@@ -62,7 +62,7 @@ impl Reader {
                     codec::validate_metadata(chunk, keys.as_ref())?;
                     (
                         codec::MAX + 16,
-                        Path::from(crate::storage::chunk_name(chunk.location_id)),
+                        Path::from(crate::storage::chunk_name(chunk.address())),
                     )
                 }
                 PhysicalSource::Pack(pack) => {
@@ -76,7 +76,7 @@ impl Reader {
                         pack.payload_size()? + 16,
                         Path::from(format!(
                             "packs/{}",
-                            crate::storage::chunk_name(pack.location_id)
+                            crate::storage::chunk_name(pack.address())
                         )),
                     )
                 }

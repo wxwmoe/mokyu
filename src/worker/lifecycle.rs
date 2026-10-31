@@ -586,7 +586,7 @@ impl App {
                 return Ok(count);
             }
             let guard = self.storage.source_gate.write().await;
-            if self.storage.physical_active(source.location_id) {
+            if self.storage.physical_active(source.address()) {
                 continue;
             }
             let claimed = self

@@ -59,6 +59,7 @@ async fn read(storage: &Arc<Storage>, source: &RawSource, expected: &[u8]) -> Re
 async fn write(storage: &Arc<Storage>, target: Uuid, data: &[u8]) -> Result<RawSource> {
     let source = RawSource {
         id: Id::default(),
+        address: None,
         location_id: Uuid::now_v7(),
         storage_id: target,
         size: data.len() as i64,

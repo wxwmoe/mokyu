@@ -184,11 +184,14 @@ impl Reader {
     }
 
     pub(super) async fn transfer_memory(&self) -> Result<Arc<OwnedSemaphorePermit>> {
-        let units = (crate::storage::external::objects::WINDOW as u64 * 4 + self.workspace)
-            .div_ceil(1024 * 1024);
+        self.work_memory(crate::storage::external::objects::WINDOW)
+            .await
+    }
+    pub(super) async fn work_memory(&self, size: usize) -> Result<Arc<OwnedSemaphorePermit>> {
+        let units = (size as u64 * 4 + self.workspace).div_ceil(1024 * 1024);
         ensure!(
             units <= u64::from(self.pack_units),
-            "external transfer exceeds node memory budget"
+            "transfer exceeds node memory budget"
         );
         Ok(Arc::new(self.acquire(&self.packs, units as u32).await?))
     }
@@ -362,7 +365,7 @@ impl Reader {
                         pack.storage_id.context("pack storage missing")?,
                         Path::from(format!(
                             "packs/{}",
-                            crate::storage::chunk_name(pack.location_id)
+                            crate::storage::chunk_name(pack.address())
                         )),
                         pack.payload_size()? + 16,
                     )
@@ -436,7 +439,7 @@ impl Reader {
             self.get(
                 &prepared,
                 chunk.storage_id.context("chunk storage missing")?,
-                Path::from(crate::storage::chunk_name(chunk.location_id)),
+                Path::from(crate::storage::chunk_name(chunk.address())),
                 codec::MAX + 16,
             )
             .await?

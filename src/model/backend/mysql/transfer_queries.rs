@@ -166,7 +166,7 @@ pub(super) fn chunk(id: Id) -> sqlx::QueryBuilder<MySql> {
 }
 
 pub(super) fn pack(id: Id) -> Rows<'static, Pack> {
-    sqlx::query_as("SELECT * FROM packs WHERE id=? AND state='ready' AND quarantined_at IS NULL LOCK IN SHARE MODE")
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=p.location_id) AS tier_material,p.* FROM packs p WHERE id=? AND state='ready' AND quarantined_at IS NULL LOCK IN SHARE MODE")
         .bind(id)
 }
 

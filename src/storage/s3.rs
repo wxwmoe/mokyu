@@ -215,6 +215,16 @@ pub(crate) struct UploadedPart {
     pub etag: String,
 }
 
+impl UploadedPart {
+    pub(crate) fn matches(&self, size: u64, md5: &[u8; 16]) -> bool {
+        self.size == size
+            && self
+                .etag
+                .trim_matches('"')
+                .eq_ignore_ascii_case(&hex::encode(md5))
+    }
+}
+
 pub(crate) struct Parts {
     pub items: Vec<UploadedPart>,
     pub next: Option<u16>,

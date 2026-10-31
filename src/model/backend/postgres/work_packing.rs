@@ -777,6 +777,7 @@ pub(super) async fn prepare(
         sqlx::query("UPDATE tasks SET detail=jsonb_set(detail,'{node_pack}',$2) WHERE id=$1 AND lease_token=$3").bind(task.id).bind(serde_json::to_value(snapshot)?).bind(task.token).execute(&mut **db).await?;
         let keys = rewrite::keys(db, &blocks.into_iter().collect::<Vec<_>>(), key).await?;
         let plan = work::Plan::Pack {
+            source_permits: Vec::new(),
             storage,
             batch: Box::new(batch),
         };

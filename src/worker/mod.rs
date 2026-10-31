@@ -14,5 +14,6 @@ pub(crate) mod rewrite;
 pub(crate) mod scheduler;
 pub(crate) mod sync;
 pub(crate) mod task;
+mod tiering;
 
 pub(crate) use crate::model::REQUEST_ID;

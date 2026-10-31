@@ -64,7 +64,7 @@ impl Writes {
             .context("S3 streaming upload missing")?;
         upload
             .put(
-                &crate::storage::raw::remote_path(source.location_id),
+                &crate::storage::raw::remote_path(source.address()),
                 source.size as u64,
                 digest,
                 || {

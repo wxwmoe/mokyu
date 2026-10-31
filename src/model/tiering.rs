@@ -18,6 +18,147 @@ pub(crate) enum Unit {
     Member,
 }
 
+impl Unit {
+    pub(crate) fn movable(value: i16) -> Result<Self> {
+        match value {
+            0 => Ok(Self::Chunk),
+            1 => Ok(Self::Pack),
+            2 => Ok(Self::Raw),
+            _ => anyhow::bail!("invalid tier unit"),
+        }
+    }
+    pub(crate) fn source(self) -> Result<super::source::SourceType> {
+        use super::source::SourceType;
+        match self {
+            Self::Chunk => Ok(SourceType::Chunk),
+            Self::Pack => Ok(SourceType::Pack),
+            Self::Raw => Ok(SourceType::Raw),
+            Self::Member => anyhow::bail!("pack members cannot migrate separately"),
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Work {
+    Copy {
+        source: super::PhysicalSource,
+        target: super::PhysicalSource,
+        rate: u64,
+        recode: bool,
+        progress: Progress,
+    },
+    Remove {
+        source: super::PhysicalSource,
+    },
+}
+
+impl Work {
+    pub(crate) fn source(&self) -> &super::PhysicalSource {
+        match self {
+            Self::Copy { source, .. } | Self::Remove { source } => source,
+        }
+    }
+    pub(crate) fn target(&self) -> Option<&super::PhysicalSource> {
+        match self {
+            Self::Copy { target, .. } => Some(target),
+            Self::Remove { .. } => None,
+        }
+    }
+    pub(crate) fn memory(&self) -> Result<usize> {
+        if matches!(self, Self::Remove { .. }) {
+            return Ok(0);
+        }
+        Ok(match self.source() {
+            super::PhysicalSource::Chunk(c) => usize::try_from(c.raw_size)?,
+            super::PhysicalSource::Pack(p) => p.payload_size()?,
+            super::PhysicalSource::Raw(_) => 8 * 1024 * 1024,
+        })
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum Outcome {
+    Retry,
+    Discard,
+    Checkpoint {
+        progress: Progress,
+    },
+    Verified {
+        target: super::PhysicalSource,
+        digest: [u8; 32],
+    },
+    Removed,
+}
+
+impl std::fmt::Debug for Outcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retry => f.write_str("Retry"),
+            Self::Discard => f.write_str("Discard"),
+            Self::Verified { target, .. } => {
+                f.debug_tuple("Verified").field(&target.address()).finish()
+            }
+            Self::Removed => f.write_str("Removed"),
+            Self::Checkpoint { progress } => {
+                f.debug_tuple("Checkpoint").field(&progress.parts).finish()
+            }
+        }
+    }
+}
+#[cfg(feature = "fault-injection")]
+impl Outcome {
+    pub(crate) async fn boundary(&self) {
+        let name = match self {
+            Self::Checkpoint { progress } if progress.parts > 0 => "tier-part-written",
+            Self::Verified { .. } => "tier-copy-verified",
+            Self::Removed => "tier-file-removed",
+            _ => return,
+        };
+        crate::faults::point(name).await;
+    }
+}
+#[derive(Default, Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Progress {
+    pub upload: Option<String>,
+    pub parts: u16,
+}
+
+pub(crate) struct Step {
+    pub work: Option<Work>,
+    pub switched: bool,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct Movement {
+    pub bucket_id: Uuid,
+    pub unit: i16,
+    pub physical_id: Uuid,
+    pub policy_revision: i64,
+    pub source_generation: i64,
+    pub source_material: sqlx::types::Json<super::PhysicalSource>,
+    pub source_stamp: Vec<u8>,
+    pub target_storage: Uuid,
+    pub target_address: Uuid,
+    pub target_material: Option<sqlx::types::Json<super::PhysicalSource>>,
+    pub checkpoint: Option<sqlx::types::Json<Progress>>,
+    pub receipt: Option<Vec<u8>>,
+    pub phase: String,
+    pub retire_after: i64,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct Head {
+    pub generation: i64,
+    pub storage_id: Uuid,
+    pub address: Uuid,
+    pub activated_at: i64,
+    pub pressure_since: i64,
+    pub origin_reads: i64,
+}
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum Source {
     Chunk(Uuid),
@@ -83,6 +224,24 @@ impl Policy {
 pub(crate) struct Update {
     pub revision: i64,
     pub policy: Policy,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[schema(as=TieringAction)]
+pub(crate) enum Transition {
+    Pause,
+    Resume,
+    Drain,
+    Disable,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as=TieringTransition)]
+pub(crate) struct Change {
+    pub revision: i64,
+    pub action: Transition,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -179,6 +338,14 @@ pub(crate) fn candidate(
 #[async_trait]
 pub(crate) trait TieringStore: Send + Sync {
     async fn active(&self) -> Result<bool>;
+    async fn schedule(&self, stale: i64) -> Result<usize>;
+    async fn step(
+        &self,
+        task: super::task::Execution,
+        stale: i64,
+        busy: Option<Uuid>,
+    ) -> Result<Step>;
+    async fn finish(&self, task: super::task::Execution, outcome: &Outcome) -> Result<()>;
     async fn candidates(
         &self,
         principal: &Principal,
@@ -189,6 +356,8 @@ pub(crate) trait TieringStore: Send + Sync {
         stale: i64,
     ) -> Result<Vec<Candidate>>;
     async fn tiering(&self, principal: &Principal, bucket: Uuid) -> Result<View>;
+    async fn transition(&self, principal: &Principal, bucket: Uuid, input: &Change)
+    -> Result<View>;
     async fn locations(&self, principal: &Principal, bucket: Uuid, cold: Uuid)
     -> Result<Locations>;
     async fn update(

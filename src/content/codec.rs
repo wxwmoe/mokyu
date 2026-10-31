@@ -98,6 +98,8 @@ pub struct Chunk {
     pub uuid: Uuid,
     pub encoding_id: Id,
     pub location_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<Uuid>,
     pub storage_id: Option<Uuid>,
     pub hash: Vec<u8>,
     pub raw_size: i32,
@@ -109,6 +111,12 @@ pub struct Chunk {
     pub format: i32,
     pub state: String,
     pub created_at: DateTime<Utc>,
+}
+
+impl Chunk {
+    pub fn address(&self) -> Uuid {
+        self.address.unwrap_or(self.location_id)
+    }
 }
 
 pub fn cut(input: &[u8]) -> usize {
@@ -319,12 +327,23 @@ pub fn decode(
 }
 pub fn decode_read(
     c: &Chunk,
-    mut encoded: Vec<u8>,
+    encoded: Vec<u8>,
     keys: &dyn KeySource,
     min_savings_percent: u8,
     compression: &crate::content::compression::Pool,
     verify: bool,
 ) -> Result<(Bytes, Bytes)> {
+    let encoded = open(c, encoded, keys)?;
+    let plain = Bytes::from(encoded);
+    let raw = decode_cache_read(c, plain.clone(), c.compressed, compression, verify)?;
+    let cache = if cache_compressed(c, min_savings_percent) {
+        plain
+    } else {
+        raw.clone()
+    };
+    Ok((raw, cache))
+}
+pub(crate) fn open(c: &Chunk, mut encoded: Vec<u8>, keys: &dyn KeySource) -> Result<Vec<u8>> {
     ensure!(
         encoded.len() <= MAX + 16 && Some(encoded.len() as i32) == c.stored_size,
         IntegrityError::Length
@@ -357,14 +376,7 @@ pub fn decode_read(
             .len()
     };
     encoded.truncate(plain_len);
-    let plain = Bytes::from(encoded);
-    let raw = decode_cache_read(c, plain.clone(), c.compressed, compression, verify)?;
-    let cache = if cache_compressed(c, min_savings_percent) {
-        plain
-    } else {
-        raw.clone()
-    };
-    Ok((raw, cache))
+    Ok(encoded)
 }
 pub fn decode_cache(
     c: &Chunk,
@@ -490,6 +502,7 @@ mod tests {
                 uuid: Uuid::from_u128(41),
                 id: 42.into(),
                 encoding_id: 42.into(),
+                address: None,
                 location_id: Uuid::from_u128(42),
                 storage_id: None,
                 hash: blake3::hash(input).as_bytes().to_vec(),
@@ -689,6 +702,7 @@ mod tests {
                     uuid: Uuid::now_v7(),
                     id: 42.into(),
                     encoding_id: 42.into(),
+                    address: None,
                     location_id: Uuid::from_u128(42),
                     storage_id: None,
                     hash: blake3::hash(&input).as_bytes().to_vec(),
@@ -877,6 +891,7 @@ mod tests {
                             uuid: Uuid::now_v7(),
                             id: (1 + worker * 2 + i as i64).into(),
                             encoding_id: (1 + worker * 2 + i as i64).into(),
+                            address: None,
                             location_id: Uuid::new_v4(),
                             storage_id: None,
                             hash: blake3::hash(&input).as_bytes().to_vec(),

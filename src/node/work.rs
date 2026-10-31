@@ -259,6 +259,64 @@ impl Worker {
                         crate::faults::point("node-transfer-scanned").await;
                         vec![result.map(work::Outcome::Scanned).or_else(retry)?]
                     }
+                    work::Plan::Tier { work, .. } => {
+                        let performed = async {
+                            fn site<'a>(
+                                b: &'a super::body::Backend,
+                                s: &crate::model::PhysicalSource,
+                            ) -> Result<crate::storage::tiering::Site<'a>>
+                            {
+                                crate::storage::tiering::Site::new(
+                                    s,
+                                    b.store.backend.clone(),
+                                    None,
+                                    b.store.streaming.as_ref(),
+                                    b.store.multipart.as_deref(),
+                                )
+                            }
+                            let source = reads::backend(&materials, work.source().storage()?)?;
+                            let target = work
+                                .target()
+                                .map(|v| reads::backend(&materials, v.storage()?))
+                                .transpose()?;
+                            let memory = self.reader.work_memory(work.memory()?).await?;
+                            let _io = self.reader.acquire(&self.reader.io, 1).await?;
+                            source.store.verify().await?;
+                            if let Some(b) = &target {
+                                b.store.verify().await?;
+                            }
+                            crate::storage::tiering::execute(
+                                &work,
+                                site(&source, work.source())?,
+                                target
+                                    .as_ref()
+                                    .zip(work.target())
+                                    .map(|(b, v)| site(b, v))
+                                    .transpose()?,
+                                Arc::new(reads::keys(&materials)?),
+                                self.reader.pool.clone(),
+                                self.reader.cpu.clone(),
+                                memory,
+                            )
+                            .await
+                        }
+                        .await;
+                        #[cfg(feature = "fault-injection")]
+                        {
+                            if let Ok(outcome) = &performed {
+                                outcome.boundary().await;
+                            }
+                            crate::faults::point("tier-before-receipt").await;
+                        }
+                        if let Err(error) = &performed {
+                            tracing::debug!(%error,"tier work postponed");
+                        }
+                        vec![
+                            performed
+                                .map(|result| work::Outcome::Tier(Box::new(result)))
+                                .or_else(retry)?,
+                        ]
+                    }
                     work::Plan::RawTransfer { transfer, .. } => {
                         let source = reads::backend(&materials, transfer.input.storage()?)?;
                         let keys = Arc::new(reads::keys(&materials)?);
@@ -516,7 +574,7 @@ impl Worker {
                         let keys = Arc::new(reads::keys(&materials)?);
                         let encoding = async {
                             let (result, candidates) =
-                                self.reader.pack(backend, keys, *batch).await?;
+                                self.reader.pack(backend, &materials, keys, *batch).await?;
                             fills.extend(candidates);
                             #[cfg(feature = "fault-injection")]
                             crate::faults::point("node-pack-stored").await;
@@ -537,7 +595,16 @@ impl Worker {
                                 }
                                 let (outcome, candidates) = self
                                     .reader
-                                    .rewrite(backend.clone(), keys.clone(), item)
+                                    .rewrite(
+                                        backend.clone(),
+                                        reads::backend(
+                                            &materials,
+                                            item.storage()
+                                                .context("rewrite source storage missing")?,
+                                        )?,
+                                        keys.clone(),
+                                        item,
+                                    )
                                     .await?;
                                 fills.extend(candidates);
                                 outcomes.push(outcome);

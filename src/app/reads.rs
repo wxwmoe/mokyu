@@ -147,7 +147,7 @@ pub(crate) async fn pin_cached(
     let stream = prepared.snapshot.stream.as_ref()?;
     let raw = prepared.snapshot.raw.as_ref()?;
     let pin = app.pin(stream.id);
-    *prepared.source.lock().unwrap() = Some(app.storage.physical_pin(raw.source.location_id));
+    *prepared.source.lock().unwrap() = Some(app.storage.physical_pin(raw.source.address()));
     prepared.raw_ready.store(true, Ordering::Release);
     Some((stream.clone(), pin))
 }
@@ -226,7 +226,7 @@ impl App {
                 snapshot
                     .raw
                     .as_ref()
-                    .map(|row| self.storage.physical_pin(row.source.location_id))
+                    .map(|row| self.storage.physical_pin(row.source.address()))
             })
             .flatten();
         let key = route.key(&snapshot.bucket).to_owned();

@@ -5,6 +5,7 @@ impl Reader {
     pub(crate) async fn rewrite(
         &self,
         backend: Arc<Backend>,
+        origin: Arc<Backend>,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         item: Rewrite,
     ) -> Result<(Outcome, crate::storage::cache::Fills)> {
@@ -26,7 +27,7 @@ impl Reader {
                 codec::validate_metadata(source, keys.as_ref())?;
                 (
                     codec::MAX + 16,
-                    Path::from(crate::storage::chunk_name(*location)),
+                    Path::from(crate::storage::chunk_name(source.address())),
                     Path::from(crate::storage::chunk_name(target.location_id)),
                 )
             }
@@ -48,7 +49,10 @@ impl Reader {
                 crate::model::source::manifest_digest(source, members)?;
                 (
                     source.payload_size()? + 16,
-                    Path::from(format!("packs/{}", crate::storage::chunk_name(*location))),
+                    Path::from(format!(
+                        "packs/{}",
+                        crate::storage::chunk_name(source.address())
+                    )),
                     Path::from(format!(
                         "packs/{}",
                         crate::storage::chunk_name(target.location_id)
@@ -65,8 +69,11 @@ impl Reader {
         let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
         let _io = self.acquire(&self.io, 1).await?;
         backend.store.verify().await?;
+        if backend.profile.storage_id != origin.profile.storage_id {
+            origin.store.verify().await?;
+        }
         self.gets.fetch_add(1, Ordering::Relaxed);
-        let bytes = read_bounded(backend.store.backend.as_ref(), &source_path, bound).await?;
+        let bytes = read_bounded(origin.store.backend.as_ref(), &source_path, bound).await?;
         let cpu = self.cpu.clone().acquire_owned().await?;
         let pool = self.pool.clone();
         let files = self.files.clone();
@@ -132,6 +139,7 @@ impl Reader {
                             id,
                             uuid: member.id,
                             encoding_id: crate::model::Id::default(),
+                            address: None,
                             location_id: Uuid::nil(),
                             storage_id: target.storage_id,
                             hash,

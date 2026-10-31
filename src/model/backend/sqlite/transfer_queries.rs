@@ -165,7 +165,7 @@ pub(super) fn chunk(id: Id) -> sqlx::QueryBuilder<Sqlite> {
 }
 
 pub(super) fn pack(id: Id) -> Rows<'static, Pack> {
-    sqlx::query_as("SELECT * FROM packs WHERE id=$1 AND state='ready' AND quarantined_at IS NULL")
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=p.location_id) AS tier_material,p.* FROM packs p WHERE id=$1 AND state='ready' AND quarantined_at IS NULL")
         .bind(id)
 }
 

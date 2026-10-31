@@ -263,6 +263,19 @@ impl Access {
                 (config::seconds(&app.config.metrics.access_flush_interval)? * 2) as f64,
             )
             .await?;
+        if self.collecting()
+            && !app.draining.load(Relaxed)
+            && !app.maintenance.load(Relaxed)
+            && app
+                .tiering
+                .schedule(i64::try_from(
+                    config::seconds(&app.config.metrics.access_flush_interval)? * 2,
+                )?)
+                .await?
+                > 0
+        {
+            app.wake_tasks.notify_waiters();
+        }
         Ok(())
     }
     pub(crate) fn take(&self) -> AccessBatch {

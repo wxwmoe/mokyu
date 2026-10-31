@@ -155,13 +155,13 @@ pub(super) fn freeze(id: Id, input: &Input) -> Statement<'_> {
 }
 
 pub(super) fn chunk(id: Id) -> Rows<'static, Chunk> {
-    sqlx::query_as("SELECT c.id,c.current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' AND l.quarantined_at IS NULL WHERE c.id=$1 AND c.state='ready' FOR SHARE OF c")
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=l.encoding_id) AS tier_material,c.id,c.current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' AND l.quarantined_at IS NULL WHERE c.id=$1 AND c.state='ready' FOR SHARE OF c")
         .bind(id)
 }
 
 pub(super) fn pack(id: Id) -> Rows<'static, Pack> {
     sqlx::query_as(
-        "SELECT * FROM packs WHERE id=$1 AND state='ready' AND quarantined_at IS NULL FOR SHARE",
+        "SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=p.id) AS tier_material,p.* FROM packs p WHERE id=$1 AND state='ready' AND quarantined_at IS NULL FOR SHARE",
     )
     .bind(id)
 }

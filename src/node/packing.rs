@@ -14,13 +14,13 @@ impl Reader {
         use crate::model::transfer::Input;
         let (path, bound) = match input {
             Input::Chunk { chunk } => (
-                Path::from(crate::storage::chunk_name(chunk.location_id)),
+                Path::from(crate::storage::chunk_name(chunk.address())),
                 codec::MAX + 16,
             ),
             Input::Pack { pack, .. } => (
                 Path::from(format!(
                     "packs/{}",
-                    crate::storage::chunk_name(pack.location_id)
+                    crate::storage::chunk_name(pack.address())
                 )),
                 pack.payload_size()? + 16,
             ),
@@ -119,6 +119,7 @@ impl Reader {
     pub(crate) async fn pack(
         &self,
         backend: Arc<Backend>,
+        materials: &crate::node::reads::Held,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         batch: wire::Batch,
     ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
@@ -153,19 +154,26 @@ impl Reader {
         for source in &batch.sources {
             let (path, bound) = match source {
                 wire::Source::Chunk { chunk } => (
-                    Path::from(crate::storage::chunk_name(chunk.location_id)),
+                    Path::from(crate::storage::chunk_name(chunk.address())),
                     codec::MAX + 16,
                 ),
                 wire::Source::Pack { pack, .. } => (
                     Path::from(format!(
                         "packs/{}",
-                        crate::storage::chunk_name(pack.location_id)
+                        crate::storage::chunk_name(pack.address())
                     )),
                     pack.payload_size()? + 16,
                 ),
             };
             self.gets.fetch_add(1, Ordering::Relaxed);
-            let bytes = read_bounded(backend.store.backend.as_ref(), &path, bound).await?;
+            let origin = crate::node::reads::backend(
+                materials,
+                source.storage().context("pack source storage missing")?,
+            )?;
+            if origin.profile.storage_id != backend.profile.storage_id {
+                origin.store.verify().await?;
+            }
+            let bytes = read_bounded(origin.store.backend.as_ref(), &path, bound).await?;
             let cpu = self.cpu.clone().acquire_owned().await?;
             let hold = memory.clone();
             let source = source.clone();

@@ -859,6 +859,7 @@ mod tests {
             input: Input::Pack {
                 pack: Pack {
                     id: Id::Uuid(Uuid::now_v7()),
+                    address: None,
                     location_id: Uuid::now_v7(),
                     storage_id: Some(Uuid::new_v4()),
                     algorithm: "aes-256-gcm".into(),

@@ -35,6 +35,7 @@ impl Physical {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Deletion {
     pub source: Physical,
+    pub identity: super::Id,
     pub location: Uuid,
     pub inspect_age: bool,
 }
@@ -95,6 +96,14 @@ pub(crate) struct RawHash {
     pub source: super::raw::RawSource,
     pub hash: Option<Vec<u8>>,
 }
+impl Rewrite {
+    pub(crate) fn storage(&self) -> Option<Uuid> {
+        match self {
+            Self::Chunk { source, .. } => source.storage_id,
+            Self::Pack { source, .. } => source.storage_id,
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -107,6 +116,11 @@ pub(crate) struct UploadFile {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
+    Tier {
+        storage: Uuid,
+        work: Box<super::tiering::Work>,
+        source_permits: [Uuid; 2],
+    },
     ExternalTest(super::external_test::Plan),
     ExternalTransfer(Box<super::replication::external::Plan>),
     Migrate {
@@ -177,17 +191,25 @@ pub(crate) enum Plan {
     Rewrite {
         storage: Uuid,
         items: Vec<Rewrite>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_permits: Vec<Uuid>,
     },
     Pack {
         storage: Uuid,
         batch: Box<super::node_pack::Batch>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_permits: Vec<Uuid>,
     },
 }
 
 impl Plan {
     pub(crate) fn source_permits(&self) -> &[Uuid] {
         match self {
-            Self::CopyTransfer { source_permits, .. }
+            Self::Pack { source_permits, .. } | Self::Rewrite { source_permits, .. } => {
+                source_permits
+            }
+            Self::Tier { source_permits, .. }
+            | Self::CopyTransfer { source_permits, .. }
             | Self::RawTransfer { source_permits, .. } => source_permits,
             _ => &[],
         }
@@ -197,6 +219,7 @@ impl Plan {
             Self::ExternalTest(_) | Self::ExternalTransfer(_) => None,
             Self::ScanTransfer(value) => Some(value.source.storage_id),
             Self::ConvertRaw { storage, .. }
+            | Self::Tier { storage, .. }
             | Self::CopyTransfer { storage, .. }
             | Self::RawTransfer { storage, .. }
             | Self::Migrate { storage, .. }
@@ -216,6 +239,7 @@ impl Plan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
+    Tier(Box<super::tiering::Outcome>),
     ExternalTest(super::external_test::Report),
     ExternalTransfer(super::replication::external::Outcome),
     Uploaded,

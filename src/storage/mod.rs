@@ -27,6 +27,7 @@ mod s3;
 mod sources;
 mod sync;
 pub(crate) mod target;
+pub(crate) mod tiering;
 pub(crate) mod transfer;
 
 #[cfg(all(test, feature = "fault-injection"))]
@@ -1726,7 +1727,7 @@ impl Storage {
         };
         let result = backend
             .put(
-                &self.path_for(storage_id, c.location_id)?,
+                &self.path_for(storage_id, c.address())?,
                 Bytes::from(encoded).into(),
             )
             .await
@@ -2281,11 +2282,11 @@ impl Storage {
         let _gate = self.source_gate.read().await;
         match self.physical.source(id, inspection).await? {
             crate::model::PhysicalSource::Chunk(chunk) => {
-                let pin = self.physical_pin(chunk.location_id);
+                let pin = self.physical_pin(chunk.address());
                 Ok(Source::Chunk(chunk, pin))
             }
             crate::model::PhysicalSource::Pack(pack) => {
-                let pin = self.physical_pin(pack.location_id);
+                let pin = self.physical_pin(pack.address());
                 Ok(Source::Pack(pack, pin))
             }
             crate::model::PhysicalSource::Raw(_) => anyhow::bail!("chunk resolved to a raw source"),
@@ -2522,7 +2523,7 @@ impl Storage {
                     let encoded = self
                         .read_path_permitted(
                             storage_id,
-                            &self.pack_path_for(storage_id, p.location_id)?,
+                            &self.pack_path_for(storage_id, p.address())?,
                             p.payload_size()? + 16,
                         )
                         .await?;
@@ -2626,7 +2627,7 @@ impl Storage {
     pub(crate) async fn head(&self, c: &Chunk) -> Result<u64> {
         let storage_id = c.storage_id.context("chunk has no store")?;
         Ok(self
-            .head_path_for(storage_id, &self.path_for(storage_id, c.location_id)?)
+            .head_path_for(storage_id, &self.path_for(storage_id, c.address())?)
             .await?
             .size)
     }
@@ -2813,7 +2814,7 @@ impl Storage {
                         let meta = self
                             .head_path_for(
                                 storage_id,
-                                &self.pack_path_for(storage_id, p.location_id)?,
+                                &self.pack_path_for(storage_id, p.address())?,
                             )
                             .await?;
                         ensure!(
@@ -2827,7 +2828,7 @@ impl Storage {
                     let data = self
                         .read_path_for(
                             storage_id,
-                            &self.pack_path_for(storage_id, p.location_id)?,
+                            &self.pack_path_for(storage_id, p.address())?,
                             capacity + 16,
                         )
                         .await?;
@@ -2859,6 +2860,7 @@ impl Storage {
                                 );
                             }
                             for (mut c, _) in members {
+                                c.address = None;
                                 c.location_id = Uuid::nil();
                                 let data = decoded.chunk(&c)?;
                                 resource_gate::PRIORITY
@@ -2899,7 +2901,7 @@ impl Storage {
         let storage_id = c.storage_id.context("chunk has no store")?;
         self.read_path_for(
             storage_id,
-            &self.path_for(storage_id, c.location_id)?,
+            &self.path_for(storage_id, c.address())?,
             MAX + 16,
         )
         .await

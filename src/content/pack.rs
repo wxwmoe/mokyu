@@ -114,6 +114,8 @@ impl Config {
 pub struct Pack {
     pub id: Id,
     pub location_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<Uuid>,
     pub storage_id: Option<Uuid>,
     pub algorithm: String,
     pub block_key_id: Option<Uuid>,
@@ -127,6 +129,10 @@ pub struct Pack {
     pub created_at: DateTime<Utc>,
 }
 impl Pack {
+    pub fn address(&self) -> Uuid {
+        self.address.unwrap_or(self.location_id)
+    }
+
     pub fn validate(&self, keys: &dyn codec::KeySource) -> Result<()> {
         self.aad().context(codec::IntegrityError::Metadata)?;
         let tag = if self.algorithm == "none" { 0 } else { 16 };
@@ -273,8 +279,17 @@ pub fn encode(
         pool.compress_with(&raw, should_try, strategy)?
     };
     p.compressed = compressed.is_some();
-    let mut encoded = compressed.unwrap_or(raw);
+    let encoded = compressed.unwrap_or(raw);
     p.stored_size = Some(encoded.len() as i64 + if p.algorithm == "none" { 0 } else { 16 });
+    let encoded = seal(&p, encoded, keys)?;
+    Ok((p, encoded))
+}
+
+pub(crate) fn seal(p: &Pack, mut encoded: Vec<u8>, keys: &dyn codec::KeySource) -> Result<Vec<u8>> {
+    ensure!(
+        p.stored_size == Some(encoded.len() as i64 + if p.algorithm == "none" { 0 } else { 16 }),
+        "pack payload length mismatch"
+    );
     if p.algorithm != "none" {
         let key = keys
             .key_for_id(p.block_key_id)
@@ -297,7 +312,7 @@ pub fn encode(
             "invalid unencrypted pack"
         );
     }
-    Ok((p, encoded))
+    Ok(encoded)
 }
 
 pub fn decode(
@@ -310,41 +325,13 @@ pub fn decode(
 }
 pub fn decode_read(
     p: &Pack,
-    mut data: Vec<u8>,
+    data: Vec<u8>,
     keys: &dyn codec::KeySource,
     pool: &Pool,
     verify: bool,
 ) -> Result<Decoded> {
     let size = p.payload_size().context(codec::IntegrityError::Metadata)?;
-    ensure!(
-        Some(data.len() as i64) == p.stored_size,
-        codec::IntegrityError::Length
-    );
-    let aad = p.aad().context(codec::IntegrityError::Metadata)?;
-    if p.algorithm != "none" {
-        let key = keys
-            .key_for_id(p.block_key_id)
-            .context(codec::IntegrityError::MissingKey)?;
-        ensure!(
-            key.algorithm == p.algorithm,
-            codec::IntegrityError::Metadata
-        );
-        key.open(
-            p.nonce
-                .as_deref()
-                .context(codec::IntegrityError::Metadata)?
-                .try_into()
-                .context(codec::IntegrityError::Metadata)?,
-            &aad,
-            &mut data,
-        )
-        .context(codec::IntegrityError::Authentication)?;
-    } else {
-        ensure!(
-            p.block_key_id.is_none() && p.nonce.is_none(),
-            codec::IntegrityError::Metadata
-        );
-    }
+    let data = open(p, data, keys)?;
     let raw = if p.compressed {
         pool.decompress_pack(&data, size)
             .context(codec::IntegrityError::Decompression)?
@@ -393,6 +380,39 @@ pub fn decode_read(
     })
 }
 
+pub(crate) fn open(p: &Pack, mut data: Vec<u8>, keys: &dyn codec::KeySource) -> Result<Vec<u8>> {
+    ensure!(
+        Some(data.len() as i64) == p.stored_size,
+        codec::IntegrityError::Length
+    );
+    let aad = p.aad().context(codec::IntegrityError::Metadata)?;
+    if p.algorithm != "none" {
+        let key = keys
+            .key_for_id(p.block_key_id)
+            .context(codec::IntegrityError::MissingKey)?;
+        ensure!(
+            key.algorithm == p.algorithm,
+            codec::IntegrityError::Metadata
+        );
+        key.open(
+            p.nonce
+                .as_deref()
+                .context(codec::IntegrityError::Metadata)?
+                .try_into()
+                .context(codec::IntegrityError::Metadata)?,
+            &aad,
+            &mut data,
+        )
+        .context(codec::IntegrityError::Authentication)?;
+    } else {
+        ensure!(
+            p.block_key_id.is_none() && p.nonce.is_none(),
+            codec::IntegrityError::Metadata
+        );
+    }
+    Ok(data)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +452,7 @@ mod tests {
                             uuid: Uuid::now_v7(),
                             id: id.into(),
                             encoding_id: id.into(),
+                            address: None,
                             location_id: Uuid::new_v4(),
                             storage_id: None,
                             hash: blake3::hash(&raw).as_bytes().to_vec(),
@@ -451,6 +472,7 @@ mod tests {
                 .collect();
             let p = Pack {
                 id: 7.into(),
+                address: None,
                 location_id: Uuid::new_v4(),
                 storage_id: None,
                 algorithm: algorithm.into(),

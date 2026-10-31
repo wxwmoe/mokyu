@@ -13,6 +13,14 @@ pub(crate) enum Source {
     Chunk { chunk: Chunk },
     Pack { pack: Pack, members: Vec<Member> },
 }
+impl Source {
+    pub(crate) fn storage(&self) -> Option<Uuid> {
+        match self {
+            Self::Chunk { chunk } => chunk.storage_id,
+            Self::Pack { pack, .. } => pack.storage_id,
+        }
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Target {
@@ -55,6 +63,7 @@ impl Batch {
             id: item.id,
             uuid,
             encoding_id: Id::Uuid(item.location),
+            address: None,
             location_id: item.location,
             storage_id: Some(storage),
             hash: item.hash.clone(),
@@ -78,6 +87,7 @@ impl Batch {
         );
         let pack = Pack {
             id: Id::Uuid(item.location),
+            address: None,
             location_id: item.location,
             storage_id: Some(storage),
             algorithm: self.algorithm.clone(),

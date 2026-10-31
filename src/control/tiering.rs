@@ -114,3 +114,18 @@ pub(super) async fn preview(
 ) -> Result<Json<View>, HttpError> {
     Ok(Json(change(&app, &actor, bucket, &input, true).await?))
 }
+
+#[utoipa::path(post,path="/api/v1/buckets/{bucket}/tiering/state",operation_id="bucket_tiering_transition",params(("bucket"=Uuid,Path)),request_body=crate::model::tiering::Change,responses((status=200,body=View)))]
+pub(super) async fn transition(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(bucket): Path<Uuid>,
+    Json(input): Json<crate::model::tiering::Change>,
+) -> Result<Json<View>, HttpError> {
+    let view = app
+        .tiering
+        .transition(&actor.principal, bucket, &input)
+        .await?;
+    app.storage.access.wake.notify_one();
+    Ok(Json(view))
+}

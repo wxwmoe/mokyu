@@ -522,9 +522,9 @@ impl Source {
     }
     pub(crate) fn pin(&self) -> Result<(&'static str, Uuid)> {
         Ok(match self {
-            Self::Chunk { chunk } => ("chunk", chunk.location_id),
-            Self::Pack { pack, .. } => ("pack", pack.location_id),
-            Self::Raw { source } => ("raw", source.location_id),
+            Self::Chunk { chunk } => ("chunk", chunk.address()),
+            Self::Pack { pack, .. } => ("pack", pack.address()),
+            Self::Raw { source } => ("raw", source.address()),
             Self::Staged { fragment, .. } => ("fragment", *fragment),
             Self::Local { chunk, .. } => {
                 let crate::model::Id::Uuid(id) = chunk.encoding_id else {

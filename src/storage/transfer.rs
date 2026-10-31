@@ -328,10 +328,7 @@ where
                             Some(stored.etag.clone())
                         } else {
                             stored
-                                .filter(|stored| {
-                                    stored.size == part.size
-                                        && stored.etag.trim_matches('"') == hex::encode(expected)
-                                })
+                                .filter(|stored| stored.matches(part.size, &expected))
                                 .map(|stored| stored.etag.clone())
                         };
                         let etag = if let Some(etag) = confirmed {
@@ -407,6 +404,7 @@ mod tests {
     fn plan(bytes: &[u8]) -> RawCopy {
         let source = RawSource {
             id: Id::Uuid(Uuid::now_v7()),
+            address: None,
             location_id: Uuid::now_v7(),
             storage_id: Uuid::new_v4(),
             size: bytes.len() as i64,

@@ -142,6 +142,8 @@ impl App {
             .await?;
             let raw = self.storage.get_with(&source, None).await?;
             let mut physical = source.clone();
+            physical.address = None;
+            physical.storage_id = Some(job.storage_id);
             physical.location_id = if matches!(physical.encoding_id, Id::Integer(_)) {
                 Uuid::now_v7()
             } else {
@@ -240,6 +242,7 @@ impl App {
             let mut fills = Vec::new();
             for (source, bytes) in &encoded_members {
                 let mut member = source.clone();
+                member.address = None;
                 member.location_id = Uuid::nil();
                 fills.extend(self.storage.prepare_fill(&member, bytes, None));
             }

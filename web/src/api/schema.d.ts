@@ -560,6 +560,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/tiering/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bucket_tiering_transition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/tiering/units": {
         parameters: {
             query?: never;
@@ -3623,6 +3639,8 @@ export interface components {
         };
         /** @enum {string} */
         TierUnit: "chunk" | "pack" | "raw" | "member";
+        /** @enum {string} */
+        TieringAction: "pause" | "resume" | "drain" | "disable";
         TieringPolicy: {
             /** Format: int64 */
             bytes_per_second: number;
@@ -3638,6 +3656,11 @@ export interface components {
             promote_reads: number;
             /** Format: int32 */
             residency_seconds: number;
+        };
+        TieringTransition: {
+            action: components["schemas"]["TieringAction"];
+            /** Format: int64 */
+            revision: number;
         };
         TieringUnit: {
             /** Format: int64 */
@@ -4876,6 +4899,31 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["TieringUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketTiering"];
+                };
+            };
+        };
+    };
+    bucket_tiering_transition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TieringTransition"];
             };
         };
         responses: {

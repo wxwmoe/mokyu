@@ -20,6 +20,8 @@ mod replication_queries;
 mod replication_remote_queries;
 mod replication_remote_transactions;
 mod replication_transactions;
+#[path = "../tier_move_transactions.rs"]
+mod tier_move_transactions;
 mod tier_queries;
 #[path = "../tier_read_queries.rs"]
 mod tier_read_queries;

@@ -108,6 +108,8 @@ pub(super) async fn prepare(
         for source in sources {
             blocks.extend(source.block_key_id);
             let mut target = source.clone();
+            target.storage_id = Some(job.storage_id);
+            target.address = None;
             target.algorithm = job.target_algorithm.clone();
             target.block_key_id = job.target_key_id;
             target.created_at = queries::node_clock().fetch_one(&mut **tx).await?;
@@ -193,6 +195,7 @@ pub(super) async fn prepare(
     }
     let keys = keys(tx, &blocks.into_iter().collect::<Vec<_>>(), key).await?;
     let plan = work::Plan::Rewrite {
+        source_permits: Vec::new(),
         storage: job.storage_id,
         items,
     };

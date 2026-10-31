@@ -10,32 +10,54 @@ pub(crate) type Processor<'a> = Option<(
     &'a crate::content::codec::Key,
 )>;
 
-#[derive(Clone, Debug, PartialEq, Deserialize, Serialize, sqlx::FromRow)]
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub(crate) struct RawSource {
-    #[sqlx(rename = "raw_id")]
     pub id: Id,
-    #[sqlx(rename = "raw_location")]
     pub location_id: Uuid,
-    #[sqlx(rename = "raw_storage")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<Uuid>,
     pub storage_id: Uuid,
-    #[sqlx(rename = "raw_size")]
     pub size: i64,
-    #[sqlx(rename = "raw_digest")]
     pub digest: Option<Vec<u8>>,
-    #[sqlx(rename = "raw_state")]
     pub state: String,
-    #[sqlx(rename = "raw_medium")]
     pub medium: String,
     #[serde(default)]
-    #[sqlx(rename = "raw_pending")]
     pub pending_upload: bool,
-    #[sqlx(rename = "raw_revision")]
     pub revision: i64,
-    #[sqlx(rename = "raw_quarantine")]
     pub quarantine_code: Option<String>,
 }
 
+macro_rules! raw_rows {
+    ($($row:ty),+) => { $(impl<'r> sqlx::FromRow<'r, $row> for RawSource {
+        fn from_row(row: &'r $row) -> sqlx::Result<Self> {
+            use sqlx::Row;
+            crate::model::physical::read_raw(Self {
+                address: None,
+                id: row.try_get("raw_id")?,
+                location_id: row.try_get("raw_location")?,
+                storage_id: row.try_get("raw_storage")?,
+                size: row.try_get("raw_size")?,
+                digest: row.try_get("raw_digest")?,
+                state: row.try_get("raw_state")?,
+                medium: row.try_get("raw_medium")?,
+                pending_upload: row.try_get("raw_pending")?,
+                revision: row.try_get("raw_revision")?,
+                quarantine_code: row.try_get("raw_quarantine")?,
+            },row.try_get("tier_material"))
+        }
+    })+ };
+}
+raw_rows!(
+    sqlx::postgres::PgRow,
+    sqlx::mysql::MySqlRow,
+    sqlx::sqlite::SqliteRow
+);
+
 impl RawSource {
+    pub fn address(&self) -> Uuid {
+        self.address.unwrap_or(self.location_id)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.state == "ready" && self.quarantine_code.is_none(),
@@ -317,6 +339,7 @@ mod tests {
         let mut range = RawRange {
             source: RawSource {
                 id: Id::from(1),
+                address: None,
                 location_id: Uuid::now_v7(),
                 storage_id: Uuid::new_v4(),
                 size: 1024,

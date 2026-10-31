@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0053.
+-- Generated from the complete mysql migration chain through 0054.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1291,6 +1291,92 @@ CREATE TABLE `tasks` (
   CONSTRAINT `tasks_state` CHECK ((`state` in (_utf8mb4'queued',_utf8mb4'running',_utf8mb4'paused',_utf8mb4'completed',_utf8mb4'failed'))),
   CONSTRAINT `tasks_type` CHECK ((`task_type` in (_utf8mb4'purge',_utf8mb4'sweep',_utf8mb4'integrity',_utf8mb4'pack',_utf8mb4'unpack',_utf8mb4'upload',_utf8mb4'cache_flush',_utf8mb4'gc',_utf8mb4'cleanup',_utf8mb4'storage_migration',_utf8mb4'rewrite',_utf8mb4'usage')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
+
+CREATE TABLE `tier_locations` (
+  `unit` smallint NOT NULL,
+  `physical_id` binary(16) NOT NULL,
+  `home_storage` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `address` binary(16) NOT NULL,
+  `generation` bigint NOT NULL,
+  `material` json NOT NULL,
+  `block_key_id` binary(16) DEFAULT NULL,
+  `stored_bytes` bigint NOT NULL,
+  `activated_at` bigint NOT NULL,
+  `pressure_seconds` bigint NOT NULL,
+  `pressure_since` bigint NOT NULL DEFAULT '0',
+  `origin_reads` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`unit`,`physical_id`),
+  UNIQUE KEY `address` (`address`),
+  KEY `home_storage` (`home_storage`),
+  KEY `block_key_id` (`block_key_id`),
+  KEY `tier_locations_storage` (`storage_id`,`unit`,`physical_id`),
+  CONSTRAINT `tier_locations_ibfk_1` FOREIGN KEY (`home_storage`) REFERENCES `storages` (`id`),
+  CONSTRAINT `tier_locations_ibfk_2` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT `tier_locations_ibfk_3` FOREIGN KEY (`block_key_id`) REFERENCES `managed_keys` (`id`),
+  CONSTRAINT `tier_location_generation` CHECK ((`generation` > 0)),
+  CONSTRAINT `tier_location_pressure` CHECK (((`pressure_seconds` > 0) and (`origin_reads` >= 0))),
+  CONSTRAINT `tier_location_size` CHECK ((`stored_bytes` >= 0)),
+  CONSTRAINT `tier_location_unit` CHECK ((`unit` between 0 and 2))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `tier_moves` (
+  `id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `unit` smallint NOT NULL,
+  `physical_id` binary(16) NOT NULL,
+  `policy_revision` bigint NOT NULL,
+  `source_generation` bigint NOT NULL,
+  `source_storage` binary(16) NOT NULL,
+  `source_address` binary(16) NOT NULL,
+  `source_material` json NOT NULL,
+  `source_stamp` binary(32) NOT NULL,
+  `source_key` binary(16) DEFAULT NULL,
+  `source_bytes` bigint NOT NULL,
+  `target_storage` binary(16) NOT NULL,
+  `target_address` binary(16) NOT NULL,
+  `target_material` json DEFAULT NULL,
+  `target_key` binary(16) DEFAULT NULL,
+  `target_bytes` bigint DEFAULT NULL,
+  `receipt` binary(32) DEFAULT NULL,
+  `checkpoint` json DEFAULT NULL,
+  `phase` varchar(12) COLLATE utf8mb4_bin NOT NULL,
+  `queued_at` bigint NOT NULL,
+  `retire_after` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `target_address` (`target_address`),
+  UNIQUE KEY `unit` (`unit`,`physical_id`),
+  KEY `source_storage` (`source_storage`),
+  KEY `target_storage` (`target_storage`),
+  KEY `source_key` (`source_key`),
+  KEY `target_key` (`target_key`),
+  KEY `tier_moves_owner` (`bucket_id`,`phase`,`id`),
+  KEY `tier_moves_source` (`source_address`,`phase`),
+  CONSTRAINT `tier_moves_ibfk_1` FOREIGN KEY (`id`) REFERENCES `tasks` (`id`),
+  CONSTRAINT `tier_moves_ibfk_2` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `tier_moves_ibfk_3` FOREIGN KEY (`source_storage`) REFERENCES `storages` (`id`),
+  CONSTRAINT `tier_moves_ibfk_4` FOREIGN KEY (`target_storage`) REFERENCES `storages` (`id`),
+  CONSTRAINT `tier_moves_ibfk_5` FOREIGN KEY (`source_key`) REFERENCES `managed_keys` (`id`),
+  CONSTRAINT `tier_moves_ibfk_6` FOREIGN KEY (`target_key`) REFERENCES `managed_keys` (`id`),
+  CONSTRAINT `tier_move_distinct` CHECK (((`source_storage` <> `target_storage`) and (`source_address` <> `target_address`))),
+  CONSTRAINT `tier_move_generation` CHECK (((`source_generation` >= 0) and (`policy_revision` > 0))),
+  CONSTRAINT `tier_move_phase` CHECK ((`phase` in (_utf8mb4'copying',_utf8mb4'verified',_utf8mb4'retiring',_utf8mb4'discarding'))),
+  CONSTRAINT `tier_move_size` CHECK (((`source_bytes` >= 0) and ((`target_bytes` is null) or (`target_bytes` >= 0)))),
+  CONSTRAINT `tier_move_unit` CHECK ((`unit` between 0 and 2))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `tier_scans` (
+  `bucket_id` binary(16) NOT NULL,
+  `revision` bigint NOT NULL,
+  `unit` smallint NOT NULL,
+  `after_id` binary(16) NOT NULL,
+  `next_scan` bigint NOT NULL,
+  PRIMARY KEY (`bucket_id`),
+  KEY `tier_scans_due` (`next_scan`,`bucket_id`),
+  CONSTRAINT `tier_scans_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `tier_scan_revision` CHECK ((`revision` > 0)),
+  CONSTRAINT `tier_scan_unit` CHECK ((`unit` between 0 and 2))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `token_bucket_grants` (
   `token_id` binary(16) NOT NULL,

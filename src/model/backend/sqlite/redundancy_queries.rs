@@ -161,7 +161,7 @@ pub(super) fn manager<'a>(bucket: Uuid, key: &'a str) -> Rows<'a, (Uuid, String)
 }
 
 pub(super) fn relocation(record: &crate::storage::model::Record) -> Scalar<'_, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages s WHERE s.id=? AND (s.type IS NOT ? OR s.path IS NOT ? OR s.endpoint_url IS NOT ? OR s.remote_bucket_name IS NOT ? OR s.region IS NOT ? OR s.prefix IS NOT ?) AND EXISTS(SELECT 1 FROM buckets b JOIN redundancy_links l ON l.source_bucket=b.id OR l.target_bucket=b.id WHERE b.storage_id=s.id))").bind(record.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages s WHERE s.id=? AND (s.type IS NOT ? OR s.path IS NOT ? OR s.endpoint_url IS NOT ? OR s.remote_bucket_name IS NOT ? OR s.region IS NOT ? OR s.prefix IS NOT ? OR NOT ?) AND (EXISTS(SELECT 1 FROM buckets b JOIN redundancy_links l ON l.source_bucket=b.id OR l.target_bucket=b.id WHERE b.storage_id=s.id) OR EXISTS(SELECT 1 FROM bucket_tiering t WHERE t.hot_storage=s.id OR t.cold_storage=s.id) OR EXISTS(SELECT 1 FROM tier_locations h WHERE h.home_storage=s.id OR h.storage_id=s.id) OR EXISTS(SELECT 1 FROM tier_moves m WHERE m.source_storage=s.id OR m.target_storage=s.id)))").bind(record.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(record.enabled)
 }
 
 pub(super) fn profile(revision: i64, id: Uuid) -> Statement<'static> {

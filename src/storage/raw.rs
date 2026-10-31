@@ -249,7 +249,7 @@ impl Storage {
                 .context("S3 multipart backend is missing")?;
             let _permit = target.controls.acquire().await?;
             match multipart
-                .abort_multipart(&remote_path(source.location_id), &upload)
+                .abort_multipart(&remote_path(source.address()), &upload)
                 .await
             {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
@@ -463,7 +463,7 @@ impl Storage {
             .raw_root
             .as_ref()
             .context("raw local path is missing")?;
-        let parent = path(root, source.location_id).parent().unwrap().to_owned();
+        let parent = path(root, source.address()).parent().unwrap().to_owned();
         ensure!(
             tokio::fs::symlink_metadata(parent).await?.is_dir(),
             IntegrityError::RawMetadata
@@ -512,7 +512,7 @@ impl Storage {
         }
         let pin = {
             let _gate = self.source_gate.read().await;
-            self.physical_pin(source.location_id)
+            self.physical_pin(source.address())
         };
         self.verify_raw_target(&target).await?;
         self.cache_lookups.fetch_add(1, Ordering::Relaxed);
@@ -575,7 +575,7 @@ impl Storage {
         source.validate()?;
         let pin = {
             let _gate = self.source_gate.read().await;
-            self.physical_pin(source.location_id)
+            self.physical_pin(source.address())
         };
         if source.pending_upload {
             match self.pending_raw(source, verify).await {
@@ -621,7 +621,7 @@ impl Storage {
                 .raw_root
                 .as_ref()
                 .context("raw local path is missing")?;
-            let file_path = path(root, source.location_id);
+            let file_path = path(root, source.address());
             let metadata = tokio::fs::symlink_metadata(&file_path)
                 .await
                 .map_err(raw_io_error)?;
@@ -690,7 +690,7 @@ impl Storage {
         if !target.is_local {
             self.remove_raw_checkpoint(source.location_id).await?;
             let _permit = target.controls.acquire().await?;
-            let key = remote_path(source.location_id);
+            let key = remote_path(source.address());
             target
                 .streaming
                 .as_ref()
@@ -715,7 +715,7 @@ impl Storage {
             .raw_root
             .as_ref()
             .context("raw files require local storage")?;
-        let destination = path(root, source.location_id);
+        let destination = path(root, source.address());
         if !tokio::fs::try_exists(&destination).await?
             && !tokio::fs::try_exists(destination.with_extension("partial")).await?
         {
@@ -1298,7 +1298,7 @@ impl RawFile {
         diagnostics: Arc<super::diagnostics::Diagnostics>,
     ) -> Result<Self> {
         source.validate()?;
-        let key = remote_path(source.location_id);
+        let key = remote_path(source.address());
         let meta = backend.head(&key).await.map_err(remote_error)?;
         gets.fetch_add(1, Ordering::Relaxed);
         ensure!(meta.size == source.size as u64, IntegrityError::Length);

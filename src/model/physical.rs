@@ -14,6 +14,193 @@ pub(crate) enum PhysicalSource {
     Raw(crate::model::raw::RawSource),
 }
 
+impl PhysicalSource {
+    pub(crate) fn unit(&self) -> super::tiering::Unit {
+        use super::tiering::Unit;
+        match self {
+            Self::Chunk(_) => Unit::Chunk,
+            Self::Pack(_) => Unit::Pack,
+            Self::Raw(_) => Unit::Raw,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> Uuid {
+        match self {
+            Self::Chunk(c) => c.location_id,
+            Self::Pack(p) => p.location_id,
+            Self::Raw(r) => r.location_id,
+        }
+    }
+
+    pub(crate) fn address(&self) -> Uuid {
+        match self {
+            Self::Chunk(c) => c.address(),
+            Self::Pack(p) => p.address(),
+            Self::Raw(r) => r.address(),
+        }
+    }
+
+    pub(crate) fn storage(&self) -> Result<Uuid> {
+        use anyhow::Context;
+        match self {
+            Self::Chunk(c) => c.storage_id,
+            Self::Pack(p) => p.storage_id,
+            Self::Raw(r) => Some(r.storage_id),
+        }
+        .context("physical source has no backend")
+    }
+
+    pub(crate) fn bytes(&self) -> Result<i64> {
+        use anyhow::Context;
+        match self {
+            Self::Chunk(c) => c.stored_size.map(i64::from),
+            Self::Pack(p) => p.stored_size,
+            Self::Raw(r) => Some(r.size),
+        }
+        .filter(|n| *n >= 0)
+        .context("invalid physical source length")
+    }
+
+    pub(crate) fn block_key(&self) -> Option<Uuid> {
+        match self {
+            Self::Chunk(c) => c.block_key_id,
+            Self::Pack(p) => p.block_key_id,
+            Self::Raw(_) => None,
+        }
+    }
+
+    pub(crate) fn relocate(&mut self, storage: Uuid, address: Uuid, local: bool) {
+        match self {
+            Self::Chunk(c) => {
+                c.storage_id = Some(storage);
+                c.address = Some(address);
+            }
+            Self::Pack(p) => {
+                p.storage_id = Some(storage);
+                p.address = Some(address);
+            }
+            Self::Raw(r) => {
+                r.storage_id = storage;
+                r.address = Some(address);
+                r.medium = if local { "local" } else { "shared_s3" }.into();
+            }
+        }
+    }
+
+    pub(crate) fn same_content(&self, other: &Self) -> bool {
+        self.identity() == other.identity()
+            && match (self, other) {
+                (Self::Chunk(a), Self::Chunk(b)) => {
+                    a.id == b.id
+                        && a.uuid == b.uuid
+                        && a.encoding_id == b.encoding_id
+                        && a.raw_size == b.raw_size
+                        && a.hash == b.hash
+                        && a.format == b.format
+                }
+                (Self::Pack(a), Self::Pack(b)) => {
+                    a.id == b.id
+                        && a.raw_size == b.raw_size
+                        && a.digest == b.digest
+                        && a.member_count == b.member_count
+                }
+                (Self::Raw(a), Self::Raw(b)) => {
+                    a.id == b.id
+                        && a.size == b.size
+                        && a.digest == b.digest
+                        && !a.pending_upload
+                        && !b.pending_upload
+                }
+                _ => false,
+            }
+    }
+
+    fn bind_location(self, mut candidate: Self) -> sqlx::Result<Self> {
+        if !self.same_content(&candidate)
+            || candidate.address().is_nil()
+            || candidate.address() == self.identity()
+            || candidate.storage().is_err()
+            || candidate.bytes().is_err()
+        {
+            return Err(sqlx::Error::Decode(
+                "tier location does not match its immutable source".into(),
+            ));
+        }
+        match (&self, &mut candidate) {
+            (Self::Chunk(a), Self::Chunk(b)) => b.state.clone_from(&a.state),
+            (Self::Pack(a), Self::Pack(b)) => b.state.clone_from(&a.state),
+            (Self::Raw(a), Self::Raw(b)) => {
+                b.state.clone_from(&a.state);
+                b.revision = a.revision;
+                b.quarantine_code.clone_from(&a.quarantine_code);
+            }
+            _ => unreachable!(),
+        }
+        Ok(candidate)
+    }
+}
+
+type Material = sqlx::Result<Option<sqlx::types::Json<PhysicalSource>>>;
+
+#[cfg(test)]
+mod tier_material_tests {
+    use super::*;
+
+    #[test]
+    fn relocating_raw_preserves_quarantine_and_rejects_other_content() {
+        let raw = super::super::raw::RawSource {
+            id: 1i64.into(),
+            location_id: Uuid::from_u128(1),
+            address: None,
+            storage_id: Uuid::from_u128(2),
+            size: 13,
+            digest: Some(vec![7; 16]),
+            state: "ready".into(),
+            medium: "shared_s3".into(),
+            pending_upload: false,
+            revision: 2,
+            quarantine_code: None,
+        };
+        let mut remote = PhysicalSource::Raw(raw.clone());
+        remote.relocate(Uuid::from_u128(3), Uuid::from_u128(4), false);
+        let mut current = raw;
+        current.state = "quarantined".into();
+        current.revision = 3;
+        current.quarantine_code = Some("hash_mismatch".into());
+        let routed = PhysicalSource::Raw(current.clone())
+            .bind_location(remote.clone())
+            .unwrap();
+        let PhysicalSource::Raw(routed) = routed else {
+            panic!("expected raw")
+        };
+        assert_eq!(routed.address(), Uuid::from_u128(4));
+        assert_eq!(
+            (routed.revision, routed.quarantine_code),
+            (3, current.quarantine_code.clone())
+        );
+        current.digest = Some(vec![8; 16]);
+        assert!(PhysicalSource::Raw(current).bind_location(remote).is_err());
+    }
+}
+macro_rules! routed {
+    ($name:ident, $variant:ident, $ty:ty) => {
+        pub(crate) fn $name(base: $ty, material: Material) -> sqlx::Result<$ty> {
+            let next = match material {
+                Ok(Some(value)) => value.0,
+                Ok(None) | Err(sqlx::Error::ColumnNotFound(_)) => return Ok(base),
+                Err(error) => return Err(error),
+            };
+            match PhysicalSource::$variant(base).bind_location(next)? {
+                PhysicalSource::$variant(value) => Ok(value),
+                _ => Err(sqlx::Error::Decode("tier source type changed".into())),
+            }
+        }
+    };
+}
+routed!(read_chunk, Chunk, Chunk);
+routed!(read_pack, Pack, Pack);
+routed!(read_raw, Raw, super::raw::RawSource);
+
 #[async_trait]
 pub(crate) trait PhysicalStore: Send + Sync {
     async fn has_chunks(&self) -> Result<bool>;

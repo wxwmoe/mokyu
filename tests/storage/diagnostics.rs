@@ -35,6 +35,7 @@ async fn storage_diagnostics_count_shared_failures_and_cache_fallback() -> Resul
         uuid: Uuid::now_v7(),
         id: 1.into(),
         encoding_id: 1.into(),
+        address: None,
         location_id: Uuid::new_v4(),
         storage_id: Some(store.id),
         hash: blake3::hash(&raw).as_bytes().to_vec(),

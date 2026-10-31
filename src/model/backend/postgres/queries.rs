@@ -79,7 +79,7 @@ pub(super) fn extents_for_copy(stream: Id, from: i64) -> Rows<'static, Extent> {
 }
 
 fn ready_chunk(id: Id) -> Rows<'static, Chunk> {
-    sqlx::query_as("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE c.id=$1 AND c.state='ready'")
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=l.encoding_id) AS tier_material,c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE c.id=$1 AND c.state='ready'")
         .bind(id)
 }
 
@@ -851,7 +851,7 @@ pub(super) async fn read_snapshot(
     use crate::model::ReadRoute;
     use sqlx::{FromRow, Row};
     let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-        "SELECT b.*,s.id AS stream_id,s.bucket_id AS stream_bucket_id,s.object_key AS stream_object_key,s.stream_type AS stream_stream_type,s.payload_type AS stream_payload_type,s.payload_revision AS stream_payload_revision,s.state AS stream_state,s.size AS stream_size,s.etag AS stream_etag,s.metadata AS stream_metadata,s.public_read AS stream_public_read,s.checksums AS stream_checksums,s.http_compression AS stream_http_compression,s.created_at AS stream_created_at,s.touched_at AS stream_touched_at,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,c.secret_encrypted AS read_secret,EXISTS(SELECT 1 FROM s3_credential_grants g WHERE g.access_key=c.access_key_id AND g.bucket_id=b.id AND c.project_id=b.project_id AND 'object.read'=ANY(g.actions)) AS read_allowed FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.object_key=",
+        "SELECT b.*,s.id AS stream_id,s.bucket_id AS stream_bucket_id,s.object_key AS stream_object_key,s.stream_type AS stream_stream_type,s.payload_type AS stream_payload_type,s.payload_revision AS stream_payload_revision,s.state AS stream_state,s.size AS stream_size,s.etag AS stream_etag,s.metadata AS stream_metadata,s.public_read AS stream_public_read,s.checksums AS stream_checksums,s.http_compression AS stream_http_compression,s.created_at AS stream_created_at,s.touched_at AS stream_touched_at,(SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,c.secret_encrypted AS read_secret,EXISTS(SELECT 1 FROM s3_credential_grants g WHERE g.access_key=c.access_key_id AND g.bucket_id=b.id AND c.project_id=b.project_id AND 'object.read'=ANY(g.actions)) AS read_allowed FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.object_key=",
     );
     match route {
         ReadRoute::Bucket {
@@ -3337,11 +3337,11 @@ pub(super) type ManagedKeyViewRow = (
 );
 pub(super) fn managed_key_views() -> Rows<'static, ManagedKeyViewRow> {
     sqlx::query_as(
-        "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state<>'deleted') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.block_key_id=k.id AND w.state='active' AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name",
+        "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tier_locations h WHERE h.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tier_moves m WHERE m.source_key=k.id OR m.target_key=k.id) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state<>'deleted' AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=e.encoding_id)) OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state<>'deleted' AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=p.id)) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.block_key_id=k.id AND w.state='active' AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name",
     )
 }
 pub(super) fn managed_key_in_use(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE block_key_id=$1) OR EXISTS(SELECT 1 FROM chunk_encodings WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM packs WHERE block_key_id=$1 AND state<>'deleted') OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=$1) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.block_key_id=$1 AND w.state='active' AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key_id'=$1::text AND state IN ('queued','running','paused','failed')) FROM managed_keys WHERE id=$1").bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE block_key_id=$1) OR EXISTS(SELECT 1 FROM tier_locations h WHERE h.block_key_id=$1) OR EXISTS(SELECT 1 FROM tier_moves m WHERE m.source_key=$1 OR m.target_key=$1) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=$1 AND e.state<>'deleted' AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=e.encoding_id)) OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=$1 AND p.state<>'deleted' AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=p.id)) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=$1) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.block_key_id=$1 AND w.state='active' AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM tasks WHERE detail->>'target_key_id'=$1::text AND state IN ('queued','running','paused','failed')) FROM managed_keys WHERE id=$1").bind(id)
 }
 pub(super) fn lock_managed_key(id: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT true FROM managed_keys WHERE id=$1 FOR UPDATE").bind(id)
@@ -4948,7 +4948,7 @@ pub(super) async fn rewrite_loose_candidate(
     job: &RewriteTask,
 ) -> Result<Option<Chunk>> {
     let mut query = sqlx::QueryBuilder::<Postgres>::new(
-        "SELECT c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size AS standalone_size,l.encryption_algorithm AS encryption_algorithm,l.block_key_id,l.standalone_compressed AS standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunks c JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' JOIN storage_profiles sp ON sp.storage_id=c.storage_id WHERE c.id>",
+        "SELECT (SELECT h.material FROM tier_locations h WHERE h.unit=0 AND h.physical_id=l.encoding_id) AS tier_material,c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size AS standalone_size,l.encryption_algorithm AS encryption_algorithm,l.block_key_id,l.standalone_compressed AS standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunks c JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' JOIN storage_profiles sp ON sp.storage_id=c.storage_id WHERE c.id>",
     );
     query.push_bind(after).push(" AND c.id<=");
     query
@@ -5011,7 +5011,7 @@ pub(super) fn advance_rewrite(id: Uuid, cursor: String) -> Statement<'static> {
         .bind(cursor)
 }
 pub(super) fn rewrite_pack(id: Id) -> Rows<'static, Pack> {
-    sqlx::query_as("SELECT * FROM packs WHERE id=$1 AND state='ready'").bind(id)
+    sqlx::query_as("SELECT (SELECT h.material FROM tier_locations h WHERE h.unit=1 AND h.physical_id=p.id) AS tier_material,p.* FROM packs p WHERE id=$1 AND state='ready'").bind(id)
 }
 pub(super) fn rewrite_members(id: Id) -> Rows<'static, Chunk> {
     sqlx::query_as("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM pack_members m JOIN chunks c ON c.id=m.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE m.pack_id=$1 ORDER BY m.ordinal").bind(id)
@@ -5131,7 +5131,7 @@ pub(super) fn complete_running_task(id: Execution) -> Statement<'static> {
         .bind(id.token)
 }
 pub(super) fn physical_indexed(location: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunk_encodings WHERE encoding_id=$1) OR EXISTS(SELECT 1 FROM packs WHERE id=$1)").bind(location)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunk_encodings u WHERE u.encoding_id=$1 AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=u.encoding_id)) OR EXISTS(SELECT 1 FROM packs u WHERE u.id=$1 AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=u.id)) OR EXISTS(SELECT 1 FROM tier_locations WHERE address=$1) OR EXISTS(SELECT 1 FROM tier_moves WHERE source_address=$1) OR EXISTS(SELECT 1 FROM tier_moves WHERE target_address=$1)").bind(location)
 }
 pub(super) fn task_progress<'q>(
     id: Execution,
@@ -5429,6 +5429,7 @@ pub(super) fn physical_gc_candidates(
     single: bool,
 ) -> Rows<'static, (Id, Uuid, bool)> {
     let (table, id_column, lease_guard) = physical_table(packed);
+    let tier_unit = i16::from(packed);
     let state_guard = if packed {
         "r.state IN ('retired','deleting')"
     } else {
@@ -5452,10 +5453,10 @@ pub(super) fn physical_gc_candidates(
         },
         node_read_source_guard(
             if packed { "pack" } else { "chunk" },
-            &format!("r.{id_column}")
+            &format!("COALESCE(tl.address,r.{id_column})")
         )
     );
-    sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT r.{id_column},r.{id_column},({unknown}) FROM {table} r WHERE {state_guard} AND r.unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR r.stored_at IS NULL OR r.stored_at<=now()-$3*interval '1 second') AND r.storage_id=$4 AND {lease_guard} AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=r.{id_column}::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) ORDER BY r.unreferenced_at,r.{id_column} LIMIT $2"))).bind(grace).bind(batch).bind(minimum).bind(storage)
+    sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT r.{id_column},COALESCE(tl.address,r.{id_column}),(tl.address IS NULL AND ({unknown})) FROM {table} r LEFT JOIN tier_locations tl ON tl.unit={tier_unit} AND tl.physical_id=r.{id_column} WHERE NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id=r.{id_column}) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id=r.{id_column} AND th.activated_at>floor(extract(epoch from clock_timestamp()))::bigint-$3::bigint) AND {state_guard} AND r.unreferenced_at<now()-$1*interval '1 second' AND ($3::double precision=0 OR r.stored_at IS NULL OR r.stored_at<=now()-$3*interval '1 second') AND COALESCE(tl.storage_id,r.storage_id)=$4 AND {lease_guard} AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=r.{id_column}::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) ORDER BY r.unreferenced_at,r.{id_column} LIMIT $2"))).bind(grace).bind(batch).bind(minimum).bind(storage)
 }
 pub(super) fn physical_gc_age(packed: bool, id: Id, stored: DateTime<Utc>) -> Statement<'static> {
     if !packed {
@@ -5475,11 +5476,14 @@ pub(super) fn claim_physical_gc(
     minimum: f64,
 ) -> Statement<'static> {
     let (table, id_column, lease_guard) = physical_table(packed);
+    let tier_unit = i16::from(packed);
     let lease_guard = format!(
         "({lease_guard}) AND ({})",
         node_read_source_guard(
             if packed { "pack" } else { "chunk" },
-            &format!("r.{id_column}")
+            &format!(
+                "COALESCE((SELECT th.address FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id=r.{id_column}),r.{id_column})"
+            )
         )
     );
     let state_guard = if packed {
@@ -5487,7 +5491,7 @@ pub(super) fn claim_physical_gc(
     } else {
         "(state IN ('retired','deleting') OR (state='deleted' AND recovery_pending)) AND owner_stream IS NULL"
     };
-    sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} r SET state='deleting' WHERE {lease_guard} AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=r.{id_column}::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND {id_column}=$1 AND {state_guard} AND unreferenced_at<now()-$2*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second')"))).bind(id).bind(grace).bind(minimum)
+    sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} r SET state='deleting' WHERE NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id=r.{id_column}) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id=r.{id_column} AND th.activated_at>floor(extract(epoch from clock_timestamp()))::bigint-$3::bigint) AND {lease_guard} AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=r.{id_column}::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND {id_column}=$1 AND {state_guard} AND unreferenced_at<now()-$2*interval '1 second' AND ($3::double precision=0 OR stored_at IS NULL OR stored_at<=now()-$3*interval '1 second')"))).bind(id).bind(grace).bind(minimum)
 }
 pub(super) fn finish_physical_gc(packed: bool, id: Id, retention: f64) -> Statement<'static> {
     if !packed {
@@ -5713,9 +5717,23 @@ impl MaintenanceStore for Backend {
             != 0)
     }
     async fn delete_physical(&self, packed: bool, id: Id, retention: f64) -> Result<()> {
-        finish_physical_gc(packed, id, retention)
-            .execute(&self.pool)
-            .await?;
+        let mut tx = super::tier_queries::begin(self).await?;
+        let unit = if packed {
+            crate::model::tiering::Unit::Pack
+        } else {
+            crate::model::tiering::Unit::Chunk
+        };
+        let address = super::tier_read_queries::gc_identity(&mut *tx, unit, id).await?;
+        let changed = finish_physical_gc(packed, id, retention)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if changed == 1
+            && let Some(address) = address
+        {
+            super::tier_read_queries::forget(&mut *tx, unit, address).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
     async fn gc_status(&self) -> Result<(Vec<(String, i64)>, bool, bool)> {
@@ -5862,8 +5880,8 @@ pub(super) async fn physical_source(
     chunk: Id,
     inspection: bool,
 ) -> Result<PhysicalSource> {
-    if let Some(physical) = sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size AS standalone_size,l.encryption_algorithm AS encryption_algorithm,l.block_key_id,l.standalone_compressed AS standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready' AND ($2 OR l.quarantined_at IS NULL)").bind(chunk).bind(inspection).fetch_optional(&mut *db).await? { return Ok(PhysicalSource::Chunk(physical)); }
-    let pack = sqlx::query_as("SELECT p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready' AND ($2 OR p.quarantined_at IS NULL)").bind(chunk).bind(inspection).fetch_optional(&mut *db).await?.context(crate::model::Error::SourceUnavailable)?;
+    if let Some(physical) = sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=l.encoding_id) AS tier_material,c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size AS standalone_size,l.encryption_algorithm AS encryption_algorithm,l.block_key_id,l.standalone_compressed AS standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE c.id=$1 AND l.state='ready' AND c.state='ready' AND ($2 OR l.quarantined_at IS NULL)").bind(chunk).bind(inspection).fetch_optional(&mut *db).await? { return Ok(PhysicalSource::Chunk(physical)); }
+    let pack = sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=p.id) AS tier_material,p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=$1 AND c.state='ready' AND p.state='ready' AND ($2 OR p.quarantined_at IS NULL)").bind(chunk).bind(inspection).fetch_optional(&mut *db).await?.context(crate::model::Error::SourceUnavailable)?;
     Ok(PhysicalSource::Pack(pack))
 }
 
@@ -8612,48 +8630,56 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::app::Extent {
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::content::codec::Chunk {
     fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
         use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            uuid: row.try_get("id")?,
-            encoding_id: row.try_get("current_encoding_id")?,
-            location_id: match row.try_get("location_id") {
-                Ok(value) => value,
-                Err(sqlx::Error::ColumnNotFound(_)) => Default::default(),
-                Err(error) => return Err(error),
+        crate::model::physical::read_chunk(
+            Self {
+                id: row.try_get("id")?,
+                uuid: row.try_get("id")?,
+                encoding_id: row.try_get("current_encoding_id")?,
+                address: None,
+                location_id: match row.try_get("location_id") {
+                    Ok(value) => value,
+                    Err(sqlx::Error::ColumnNotFound(_)) => Default::default(),
+                    Err(error) => return Err(error),
+                },
+                storage_id: row.try_get("storage_id")?,
+                hash: row.try_get("hash")?,
+                raw_size: row.try_get("raw_size")?,
+                stored_size: row.try_get("standalone_size")?,
+                algorithm: row.try_get("encryption_algorithm")?,
+                block_key_id: row.try_get("block_key_id")?,
+                compressed: row.try_get("standalone_compressed")?,
+                nonce: row.try_get("nonce")?,
+                format: row.try_get("format")?,
+                state: row.try_get("state")?,
+                created_at: row.try_get("created_at")?,
             },
-            storage_id: row.try_get("storage_id")?,
-            hash: row.try_get("hash")?,
-            raw_size: row.try_get("raw_size")?,
-            stored_size: row.try_get("standalone_size")?,
-            algorithm: row.try_get("encryption_algorithm")?,
-            block_key_id: row.try_get("block_key_id")?,
-            compressed: row.try_get("standalone_compressed")?,
-            nonce: row.try_get("nonce")?,
-            format: row.try_get("format")?,
-            state: row.try_get("state")?,
-            created_at: row.try_get("created_at")?,
-        })
+            row.try_get("tier_material"),
+        )
     }
 }
 
 impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::content::pack::Pack {
     fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
         use sqlx::Row;
-        Ok(Self {
-            id: row.try_get("id")?,
-            location_id: row.try_get("id")?,
-            storage_id: row.try_get("storage_id")?,
-            algorithm: row.try_get("encryption_algorithm")?,
-            block_key_id: row.try_get("block_key_id")?,
-            raw_size: row.try_get("raw_size")?,
-            stored_size: row.try_get("stored_size")?,
-            compressed: row.try_get("pack_compressed")?,
-            nonce: row.try_get("nonce")?,
-            digest: row.try_get("digest")?,
-            member_count: row.try_get("member_count")?,
-            state: row.try_get("state")?,
-            created_at: row.try_get("created_at")?,
-        })
+        crate::model::physical::read_pack(
+            Self {
+                id: row.try_get("id")?,
+                address: None,
+                location_id: row.try_get("id")?,
+                storage_id: row.try_get("storage_id")?,
+                algorithm: row.try_get("encryption_algorithm")?,
+                block_key_id: row.try_get("block_key_id")?,
+                raw_size: row.try_get("raw_size")?,
+                stored_size: row.try_get("stored_size")?,
+                compressed: row.try_get("pack_compressed")?,
+                nonce: row.try_get("nonce")?,
+                digest: row.try_get("digest")?,
+                member_count: row.try_get("member_count")?,
+                state: row.try_get("state")?,
+                created_at: row.try_get("created_at")?,
+            },
+            row.try_get("tier_material"),
+        )
     }
 }
 
@@ -9246,7 +9272,7 @@ pub(super) async fn source_snapshot(
         .bind(scope.storage_id).fetch_one(&mut *db).await?;
     let suffix = if lock { " FOR UPDATE" } else { "" };
     if scope.source == crate::model::source::SourceType::Raw {
-        let raw: RawSource = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=$1 AND r.storage_id=$2{suffix}")))
+        let raw: RawSource = sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=$1 AND r.storage_id=$2{suffix}")))
             .bind(scope.identity()?).bind(scope.storage_id).fetch_one(&mut *db).await?;
         return Ok(SourceSnapshot {
             scope: scope.clone(),
@@ -9269,14 +9295,14 @@ pub(super) async fn source_snapshot(
         .bind(id).bind(scope.storage_id).fetch_optional(&mut *db).await?.context(crate::model::Error::OperationAborted)?;
     let physical = if scope.packed() {
         PhysicalSource::Pack(
-            sqlx::query_as("SELECT * FROM packs WHERE id=$1 AND storage_id=$2")
+            sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=p.id) AS tier_material,p.* FROM packs p WHERE id=$1 AND storage_id=$2")
                 .bind(id)
                 .bind(scope.storage_id)
                 .fetch_one(&mut *db)
                 .await?,
         )
     } else {
-        PhysicalSource::Chunk(sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.encoding_id=$1 AND l.storage_id=$2").bind(id).bind(scope.storage_id).fetch_one(&mut *db).await?)
+        PhysicalSource::Chunk(sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=l.encoding_id) AS tier_material,c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.encoding_id=$1 AND l.storage_id=$2").bind(id).bind(scope.storage_id).fetch_one(&mut *db).await?)
     };
     let manifest_digest = if let PhysicalSource::Pack(pack) = &physical {
         let members: Vec<(Id, i64, i32, Vec<u8>)> = sqlx::query_as("SELECT m.chunk_id,m.offset_bytes,c.raw_size,c.hash FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY m.ordinal LIMIT 4097").bind(id).fetch_all(&mut *db).await?;
@@ -9534,7 +9560,7 @@ use crate::model::raw::{RawProcessing, RawRange, RawSource, RawStore, RawUpload}
 const RAW_COPY_READY: &str = "r.state='ready' AND r.quarantine_code IS NULL AND r.durability='durable' AND NOT r.pending_upload AND r.medium IN ('local','shared_s3') AND r.size>=0 AND length(r.digest)=16";
 
 pub(super) fn raw_page(stream: Id, start: i64, end: i64) -> Rows<'static, RawRange> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=$1 AND e.offset_bytes+e.length>=$2 AND e.offset_bytes<=$3 ORDER BY e.offset_bytes LIMIT 128")
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=$1 AND e.offset_bytes+e.length>=$2 AND e.offset_bytes<=$3 ORDER BY e.offset_bytes LIMIT 128")
             .bind(stream).bind(start).bind(end)
 }
 
@@ -10075,7 +10101,19 @@ impl RawStore for Backend {
             == 1)
     }
     async fn removed(&self, source: Id) -> Result<()> {
-        raw_gc_finish(source).execute(&self.pool).await?;
+        let mut tx = super::tier_queries::begin(self).await?;
+        let unit = crate::model::tiering::Unit::Raw;
+        let address = super::tier_read_queries::gc_identity(&mut *tx, unit, source).await?;
+        let changed = raw_gc_finish(source)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        if changed == 1
+            && let Some(address) = address
+        {
+            super::tier_read_queries::forget(&mut *tx, unit, address).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -10788,12 +10826,12 @@ pub(super) fn node_read_chunks(ids: &[Id]) -> Rows<'_, NodeReadChunk> {
 }
 
 pub(super) fn node_read_encodings(ids: &[Id]) -> Rows<'_, Chunk> {
-    sqlx::query_as("SELECT c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,l.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunks c JOIN LATERAL (SELECT * FROM chunk_encodings e WHERE e.chunk_id=c.id AND e.state='ready' AND e.quarantined_at IS NULL ORDER BY e.encoding_id LIMIT 1 FOR SHARE) l ON true WHERE c.id=ANY($1) ORDER BY c.id")
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=l.encoding_id) AS tier_material,c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,l.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunks c JOIN LATERAL (SELECT * FROM chunk_encodings e WHERE e.chunk_id=c.id AND e.state='ready' AND e.quarantined_at IS NULL ORDER BY e.encoding_id LIMIT 1 FOR SHARE) l ON true WHERE c.id=ANY($1) ORDER BY c.id")
         .bind(ids)
 }
 
 pub(super) fn node_read_packs(ids: &[Id]) -> Rows<'_, crate::content::pack::Pack> {
-    sqlx::query_as("SELECT * FROM packs WHERE id=ANY($1) AND state='ready' AND quarantined_at IS NULL ORDER BY id FOR SHARE").bind(ids)
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=p.id) AS tier_material,p.* FROM packs p WHERE id=ANY($1) AND state='ready' AND quarantined_at IS NULL ORDER BY id FOR SHARE").bind(ids)
 }
 
 pub(super) fn node_read_pending(ids: &[Id]) -> Rows<'_, (Id, Option<Uuid>)> {
@@ -10825,7 +10863,7 @@ pub(super) fn node_read_raw(
     end: i64,
     limit: i64,
 ) -> Rows<'static, NodeReadRaw> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,u.node_id FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id LEFT JOIN raw_uploads u ON u.source_id=r.id WHERE e.stream_id=$1 AND e.offset_bytes>=COALESCE((SELECT offset_bytes FROM raw_ranges WHERE stream_id=$1 AND offset_bytes<=$2 ORDER BY offset_bytes DESC LIMIT 1),$2) AND e.offset_bytes+e.length>$2 AND e.offset_bytes<$3 ORDER BY e.offset_bytes LIMIT $4 FOR SHARE OF e,r")
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,u.node_id FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id LEFT JOIN raw_uploads u ON u.source_id=r.id WHERE e.stream_id=$1 AND e.offset_bytes>=COALESCE((SELECT offset_bytes FROM raw_ranges WHERE stream_id=$1 AND offset_bytes<=$2 ORDER BY offset_bytes DESC LIMIT 1),$2) AND e.offset_bytes+e.length>$2 AND e.offset_bytes<$3 ORDER BY e.offset_bytes LIMIT $4 FOR SHARE OF e,r")
         .bind(stream).bind(start).bind(end).bind(limit)
 }
 
@@ -11580,7 +11618,7 @@ pub(super) fn raw_gc_candidates(
     minimum: i64,
     limit: i64,
 ) -> Rows<'static, RawSource> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.owner_stream IS NULL AND r.unreferenced_at<now()-$2*interval '1 second' AND r.created_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=r.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=r.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id) ORDER BY r.unreferenced_at,r.id LIMIT $4").bind(storage).bind(grace).bind(minimum).bind(limit)
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r LEFT JOIN tier_locations th ON th.unit=2 AND th.physical_id=r.id WHERE COALESCE(th.storage_id,r.storage_id)=$1 AND r.owner_stream IS NULL AND r.unreferenced_at<now()-$2*interval '1 second' AND r.created_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=COALESCE(th.address,r.id) AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=r.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit=2 AND mv.physical_id=r.id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit=2 AND th.physical_id=r.id AND th.activated_at>floor(extract(epoch from clock_timestamp()))::bigint-$3::bigint) ORDER BY r.unreferenced_at,r.id LIMIT $4").bind(storage).bind(grace).bind(minimum).bind(limit)
 }
 
 pub(super) fn raw_gc_claim(
@@ -11589,7 +11627,7 @@ pub(super) fn raw_gc_claim(
     grace: i64,
     minimum: i64,
 ) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND revision=$2 AND owner_stream IS NULL AND unreferenced_at<now()-$3*interval '1 second' AND created_at<now()-$4*interval '1 second' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=raw_sources.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=raw_sources.id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=raw_sources.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source).bind(revision).bind(grace).bind(minimum)
+    sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND revision=$2 AND owner_stream IS NULL AND unreferenced_at<now()-$3*interval '1 second' AND created_at<now()-$4*interval '1 second' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=COALESCE((SELECT th.address FROM tier_locations th WHERE th.unit=2 AND th.physical_id=raw_sources.id),raw_sources.id) AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=raw_sources.id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=raw_sources.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit=2 AND mv.physical_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit=2 AND th.physical_id=raw_sources.id AND th.activated_at>floor(extract(epoch from clock_timestamp()))::bigint-$4::bigint)").bind(source).bind(revision).bind(grace).bind(minimum)
 }
 
 pub(super) fn raw_gc_finish(source: Id) -> Statement<'static> {

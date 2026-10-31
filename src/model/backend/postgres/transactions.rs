@@ -4430,6 +4430,18 @@ async fn commit_rewrite_chunk_in(
     physical: &Chunk,
 ) -> Result<()> {
     rewrite_lease(tx, task, token).await?;
+    ensure!(
+        super::tier_read_queries::rewrite_source(
+            &mut **tx,
+            crate::model::tiering::Unit::Chunk,
+            source.encoding_id,
+            source.address(),
+            source.storage_id,
+            physical.storage_id
+        )
+        .await?,
+        crate::model::Error::OperationAborted
+    );
     let current = queries::lock_rewrite_chunk(source.id)
         .fetch_optional(&mut **tx)
         .await?;
@@ -4488,6 +4500,18 @@ async fn commit_rewrite_pack_in(
     first: Id,
 ) -> Result<()> {
     rewrite_lease(tx, task, token).await?;
+    ensure!(
+        super::tier_read_queries::rewrite_source(
+            &mut **tx,
+            crate::model::tiering::Unit::Pack,
+            old.id,
+            old.address(),
+            old.storage_id,
+            new.storage_id
+        )
+        .await?,
+        crate::model::Error::OperationAborted
+    );
     let locked = queries::lock_rewrite_members(old.id)
         .fetch_all(&mut **tx)
         .await?;
@@ -6574,7 +6598,7 @@ impl StorageUpdate for StorageModification {
                 .await?,
             s3s::s3_error!(
                 OperationAborted,
-                "remove bucket redundancy before relocating its storage"
+                "storage still has redundancy or tiering dependencies"
             )
         );
         if self.original_type != record.r#type {
@@ -7426,6 +7450,7 @@ pub(super) async fn prepare_repair(
             .all(|source| source.storage_revision == revision),
         crate::model::Error::OperationAborted
     );
+    chunk.address = None;
     chunk.location_id = Uuid::nil();
     chunk.algorithm = input.algorithm;
     chunk.block_key_id = input.key;

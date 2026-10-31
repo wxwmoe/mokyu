@@ -60,7 +60,7 @@ pub(super) fn stream(id: Id) -> Rows<'static, crate::app::StoredStream> {
 }
 
 pub(super) fn range(stream: Id, offset: i64) -> Rows<'static, crate::model::raw::RawRange> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=? AND e.offset_bytes<=? AND e.offset_bytes+e.length>? ORDER BY e.offset_bytes DESC LIMIT 1").bind(stream).bind(offset).bind(offset)
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.location_id) AS tier_material,r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=? AND e.offset_bytes<=? AND e.offset_bytes+e.length>? ORDER BY e.offset_bytes DESC LIMIT 1").bind(stream).bind(offset).bind(offset)
 }
 
 pub(super) fn proof(unit: Id, offset: i64) -> Rows<'static, (i64, i32, Vec<u8>)> {

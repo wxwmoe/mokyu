@@ -161,6 +161,7 @@ impl App {
         if let Some((id, location, size)) = self.packing.ready_encoding(c.id).await? {
             let mut physical = c.clone();
             physical.encoding_id = id;
+            physical.address = None;
             physical.location_id = location;
             physical.stored_size = Some(size);
             if !self.storage.has_pending(c) {
@@ -174,6 +175,7 @@ impl App {
         }
         let mut physical = c.clone();
         (physical.algorithm, physical.block_key_id) = self.physical_encoding(c, accepted).await?;
+        physical.address = None;
         physical.location_id = if matches!(physical.encoding_id, Id::Integer(_)) {
             Uuid::now_v7()
         } else {
@@ -450,6 +452,7 @@ impl App {
         for (source, bytes) in data {
             if !self.storage.has_pending(source) {
                 let mut member = source.clone();
+                member.address = None;
                 member.location_id = Uuid::nil();
                 cache.push((member, bytes.clone()));
             }

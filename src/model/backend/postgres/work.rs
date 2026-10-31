@@ -405,6 +405,42 @@ async fn finish(
             .await?;
             release_task_inputs(db, task).await?;
         }
+        work::Plan::Tier { work: planned, .. } => {
+            let execution = Execution {
+                id: task,
+                token: row.token,
+            };
+            match completion.outcomes.as_slice() {
+                [work::Outcome::Tier(out)] => {
+                    ensure!(
+                        matches!(
+                            (&*planned, &**out),
+                            (
+                                crate::model::tiering::Work::Copy { .. },
+                                crate::model::tiering::Outcome::Verified { .. }
+                                    | crate::model::tiering::Outcome::Checkpoint { .. }
+                                    | crate::model::tiering::Outcome::Discard
+                            ) | (
+                                crate::model::tiering::Work::Remove { .. },
+                                crate::model::tiering::Outcome::Removed
+                            )
+                        ),
+                        Error::NodeOperationConflict
+                    );
+                    super::super::tier_move_transactions::finish(db, execution, out).await?;
+                    complete = matches!(&**out, crate::model::tiering::Outcome::Removed);
+                }
+                [work::Outcome::Retry] => {
+                    super::super::tier_move_transactions::finish(
+                        db,
+                        execution,
+                        &crate::model::tiering::Outcome::Retry,
+                    )
+                    .await?
+                }
+                _ => return Err(Error::NodeOperationConflict.into()),
+            }
+        }
         work::Plan::RawTransfer { transfer: plan, .. } => {
             ensure!(!maintenance, Error::OperationAborted);
             let [outcome] = completion.outcomes.as_slice() else {
@@ -549,25 +585,45 @@ async fn finish(
                         matches!(item.source, work::Physical::Chunk | work::Physical::Pack),
                         Error::NodeOperationConflict
                     );
-                    queries::physical_gc_age(item.source.packed(), item.location.into(), stored)
+                    queries::physical_gc_age(item.source.packed(), item.identity, stored)
                         .execute(&mut **db)
                         .await?;
                 }
                 if matches!(outcome, work::Outcome::Deleted { .. }) {
+                    let crate::model::Id::Uuid(identity) = item.identity else {
+                        return Err(Error::NodeOperationConflict.into());
+                    };
                     match &item.source {
                         work::Physical::Chunk | work::Physical::Pack => {
-                            queries::finish_physical_gc(
+                            let changed = queries::finish_physical_gc(
                                 item.source.packed(),
-                                item.location.into(),
+                                item.identity,
                                 retention as f64,
                             )
                             .execute(&mut **db)
                             .await?;
+                            let unit = if item.source.packed() {
+                                crate::model::tiering::Unit::Pack
+                            } else {
+                                crate::model::tiering::Unit::Chunk
+                            };
+                            if changed.rows_affected() == 1 {
+                                super::super::tier_read_queries::forget(&mut **db, unit, identity)
+                                    .await?;
+                            }
                         }
                         work::Physical::Raw { .. } => {
-                            queries::raw_gc_finish(item.location.into())
+                            let changed = queries::raw_gc_finish(item.identity)
                                 .execute(&mut **db)
                                 .await?;
+                            if changed.rows_affected() == 1 {
+                                super::super::tier_read_queries::forget(
+                                    &mut **db,
+                                    crate::model::tiering::Unit::Raw,
+                                    identity,
+                                )
+                                .await?;
+                            }
                         }
                         work::Physical::Staging { key } => {
                             q::remove_staging(storage, key).execute(&mut **db).await?;
@@ -608,7 +664,7 @@ async fn finish(
             )
             .await?;
         }
-        work::Plan::Pack { storage, batch } => {
+        work::Plan::Pack { storage, batch, .. } => {
             ensure!(!maintenance, Error::OperationAborted);
             error = packing::finish(
                 db,
@@ -851,6 +907,7 @@ async fn collect(
                 {
                     items.push(work::Deletion {
                         source: source.clone(),
+                        identity: id,
                         location,
                         inspect_age: minimum > 0 && unknown,
                     });
@@ -865,7 +922,7 @@ async fn collect(
                     .await?
             {
                 if source.medium != "shared_s3"
-                    || q::physical_active(source.location_id)
+                    || q::physical_active(source.address())
                         .fetch_one(&mut **db)
                         .await?
                 {
@@ -881,7 +938,8 @@ async fn collect(
                         source: work::Physical::Raw {
                             upload: q::upload(source.id).fetch_one(&mut **db).await?,
                         },
-                        location: source.location_id,
+                        identity: source.id,
+                        location: source.address(),
                         inspect_age: false,
                     });
                 }
@@ -906,6 +964,7 @@ async fn collect(
             if !q::physical_active(location).fetch_one(&mut **db).await? {
                 items.push(work::Deletion {
                     source: work::Physical::Staging { key },
+                    identity: location.into(),
                     location,
                     inspect_age: false,
                 });
@@ -1187,7 +1246,10 @@ pub(crate) async fn exchange(
                 } else {
                     run.storage()?
                 }
-            } else if policy == "storage_migration" && detail["operation"] != "replication" {
+            } else if policy == "storage_migration"
+                && detail["operation"] != "replication"
+                && detail["operation"] != "tiering"
+            {
                 migration::storage(&mut tx, &detail).await?
             } else {
                 detail["storage_id"]
@@ -1207,7 +1269,9 @@ pub(crate) async fn exchange(
                 .await?;
             ensure!(record.r#type == "s3", Error::SourceUnavailable);
             let secondary_id: Option<Uuid> =
-                if policy == "storage_migration" && detail["operation"] == "replication" {
+                if policy == "storage_migration" && detail["operation"] == "tiering" {
+                    Some(serde_json::from_value(detail["source_storage"].clone())?)
+                } else if policy == "storage_migration" && detail["operation"] == "replication" {
                     q::transfer_source(task, storage)
                         .fetch_optional(&mut *tx)
                         .await?
@@ -1291,6 +1355,35 @@ pub(crate) async fn exchange(
                         profile.clone(),
                     )
                     .await?
+                } else if policy == "storage_migration" && detail["operation"] == "tiering" {
+                    let step = super::super::tier_move_transactions::step(
+                        &mut tx,
+                        Execution { id: task, token },
+                        detail["stale_seconds"]
+                            .as_i64()
+                            .context("tier coverage missing")?,
+                        None,
+                    )
+                    .await?;
+                    if let Some(work) = step.work {
+                        let ids: std::collections::BTreeSet<_> = std::iter::once(work.source())
+                            .chain(work.target())
+                            .filter_map(|s| s.block_key())
+                            .collect();
+                        let keys =
+                            rewrite::keys(&mut tx, &ids.into_iter().collect::<Vec<_>>(), key)
+                                .await?;
+                        Some((
+                            work::Plan::Tier {
+                                storage,
+                                work: Box::new(work),
+                                source_permits,
+                            },
+                            keys,
+                        ))
+                    } else {
+                        None
+                    }
                 } else if policy == "storage_migration" && detail["operation"] == "replication" {
                     let execution = Execution { id: task, token };
                     let mut run =
@@ -1429,7 +1522,7 @@ pub(crate) async fn exchange(
                         vec![],
                     ))
                 };
-                if let Some((value, keys)) = selected {
+                if let Some((mut value, keys)) = selected {
                     let mut idle = false;
                     if let work::Plan::Collect {
                         items,
@@ -1449,7 +1542,44 @@ pub(crate) async fn exchange(
                             .execute(&mut *tx)
                             .await?;
                     } else {
-                        let additional = secondary
+                        let mut stores: Vec<_> = secondary.into_iter().collect();
+                        let routed: Option<(std::collections::BTreeSet<_>, &mut Vec<Uuid>)> =
+                            match &mut value {
+                                work::Plan::Pack {
+                                    batch,
+                                    source_permits,
+                                    ..
+                                } => Some((
+                                    batch.sources.iter().filter_map(|s| s.storage()).collect(),
+                                    source_permits,
+                                )),
+                                work::Plan::Rewrite {
+                                    items,
+                                    source_permits,
+                                    ..
+                                } => Some((
+                                    items.iter().filter_map(|s| s.storage()).collect(),
+                                    source_permits,
+                                )),
+                                _ => None,
+                            };
+                        if let Some((ids, tokens)) = routed {
+                            for id in ids.into_iter().filter(|id| *id != storage) {
+                                let p = queries::storage_profile(id).fetch_one(&mut *tx).await?;
+                                let r = queries::node_read_storages(&[id])
+                                    .fetch_one(&mut *tx)
+                                    .await?;
+                                ensure!(r.r#type == "s3", Error::SourceUnavailable);
+                                let [io, job] = [Uuid::new_v4(), Uuid::new_v4()];
+                                ensure!(
+                                    permits(&mut tx, node.node_id, io, job, &p, direction).await?,
+                                    Error::OperationAborted
+                                );
+                                tokens.extend([io, job]);
+                                stores.push((r, p));
+                            }
+                        }
+                        let additional = stores
                             .into_iter()
                             .map(|(record, profile)| {
                                 Ok(read::Storage {

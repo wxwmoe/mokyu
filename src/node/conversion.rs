@@ -83,7 +83,7 @@ impl Writes {
                     let meta = backend
                         .head(&Path::from(format!(
                             "raw/{}",
-                            crate::storage::chunk_name(source.location_id)
+                            crate::storage::chunk_name(source.address())
                         )))
                         .await?;
                     ensure!(

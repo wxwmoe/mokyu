@@ -318,6 +318,7 @@ mod tests {
                             id: id.into(),
                             uuid: Uuid::now_v7(),
                             encoding_id: id.into(),
+                            address: None,
                             location_id: Uuid::now_v7(),
                             storage_id: Some(storage),
                             hash: blake3::hash(&data).as_bytes().to_vec(),
@@ -337,6 +338,7 @@ mod tests {
                 .collect();
             let original = pack::Pack {
                 id: 19.into(),
+                address: None,
                 location_id: Uuid::now_v7(),
                 storage_id: Some(storage),
                 algorithm: algorithm.into(),
@@ -452,6 +454,7 @@ mod tests {
             revision: 1,
             source: RawSource {
                 id: Id::Uuid(Uuid::now_v7()),
+                address: None,
                 location_id: Uuid::now_v7(),
                 storage_id: Uuid::now_v7(),
                 size: bytes.len() as i64,
@@ -574,6 +577,7 @@ mod tests {
                     id: (n as i64 + 101).into(),
                     uuid: Uuid::now_v7(),
                     encoding_id: (n as i64 + 201).into(),
+                    address: None,
                     location_id: Uuid::now_v7(),
                     storage_id: Some(storage),
                     hash,

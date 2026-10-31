@@ -988,13 +988,24 @@ pub(super) async fn commit_rewrite_chunk(
 ) -> Result<()> {
     ensure!(
         source.id == physical.id
-            && source.storage_id == physical.storage_id
             && source.raw_size == physical.raw_size
             && source.hash == physical.hash,
         "rewrite content identity changed"
     );
     let mut tx = pool.begin().await?;
     lock_execution(&mut tx, task).await?;
+    ensure!(
+        super::tier_read_queries::rewrite_source(
+            &mut *tx,
+            crate::model::tiering::Unit::Chunk,
+            source.encoding_id,
+            source.address(),
+            source.storage_id,
+            physical.storage_id
+        )
+        .await?,
+        crate::model::Error::OperationAborted
+    );
     let current = queries::lock_rewrite_chunk(source.id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -1067,14 +1078,25 @@ pub(super) async fn commit_rewrite_pack(
     first: Id,
 ) -> Result<()> {
     ensure!(
-        old.storage_id == new.storage_id
-            && old.raw_size == new.raw_size
+        old.raw_size == new.raw_size
             && old.member_count == new.member_count
             && members.len() == new.member_count as usize,
         "pack content identity changed"
     );
     let mut tx = pool.begin().await?;
     lock_execution(&mut tx, task).await?;
+    ensure!(
+        super::tier_read_queries::rewrite_source(
+            &mut *tx,
+            crate::model::tiering::Unit::Pack,
+            old.id,
+            old.address(),
+            old.storage_id,
+            new.storage_id
+        )
+        .await?,
+        crate::model::Error::OperationAborted
+    );
     let locked = queries::lock_rewrite_members(old.id)
         .fetch_all(&mut *tx)
         .await?;
@@ -6938,7 +6960,7 @@ impl StorageUpdate for StorageModification {
                 .await?,
             s3s::s3_error!(
                 OperationAborted,
-                "remove bucket redundancy before relocating its storage"
+                "storage still has redundancy or tiering dependencies"
             )
         );
         if self.original_type != record.r#type {
@@ -7334,6 +7356,7 @@ pub(super) async fn prepare_repair(
             .all(|source| source.storage_revision == revision),
         crate::model::Error::OperationAborted
     );
+    chunk.address = None;
     chunk.location_id = Uuid::now_v7();
     chunk.algorithm = input.algorithm;
     chunk.block_key_id = input.key;

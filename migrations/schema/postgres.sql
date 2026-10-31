@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0100.
+-- Generated from the complete postgres migration chain through 0101.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2158,6 +2158,66 @@ CREATE TABLE public.tasks (
 )
 WITH (autovacuum_vacuum_scale_factor='0.05', autovacuum_analyze_scale_factor='0.02');
 
+CREATE TABLE public.tier_locations (
+    unit smallint NOT NULL,
+    physical_id uuid NOT NULL,
+    home_storage uuid NOT NULL,
+    storage_id uuid NOT NULL,
+    address uuid NOT NULL,
+    generation bigint NOT NULL,
+    material jsonb NOT NULL,
+    block_key_id uuid,
+    stored_bytes bigint NOT NULL,
+    activated_at bigint NOT NULL,
+    pressure_seconds bigint NOT NULL,
+    pressure_since bigint DEFAULT 0 NOT NULL,
+    origin_reads bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT tier_location_generation CHECK ((generation > 0)),
+    CONSTRAINT tier_location_pressure CHECK (((pressure_seconds > 0) AND (origin_reads >= 0))),
+    CONSTRAINT tier_location_size CHECK ((stored_bytes >= 0)),
+    CONSTRAINT tier_location_unit CHECK (((unit >= 0) AND (unit <= 2)))
+);
+
+CREATE TABLE public.tier_moves (
+    id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    unit smallint NOT NULL,
+    physical_id uuid NOT NULL,
+    policy_revision bigint NOT NULL,
+    source_generation bigint NOT NULL,
+    source_storage uuid NOT NULL,
+    source_address uuid NOT NULL,
+    source_material jsonb NOT NULL,
+    source_stamp bytea NOT NULL,
+    source_key uuid,
+    source_bytes bigint NOT NULL,
+    target_storage uuid NOT NULL,
+    target_address uuid NOT NULL,
+    target_material jsonb,
+    target_key uuid,
+    target_bytes bigint,
+    receipt bytea,
+    checkpoint jsonb,
+    phase text NOT NULL,
+    queued_at bigint NOT NULL,
+    retire_after bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT tier_move_distinct CHECK (((source_storage <> target_storage) AND (source_address <> target_address))),
+    CONSTRAINT tier_move_generation CHECK (((source_generation >= 0) AND (policy_revision > 0))),
+    CONSTRAINT tier_move_phase CHECK ((phase = ANY (ARRAY['copying'::text, 'verified'::text, 'retiring'::text, 'discarding'::text]))),
+    CONSTRAINT tier_move_size CHECK (((source_bytes >= 0) AND ((target_bytes IS NULL) OR (target_bytes >= 0)))),
+    CONSTRAINT tier_move_unit CHECK (((unit >= 0) AND (unit <= 2)))
+);
+
+CREATE TABLE public.tier_scans (
+    bucket_id uuid NOT NULL,
+    revision bigint NOT NULL,
+    unit smallint NOT NULL,
+    after_id uuid NOT NULL,
+    next_scan bigint NOT NULL,
+    CONSTRAINT tier_scan_revision CHECK ((revision > 0)),
+    CONSTRAINT tier_scan_unit CHECK (((unit >= 0) AND (unit <= 2)))
+);
+
 CREATE TABLE public.token_bucket_grants (
     token_id uuid CONSTRAINT token_grants_token_id_not_null NOT NULL,
     bucket_id uuid CONSTRAINT token_grants_bucket_id_not_null NOT NULL,
@@ -2852,6 +2912,24 @@ ALTER TABLE ONLY public.streams
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_pkey PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.tier_locations
+    ADD CONSTRAINT tier_locations_address_key UNIQUE (address);
+
+ALTER TABLE ONLY public.tier_locations
+    ADD CONSTRAINT tier_locations_pkey PRIMARY KEY (unit, physical_id);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_target_address_key UNIQUE (target_address);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_unit_physical_id_key UNIQUE (unit, physical_id);
+
+ALTER TABLE ONLY public.tier_scans
+    ADD CONSTRAINT tier_scans_pkey PRIMARY KEY (bucket_id);
+
 ALTER TABLE ONLY public.token_external_grants
     ADD CONSTRAINT token_external_grants_pkey PRIMARY KEY (token_id, bucket_id);
 
@@ -3189,6 +3267,14 @@ CREATE INDEX tasks_state_list ON public.tasks USING btree (state, created_at DES
 CREATE INDEX tasks_target_node ON public.tasks USING btree (target_node_id) WHERE (target_node_id IS NOT NULL);
 
 CREATE INDEX tasks_work ON public.tasks USING btree (updated_at, id) WHERE (state = ANY (ARRAY['queued'::text, 'running'::text]));
+
+CREATE INDEX tier_locations_storage ON public.tier_locations USING btree (storage_id, unit, physical_id);
+
+CREATE INDEX tier_moves_owner ON public.tier_moves USING btree (bucket_id, phase, id);
+
+CREATE INDEX tier_moves_source ON public.tier_moves USING btree (source_address, phase);
+
+CREATE INDEX tier_scans_due ON public.tier_scans USING btree (next_scan, bucket_id);
 
 CREATE INDEX token_bucket_grants_bucket ON public.token_bucket_grants USING btree (bucket_id, token_id);
 
@@ -3807,6 +3893,36 @@ ALTER TABLE ONLY public.tasks
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_target_node_id_fkey FOREIGN KEY (target_node_id) REFERENCES public.nodes(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.tier_locations
+    ADD CONSTRAINT tier_locations_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);
+
+ALTER TABLE ONLY public.tier_locations
+    ADD CONSTRAINT tier_locations_home_storage_fkey FOREIGN KEY (home_storage) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.tier_locations
+    ADD CONSTRAINT tier_locations_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_id_fkey FOREIGN KEY (id) REFERENCES public.tasks(id);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_source_key_fkey FOREIGN KEY (source_key) REFERENCES public.managed_keys(id);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_source_storage_fkey FOREIGN KEY (source_storage) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_target_key_fkey FOREIGN KEY (target_key) REFERENCES public.managed_keys(id);
+
+ALTER TABLE ONLY public.tier_moves
+    ADD CONSTRAINT tier_moves_target_storage_fkey FOREIGN KEY (target_storage) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.tier_scans
+    ADD CONSTRAINT tier_scans_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.token_external_grants
     ADD CONSTRAINT token_external_grants_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.external_buckets(id) ON DELETE CASCADE;

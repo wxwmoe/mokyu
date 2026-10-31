@@ -176,8 +176,8 @@ impl Cache {
 impl Storage {
     fn clone_source(&self, source: &Source) -> Source {
         match source {
-            Source::Chunk(c, _) => Source::Chunk(c.clone(), self.physical_pin(c.location_id)),
-            Source::Pack(p, _) => Source::Pack(p.clone(), self.physical_pin(p.location_id)),
+            Source::Chunk(c, _) => Source::Chunk(c.clone(), self.physical_pin(c.address())),
+            Source::Pack(p, _) => Source::Pack(p.clone(), self.physical_pin(p.address())),
         }
     }
     fn remember_source(&self, c: &Chunk, source: &Source, stamp: (Instant, u64)) -> Result<()> {
@@ -280,6 +280,7 @@ mod tests {
             id: Id::Integer(id),
             uuid: Uuid::now_v7(),
             encoding_id: Id::Integer(id),
+            address: None,
             location_id: Uuid::now_v7(),
             storage_id: Some(Uuid::now_v7()),
             hash: vec![0; 32],

@@ -1,4 +1,40 @@
 use super::Backend;
+pub(super) const CHECKPOINT: &str =
+    "UPDATE tier_moves SET checkpoint=$1 WHERE id=$2 AND phase='copying'";
+pub(super) const PARK: &str = "UPDATE tasks SET state='paused',error='tier_wait',lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND state='running'";
+pub(super) const WAKE: &str = "UPDATE tasks SET state='queued',error=NULL,updated_at=clock_timestamp() WHERE id IN (SELECT m.id FROM tier_moves m WHERE m.bucket_id=$1 AND m.retire_after<=$2) AND state='paused' AND error='tier_wait'";
+pub(super) async fn protected(db: &mut Connection, address: uuid::Uuid) -> anyhow::Result<bool> {
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.location_id=$1 AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM node_work w WHERE w.result_hash IS NULL AND w.expires_at>clock_timestamp() AND jsonb_path_exists(w.plan,'$.** ? (@ == $v)',jsonb_build_object('v',$1::uuid::text)))").bind(address).fetch_one(&mut *db).await?)
+}
+pub(super) async fn changed(
+    db: &mut Connection,
+    home: uuid::Uuid,
+    dest: uuid::Uuid,
+) -> anyhow::Result<()> {
+    for storage in [home, dest] {
+        sqlx::query("SELECT mokyu_notify_change('storage',$1)")
+            .bind(storage)
+            .execute(&mut *db)
+            .await?;
+    }
+    Ok(())
+}
+pub(super) const DUE: &str = "SELECT t.bucket_id,t.hot_storage,t.cold_storage,t.revision,t.state,t.policy,s.unit,s.after_id FROM bucket_tiering t LEFT JOIN tier_scans s ON s.bucket_id=t.bucket_id AND s.revision=t.revision WHERE (t.state<>'paused' OR EXISTS(SELECT 1 FROM tier_moves m WHERE m.bucket_id=t.bucket_id)) AND COALESCE(s.next_scan,0)<=$1 ORDER BY COALESCE(s.next_scan,0),t.bucket_id LIMIT 1";
+pub(super) const CURSOR: &str = "INSERT INTO tier_scans(bucket_id,revision,unit,after_id,next_scan) VALUES($1,$2,$3,$4,$5) ON CONFLICT(bucket_id) DO UPDATE SET revision=excluded.revision,unit=excluded.unit,after_id=excluded.after_id,next_scan=excluded.next_scan";
+pub(super) const HEAD: &str = "SELECT generation,storage_id,address,activated_at,pressure_since,origin_reads FROM tier_locations WHERE unit=$1 AND physical_id=$2 FOR UPDATE";
+pub(super) const MOVEMENT: &str = "SELECT m.* FROM tier_moves m WHERE id=$1 FOR UPDATE";
+pub(super) const HAS_MOVEMENT: &str = "SELECT id FROM tier_moves WHERE unit=$1 AND physical_id=$2";
+pub(super) const RUNNING: &str =
+    "SELECT COUNT(*) FROM tier_moves WHERE bucket_id=$1 AND phase IN ('copying','verified')";
+pub(super) const BACKLOG: &str = "SELECT COUNT(*) FROM tier_moves WHERE bucket_id=$1";
+pub(super) const PREPARE: &str = "INSERT INTO tier_moves(id,bucket_id,unit,physical_id,policy_revision,source_generation,source_storage,source_address,source_material,source_stamp,source_key,source_bytes,target_storage,target_address,target_material,target_key,phase,queued_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'copying',$17)";
+pub(super) const TARGET: &str = "SELECT s.type,s.block_key_id,k.key_algorithm,p.compression_enabled,p.compression_strategy,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id LEFT JOIN managed_keys k ON k.id=s.block_key_id AND k.revoked_at IS NULL WHERE s.id=$1 AND s.enabled";
+pub(super) const PROOF: &str = "UPDATE tier_moves SET target_material=$1,target_key=$2,target_bytes=$3,receipt=$4,phase='verified' WHERE id=$5 AND phase='copying'";
+pub(super) const INITIAL: &str = "INSERT INTO tier_locations(unit,physical_id,home_storage,storage_id,address,generation,material,block_key_id,stored_bytes,activated_at,pressure_seconds) VALUES($1,$2,$3,$4,$5,1,$6,$7,$8,$9,$10)";
+pub(super) const SWITCH: &str = "UPDATE tier_locations SET storage_id=$1,address=$2,generation=generation+1,material=$3,block_key_id=$4,stored_bytes=$5,activated_at=$6,pressure_seconds=$7,pressure_since=0,origin_reads=0 WHERE unit=$8 AND physical_id=$9 AND generation=$10 AND address=$11";
+pub(super) const RETIRE: &str = "UPDATE tier_moves SET phase=$1,retire_after=$2 WHERE id=$3";
+pub(super) const ERASE: &str =
+    "DELETE FROM tier_moves WHERE id=$1 AND phase IN ('retiring','discarding')";
 pub(super) const MAXIMUM: &str = "GREATEST";
 pub(super) const BIG_INT: &str = "BIGINT";
 pub(super) const COVERAGE: &str = "SELECT floor(extract(epoch from clock_timestamp()))::bigint, COALESCE(floor(extract(epoch from access_coverage_since))::bigint,0), COALESCE(floor(extract(epoch from access_flushed_at))::bigint,0) FROM mokyu_meta WHERE singleton";
@@ -44,7 +80,7 @@ pub(super) fn cold(
     sqlx::query_as("SELECT cold_domain,cold_space FROM bucket_tiering WHERE bucket_id=$1")
         .bind(bucket)
 }
-pub(super) const INSERT_POLICY: &str = "INSERT INTO bucket_tiering(bucket_id,hot_storage,cold_storage,cold_domain,cold_space,policy,revision,state) VALUES($1,$2,$3,$4,$5,$6,1,'active')";
+pub(super) const INSERT_POLICY: &str = "INSERT INTO bucket_tiering(bucket_id,hot_storage,cold_storage,cold_domain,cold_space,policy,revision,state) VALUES($1,$2,$3,$4,$5,$6,$7,'active')";
 pub(super) const UPDATE_POLICY: &str = "UPDATE bucket_tiering SET cold_storage=$1,cold_domain=$2,cold_space=$3,policy=$4,revision=revision+1,observed_since=now() WHERE bucket_id=$5 AND revision=$6";
 pub(super) const EXPIRE: &str = "DELETE FROM physical_demand_windows WHERE (unit,physical_id,hour_start) IN (SELECT unit,physical_id,hour_start FROM physical_demand_windows WHERE hour_start<extract(epoch from now())-$1::double precision ORDER BY hour_start LIMIT $2)";
 use crate::model::tiering::Unit;
