@@ -934,6 +934,15 @@ impl StorageUpdate for StorageModification {
         validate_storage_profile(profile, &record.r#type)?;
         profile.validate_key(key)?;
         let mut tx = self.write.begin_with(queries::BEGIN_WRITE).await?;
+        ensure!(
+            !super::redundancy_queries::relocation(record)
+                .fetch_one(&mut *tx)
+                .await?,
+            s3s::s3_error!(
+                OperationAborted,
+                "remove bucket redundancy before relocating its storage"
+            )
+        );
         if self.original_type != record.r#type {
             ensure!(
                 queries::storage_relocation_ready()
@@ -1855,10 +1864,26 @@ pub(super) async fn create_stream_in(
             .add(input.bucket, crate::authorization::Action::Acl);
     }
     lock_permit(tx, &input.authority).await?;
-    let (state, paused) = queries::lock_bucket_uploads(input.bucket)
+    let (state, paused, managed) = super::redundancy_queries::admission(input.bucket)
         .fetch_one(&mut **tx)
         .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
+    if input.owner.is_none() || input.claim_object {
+        super::redundancy_transactions::accept_origin(
+            tx,
+            input.bucket,
+            crate::model::redundancy::marked(&input.metadata),
+        )
+        .await?;
+        super::redundancy_transactions::admitted(
+            tx,
+            input.bucket,
+            &input.key,
+            input.owner.map(|(id, _)| id),
+            managed,
+        )
+        .await?;
+    }
     if paused && input.stream_type == "object" {
         ensure!(
             queries::completing_upload(input.completion, input.bucket, &input.key)
@@ -2533,10 +2558,24 @@ pub(super) async fn publish(
                 && key.as_slice() == stream.object_key.as_bytes()),
         crate::model::Error::OperationAborted
     );
-    let (state, _) = queries::lock_bucket_uploads(stream.bucket_id)
+    let (state, _, managed) = super::redundancy_queries::admission(stream.bucket_id)
         .fetch_one(&mut *tx)
         .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
+    super::redundancy_transactions::admitted(
+        &mut tx,
+        stream.bucket_id,
+        &stream.object_key,
+        None,
+        managed,
+    )
+    .await?;
+    super::redundancy_transactions::accept_origin(
+        &mut tx,
+        stream.bucket_id,
+        crate::model::redundancy::marked(&stream.metadata),
+    )
+    .await?;
     let (old, token) = queries::lock_object_version(stream.bucket_id, &stream.object_key)
         .fetch_one(&mut *tx)
         .await?;
@@ -2637,6 +2676,7 @@ pub(super) async fn create_multipart(
         authority.add(input.bucket, crate::authorization::Action::Acl);
     }
     lock_permit(&mut tx, &authority).await?;
+    super::redundancy_transactions::writable(&mut tx, input.bucket, input.key, None).await?;
     let (state, paused) = queries::lock_bucket_uploads(input.bucket)
         .fetch_one(&mut *tx)
         .await?;
@@ -3373,6 +3413,7 @@ pub(super) async fn delete_bucket(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+    super::redundancy_transactions::removable(&mut tx, bucket).await?;
     ensure!(row.name == name, s3s::s3_error!(PreconditionFailed));
     if let Some(expected) = confirmation {
         ensure!(
@@ -3715,6 +3756,7 @@ pub(super) async fn start_purge(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(PreconditionFailed))?;
+    super::redundancy_transactions::removable(&mut tx, id).await?;
     ensure!(row.name == name, s3s::s3_error!(PreconditionFailed));
     if let Some(task) = queries::existing_purge(id).fetch_optional(&mut *tx).await? {
         return Ok(serde_json::json!({"task_id":task,"existing":true}));
@@ -4024,6 +4066,7 @@ pub(super) async fn change_object(pool: &SqlitePool, input: ObjectChange) -> Res
         permit.add(input.bucket, Action::Read);
     }
     lock_media_scope(&mut tx, &permit).await?;
+    super::redundancy_transactions::writable(&mut tx, input.bucket, &input.key, None).await?;
     let old = queries::lock_object_version(input.bucket, &input.key)
         .fetch_optional(&mut *tx)
         .await?
@@ -4075,6 +4118,10 @@ pub(super) async fn move_object(
     authority.add(input.target_bucket, Action::Write);
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_media_scope(&mut tx, &authority).await?;
+    super::redundancy_transactions::writable(&mut tx, input.target_bucket, input.target_key, None)
+        .await?;
+    super::redundancy_transactions::writable(&mut tx, input.source_bucket, input.source_key, None)
+        .await?;
     let old = selected_objects(&mut tx, &input).await?;
     let mut stream = queries::publish_stream_record(input.source_version)
         .fetch_one(&mut *tx)
@@ -4171,6 +4218,8 @@ pub(super) async fn publish_copy(
     }
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_media_scope(&mut tx, &authority).await?;
+    super::redundancy_transactions::writable(&mut tx, input.target_bucket, input.target_key, None)
+        .await?;
     let old = selected_objects(&mut tx, &input).await?;
     if let Some(expected) = expected_public {
         ensure!(
@@ -4212,6 +4261,12 @@ pub(super) async fn queue_storage_migration(
     }
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     lock_media_scope(&mut tx, &authority).await?;
+    super::redundancy_transactions::writable(&mut tx, job.target_bucket, &job.target_key, None)
+        .await?;
+    if job.action == "move" {
+        super::redundancy_transactions::writable(&mut tx, job.source_bucket, &job.source_key, None)
+            .await?;
+    }
     selected_objects(
         &mut tx,
         &ObjectTransfer {
@@ -4279,6 +4334,12 @@ pub(super) async fn publish_migration_in(
     let mut authority = Permit::for_action(Principal::System, job.source_bucket, Action::Read);
     authority.add(job.target_bucket, Action::Write);
     lock_media_scope(tx, &authority).await?;
+    super::redundancy_transactions::writable(tx, job.target_bucket, &job.target_key, Some(task.id))
+        .await?;
+    if job.action == "move" {
+        super::redundancy_transactions::writable(tx, job.source_bucket, &job.source_key, None)
+            .await?;
+    }
     let old = selected_objects(
         tx,
         &ObjectTransfer {
@@ -8561,6 +8622,7 @@ pub(super) async fn publish_import_in(
     lock_execution(tx, task).await?;
     let authority = Permit::for_action(Principal::System, bucket, Action::Write);
     lock_media_scope(tx, &authority).await?;
+    super::redundancy_transactions::writable(tx, bucket, key, Some(task.id)).await?;
     let old = selected_object(tx, bucket, key, expected).await?;
     let stream = validate_copy(tx, id, bucket, key, public).await?;
     require_sources(tx, Some(id), &[]).await?;

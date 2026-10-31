@@ -5301,7 +5301,7 @@ pub(super) fn claim_task_candidate(
     draining: bool,
 ) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='failed' AND json_extract(t.detail,'$.operation')='cdc' AND t.updated_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-30000000)) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
+        "SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE (t.state='queued' OR (t.state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=t.id AND rl.state='idle' AND (rl.next_reconcile_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now') OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (t.state='failed' AND (json_extract(t.detail,'$.operation')='cdc' OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=t.id AND rl.state<>'paused')) AND t.updated_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-30000000)) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
     );
     query.push_bind(class);
     if draining {
@@ -5319,7 +5319,7 @@ pub(super) fn claim_task_candidate(
     query
 }
 pub(super) fn claim_task(id: Uuid, token: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)),execution_token=?,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND (state='queued' OR (state='failed' AND json_extract(detail,'$.operation')='cdc' AND updated_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-30000000))").bind(token).bind(id)
+    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)),execution_token=?,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND (state='queued' OR (state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state='idle' AND (rl.next_reconcile_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now') OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (state='failed' AND (json_extract(detail,'$.operation')='cdc' OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state<>'paused')) AND updated_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-30000000))").bind(token).bind(id)
 }
 pub(super) fn task_record(id: Uuid) -> Rows<'static, TaskRecord> {
     sqlx::query_as("SELECT task_type,state,bucket_id,progress_cursor,detail,execution_token FROM tasks WHERE id=?").bind(id)

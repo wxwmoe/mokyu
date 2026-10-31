@@ -216,6 +216,20 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 外部对象导入按目标内部后端的 raw/chunks、压缩与加密配置写入持久分段，封存后将映射追加到任务候选；恢复保留已确认分段，只重试未确认部分。全部分段验证后，检查目标版本、元数据、权限、任务授权和配额，再原子发布目标。导入自行计算内容摘要，不把外部 ETag 当作 MD5；多段对象使用组合校验和。外部来源的最终检查与内部提交不构成跨系统事务，来源随后变化需再次复制。涉及外部桶的 Move 不受支持。
 
+## 存储冗余
+
+以下路径相对于 `/api/v1/buckets/{bucket}/redundancy`。读取关系需要该桶的设置权限；创建、恢复和重新对账还会检查当前来源、目标及所选权限策略。内部目标管理者可以从目标桶查看、解除传入关系。
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `GET` | 分页返回传入或传出的 `links` 与 `next_after`；支持 `after`、`limit` |
+| `POST /preview` | 校验配置，返回来源和目标位置，不创建关系 |
+| `POST` | 以相同配置创建关系，返回 202 和 `{task_id}`；支持 UUID 格式的 `Idempotency-Key` |
+| `GET /{id}` | 查询 `revision`、`status`、进度、`queued_keys`、`confirmed` 及最近对账时间 |
+| `POST /{id}/command` | 提交 `{revision,action,prefix?}`，返回 202；动作为 `pause`、`resume`、`retry`、`reconcile` 或 `remove`，仅对账可指定来源前缀 |
+
+创建和预览使用 `target_bucket`、`target_external`、`target_prefix`、`mode`、`permissions`、`propagate_deletes`、`max_pending_keys`。异步模式为 `asynchronous`；每条关系最多保留的不同待处理键默认 4096，可选 1–1000000。权限选项与数据复制相同，缺省时内部目标继承、外部目标不传递。删除传播仅适用于内部目标。解除完成前目标命名空间仍由关系占用；解除不会清理已发布副本。
+
 ## 上传与传输中心
 
 | 方法与路径 | 用途 |

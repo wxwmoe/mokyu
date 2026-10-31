@@ -3,6 +3,8 @@ mod external_queries;
 mod external_transactions;
 mod migration;
 mod queries;
+mod redundancy_queries;
+mod redundancy_transactions;
 mod replication_change_queries;
 mod replication_change_transactions;
 mod replication_import_queries;
@@ -25,6 +27,14 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
         .as_database_error()?
         .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()?;
     match error.number() {
+        3819 | 4025
+            if error
+                .message()
+                .split(['\'', '`'])
+                .any(|name| name == "redundancy_queue_full") =>
+        {
+            Some(crate::model::Error::RedundancyBacklog)
+        }
         1205 | 1213 => Some(crate::model::Error::OperationAborted),
         1317 | 1969 | 3024 => Some(crate::model::Error::QueryCancelled),
         _ => None,

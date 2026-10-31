@@ -282,6 +282,7 @@ pub(crate) struct Run {
     pub captured: bool,
     pub sealed: bool,
     pub scan_end: Option<String>,
+    pub redundancy_id: Option<Uuid>,
 }
 impl Run {
     #[cfg(feature = "fault-injection")]
@@ -294,7 +295,9 @@ impl Run {
     }
 
     pub(crate) fn frozen(&self) -> bool {
-        self.captured && self.sealed && self.options.0.operation == Operation::Copy
+        self.captured
+            && (self.sealed || self.redundancy_id.is_some())
+            && self.options.0.operation == Operation::Copy
     }
 
     pub(crate) fn phase_label(&self) -> &str {
@@ -335,6 +338,7 @@ impl Run {
             error: self.error,
             captured: self.captured,
             sealed: self.sealed,
+            redundancy_id: self.redundancy_id,
         }
     }
 }
@@ -362,6 +366,7 @@ pub(crate) struct Replication {
     pub error: Option<String>,
     pub captured: bool,
     pub sealed: bool,
+    pub redundancy_id: Option<Uuid>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -469,9 +474,62 @@ pub(crate) fn same_source(left: &RawSource, right: &RawSource) -> bool {
     left == *right
 }
 
+pub(crate) fn matches_scan_source(
+    captured: &RawSource,
+    current: &RawSource,
+    starting: bool,
+) -> bool {
+    if starting
+        && captured.pending_upload
+        && !current.pending_upload
+        && current.revision > captured.revision
+    {
+        let mut persisted = captured.clone();
+        persisted.pending_upload = false;
+        if matches!(captured.medium.as_str(), "local" | "memory") && current.medium == "shared_s3" {
+            persisted.medium.clone_from(&current.medium);
+        }
+        return same_source(&persisted, current);
+    }
+    same_source(captured, current)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_upload_can_change_medium_only_before_a_scan() {
+        let id = Uuid::new_v4();
+        let pending = RawSource {
+            id: Id::Uuid(id),
+            location_id: id,
+            storage_id: Uuid::new_v4(),
+            size: 5,
+            digest: Some(vec![7; 16]),
+            state: "ready".into(),
+            medium: "local".into(),
+            pending_upload: true,
+            revision: 2,
+            quarantine_code: None,
+        };
+        let mut stored = RawSource {
+            medium: "shared_s3".into(),
+            pending_upload: false,
+            revision: 3,
+            ..pending.clone()
+        };
+        assert!(matches_scan_source(&pending, &stored, true));
+        assert!(!matches_scan_source(&pending, &stored, false));
+        stored.revision = 2;
+        assert!(!matches_scan_source(&pending, &stored, true));
+        stored.revision = 3;
+        stored.digest = Some(vec![8; 16]);
+        assert!(!matches_scan_source(&pending, &stored, true));
+        stored.digest.clone_from(&pending.digest);
+        stored.location_id = Uuid::new_v4();
+        assert!(!matches_scan_source(&pending, &stored, true));
+    }
 
     #[test]
     fn delete_propagation_requires_an_internal_copy_and_target_delete_grant() {

@@ -165,7 +165,7 @@ pub(super) fn update(input: &Save) -> Statement<'_> {
         .bind(&input.name).bind(Json(&input.connection)).bind(&input.access_encrypted).bind(&input.secret_encrypted).bind(input.enabled).bind(input.id).bind(input.project_id).bind(input.expected)
 }
 pub(super) fn referenced(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM transfer_connections WHERE external_id=$1) OR EXISTS(SELECT 1 FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.external_id=$1 AND (e.cleanup_required OR t.state<>'completed') AND coalesce(t.detail->>'test_stopped','false')<>'true')").bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM redundancy_links WHERE external_bucket=$1) OR EXISTS(SELECT 1 FROM transfer_connections WHERE external_id=$1) OR EXISTS(SELECT 1 FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.external_id=$1 AND (e.cleanup_required OR t.state<>'completed') AND coalesce(t.detail->>'test_stopped','false')<>'true')").bind(id)
 }
 pub(super) fn delete(id: Uuid, revision: i64) -> Statement<'static> {
     sqlx::query("DELETE FROM external_buckets WHERE id=$1 AND revision=$2")

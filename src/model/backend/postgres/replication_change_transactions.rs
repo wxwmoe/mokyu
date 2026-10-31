@@ -24,7 +24,7 @@ pub(super) async fn activate(db: &mut Tx<'_>, task: Uuid, options: &Options) -> 
     Ok(())
 }
 
-async fn seal(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
+pub(super) async fn seal(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
     if run.captured && !run.sealed {
         c::gate(run.options.0.source_bucket)
             .fetch_one(&mut **db)
@@ -62,6 +62,17 @@ pub(super) async fn cancel(db: &mut Tx<'_>, run: &mut Run) -> Result<bool> {
 }
 
 pub(super) async fn advance(db: &mut Tx<'_>, run: &mut Run) -> Result<bool> {
+    if run.redundancy_id.is_some() {
+        if !run.scanned
+            || super::redundancy_queries::pending(run.task_id)
+                .fetch_one(&mut **db)
+                .await?
+        {
+            run.phase = "scan".into();
+            return Ok(true);
+        }
+        return Ok(false);
+    }
     if !run.scanned
         || !run.sealed
         || run.captured && c::subscribed(run.task_id).fetch_one(&mut **db).await?
@@ -110,7 +121,11 @@ pub(super) fn forget_result(run: &mut Run, state: &str) {
 }
 
 pub(super) async fn reset_remote(db: &mut Tx<'_>, item: &q::Entry) -> Result<()> {
-    let previous_state = r::state(item.id).fetch_one(&mut **db).await?.0;
+    let previous_state = r::state(item.id)
+        .fetch_optional(&mut **db)
+        .await?
+        .map(|state| state.0)
+        .unwrap_or_default();
     let previous = item
         .confirmation
         .as_ref()
@@ -133,11 +148,38 @@ pub(super) async fn reset_remote(db: &mut Tx<'_>, item: &q::Entry) -> Result<()>
 
 pub(super) async fn replay(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
     // Release scan row locks before closing the publication gate.
-    if !run.sealed {
+    if run.redundancy_id.is_none() && !run.sealed {
         return seal(db, run).await;
     }
-    let Some(change) = c::pending(run.task_id).fetch_optional(&mut **db).await? else {
-        c::forget(run.task_id).execute(&mut **db).await?;
+    // Live publishers lock the source before the queue row, including same-version ACL updates.
+    let mut frozen = None;
+    let change = if run.redundancy_id.is_some() {
+        if let Some(seen) = super::redundancy_queries::peek(run.task_id)
+            .fetch_optional(&mut **db)
+            .await?
+        {
+            if let Some(version) = seen.source_version {
+                frozen = c::frozen(version).fetch_optional(&mut **db).await?;
+            }
+            let current = super::redundancy_queries::exact(run.task_id, &seen.object_key)
+                .fetch_optional(&mut **db)
+                .await?;
+            if !current.as_ref().is_some_and(|row| {
+                row.revision == seen.revision && row.source_version == seen.source_version
+            }) {
+                return Ok(());
+            }
+            current
+        } else {
+            None
+        }
+    } else {
+        c::pending(run.task_id).fetch_optional(&mut **db).await?
+    };
+    let Some(change) = change else {
+        if run.redundancy_id.is_none() {
+            c::forget(run.task_id).execute(&mut **db).await?;
+        }
         run.phase = if run.options.0.external() {
             "verify"
         } else {
@@ -159,7 +201,11 @@ pub(super) async fn replay(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
         .map(|snapshot| snapshot.0.clone())
         .unwrap_or_default();
     if let Some(version) = change.source_version {
-        let source = c::frozen(version).fetch_one(&mut **db).await?;
+        let source = if run.redundancy_id.is_some() {
+            frozen.ok_or(Error::SourceUnavailable)?
+        } else {
+            c::frozen(version).fetch_one(&mut **db).await?
+        };
         ensure!(
             source.size == snapshot.size && source.etag == snapshot.etag,
             Error::SourceUnavailable
@@ -174,7 +220,8 @@ pub(super) async fn replay(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
         if run.options.0.permissions != Permissions::Inherit {
             previous.public = snapshot.public;
         }
-        if change.source_version == item.source_version
+        if !change.reconcile
+            && change.source_version == item.source_version
             && previous == snapshot
             && matches!(item.state.as_str(), "completed" | "skipped" | "conflict")
         {
@@ -186,12 +233,24 @@ pub(super) async fn replay(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
     }
     if change.source_version.is_none() {
         if let Some(item) = existing {
+            if run.redundancy_id.is_some() {
+                super::redundancy_queries::missing(item.id)
+                    .execute(&mut **db)
+                    .await?;
+            }
             if run.options.0.propagate_deletes && item.confirmation.is_some() {
                 let target = q::source(run.options.0.target_bucket, &item.target_key)
                     .fetch_optional(&mut **db)
                     .await?;
                 if let Some(target) = target {
                     if owned(&item, &target) {
+                        super::redundancy_transactions::writable(
+                            db,
+                            run.options.0.target_bucket,
+                            &item.target_key,
+                            run.redundancy_id,
+                        )
+                        .await?;
                         super::transactions::apply_object_change(
                             db,
                             run.options.0.target_bucket,
@@ -217,22 +276,37 @@ pub(super) async fn replay(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
             }
         }
     } else {
-        let Ok(target_key) = run.options.0.target(&change.object_key) else {
+        if change.reconcile {
+            super::redundancy_queries::checking(run.task_id, &change.object_key, change.revision)
+                .execute(&mut **db)
+                .await?;
+        }
+        let target_key = run.options.0.target(&change.object_key).ok();
+        let problem = if target_key.is_none() {
+            Some("invalid_target_key")
+        } else if run.redundancy_id.is_some()
+            && crate::model::redundancy::marked(&snapshot.metadata)
+        {
+            Some("replica_origin")
+        } else {
+            None
+        };
+        if let Some(problem) = problem {
             if let Some(item) = existing {
                 forget_result(run, &item.state);
-                q::finish_item(item.id, "conflict", None, Some("invalid_target_key"))
+                q::finish_item(item.id, "conflict", None, Some(problem))
                     .execute(&mut **db)
                     .await?;
             } else {
                 q::insert_item(
                     run.task_id,
                     &change.object_key,
-                    "",
+                    target_key.as_deref().unwrap_or_default(),
                     change.source_version,
                     None,
                     &snapshot,
                     "conflict",
-                    Some("invalid_target_key"),
+                    Some(problem),
                 )
                 .execute(&mut **db)
                 .await?;
@@ -243,7 +317,8 @@ pub(super) async fn replay(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
                 .execute(&mut **db)
                 .await?;
             return Ok(());
-        };
+        }
+        let target_key = target_key.ok_or(Error::OperationAborted)?;
         let target = if run.options.0.target_external {
             None
         } else {

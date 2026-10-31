@@ -20,8 +20,8 @@ use uuid::Uuid;
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Filter {
-    after: Option<Uuid>,
-    limit: Option<i64>,
+    pub(super) after: Option<Uuid>,
+    pub(super) limit: Option<i64>,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -45,7 +45,7 @@ pub(super) struct Items {
     next_after: Option<Id>,
 }
 
-fn limit(value: Option<i64>) -> Result<i64, HttpError> {
+pub(super) fn limit(value: Option<i64>) -> Result<i64, HttpError> {
     let value = value.unwrap_or(50);
     if !(1..=100).contains(&value) {
         return Err(s3s::s3_error!(InvalidArgument).into());
@@ -53,15 +53,8 @@ fn limit(value: Option<i64>) -> Result<i64, HttpError> {
     Ok(value)
 }
 
-#[utoipa::path(post,path="/api/v1/replications",operation_id="replication_create",params(("Idempotency-Key"=Option<Uuid>, Header, description="Reuse this UUID when retrying the same task creation")),request_body=Options,responses((status=202,body=super::maintenance::TaskStarted)))]
-pub(super) async fn create(
-    State(app): State<Arc<App>>,
-    Extension(actor): Extension<Identity>,
-    headers: HeaderMap,
-    Json(input): Json<Options>,
-) -> Result<(StatusCode, Json<super::maintenance::TaskStarted>), HttpError> {
-    input.validate()?;
-    let id = headers
+pub(super) fn request_id(headers: &HeaderMap) -> Result<Uuid, HttpError> {
+    Ok(headers
         .get("Idempotency-Key")
         .map(|value| {
             value
@@ -72,12 +65,20 @@ pub(super) async fn create(
                 .ok_or_else(|| s3s::s3_error!(InvalidArgument))
         })
         .transpose()?
-        .unwrap_or_else(Uuid::now_v7);
+        .unwrap_or_else(Uuid::now_v7))
+}
+
+pub(super) async fn connections(
+    app: &App,
+    principal: &crate::authorization::Principal,
+    id: Uuid,
+    input: &Options,
+) -> Result<Vec<crate::model::replication::external::Connection>, HttpError> {
     let mut connections = Vec::new();
     if input.external() {
         for record in app
             .external_buckets
-            .authorized(&input.external_authority(actor.principal.clone()))
+            .authorized(&input.external_authority(principal.clone()))
             .await?
         {
             let snapshot =
@@ -89,6 +90,19 @@ pub(super) async fn create(
             )?);
         }
     }
+    Ok(connections)
+}
+
+#[utoipa::path(post,path="/api/v1/replications",operation_id="replication_create",params(("Idempotency-Key"=Option<Uuid>, Header, description="Reuse this UUID when retrying the same task creation")),request_body=Options,responses((status=202,body=super::maintenance::TaskStarted)))]
+pub(super) async fn create(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    headers: HeaderMap,
+    Json(input): Json<Options>,
+) -> Result<(StatusCode, Json<super::maintenance::TaskStarted>), HttpError> {
+    input.validate()?;
+    let id = request_id(&headers)?;
+    let connections = connections(&app, &actor.principal, id, &input).await?;
     let task_id = crate::model::REQUEST_ID
         .scope(
             id,

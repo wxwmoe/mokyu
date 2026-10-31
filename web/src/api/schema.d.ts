@@ -448,6 +448,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/redundancy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["redundancy_list"];
+        put?: never;
+        post: operations["redundancy_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/redundancy/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["redundancy_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/redundancy/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["redundancy_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/redundancy/{id}/command": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["redundancy_command"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/settings": {
         parameters: {
             query?: never;
@@ -2970,6 +3034,68 @@ export interface components {
         RecoverInput: {
             confirm?: boolean;
         };
+        /** @enum {string} */
+        RedundancyAction: "pause" | "resume" | "retry" | "reconcile" | "remove";
+        RedundancyCommand: {
+            action: components["schemas"]["RedundancyAction"];
+            prefix?: string | null;
+            /** Format: int64 */
+            revision: number;
+        };
+        RedundancyLink: {
+            /** Format: int64 */
+            confirmed?: number | null;
+            error?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            pending: number;
+            progress: components["schemas"]["ReplicationProgress"];
+            /** Format: int32 */
+            queued_keys: number;
+            /** Format: date-time */
+            reconciled_at?: string | null;
+            /** Format: int64 */
+            revision: number;
+            settings: components["schemas"]["RedundancySettings"];
+            /** Format: uuid */
+            source_bucket: string;
+            status: components["schemas"]["RedundancyStatus"];
+            /** Format: uuid */
+            task_id: string;
+        };
+        /** @enum {string} */
+        RedundancyMode: "asynchronous";
+        RedundancyPage: {
+            links: components["schemas"]["RedundancyLink"][];
+            /** Format: uuid */
+            next_after?: string | null;
+        };
+        RedundancyPreview: {
+            settings: components["schemas"]["RedundancySettings"];
+            /** Format: uuid */
+            source_bucket: string;
+            /** Format: uuid */
+            source_storage: string;
+            /** Format: uuid */
+            target_storage?: string | null;
+        };
+        RedundancySettings: {
+            /**
+             * Format: int32
+             * @default 4096
+             */
+            max_pending_keys: number;
+            mode?: components["schemas"]["RedundancyMode"];
+            permissions?: components["schemas"]["ReplicationPermissions"] | null;
+            propagate_deletes?: boolean;
+            /** Format: uuid */
+            target_bucket: string;
+            target_external?: boolean;
+            target_prefix?: string;
+        };
+        /** @enum {string} */
+        RedundancyStatus: "backfilling" | "reconciling" | "catching_up" | "healthy" | "lagging" | "pausing" | "paused" | "failed" | "removing";
         RefreshInput: {
             refresh_token: string;
         };
@@ -2984,6 +3110,8 @@ export interface components {
             options: components["schemas"]["ReplicationOptions"];
             phase: string;
             progress: components["schemas"]["ReplicationProgress"];
+            /** Format: uuid */
+            redundancy_id?: string | null;
             sealed: boolean;
             state: string;
         };
@@ -4425,6 +4553,130 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BucketPreview"];
+                };
+            };
+        };
+    };
+    redundancy_list: {
+        parameters: {
+            query?: {
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RedundancyPage"];
+                };
+            };
+        };
+    };
+    redundancy_create: {
+        parameters: {
+            query?: never;
+            header?: {
+                "Idempotency-Key"?: string | null;
+            };
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RedundancySettings"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
+                };
+            };
+        };
+    };
+    redundancy_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RedundancySettings"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RedundancyPreview"];
+                };
+            };
+        };
+    };
+    redundancy_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RedundancyLink"];
+                };
+            };
+        };
+    };
+    redundancy_command: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RedundancyCommand"];
+            };
+        };
+        responses: {
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
                 };
             };
         };

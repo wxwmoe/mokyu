@@ -226,6 +226,9 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
             Status::already_exists("node operation parameters changed")
         }
         Some(Error::NodeOperationMissing) => Status::not_found("node operation was not found"),
+        Some(Error::RedundancyBacklog) => {
+            Status::resource_exhausted("redundancy pending key limit reached")
+        }
         Some(Error::QuotaExceeded) => Status::resource_exhausted("storage quota exceeded"),
         Some(Error::OperationAborted) => Status::aborted("operation was aborted"),
         Some(Error::NodeReadBusy) => {
@@ -278,6 +281,7 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
         }
     };
     let business = match model::error(&error) {
+        Some(Error::RedundancyBacklog) => Some("SlowDown"),
         Some(Error::QuotaExceeded) => Some("QuotaExceeded"),
         Some(Error::OperationAborted) => Some("OperationAborted"),
         _ => error

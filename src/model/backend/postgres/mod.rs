@@ -6,6 +6,8 @@ mod external_transactions;
 mod migration;
 mod queries;
 mod read_sources;
+mod redundancy_queries;
+mod redundancy_transactions;
 mod refresh;
 mod replication_change_queries;
 mod replication_change_transactions;
@@ -73,11 +75,11 @@ fn sqlstate_error(code: &str) -> Option<Error> {
 }
 
 pub(crate) fn error(source: &anyhow::Error) -> Option<Error> {
-    let code = source
-        .downcast_ref::<sqlx::Error>()?
-        .as_database_error()?
-        .code()?;
-    sqlstate_error(&code)
+    let native = source.downcast_ref::<sqlx::Error>()?.as_database_error()?;
+    if native.constraint() == Some("redundancy_queue_full") {
+        return Some(Error::RedundancyBacklog);
+    }
+    sqlstate_error(&native.code()?)
 }
 
 fn normalize_error(error: anyhow::Error) -> anyhow::Error {
@@ -199,6 +201,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         storage_records: backend.clone(),
         external_buckets: backend.clone(),
         replications: backend.clone(),
+        redundancy: backend.clone(),
         chunks: backend,
     }
 }

@@ -129,12 +129,8 @@ pub(super) async fn scan(
     if current.pending_upload {
         return Ok(None);
     }
-    let mut expected = source.clone();
-    if unit.state == "selected" {
-        expected.pending_upload = current.pending_upload;
-    }
     ensure!(
-        replication::same_source(&expected, &current),
+        replication::matches_scan_source(source, &current, unit.state == "selected"),
         Error::SourceUnavailable
     );
     let source = current;

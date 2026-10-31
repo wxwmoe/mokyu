@@ -2331,14 +2331,23 @@ pub(super) fn pack_exclusive(
 pub(super) fn publish_prepared_pack(pack: Id, task: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE packs SET state='ready',unreferenced_at=NULL,stored_at=CURRENT_TIMESTAMP(6),owner_task=NULL WHERE id=? AND owner_task=? AND state='preparing' AND stored_size IS NOT NULL AND digest IS NOT NULL").bind(pack).bind(task)
 }
-pub(super) fn retire_pack_encodings(ids: &[Id], keep: Option<Id>) -> sqlx::QueryBuilder<MySql> {
+pub(super) fn ready_pack_encodings(ids: &[Id], keep: Option<Id>) -> sqlx::QueryBuilder<MySql> {
     let mut query = sqlx::QueryBuilder::new(
-        "UPDATE chunk_encodings SET state='retired',unreferenced_at=CURRENT_TIMESTAMP(6) WHERE state='ready' AND chunk_id IN ",
+        "SELECT encoding_id FROM chunk_encodings WHERE state='ready' AND chunk_id IN ",
     );
     chunk_ids(&mut query, ids);
     if let Some(keep) = keep {
         query.push(" AND encoding_id<>").push_bind(keep);
     }
+    query
+}
+pub(super) fn retire_pack_encodings(chunks: &[Id], encodings: &[Id]) -> sqlx::QueryBuilder<MySql> {
+    let mut query = sqlx::QueryBuilder::new(
+        "UPDATE chunk_encodings FORCE INDEX (PRIMARY) SET state='retired',unreferenced_at=CURRENT_TIMESTAMP(6) WHERE encoding_id IN ",
+    );
+    chunk_ids(&mut query, encodings);
+    query.push(" AND state='ready' AND chunk_id IN ");
+    chunk_ids(&mut query, chunks);
     query
 }
 pub(super) fn lock_output_encoding(
@@ -2879,7 +2888,7 @@ pub(super) fn claim_task_candidate(
 ) -> sqlx::QueryBuilder<MySql> {
     // Keep the state prefix: retries span states and a filesort locks every candidate.
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT t.id FROM tasks t FORCE INDEX(tasks_work) WHERE (t.state='queued' OR (t.state='failed' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation')) AS BINARY)='cdc' AND t.updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6)))) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
+        "SELECT t.id FROM tasks t FORCE INDEX(tasks_work) WHERE (t.state='queued' OR (t.state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=t.id AND rl.state='idle' AND (rl.next_reconcile_at<=UTC_TIMESTAMP(6) OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (t.state='failed' AND (CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation')) AS BINARY)='cdc' OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=t.id AND rl.state<>'paused')) AND t.updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6)))) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
     );
     query.push_bind(class);
     if draining {
@@ -2897,7 +2906,7 @@ pub(super) fn claim_task_candidate(
     query
 }
 pub(super) fn claim_task(id: Uuid, token: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP(6)),execution_token=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (state='queued' OR (state='failed' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')) AS BINARY)='cdc' AND updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6))))").bind(token).bind(id)
+    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP(6)),execution_token=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (state='queued' OR (state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state='idle' AND (rl.next_reconcile_at<=UTC_TIMESTAMP(6) OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (state='failed' AND (CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')) AS BINARY)='cdc' OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state<>'paused')) AND updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6))))").bind(token).bind(id)
 }
 pub(super) fn task_record(id: Uuid) -> Rows<'static, TaskRecord> {
     sqlx::query_as("SELECT task_type,state,bucket_id,progress_cursor,detail,execution_token FROM tasks WHERE id=?").bind(id)

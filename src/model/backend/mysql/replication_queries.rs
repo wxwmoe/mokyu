@@ -73,7 +73,7 @@ impl Entry {
 }
 
 pub(super) fn run<'q>(id: Uuid) -> Rows<'q, Run> {
-    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,r.scanned,r.captured,r.sealed,r.scan_end,t.state,t.error,JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.execution_mode')) AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=?")
+    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,r.scanned,r.captured,r.sealed,r.scan_end,r.redundancy_id,t.state,t.error,JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.execution_mode')) AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=?")
         .bind(id)
 }
 
@@ -94,7 +94,7 @@ pub(super) fn mode<'q>() -> Scalar<'q, String> {
 }
 
 pub(super) fn list<'q>(user: Option<Uuid>, after: Option<Uuid>, limit: i64) -> Rows<'q, Run> {
-    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,r.scanned,r.captured,r.sealed,r.scan_end,t.state,t.error,JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.execution_mode')) AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE (r.created_by=? OR (r.created_by IS NULL AND ? IS NULL)) AND (? IS NULL OR r.task_id>?) ORDER BY r.task_id LIMIT ?")
+    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,r.scanned,r.captured,r.sealed,r.scan_end,r.redundancy_id,t.state,t.error,JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.execution_mode')) AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE r.redundancy_id IS NULL AND (r.created_by=? OR (r.created_by IS NULL AND ? IS NULL)) AND (? IS NULL OR r.task_id>?) ORDER BY r.task_id LIMIT ?")
         .bind(user)
         .bind(user)
         .bind(after)
@@ -167,7 +167,7 @@ pub(super) fn resume<'q>(id: Uuid) -> Statement<'q> {
 }
 
 pub(super) fn profile<'q>(bucket: Uuid) -> Rows<'q, (Uuid, i64)> {
-    sqlx::query_as("SELECT b.storage_id,p.revision FROM buckets b JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=? AND b.state='active' AND s.enabled FOR UPDATE")
+    sqlx::query_as("SELECT b.storage_id,p.revision FROM buckets b JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=? AND b.state='active' AND s.enabled LOCK IN SHARE MODE")
         .bind(bucket)
 }
 

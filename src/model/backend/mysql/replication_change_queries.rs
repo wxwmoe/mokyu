@@ -57,7 +57,7 @@ pub(super) fn discard(task: Uuid) -> Statement<'static> {
 }
 
 pub(super) fn pending(task: Uuid) -> Rows<'static, Change> {
-    sqlx::query_as("SELECT object_key,source_version,snapshot,revision FROM transfer_changes WHERE task_id=? ORDER BY key_hash LIMIT 1 FOR UPDATE").bind(task)
+    sqlx::query_as("SELECT object_key,source_version,snapshot,revision,reconcile FROM transfer_changes WHERE task_id=? ORDER BY key_hash LIMIT 1 FOR UPDATE").bind(task)
 }
 
 pub(super) fn consume(task: Uuid, key: &str, revision: i64) -> Statement<'_> {

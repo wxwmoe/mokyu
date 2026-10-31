@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0050.
+-- Generated from the complete mysql migration chain through 0051.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -59,9 +59,11 @@ CREATE TABLE `audit_events` (
 CREATE TABLE `bucket_change_gates` (
   `bucket_id` binary(16) NOT NULL,
   `subscribers` int NOT NULL DEFAULT '0',
+  `managed` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`bucket_id`),
   CONSTRAINT `bucket_change_gates_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `bucket_change_gates_chk_1` CHECK ((`subscribers` >= 0))
+  CONSTRAINT `bucket_change_gates_chk_1` CHECK ((`subscribers` >= 0)),
+  CONSTRAINT `bucket_change_gates_chk_2` CHECK ((`managed` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `bucket_domains` (
@@ -836,6 +838,60 @@ CREATE TABLE `raw_uploads` (
   CONSTRAINT `raw_uploads_source` FOREIGN KEY (`source_id`) REFERENCES `raw_sources` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `redundancy_backlogs` (
+  `id` binary(16) NOT NULL,
+  `max_pending_keys` int NOT NULL,
+  `queued_keys` int NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  CONSTRAINT `redundancy_backlogs_ibfk_1` FOREIGN KEY (`id`) REFERENCES `redundancy_links` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `redundancy_queue_capacity` CHECK ((`max_pending_keys` between 1 and 1000000)),
+  CONSTRAINT `redundancy_queue_full` CHECK ((`queued_keys` <= `max_pending_keys`)),
+  CONSTRAINT `redundancy_queue_nonnegative` CHECK ((`queued_keys` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `redundancy_catalog` (
+  `singleton` tinyint NOT NULL DEFAULT '1',
+  PRIMARY KEY (`singleton`),
+  CONSTRAINT `redundancy_catalog_singleton` CHECK ((`singleton` = 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `redundancy_links` (
+  `id` binary(16) NOT NULL,
+  `source_bucket` binary(16) NOT NULL,
+  `target_bucket` binary(16) DEFAULT NULL,
+  `external_bucket` binary(16) DEFAULT NULL,
+  `target_prefix` text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `source_domain` binary(32) NOT NULL,
+  `source_space` text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `target_domain` binary(32) NOT NULL,
+  `target_space` text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `settings` json NOT NULL,
+  `revision` bigint NOT NULL DEFAULT '1',
+  `scan_credit` int NOT NULL DEFAULT '0',
+  `state` varchar(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'preparing',
+  `reconcile_prefix` text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `reconciled_at` datetime(6) DEFAULT NULL,
+  `next_reconcile_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `redundancy_links_destination` (`source_bucket`,`target_domain`),
+  KEY `redundancy_links_source` (`source_bucket`,`id`),
+  KEY `redundancy_links_source_domain` (`source_domain`),
+  KEY `redundancy_links_target_domain` (`target_domain`),
+  KEY `redundancy_links_target` (`target_bucket`),
+  KEY `redundancy_links_external` (`external_bucket`),
+  KEY `redundancy_links_due` (`state`,`next_reconcile_at`,`id`),
+  CONSTRAINT `redundancy_links_ibfk_1` FOREIGN KEY (`id`) REFERENCES `transfer_runs` (`task_id`),
+  CONSTRAINT `redundancy_links_ibfk_2` FOREIGN KEY (`source_bucket`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `redundancy_links_ibfk_3` FOREIGN KEY (`target_bucket`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `redundancy_links_ibfk_4` FOREIGN KEY (`external_bucket`) REFERENCES `external_buckets` (`id`),
+  CONSTRAINT `redundancy_links_chk_1` CHECK ((`revision` > 0)),
+  CONSTRAINT `redundancy_links_chk_2` CHECK ((`scan_credit` between 0 and 64)),
+  CONSTRAINT `redundancy_links_chk_3` CHECK ((`state` in (_utf8mb4'preparing',_utf8mb4'active',_utf8mb4'reconciling',_utf8mb4'catchup',_utf8mb4'idle',_utf8mb4'pausing',_utf8mb4'paused',_utf8mb4'removing'))),
+  CONSTRAINT `redundancy_links_chk_4` CHECK (((`target_bucket` is null) <> (`external_bucket` is null))),
+  CONSTRAINT `redundancy_links_chk_5` CHECK (((`target_bucket` is null) or (`source_bucket` <> `target_bucket`))),
+  CONSTRAINT `redundancy_links_chk_6` CHECK (((length(`target_prefix`) <= 1024) and (length(`reconcile_prefix`) <= 1024)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `runtime_samples` (
   `sampled_at` datetime(6) NOT NULL,
   `data` json NOT NULL,
@@ -1158,8 +1214,11 @@ CREATE TABLE `transfer_changes` (
   `source_version` bigint DEFAULT NULL,
   `snapshot` json DEFAULT NULL,
   `revision` bigint NOT NULL DEFAULT '1',
+  `reconcile` tinyint(1) NOT NULL DEFAULT '0',
+  `object_key_bytes` varbinary(1024) GENERATED ALWAYS AS (cast(`object_key` as char charset binary)) VIRTUAL,
   UNIQUE KEY `task_id` (`task_id`,`key_hash`),
   KEY `transfer_changes_source` (`source_version`),
+  KEY `transfer_changes_key_order` (`task_id`,`object_key_bytes`),
   CONSTRAINT `transfer_changes_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_subscriptions` (`task_id`) ON DELETE CASCADE,
   CONSTRAINT `transfer_changes_ibfk_2` FOREIGN KEY (`source_version`) REFERENCES `streams` (`id`),
   CONSTRAINT `transfer_changes_chk_1` CHECK ((`revision` > 0)),
@@ -1228,12 +1287,14 @@ CREATE TABLE `transfer_items` (
   `reuse_target` tinyint(1) NOT NULL DEFAULT '0',
   `source_key_hash` binary(32) GENERATED ALWAYS AS (unhex(sha2(cast(`source_key` as char charset binary),256))) STORED,
   `confirmation` json DEFAULT NULL,
+  `source_key_bytes` varbinary(1024) GENERATED ALWAYS AS (cast(`source_key` as char charset binary)) VIRTUAL,
   PRIMARY KEY (`id`),
   KEY `transfer_items_work` (`task_id`,`state`,`id`),
   KEY `transfer_items_source_pin` (`source_pin`),
   KEY `transfer_items_candidate` (`candidate`),
   KEY `transfer_items_receipt` (`source_version`,`output_version`,`state`),
   KEY `transfer_items_source_key` (`task_id`,`source_key_hash`),
+  KEY `transfer_items_key_order` (`task_id`,`source_key_bytes`),
   CONSTRAINT `transfer_items_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
   CONSTRAINT `transfer_items_ibfk_2` FOREIGN KEY (`source_pin`) REFERENCES `streams` (`id`),
   CONSTRAINT `transfer_items_ibfk_3` FOREIGN KEY (`candidate`) REFERENCES `streams` (`id`),
@@ -1287,11 +1348,13 @@ CREATE TABLE `transfer_runs` (
   `captured` tinyint(1) NOT NULL DEFAULT '0',
   `sealed` tinyint(1) NOT NULL DEFAULT '0',
   `scan_end` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  `redundancy_id` binary(16) DEFAULT NULL,
   PRIMARY KEY (`task_id`),
   KEY `transfer_runs_creator` (`created_by`,`task_id`),
   CONSTRAINT `transfer_runs_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE,
   CONSTRAINT `transfer_runs_chk_1` CHECK ((`generation` > 0)),
-  CONSTRAINT `transfer_runs_chk_2` CHECK ((`phase` in (_utf8mb4'scan',_utf8mb4'plan',_utf8mb4'verify',_utf8mb4'publish',_utf8mb4'cancel',_utf8mb4'complete',_utf8mb4'cancelled')))
+  CONSTRAINT `transfer_runs_chk_2` CHECK ((`phase` in (_utf8mb4'scan',_utf8mb4'plan',_utf8mb4'verify',_utf8mb4'publish',_utf8mb4'cancel',_utf8mb4'complete',_utf8mb4'cancelled'))),
+  CONSTRAINT `transfer_runs_chk_3` CHECK (((`redundancy_id` is null) or (`redundancy_id` = `task_id`)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `transfer_sources` (
@@ -1464,6 +1527,7 @@ INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `up
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('reuse', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
 INSERT INTO `projects` (`id`, `name`, `description`, `builtin`, `allow_bucket_create`, `created_at`) VALUES (X'00000000000000000000000000000001', 'Default', '', '1', '0', CURRENT_TIMESTAMP(6));
 INSERT INTO `quota_scopes` (`scope`, `scope_id`, `used_bytes`, `reserved_bytes`, `inflight_bytes`, `object_count`, `bucket_count`, `logical_bytes_limit`, `inflight_bytes_limit`, `bucket_count_limit`) VALUES ('project', X'00000000000000000000000000000001', '0', '0', '0', '0', '0', NULL, NULL, NULL);
+INSERT INTO `redundancy_catalog` (`singleton`) VALUES ('1');
 INSERT INTO `usage_summary` (`id`, `requested_at`, `as_of`, `data`) VALUES ('global', CURRENT_TIMESTAMP(6), NULL, NULL);
 
 SET foreign_key_checks=@mokyu_schema_foreign_keys;
@@ -1551,4 +1615,12 @@ CREATE TRIGGER `objects_capture_update` AFTER UPDATE ON `objects` FOR EACH ROW B
                     source_version=VALUES(source_version),snapshot=VALUES(snapshot),revision=transfer_changes.revision+1;
         END IF;
     END IF;
+END;
+
+CREATE TRIGGER `transfer_changes_backlog_delete` AFTER DELETE ON `transfer_changes` FOR EACH ROW BEGIN
+    UPDATE redundancy_backlogs SET queued_keys=queued_keys-1 WHERE id=OLD.task_id;
+END;
+
+CREATE TRIGGER `transfer_changes_backlog_insert` AFTER INSERT ON `transfer_changes` FOR EACH ROW BEGIN
+    UPDATE redundancy_backlogs SET queued_keys=queued_keys+1 WHERE id=NEW.task_id;
 END;

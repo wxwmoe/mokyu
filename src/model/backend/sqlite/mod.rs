@@ -3,6 +3,8 @@ mod external_queries;
 mod external_transactions;
 mod migration;
 mod queries;
+mod redundancy_queries;
+mod redundancy_transactions;
 mod replication_change_queries;
 mod replication_change_transactions;
 mod replication_import_queries;
@@ -70,6 +72,12 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
     let code = sqlx::error::DatabaseError::code(native)?
         .parse::<i32>()
         .ok()?;
+    if code == 275
+        && sqlx::error::DatabaseError::message(native)
+            == "CHECK constraint failed: redundancy_queue_full"
+    {
+        return Some(crate::model::Error::RedundancyBacklog);
+    }
     match code & 255 {
         5 | 6 => Some(crate::model::Error::OperationAborted),
         9 => Some(crate::model::Error::QueryCancelled),

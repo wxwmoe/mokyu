@@ -81,6 +81,7 @@ pub(crate) struct Change {
     pub source_version: Option<Id>,
     pub snapshot: Option<Json<Snapshot>>,
     pub revision: i64,
+    pub reconcile: bool,
 }
 
 #[cfg(test)]

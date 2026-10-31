@@ -67,6 +67,7 @@ pub(crate) async fn connect(
         storage_records: backend.clone(),
         external_buckets: backend.clone(),
         replications: backend.clone(),
+        redundancy: backend.clone(),
         chunks: backend.clone(),
     };
     Ok((stores, Box::new(RuntimeOwner(backend))))

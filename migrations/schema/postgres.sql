@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0097.
+-- Generated from the complete postgres migration chain through 0098.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -78,6 +78,19 @@ BEGIN
     END IF;
     RETURN NEW;
 END
+$$;
+
+CREATE FUNCTION public.count_redundancy_changes() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        UPDATE redundancy_backlogs SET queued_keys=queued_keys+1 WHERE id=NEW.task_id;
+    ELSE
+        UPDATE redundancy_backlogs SET queued_keys=queued_keys-1 WHERE id=OLD.task_id;
+    END IF;
+    RETURN NULL;
+END;
 $$;
 
 CREATE FUNCTION public.domain_settings_revision() RETURNS trigger
@@ -761,6 +774,8 @@ CREATE TABLE public.audit_events (
 CREATE TABLE public.bucket_change_gates (
     bucket_id uuid NOT NULL,
     subscribers integer DEFAULT 0 NOT NULL,
+    managed integer DEFAULT 0 NOT NULL,
+    CONSTRAINT bucket_change_gates_managed_check CHECK ((managed >= 0)),
     CONSTRAINT bucket_change_gates_subscribers_check CHECK ((subscribers >= 0))
 );
 
@@ -1707,6 +1722,45 @@ CREATE TABLE public.raw_uploads (
     lease_expires_at timestamp with time zone
 );
 
+CREATE TABLE public.redundancy_backlogs (
+    id uuid NOT NULL,
+    max_pending_keys integer NOT NULL,
+    queued_keys integer DEFAULT 0 NOT NULL,
+    CONSTRAINT redundancy_queue_capacity CHECK (((max_pending_keys >= 1) AND (max_pending_keys <= 1000000))),
+    CONSTRAINT redundancy_queue_full CHECK ((queued_keys <= max_pending_keys)),
+    CONSTRAINT redundancy_queue_nonnegative CHECK ((queued_keys >= 0))
+);
+
+CREATE TABLE public.redundancy_catalog (
+    singleton boolean DEFAULT true NOT NULL,
+    CONSTRAINT redundancy_catalog_singleton_check CHECK (singleton)
+);
+
+CREATE TABLE public.redundancy_links (
+    id uuid NOT NULL,
+    source_bucket uuid NOT NULL,
+    target_bucket uuid,
+    external_bucket uuid,
+    target_prefix text NOT NULL COLLATE pg_catalog."C",
+    source_domain bytea NOT NULL,
+    source_space text NOT NULL COLLATE pg_catalog."C",
+    target_domain bytea NOT NULL,
+    target_space text NOT NULL COLLATE pg_catalog."C",
+    settings jsonb NOT NULL,
+    revision bigint DEFAULT 1 NOT NULL,
+    scan_credit integer DEFAULT 0 NOT NULL,
+    state text DEFAULT 'preparing'::text NOT NULL,
+    reconcile_prefix text DEFAULT ''::text NOT NULL COLLATE pg_catalog."C",
+    reconciled_at timestamp with time zone,
+    next_reconcile_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT redundancy_links_check CHECK (((target_bucket IS NULL) <> (external_bucket IS NULL))),
+    CONSTRAINT redundancy_links_check1 CHECK (((target_bucket IS NULL) OR (source_bucket <> target_bucket))),
+    CONSTRAINT redundancy_links_check2 CHECK (((octet_length(target_prefix) <= 1024) AND (octet_length(reconcile_prefix) <= 1024))),
+    CONSTRAINT redundancy_links_revision_check CHECK ((revision > 0)),
+    CONSTRAINT redundancy_links_scan_credit_check CHECK (((scan_credit >= 0) AND (scan_credit <= 64))),
+    CONSTRAINT redundancy_links_state_check CHECK ((state = ANY (ARRAY['preparing'::text, 'active'::text, 'reconciling'::text, 'catchup'::text, 'idle'::text, 'pausing'::text, 'paused'::text, 'removing'::text])))
+);
+
 CREATE TABLE public.runtime_samples (
     sampled_at timestamp with time zone CONSTRAINT runtime_history_at_not_null NOT NULL,
     data jsonb CONSTRAINT runtime_history_data_not_null NOT NULL
@@ -2105,6 +2159,7 @@ CREATE TABLE public.transfer_changes (
     source_version uuid,
     snapshot jsonb,
     revision bigint DEFAULT 1 NOT NULL,
+    reconcile boolean DEFAULT false NOT NULL,
     CONSTRAINT transfer_changes_check CHECK (((source_version IS NULL) = (snapshot IS NULL))),
     CONSTRAINT transfer_changes_object_key_check CHECK (((octet_length(object_key) >= 1) AND (octet_length(object_key) <= 1024))),
     CONSTRAINT transfer_changes_revision_check CHECK ((revision > 0))
@@ -2145,7 +2200,7 @@ CREATE TABLE public.transfer_imports (
 CREATE TABLE public.transfer_items (
     id uuid DEFAULT uuidv7() NOT NULL,
     task_id uuid NOT NULL,
-    source_key text NOT NULL,
+    source_key text NOT NULL COLLATE pg_catalog."C",
     target_key text NOT NULL,
     source_version uuid,
     source_pin uuid,
@@ -2201,6 +2256,8 @@ CREATE TABLE public.transfer_runs (
     captured boolean DEFAULT false NOT NULL,
     sealed boolean DEFAULT false NOT NULL,
     scan_end text,
+    redundancy_id uuid,
+    CONSTRAINT transfer_runs_check CHECK (((redundancy_id IS NULL) OR (redundancy_id = task_id))),
     CONSTRAINT transfer_runs_generation_check CHECK ((generation > 0)),
     CONSTRAINT transfer_runs_phase_check CHECK ((phase = ANY (ARRAY['scan'::text, 'plan'::text, 'verify'::text, 'publish'::text, 'cancel'::text, 'complete'::text, 'cancelled'::text])))
 );
@@ -2317,6 +2374,7 @@ INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "up
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reuse', 'false', now(), now());
 INSERT INTO "projects" ("id", "name", "description", "builtin", "allow_bucket_create", "created_at") VALUES ('00000000-0000-0000-0000-000000000001', 'Default', '', 'true', 'false', now());
 INSERT INTO "quota_scopes" ("scope", "scope_id", "used_bytes", "reserved_bytes", "inflight_bytes", "object_count", "bucket_count", "logical_bytes_limit", "inflight_bytes_limit", "bucket_count_limit", "cached_bytes", "cached_compressed") VALUES ('project', '00000000-0000-0000-0000-000000000001', '0', '0', '0', '0', '0', NULL, NULL, NULL, '0', 'false');
+INSERT INTO "redundancy_catalog" ("singleton") VALUES ('true');
 INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('maintenance', '{"interval": "30m", "batch_size": 1000, "max_duration": "5s", "task_retention": "30d", "audit_retention": "90d"}', '1', now(), NULL);
 INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('metrics', '{"scope_limit": 64, "query_timeout": "2m", "access_retention": "14d", "refresh_interval": "15m", "runtime_interval": "1m", "storage_interval": "15m", "runtime_retention": "24h", "storage_retention": "7d", "access_flush_interval": "1m"}', '1', now(), NULL);
 INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('requests', '{"s3_domain": null, "s3_region": "us-east-1", "s3_chunk_limit": "8MiB", "read_idle_timeout": "120s", "upload_idle_timeout": "120s"}', '1', now(), NULL);
@@ -2623,6 +2681,15 @@ ALTER TABLE ONLY public.raw_sources
 
 ALTER TABLE ONLY public.raw_uploads
     ADD CONSTRAINT raw_uploads_pkey PRIMARY KEY (source_id);
+
+ALTER TABLE ONLY public.redundancy_backlogs
+    ADD CONSTRAINT redundancy_backlogs_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.redundancy_catalog
+    ADD CONSTRAINT redundancy_catalog_pkey PRIMARY KEY (singleton);
+
+ALTER TABLE ONLY public.redundancy_links
+    ADD CONSTRAINT redundancy_links_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.runtime_samples
     ADD CONSTRAINT runtime_history_pkey PRIMARY KEY (sampled_at);
@@ -2936,6 +3003,20 @@ CREATE INDEX raw_uploads_due ON public.raw_uploads USING btree (next_attempt_at,
 
 CREATE INDEX raw_uploads_node ON public.raw_uploads USING btree (node_id) WHERE (node_id IS NOT NULL);
 
+CREATE UNIQUE INDEX redundancy_links_destination ON public.redundancy_links USING btree (source_bucket, target_domain);
+
+CREATE INDEX redundancy_links_due ON public.redundancy_links USING btree (state, next_reconcile_at, id);
+
+CREATE INDEX redundancy_links_external ON public.redundancy_links USING btree (external_bucket);
+
+CREATE INDEX redundancy_links_source ON public.redundancy_links USING btree (source_bucket, id);
+
+CREATE INDEX redundancy_links_source_domain ON public.redundancy_links USING btree (source_domain);
+
+CREATE INDEX redundancy_links_target ON public.redundancy_links USING btree (target_bucket);
+
+CREATE INDEX redundancy_links_target_domain ON public.redundancy_links USING btree (target_domain);
+
 CREATE INDEX runtime_cluster_time ON public.runtime_samples USING btree (sampled_at DESC) WHERE ((data ->> 'scope'::text) = 'cluster'::text);
 
 CREATE UNIQUE INDEX session_refresh_active ON public.session_refresh_tokens USING btree (session_id) WHERE (revoked_at IS NULL);
@@ -3123,6 +3204,8 @@ CREATE TRIGGER streams_notify AFTER UPDATE OF public_read, metadata, etag, size,
 CREATE TRIGGER token_authorization BEFORE UPDATE OF system, expires_at, revoked_at ON public.api_tokens FOR EACH ROW EXECUTE FUNCTION public.advance_authorization_revision();
 
 CREATE TRIGGER token_grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.token_bucket_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_token_authorization();
+
+CREATE TRIGGER transfer_changes_backlog AFTER INSERT OR DELETE ON public.transfer_changes FOR EACH ROW EXECUTE FUNCTION public.count_redundancy_changes();
 
 CREATE TRIGGER user_authorization BEFORE UPDATE OF role, enabled, password_hash ON public.web_users FOR EACH ROW EXECUTE FUNCTION public.advance_authorization_revision();
 
@@ -3491,6 +3574,21 @@ ALTER TABLE ONLY public.raw_uploads
 
 ALTER TABLE ONLY public.raw_uploads
     ADD CONSTRAINT raw_uploads_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.raw_sources(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.redundancy_backlogs
+    ADD CONSTRAINT redundancy_backlogs_id_fkey FOREIGN KEY (id) REFERENCES public.redundancy_links(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.redundancy_links
+    ADD CONSTRAINT redundancy_links_external_bucket_fkey FOREIGN KEY (external_bucket) REFERENCES public.external_buckets(id);
+
+ALTER TABLE ONLY public.redundancy_links
+    ADD CONSTRAINT redundancy_links_id_fkey FOREIGN KEY (id) REFERENCES public.transfer_runs(task_id);
+
+ALTER TABLE ONLY public.redundancy_links
+    ADD CONSTRAINT redundancy_links_source_bucket_fkey FOREIGN KEY (source_bucket) REFERENCES public.buckets(id);
+
+ALTER TABLE ONLY public.redundancy_links
+    ADD CONSTRAINT redundancy_links_target_bucket_fkey FOREIGN KEY (target_bucket) REFERENCES public.buckets(id);
 
 ALTER TABLE ONLY public.runtime_settings
     ADD CONSTRAINT runtime_settings_updated_by_fkey FOREIGN KEY (updated_by_user_id) REFERENCES public.web_users(id) ON DELETE SET NULL;

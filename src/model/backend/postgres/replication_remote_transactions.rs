@@ -125,6 +125,10 @@ pub(super) async fn prepare(
         if !super::transfer_transactions::cleanup(db, run.task_id).await? {
             return Ok(None);
         }
+        if run.redundancy_id.is_some() {
+            super::redundancy_transactions::finish(db, run).await?;
+            return Ok(None);
+        }
         run.phase = if run.phase == "cancel" {
             "cancelled"
         } else {
@@ -304,7 +308,11 @@ pub(super) async fn native(
             Some(source)
                 if source.size == entry.snapshot.0.size && source.etag == entry.snapshot.0.etag =>
             {
-                Ok(Some(external::Native::new(version, &entry.snapshot.0)?))
+                Ok(Some(external::Native::export(
+                    version,
+                    &entry.snapshot.0,
+                    run.redundancy_id,
+                )?))
             }
             _ => Ok(None),
         };
@@ -314,7 +322,11 @@ pub(super) async fn native(
         Some(source)
             if Some(source.id) == entry.source_pin && source.snapshot() == entry.snapshot.0 =>
         {
-            Ok(Some(external::Native::new(source.id, &entry.snapshot.0)?))
+            Ok(Some(external::Native::export(
+                source.id,
+                &entry.snapshot.0,
+                run.redundancy_id,
+            )?))
         }
         _ => Ok(None),
     }

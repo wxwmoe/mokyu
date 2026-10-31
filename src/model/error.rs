@@ -3,6 +3,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
     QuotaExceeded,
+    RedundancyBacklog,
     OperationAborted,
     ChunkBusy,
     QueryCancelled,
@@ -35,6 +36,7 @@ pub(crate) enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::RedundancyBacklog => "redundancy pending key limit reached",
             Self::QuotaExceeded => "storage quota exceeded",
             Self::OperationAborted => "operation was aborted",
             Self::ChunkBusy => "chunk allocation is still owned by another writer",
@@ -80,6 +82,7 @@ mod tests {
     fn model_errors_survive_context_without_matching_unrelated_errors() {
         for classification in [
             Error::QuotaExceeded,
+            Error::RedundancyBacklog,
             Error::OperationAborted,
             Error::ChunkBusy,
             Error::QueryCancelled,

@@ -329,6 +329,27 @@ pub(crate) struct Native {
 }
 
 impl Native {
+    pub(crate) fn export(
+        stream: Id,
+        source: &super::Snapshot,
+        origin: Option<Uuid>,
+    ) -> Result<Self> {
+        let mut native = Self::new(stream, source)?;
+        if let Some(origin) = origin {
+            let key = format!("x-amz-meta-{}", crate::model::redundancy::ORIGIN);
+            ensure!(
+                native
+                    .object
+                    .metadata
+                    .insert(key, origin.to_string())
+                    .is_none(),
+                "redundancy source already carries a replica origin"
+            );
+            native.object.validate()?;
+        }
+        Ok(native)
+    }
+
     pub(crate) fn new(stream: Id, source: &super::Snapshot) -> Result<Self> {
         ensure!(source.size >= 0, "invalid native source size");
         let metadata: crate::app::Metadata = serde_json::from_value(source.metadata.clone())?;

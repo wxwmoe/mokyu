@@ -94,6 +94,10 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::replication::get))
         .routes(routes!(super::replication::items))
         .routes(routes!(super::replication::command))
+        .routes(routes!(super::redundancy::list, super::redundancy::create))
+        .routes(routes!(super::redundancy::preview))
+        .routes(routes!(super::redundancy::get))
+        .routes(routes!(super::redundancy::command))
         .routes(routes!(
             super::external::start_test,
             super::external::latest_test

@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0051.
+-- Generated from the complete sqlite migration chain through 0052.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -46,7 +46,7 @@ CREATE TABLE "audit_events" (
 CREATE TABLE bucket_change_gates (
     bucket_id BLOB PRIMARY KEY REFERENCES buckets(id) ON DELETE CASCADE,
     subscribers INTEGER NOT NULL DEFAULT 0 CHECK (subscribers>=0)
-);
+, managed INTEGER NOT NULL DEFAULT 0 CHECK (managed>=0));
 
 CREATE TABLE bucket_domains (
     host TEXT NOT NULL PRIMARY KEY,
@@ -635,6 +635,42 @@ CREATE TABLE raw_uploads (
     last_error TEXT
 );
 
+CREATE TABLE redundancy_backlogs (
+    id BLOB PRIMARY KEY NOT NULL,
+    max_pending_keys INTEGER NOT NULL,
+    queued_keys INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (id) REFERENCES redundancy_links(id) ON DELETE CASCADE,
+    CONSTRAINT redundancy_queue_capacity CHECK (max_pending_keys BETWEEN 1 AND 1000000),
+    CONSTRAINT redundancy_queue_nonnegative CHECK (queued_keys >= 0),
+    CONSTRAINT redundancy_queue_full CHECK (queued_keys <= max_pending_keys)
+);
+
+CREATE TABLE redundancy_catalog (
+    singleton INTEGER PRIMARY KEY DEFAULT 1 CHECK (singleton=1)
+);
+
+CREATE TABLE redundancy_links (
+    id BLOB NOT NULL PRIMARY KEY REFERENCES transfer_runs(task_id),
+    source_bucket BLOB NOT NULL REFERENCES buckets(id),
+    target_bucket BLOB REFERENCES buckets(id),
+    external_bucket BLOB REFERENCES external_buckets(id),
+    target_prefix TEXT NOT NULL,
+    source_domain BLOB NOT NULL,
+    source_space TEXT NOT NULL,
+    target_domain BLOB NOT NULL,
+    target_space TEXT NOT NULL,
+    settings TEXT NOT NULL,
+    revision BIGINT NOT NULL DEFAULT 1 CHECK (revision>0),
+    scan_credit INTEGER NOT NULL DEFAULT 0 CHECK (scan_credit BETWEEN 0 AND 64),
+    state TEXT NOT NULL DEFAULT 'preparing' CHECK (state IN ('preparing','active','reconciling','catchup','idle','pausing','paused','removing')),
+    reconcile_prefix TEXT NOT NULL DEFAULT '',
+    reconciled_at TEXT,
+    next_reconcile_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    CHECK ((target_bucket IS NULL)<>(external_bucket IS NULL)),
+    CHECK (target_bucket IS NULL OR source_bucket<>target_bucket),
+    CHECK (length(CAST(target_prefix AS BLOB))<=1024 AND length(CAST(reconcile_prefix AS BLOB))<=1024)
+);
+
 CREATE TABLE runtime_samples (
     sampled_at INTEGER NOT NULL PRIMARY KEY,
     data TEXT CHECK (json_valid(data)) NOT NULL
@@ -882,7 +918,7 @@ CREATE TABLE transfer_changes (
     object_key TEXT NOT NULL CHECK (length(CAST(object_key AS BLOB)) BETWEEN 1 AND 1024),
     source_version INTEGER REFERENCES streams(id),
     snapshot TEXT,
-    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision>0),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision>0), reconcile INTEGER NOT NULL DEFAULT 0 CHECK (reconcile IN (0,1)),
     PRIMARY KEY (task_id,object_key),
     CHECK ((source_version IS NULL)=(snapshot IS NULL))
 );
@@ -966,7 +1002,7 @@ CREATE TABLE transfer_runs (
     generation BIGINT NOT NULL DEFAULT 1 CHECK (generation>0),
     phase TEXT NOT NULL DEFAULT 'scan',
     cursor_key TEXT,
-    progress TEXT NOT NULL, storage_id BLOB, source_storage_id BLOB, profile_revision BIGINT, scanned BOOLEAN NOT NULL DEFAULT FALSE, captured BOOLEAN NOT NULL DEFAULT FALSE, sealed BOOLEAN NOT NULL DEFAULT FALSE, scan_end TEXT,
+    progress TEXT NOT NULL, storage_id BLOB, source_storage_id BLOB, profile_revision BIGINT, scanned BOOLEAN NOT NULL DEFAULT FALSE, captured BOOLEAN NOT NULL DEFAULT FALSE, sealed BOOLEAN NOT NULL DEFAULT FALSE, scan_end TEXT, redundancy_id BLOB CHECK (redundancy_id IS NULL OR redundancy_id=task_id),
     CHECK (phase IN ('scan','plan','verify','publish','cancel','complete','cancelled'))
 );
 
@@ -1097,6 +1133,7 @@ INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "up
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reuse', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "projects" ("id", "name", "description", "builtin", "allow_bucket_create", "created_at") VALUES (X'00000000000000000000000000000001', 'Default', '', 1, 0, CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "quota_scopes" ("scope", "scope_id", "used_bytes", "reserved_bytes", "inflight_bytes", "object_count", "bucket_count", "logical_bytes_limit", "inflight_bytes_limit", "bucket_count_limit") VALUES ('project', X'00000000000000000000000000000001', 0, 0, 0, 0, 0, NULL, NULL, NULL);
+INSERT INTO "redundancy_catalog" ("singleton") VALUES (1);
 INSERT INTO "usage_summary" ("id", "requested_at", "as_of", "data") VALUES ('global', CAST(unixepoch('subsec')*1000000 AS INTEGER), NULL, NULL);
 
 CREATE INDEX api_tokens_user ON api_tokens(user_id);
@@ -1269,6 +1306,20 @@ CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability IN ('buffered'
 
 CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
 
+CREATE UNIQUE INDEX redundancy_links_destination ON redundancy_links(source_bucket,target_domain);
+
+CREATE INDEX redundancy_links_due ON redundancy_links(state,next_reconcile_at,id);
+
+CREATE INDEX redundancy_links_external ON redundancy_links(external_bucket);
+
+CREATE INDEX redundancy_links_source ON redundancy_links(source_bucket,id);
+
+CREATE INDEX redundancy_links_source_domain ON redundancy_links(source_domain);
+
+CREATE INDEX redundancy_links_target ON redundancy_links(target_bucket);
+
+CREATE INDEX redundancy_links_target_domain ON redundancy_links(target_domain);
+
 CREATE UNIQUE INDEX refresh_active ON session_refresh_tokens(session_id) WHERE revoked_at IS NULL;
 
 CREATE INDEX refresh_expiry ON session_refresh_tokens(revoked_at,expires_at);
@@ -1428,6 +1479,16 @@ BEGIN
             OR scope->>'selection'='objects' AND EXISTS(SELECT 1 FROM json_each(scope,'$.keys') WHERE value=CAST(NEW.object_key AS TEXT)))
         ON CONFLICT(task_id,object_key) DO UPDATE SET source_version=excluded.source_version,
             snapshot=excluded.snapshot,revision=transfer_changes.revision+1;
+END;
+
+CREATE TRIGGER transfer_changes_backlog_delete AFTER DELETE ON transfer_changes FOR EACH ROW
+BEGIN
+    UPDATE redundancy_backlogs SET queued_keys=queued_keys-1 WHERE id=OLD.task_id;
+END;
+
+CREATE TRIGGER transfer_changes_backlog_insert AFTER INSERT ON transfer_changes FOR EACH ROW
+BEGIN
+    UPDATE redundancy_backlogs SET queued_keys=queued_keys+1 WHERE id=NEW.task_id;
 END;
 
 CREATE VIEW token_bucket_access AS
