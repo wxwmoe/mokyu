@@ -57,6 +57,9 @@ pub(super) async fn prepare(
     mut profile: crate::storage::profile::StorageProfile,
 ) -> Result<Option<(work::Plan, Vec<read::BlockKey>)>> {
     let job = job(detail)?;
+    if !detail["replica_parked"].is_null() && resume_migration_in(db, task, &job).await? {
+        return Ok(None);
+    }
     let selected = async {
         let source = source(db, &job).await?;
         selected_object(db, job.target_bucket, &job.target_key, job.target_version).await?;
@@ -157,10 +160,9 @@ pub(super) async fn prepare(
                 authority: Permit::system(),
                 bucket: job.target_bucket,
                 key: job.target_key.clone(),
-                stream_type: "object".into(),
+                purpose: crate::model::StreamPurpose::Copy,
                 metadata: original.metadata.clone(),
                 public: job.public_read,
-                claim_object: false,
                 completion: None,
                 owner: Some((task.id, task.token)),
             },

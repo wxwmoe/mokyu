@@ -1842,6 +1842,147 @@ pub(super) async fn create_stream(pool: &sqlx::SqlitePool, input: StreamCreate) 
     Ok(result)
 }
 
+pub(super) async fn install_replica(
+    db: &mut super::replica_queries::Tx<'_>,
+    bucket: Uuid,
+    key: &str,
+    expected: Option<Id>,
+    candidate: Id,
+) -> Result<()> {
+    let (old, token) = queries::lock_object_version(bucket, key)
+        .fetch_one(&mut **db)
+        .await?;
+    ensure!(
+        old == expected && token == candidate,
+        s3s::s3_error!(PreconditionFailed)
+    );
+    let stream = super::replica_queries::candidate(candidate)
+        .fetch_one(&mut **db)
+        .await?
+        .stream;
+    ensure!(
+        stream.state == "writing" && stream.bucket_id == bucket && stream.object_key == key,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        super::replication_queries::ready(candidate, &stream.payload_type)
+            .fetch_one(&mut **db)
+            .await?,
+        crate::model::Error::SourceUnavailable
+    );
+    let mut accounts = lock_quota(db, bucket).await?;
+    let previous = if let Some(id) = old {
+        Some((
+            id,
+            queries::stream_size_etag(id).fetch_one(&mut **db).await?.0,
+        ))
+    } else {
+        None
+    };
+    replace_object_quota(
+        db,
+        &mut accounts,
+        bucket,
+        key,
+        previous,
+        Some((candidate, stream.size)),
+    )
+    .await?;
+    queries::publish_object(&stream).execute(&mut **db).await?;
+    queries::publish_stream(candidate)
+        .execute(&mut **db)
+        .await?;
+    queries::ready_stream_queues(db, candidate).await?;
+    if let Some(id) = old {
+        forget_quota_write(db, &mut accounts, id).await?;
+        queries::retire_stream(id).execute(&mut **db).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn validate_replica_node(
+    _db: &mut super::replica_queries::Tx<'_>,
+    _stream: Id,
+    node: Option<(Uuid, Uuid)>,
+) -> Result<()> {
+    ensure!(node.is_none(), crate::model::Error::OperationAborted);
+    Ok(())
+}
+
+pub(super) use validate_replica_node as finish_replica_node;
+
+pub(super) async fn abort_replica_node(
+    _db: &mut super::replica_queries::Tx<'_>,
+    node: Option<(Uuid, Uuid)>,
+) -> Result<()> {
+    ensure!(node.is_none(), crate::model::Error::OperationAborted);
+    Ok(())
+}
+
+async fn reject_admission(pool: &SqlitePool, id: Id, reason: &str) -> Result<()> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    super::replica_transactions::reap_admission(&mut tx, id, Some(reason)).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn discard_replica(
+    db: &mut super::replica_queries::Tx<'_>,
+    bucket: Uuid,
+    stream: Id,
+) -> Result<()> {
+    let row = super::replica_queries::candidate(stream)
+        .fetch_optional(&mut **db)
+        .await?;
+    if let Some(row) = row
+        && row.stream.state == "writing"
+        && row.stream.bucket_id == bucket
+    {
+        super::replica_queries::unclaim(bucket, &row.stream.object_key, stream)
+            .execute(&mut **db)
+            .await?;
+        let mut accounts = lock_quota(db, bucket).await?;
+        forget_quota_write(db, &mut accounts, stream).await?;
+        super::replication_queries::abandon(stream)
+            .execute(&mut **db)
+            .await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn enqueue_replica(
+    db: &mut super::replica_queries::Tx<'_>,
+    bucket: Uuid,
+    detail: Value,
+) -> Result<Uuid> {
+    let id = Uuid::now_v7();
+    queries::insert_task(
+        id,
+        "storage_migration",
+        Some(bucket),
+        detail,
+        crate::model::audit::current(),
+    )
+    .execute(&mut **db)
+    .await?;
+    Ok(id)
+}
+
+pub(super) async fn reserve_replica(
+    db: &mut super::replica_queries::Tx<'_>,
+    input: &StreamCreate,
+    size: i64,
+) -> Result<Id> {
+    let result = queries::insert_stream(input).execute(&mut **db).await?;
+    let stream = Id::from(result.last_insert_rowid());
+    queries::claim_object(input.bucket, &input.key, stream)
+        .execute(&mut **db)
+        .await?;
+    supersede_object_quota(db, input.bucket, &input.key, stream).await?;
+    reserve_quota_in(db, stream, size, false, None).await?;
+    Ok(stream)
+}
+
 pub(super) async fn create_stream_in(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     mut input: StreamCreate,
@@ -1864,11 +2005,11 @@ pub(super) async fn create_stream_in(
             .add(input.bucket, crate::authorization::Action::Acl);
     }
     lock_permit(tx, &input.authority).await?;
-    let (state, paused, managed) = super::redundancy_queries::admission(input.bucket)
+    let (state, paused, managed, required) = super::redundancy_queries::admission(input.bucket)
         .fetch_one(&mut **tx)
         .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
-    if input.owner.is_none() || input.claim_object {
+    if input.owner.is_none() || input.purpose == crate::model::StreamPurpose::Object {
         super::redundancy_transactions::accept_origin(
             tx,
             input.bucket,
@@ -1884,7 +2025,7 @@ pub(super) async fn create_stream_in(
         )
         .await?;
     }
-    if paused && input.stream_type == "object" {
+    if paused && input.purpose.stream_type() == "object" {
         ensure!(
             queries::completing_upload(input.completion, input.bucket, &input.key)
                 .fetch_one(&mut **tx)
@@ -1894,7 +2035,11 @@ pub(super) async fn create_stream_in(
     }
     let inserted = queries::insert_stream(&input).execute(&mut **tx).await?;
     let id = Id::from(inserted.last_insert_rowid());
-    if input.claim_object {
+    if required != 0 && input.purpose.publishes() {
+        super::redundancy_transactions::freeze(tx, input.bucket, &input.key, id, required, true)
+            .await?;
+    }
+    if input.purpose == crate::model::StreamPurpose::Object {
         queries::claim_object(input.bucket, &input.key, id)
             .execute(&mut **tx)
             .await?;
@@ -2236,19 +2381,31 @@ pub(super) async fn reserve_quota(
     padding: bool,
     upload: Option<(uuid::Uuid, i32)>,
 ) -> Result<i64> {
-    ensure!(required >= 0, "negative quota reservation");
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let reserved = reserve_quota_in(&mut tx, stream, required, padding, upload).await?;
+    tx.commit().await?;
+    Ok(reserved)
+}
+
+pub(super) async fn reserve_quota_in(
+    db: &mut SqliteConnection,
+    stream: Id,
+    required: i64,
+    padding: bool,
+    upload: Option<(uuid::Uuid, i32)>,
+) -> Result<i64> {
+    ensure!(required >= 0, "negative quota reservation");
     let upload_bucket = if let Some((upload, _)) = upload {
         Some(
             queries::quota_upload(upload, false)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut *db)
                 .await?
                 .ok_or(crate::model::Error::OperationAborted)?,
         )
     } else {
         None
     };
-    let info = queries::quota_stream(stream).fetch_one(&mut *tx).await?;
+    let info = queries::quota_stream(stream).fetch_one(&mut *db).await?;
     ensure!(
         info.state == "writing"
             && upload_bucket
@@ -2257,16 +2414,16 @@ pub(super) async fn reserve_quota(
                     && key.as_slice() == info.object_key.as_bytes()),
         crate::model::Error::OperationAborted
     );
-    let mut accounts = lock_quota(&mut tx, info.bucket_id).await?;
+    let mut accounts = lock_quota(&mut *db, info.bucket_id).await?;
     let accepted = if let Some((upload, part)) = upload {
         queries::part_quota(upload, part, stream)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *db)
             .await?
             .ok_or(crate::model::Error::OperationAborted)?
     } else {
         ensure!(
             queries::object_claim(info.bucket_id, &info.object_key, stream)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut *db)
                 .await?,
             crate::model::Error::OperationAborted
         );
@@ -2274,13 +2431,13 @@ pub(super) async fn reserve_quota(
     };
     let mut reservation = if let Some(row) =
         queries::owned_quota_reservation(stream, upload.map(|v| v.0))
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *db)
             .await?
     {
         row
     } else {
         let credit = queries::quota_credit(info.bucket_id, &info.object_key)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut *db)
             .await?;
         let result = queries::insert_quota_reservation(
             info.bucket_id,
@@ -2289,18 +2446,18 @@ pub(super) async fn reserve_quota(
             upload.map(|v| v.0),
             credit,
         )
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
         queries::quota_reservation(Id::from(result.last_insert_rowid()))
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *db)
             .await?
     };
     ensure!(!reservation.closed, crate::model::Error::OperationAborted);
     let owner = reservation.id;
     queries::insert_quota_write(stream, owner)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    let write = queries::quota_write(stream).fetch_one(&mut *tx).await?;
+    let write = queries::quota_write(stream).fetch_one(&mut *db).await?;
     ensure!(write.reservation_id == owner, "quota owner mismatch");
     let mut target = required;
     if padding && required > write.allocated_bytes {
@@ -2337,7 +2494,7 @@ pub(super) async fn reserve_quota(
     )?;
     let credit = reservation.credit_bytes;
     change_reservation(
-        &mut tx,
+        &mut *db,
         &mut accounts,
         &mut reservation,
         logical,
@@ -2346,9 +2503,8 @@ pub(super) async fn reserve_quota(
     )
     .await?;
     queries::change_quota_write(stream, target, contribution)
-        .execute(&mut *tx)
+        .execute(&mut *db)
         .await?;
-    tx.commit().await?;
     Ok(target)
 }
 
@@ -2532,14 +2688,39 @@ pub(super) async fn publish(
     completion: Option<(uuid::Uuid, String, serde_json::Value, Uuid)>,
 ) -> Result<bool> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let result = publish_in(&mut tx, id, if_match, if_none, completion).await;
+    if matches!(&result, Ok(true))
+        || result
+            .as_ref()
+            .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+    {
+        tx.commit().await?;
+    } else if let Some(reason) = result
+        .as_ref()
+        .err()
+        .and_then(crate::model::replica_rejection)
+    {
+        tx.rollback().await?;
+        reject_admission(pool, id, reason).await?;
+    }
+    result
+}
+
+pub(super) async fn publish_in(
+    tx: &mut super::replica_queries::Tx<'_>,
+    id: Id,
+    if_match: Option<s3s::dto::ETagCondition>,
+    if_none: Option<s3s::dto::ETagCondition>,
+    completion: Option<(uuid::Uuid, String, serde_json::Value, Uuid)>,
+) -> Result<bool> {
     let authority = queries::write_authorization(id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?
         .0;
-    lock_permit(&mut tx, &authority).await?;
+    lock_permit(tx, &authority).await?;
     let upload_target = if let Some((upload, _, _, _)) = &completion {
         let target = queries::quota_upload(*upload, true)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
         if target.is_none() {
             return Ok(false);
@@ -2548,8 +2729,11 @@ pub(super) async fn publish(
     } else {
         None
     };
-    let stream = queries::publish_stream_record(id)
-        .fetch_one(&mut *tx)
+    let crate::model::PublishingStream {
+        stream,
+        publication_id,
+    } = super::replica_queries::candidate(id)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         upload_target
@@ -2558,12 +2742,12 @@ pub(super) async fn publish(
                 && key.as_slice() == stream.object_key.as_bytes()),
         crate::model::Error::OperationAborted
     );
-    let (state, _, managed) = super::redundancy_queries::admission(stream.bucket_id)
-        .fetch_one(&mut *tx)
+    let (state, _, managed, _) = super::redundancy_queries::admission(stream.bucket_id)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
     super::redundancy_transactions::admitted(
-        &mut tx,
+        tx,
         stream.bucket_id,
         &stream.object_key,
         None,
@@ -2571,13 +2755,13 @@ pub(super) async fn publish(
     )
     .await?;
     super::redundancy_transactions::accept_origin(
-        &mut tx,
+        tx,
         stream.bucket_id,
         crate::model::redundancy::marked(&stream.metadata),
     )
     .await?;
     let (old, token) = queries::lock_object_version(stream.bucket_id, &stream.object_key)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         token == id && stream.state == "writing",
@@ -2585,7 +2769,7 @@ pub(super) async fn publish(
     );
     if let Some((upload, _, _, _)) = &completion
         && let Some((version, size)) = queries::web_upload_expectation(*upload)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
     {
         ensure!(
@@ -2595,7 +2779,7 @@ pub(super) async fn publish(
         ensure!(stream.size == size, s3s::s3_error!(IncompleteBody));
     }
     let previous = if let Some(old) = old {
-        Some(queries::stream_size_etag(old).fetch_one(&mut *tx).await?)
+        Some(queries::stream_size_etag(old).fetch_one(&mut **tx).await?)
     } else {
         None
     };
@@ -2605,22 +2789,34 @@ pub(super) async fn publish(
         if_none.as_ref(),
     )?;
     if stream.payload_type == "raw" {
-        validate_raw(&mut tx, id, stream.size).await?;
+        validate_raw(tx, id, stream.size).await?;
     } else {
         ensure!(
-            !queries::incomplete_extents(id).fetch_one(&mut *tx).await?,
+            !queries::incomplete_extents(id).fetch_one(&mut **tx).await?,
             "cannot publish an incomplete generation"
         );
-        let (end, contiguous) = queries::extent_continuity(id).fetch_one(&mut *tx).await?;
+        let (end, contiguous) = queries::extent_continuity(id).fetch_one(&mut **tx).await?;
         ensure!(
             end == stream.size && contiguous,
             "cannot publish a mapping with gaps or overlaps"
         );
-        require_sources(&mut tx, Some(id), &[]).await?;
+        require_sources(tx, Some(id), &[]).await?;
     }
-    let mut accounts = lock_quota(&mut tx, stream.bucket_id).await?;
+    let mut accounts = lock_quota(tx, stream.bucket_id).await?;
+    if let Some(publication) = publication_id {
+        let intent = crate::model::write_intent(if_match.as_ref(), if_none.as_ref(), &completion)?;
+        super::replica_transactions::publish(
+            tx,
+            publication,
+            stream.bucket_id,
+            &stream.object_key,
+            id,
+            &intent,
+        )
+        .await?;
+    }
     replace_object_quota(
-        &mut tx,
+        tx,
         &mut accounts,
         stream.bucket_id,
         &stream.object_key,
@@ -2628,36 +2824,35 @@ pub(super) async fn publish(
         Some((id, stream.size)),
     )
     .await?;
-    queries::publish_object(&stream).execute(&mut *tx).await?;
-    queries::publish_stream(id).execute(&mut *tx).await?;
-    queries::ready_stream_queues(&mut tx, id).await?;
+    queries::publish_object(&stream).execute(&mut **tx).await?;
+    queries::publish_stream(id).execute(&mut **tx).await?;
+    queries::ready_stream_queues(tx, id).await?;
     if let Some(old) = old {
-        forget_quota_write(&mut tx, &mut accounts, old).await?;
-        queries::retire_stream(old).execute(&mut *tx).await?;
+        forget_quota_write(tx, &mut accounts, old).await?;
+        queries::retire_stream(old).execute(&mut **tx).await?;
     }
     if let Some((upload, hash, result, token)) = completion {
         if queries::complete_upload(upload, id, &hash, &result, token)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             != 1
         {
             return Ok(false);
         }
-        close_upload_quota(&mut tx, &mut accounts, upload).await?;
+        close_upload_quota(tx, &mut accounts, upload).await?;
         for part in queries::upload_part_streams(upload)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await?
         {
-            forget_quota_write(&mut tx, &mut accounts, part).await?;
-            queries::retire_stream(part).execute(&mut *tx).await?;
+            forget_quota_write(tx, &mut accounts, part).await?;
+            queries::retire_stream(part).execute(&mut **tx).await?;
         }
         queries::delete_upload_parts(upload)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        checkpoint_event(&mut tx,"upload.complete",&upload.to_string(),serde_json::json!({"bucket_id":stream.bucket_id,"key":stream.object_key,"size":stream.size})).await?;
+        checkpoint_event(tx,"upload.complete",&upload.to_string(),serde_json::json!({"bucket_id":stream.bucket_id,"key":stream.object_key,"size":stream.size})).await?;
     }
-    tx.commit().await?;
     Ok(true)
 }
 
@@ -2967,6 +3162,17 @@ pub(super) async fn abort_multipart(
     {
         if expired {
             return Ok(false);
+        }
+        if queries::completion_state(upload)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some_and(|(state, _, live)| state == "completing" && live)
+        {
+            return Err(s3s::s3_error!(
+                OperationAborted,
+                "multipart publication is already in progress"
+            )
+            .into());
         }
         return Err(s3s::s3_error!(NoSuchUpload).into());
     }
@@ -3978,7 +4184,7 @@ pub(super) async fn lock_media_scope(
     }
     Ok(())
 }
-async fn selected_object(
+pub(super) async fn selected_object(
     connection: &mut SqliteConnection,
     bucket: Uuid,
     key: &str,
@@ -4108,6 +4314,24 @@ pub(super) async fn move_object(
     permit: &Permit,
     input: ObjectTransfer<'_>,
 ) -> Result<()> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let result = move_object_in(&mut tx, permit, input, None).await;
+    if result.is_ok()
+        || result
+            .as_ref()
+            .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+    {
+        tx.commit().await?;
+    }
+    result
+}
+
+pub(super) async fn move_object_in(
+    tx: &mut super::replica_queries::Tx<'_>,
+    permit: &Permit,
+    input: ObjectTransfer<'_>,
+    resumed: Option<Uuid>,
+) -> Result<()> {
     ensure!(
         (input.source_bucket, input.source_key) != (input.target_bucket, input.target_key),
         s3s::s3_error!(InvalidArgument)
@@ -4116,15 +4340,19 @@ pub(super) async fn move_object(
     authority.add(input.source_bucket, Action::Read);
     authority.add(input.source_bucket, Action::Delete);
     authority.add(input.target_bucket, Action::Write);
-    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_media_scope(&mut tx, &authority).await?;
-    super::redundancy_transactions::writable(&mut tx, input.target_bucket, input.target_key, None)
+    lock_media_scope(tx, &authority).await?;
+    let required = super::redundancy_transactions::writable_targets(
+        tx,
+        input.target_bucket,
+        input.target_key,
+        None,
+    )
+    .await?;
+    super::redundancy_transactions::writable(tx, input.source_bucket, input.source_key, None)
         .await?;
-    super::redundancy_transactions::writable(&mut tx, input.source_bucket, input.source_key, None)
-        .await?;
-    let old = selected_objects(&mut tx, &input).await?;
+    let old = selected_objects(tx, &input).await?;
     let mut stream = queries::publish_stream_record(input.source_version)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         stream.state == "ready",
@@ -4132,37 +4360,65 @@ pub(super) async fn move_object(
     );
     ensure!(
         queries::bucket_by_id(input.source_bucket)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?
             .storage_id
             == queries::bucket_by_id(input.target_bucket)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?
                 .storage_id,
         "moving between stores requires a storage migration"
     );
     if stream.public_read {
         lock_permit(
-            &mut tx,
+            tx,
             &Permit::for_action(permit.principal.clone(), input.target_bucket, Action::Acl),
         )
         .await?;
     }
+    let publication = if resumed.is_some() {
+        resumed
+    } else if required != 0 {
+        Some(
+            super::redundancy_transactions::freeze(
+                tx,
+                input.target_bucket,
+                input.target_key,
+                input.source_version,
+                required,
+                false,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    if let Some(publication) = publication {
+        let intent = input.media_intent(permit, "move", stream.public_read, None);
+        super::replica_transactions::publish(
+            tx,
+            publication,
+            input.target_bucket,
+            input.target_key,
+            input.source_version,
+            &intent,
+        )
+        .await?;
+    }
     remove_object_reference(
-        &mut tx,
+        tx,
         input.source_bucket,
         input.source_key,
         Some(input.source_version),
     )
     .await?;
     queries::move_stream(stream.id, input.target_bucket, input.target_key)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     stream.bucket_id = input.target_bucket;
     stream.object_key = input.target_key.into();
-    replace_object_reference(&mut tx, &stream, old).await?;
-    complete_media_operation(&mut tx, Some(stream.id)).await?;
-    tx.commit().await?;
+    replace_object_reference(tx, &stream, old).await?;
+    complete_media_operation(tx, Some(stream.id)).await?;
     Ok(())
 }
 
@@ -4172,10 +4428,11 @@ async fn validate_copy(
     bucket: Uuid,
     key: &str,
     public: bool,
-) -> Result<crate::app::StoredStream> {
-    let stream = queries::publish_stream_record(id)
+) -> Result<crate::model::PublishingStream> {
+    let record = super::replica_queries::candidate(id)
         .fetch_one(&mut *connection)
         .await?;
+    let stream = &record.stream;
     ensure!(
         stream.state == "writing"
             && stream.stream_type == "object"
@@ -4186,7 +4443,7 @@ async fn validate_copy(
     );
     if stream.payload_type == "raw" {
         validate_raw(connection, id, stream.size).await?;
-        return Ok(stream);
+        return Ok(record);
     }
     ensure!(
         !queries::incomplete_extents(id)
@@ -4199,11 +4456,31 @@ async fn validate_copy(
         end == stream.size && contiguous,
         "copy mapping has gaps or overlaps"
     );
-    Ok(stream)
+    Ok(record)
 }
 
 pub(super) async fn publish_copy(
     pool: &SqlitePool,
+    permit: &Permit,
+    input: ObjectTransfer<'_>,
+    id: Id,
+    public: bool,
+    expected_public: Option<bool>,
+) -> Result<()> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let result = publish_copy_in(&mut tx, permit, input, id, public, expected_public).await;
+    if result.is_ok()
+        || result
+            .as_ref()
+            .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+    {
+        tx.commit().await?;
+    }
+    result
+}
+
+pub(super) async fn publish_copy_in(
+    tx: &mut super::replica_queries::Tx<'_>,
     permit: &Permit,
     input: ObjectTransfer<'_>,
     id: Id,
@@ -4216,28 +4493,41 @@ pub(super) async fn publish_copy(
     if public {
         authority.add(input.target_bucket, Action::Acl);
     }
-    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_media_scope(&mut tx, &authority).await?;
-    super::redundancy_transactions::writable(&mut tx, input.target_bucket, input.target_key, None)
+    lock_media_scope(tx, &authority).await?;
+    super::redundancy_transactions::writable(tx, input.target_bucket, input.target_key, None)
         .await?;
-    let old = selected_objects(&mut tx, &input).await?;
+    let old = selected_objects(tx, &input).await?;
     if let Some(expected) = expected_public {
         ensure!(
             queries::quota_stream(input.source_version)
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?
                 .public_read
                 == expected,
             s3s::s3_error!(PreconditionFailed)
         );
     }
-    let stream = validate_copy(&mut tx, id, input.target_bucket, input.target_key, public).await?;
-    require_sources(&mut tx, Some(id), &[]).await?;
-    queries::publish_stream(id).execute(&mut *tx).await?;
-    queries::ready_stream_queues(&mut tx, id).await?;
-    replace_object_reference(&mut tx, &stream, old).await?;
-    complete_media_operation(&mut tx, Some(id)).await?;
-    tx.commit().await?;
+    let crate::model::PublishingStream {
+        stream,
+        publication_id,
+    } = validate_copy(tx, id, input.target_bucket, input.target_key, public).await?;
+    require_sources(tx, Some(id), &[]).await?;
+    if let Some(publication) = publication_id {
+        let intent = input.media_intent(permit, "copy", public, expected_public);
+        super::replica_transactions::publish(
+            tx,
+            publication,
+            input.target_bucket,
+            input.target_key,
+            id,
+            &intent,
+        )
+        .await?;
+    }
+    queries::publish_stream(id).execute(&mut **tx).await?;
+    queries::ready_stream_queues(tx, id).await?;
+    replace_object_reference(tx, &stream, old).await?;
+    complete_media_operation(tx, Some(id)).await?;
     Ok(())
 }
 
@@ -4283,7 +4573,7 @@ pub(super) async fn queue_storage_migration(
         &mut tx,
         "storage_migration",
         Some(job.target_bucket),
-        serde_json::to_value(job)?,
+        serde_json::json!({"job":job,"authority":authority}),
     )
     .await?;
     record_media_operation(
@@ -4300,6 +4590,40 @@ pub(super) async fn queue_storage_migration(
     Ok(())
 }
 
+pub(super) async fn resume_migration(
+    pool: &SqlitePool,
+    task: Execution,
+    job: &StorageMigration,
+) -> Result<bool> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let resumed = resume_migration_in(&mut tx, task, job).await?;
+    tx.commit().await?;
+    Ok(resumed)
+}
+
+pub(super) async fn resume_migration_in(
+    tx: &mut super::replica_queries::Tx<'_>,
+    task: Execution,
+    job: &StorageMigration,
+) -> Result<bool> {
+    let Some((stream, _)) = super::replica_queries::parked_stream(task.id)
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(false);
+    };
+    ensure!(
+        super::replication_queries::adopt(stream, task)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    complete_storage_migration_in(tx, task, stream, job).await?;
+    Ok(true)
+}
+
 pub(super) async fn complete_storage_migration(
     pool: &SqlitePool,
     task: Execution,
@@ -4307,17 +4631,33 @@ pub(super) async fn complete_storage_migration(
     job: &StorageMigration,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    let result = publish_migration_in(&mut tx, task, id, job).await?;
+    complete_storage_migration_in(&mut tx, task, id, job).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn complete_storage_migration_in(
+    tx: &mut super::replica_queries::Tx<'_>,
+    task: Execution,
+    id: Id,
+    job: &StorageMigration,
+) -> Result<()> {
+    if let Err(error) = publish_migration_in(tx, task, id, job).await {
+        if error.is::<crate::model::ReplicaPending>() {
+            super::replica_transactions::park(tx, task).await?;
+            return Ok(());
+        }
+        return Err(error);
+    }
     ensure!(
         queries::complete_migration_task(task)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
         crate::model::Error::OperationAborted
     );
-    tx.commit().await?;
-    Ok(result)
+    Ok(())
 }
 
 pub(super) async fn publish_migration_in(
@@ -4352,8 +4692,28 @@ pub(super) async fn publish_migration_in(
         },
     )
     .await?;
-    let stream = validate_copy(tx, id, job.target_bucket, &job.target_key, job.public_read).await?;
+    let crate::model::PublishingStream {
+        stream,
+        publication_id,
+    } = validate_copy(tx, id, job.target_bucket, &job.target_key, job.public_read).await?;
     require_sources(tx, Some(id), &[]).await?;
+    if let Some(publication) = publication_id {
+        let record = queries::lock_task_detail(task).fetch_one(&mut **tx).await?;
+        if let Some(grant) = record.get("authority") {
+            lock_media_scope(tx, &serde_json::from_value(grant.clone())?).await?;
+        }
+        let details =
+            serde_json::json!({"operation":"task","task":task.id,"method":"migration","job":job});
+        super::replica_transactions::publish(
+            tx,
+            publication,
+            job.target_bucket,
+            &job.target_key,
+            id,
+            &details,
+        )
+        .await?;
+    }
     ensure!(
         queries::publish_migration_stream(id, task)
             .execute(&mut **tx)
@@ -4385,10 +4745,14 @@ pub(super) async fn abandon_copy(pool: &SqlitePool, id: Id) -> Result<()> {
         .await?;
     if let Some(stream) = stream
         && stream.state == "writing"
+        && queries::abandon_copy_stream(id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+            == 1
     {
         let mut accounts = lock_quota(&mut tx, stream.bucket_id).await?;
         forget_quota_write(&mut tx, &mut accounts, id).await?;
-        queries::abandon_copy_stream(id).execute(&mut *tx).await?;
     }
     tx.commit().await?;
     Ok(())
@@ -5010,6 +5374,10 @@ pub(super) async fn finish_task(pool: &SqlitePool, input: crate::model::TaskFini
         return Ok(());
     };
     let failed = state == "running" && input.error.is_some();
+    if failed && task_type == "storage_migration" {
+        super::replica_transactions::failed(&mut tx, task.id, input.error.as_deref().unwrap())
+            .await?;
+    }
     if failed && matches!(task_type.as_str(), "pack" | "unpack") {
         queries::defer_pack_changes(task.id)
             .execute(&mut *tx)
@@ -6141,6 +6509,7 @@ pub(super) async fn recover_runtime(pool: &SqlitePool, maintenance: bool) -> Res
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     queries::reset_access_coverage().execute(&mut *tx).await?;
     queries::abandon_startup_streams().execute(&mut *tx).await?;
+    super::replica_transactions::recover_admissions(&mut tx).await?;
     queries::fail_startup_chunks().execute(&mut *tx).await?;
     queries::retire_startup_encodings()
         .execute(&mut *tx)
@@ -6165,17 +6534,19 @@ pub(super) async fn claim_stale_stream(
     let Some(mut tx) = try_cleanup_transaction(pool).await? else {
         return Ok(false);
     };
-    if queries::lock_stale_stream(id, storage, retention)
-        .build_query_scalar::<Id>()
+    let Some(publication) = queries::lock_stale_stream(id, storage, retention)
+        .build_query_scalar::<Option<Uuid>>()
         .fetch_optional(&mut *tx)
         .await?
-        .is_none()
-    {
+    else {
         return Ok(false);
-    }
+    };
     queries::abandon_cleanup_stream(id)
         .execute(&mut *tx)
         .await?;
+    if publication.is_some() {
+        super::replica_transactions::reap_admission(&mut tx, id, None).await?;
+    }
     tx.commit().await?;
     Ok(true)
 }
@@ -6322,6 +6693,13 @@ pub(super) async fn cleanup_history(
     let mut connection = super::connection::DeadlineConnection::acquire(pool, deadline).await?;
     let result = tokio::time::timeout_at(deadline, async {
         let mut tx = connection.begin_with(queries::BEGIN_WRITE).await?;
+        if section == "tasks" {
+            super::replica_transactions::reap_abandoned(&mut tx, batch).await?;
+            let expired = super::replica_queries::expired(age, batch)
+                .fetch_all(&mut *tx)
+                .await?;
+            super::replica_transactions::prune(&mut tx, expired).await?;
+        }
         let count = queries::cleanup_history(&mut tx, section, age, batch, active).await?;
         tx.commit().await?;
         Ok(count)
@@ -8624,8 +9002,15 @@ pub(super) async fn publish_import_in(
     lock_media_scope(tx, &authority).await?;
     super::redundancy_transactions::writable(tx, bucket, key, Some(task.id)).await?;
     let old = selected_object(tx, bucket, key, expected).await?;
-    let stream = validate_copy(tx, id, bucket, key, public).await?;
+    let crate::model::PublishingStream {
+        stream,
+        publication_id,
+    } = validate_copy(tx, id, bucket, key, public).await?;
     require_sources(tx, Some(id), &[]).await?;
+    if let Some(publication) = publication_id {
+        let details = serde_json::json!({"operation":"task","task":task.id,"method":"import","expected":expected,"public":public});
+        super::replica_transactions::publish(tx, publication, bucket, key, id, &details).await?;
+    }
     ensure!(
         queries::publish_migration_stream(id, task)
             .execute(&mut **tx)

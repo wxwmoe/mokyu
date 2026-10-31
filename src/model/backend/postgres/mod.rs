@@ -9,6 +9,9 @@ mod read_sources;
 mod redundancy_queries;
 mod redundancy_transactions;
 mod refresh;
+mod replica_queries;
+#[path = "../replica_transactions.rs"]
+mod replica_transactions;
 mod replication_change_queries;
 mod replication_change_transactions;
 mod replication_import_queries;

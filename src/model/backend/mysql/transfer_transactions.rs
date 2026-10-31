@@ -293,10 +293,9 @@ pub(super) async fn prepare(
             authority: Permit::system(),
             bucket: run.options.0.target_bucket,
             key: format!("__transfer/{}", unit.id),
-            stream_type: "object".into(),
+            purpose: crate::model::StreamPurpose::Internal,
             metadata: serde_json::json!({}),
             public: false,
-            claim_object: false,
             completion: None,
             owner: Some((task.id, task.token)),
         };

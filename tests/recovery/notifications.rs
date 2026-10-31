@@ -247,6 +247,39 @@ async fn postgres_notifications_survive_rollback_takeover_and_membership_changes
         crate::model::notification::Signal::Changes
     );
 
+    let mut work = sqlx::postgres::PgListener::connect_with(&pool).await?;
+    work.listen("mokyu_tasks").await?;
+    let handoff = Uuid::new_v4();
+    let token = Uuid::new_v4();
+    sqlx::query("INSERT INTO tasks(id,task_type,state,detail,lease_node_id,lease_token,lease_expires_at) VALUES($1,'storage_migration','running','{}',$2,$3,clock_timestamp()+interval '5 minutes')")
+        .bind(handoff).bind(control.node_id).bind(token).execute(&pool).await?;
+    let finish = |token| crate::model::TaskFinish {
+        execution: crate::model::task::Execution { id: handoff, token },
+        error: None,
+    };
+    transactions::finish_task(&pool, finish(Uuid::new_v4())).await?;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), work.recv())
+            .await
+            .is_err(),
+        "a stale owner cannot wake or requeue the task"
+    );
+    transactions::finish_task(&pool, finish(token)).await?;
+    let notice = tokio::time::timeout(std::time::Duration::from_secs(3), work.recv()).await??;
+    assert_eq!(notice.payload(), format!("task:{handoff}"));
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT state='queued' AND lease_token IS NULL AND lease_node_id IS NULL FROM tasks WHERE id=$1")
+            .bind(handoff).fetch_one(&pool).await?,
+        "node work is visible when the handoff notification arrives"
+    );
+    transactions::finish_task(&pool, finish(token)).await?;
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), work.recv())
+            .await
+            .is_err(),
+        "replaying a completed handoff does not emit another wake"
+    );
+
     sqlx::query(
         "UPDATE notification_consumers SET expires_at=clock_timestamp()-interval '1 second'",
     )

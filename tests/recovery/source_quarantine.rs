@@ -12,10 +12,9 @@ async fn stream(stores: &Stores, bucket: Uuid, key: &str) -> Result<Id> {
             authority: Permit::for_action(Principal::Local, bucket, Action::Write),
             bucket,
             key: key.into(),
-            stream_type: "object".into(),
+            purpose: crate::model::StreamPurpose::Object,
             metadata: json!({}),
             public: false,
-            claim_object: true,
             completion: None,
             owner: None,
         })

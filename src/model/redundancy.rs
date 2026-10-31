@@ -177,6 +177,7 @@ impl Placement {
 pub(crate) enum Mode {
     #[default]
     Asynchronous,
+    Synchronous,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
@@ -209,6 +210,13 @@ impl Settings {
             s3s::s3_error!(
                 InvalidArgument,
                 "pending key limit must be between 1 and 1000000"
+            )
+        );
+        ensure!(
+            self.mode != Mode::Synchronous || !self.target_external,
+            s3s::s3_error!(
+                InvalidArgument,
+                "synchronous redundancy requires an internal target"
             )
         );
         let options = replication::Options {
@@ -331,7 +339,9 @@ impl Row {
             "removing" => Status::Removing,
             "pausing" => Status::Pausing,
             "paused" => Status::Paused,
-            _ if self.task_state == "failed" => Status::Failed,
+            _ if self.task_state == "failed" || self.error.is_some() && self.pending > 0 => {
+                Status::Failed
+            }
             _ if self.progress.0.conflicts > 0 => Status::Lagging,
             "idle" if self.pending == 0 && self.reconciled_at.is_some() => Status::Healthy,
             "preparing" | "active" if self.reconciled_at.is_none() => Status::Backfilling,
@@ -477,6 +487,12 @@ mod tests {
             settings.replication(source).unwrap().permissions,
             Permissions::Ignore
         );
+        settings.mode = Mode::Synchronous;
+        assert!(settings.replication(source).is_err());
+        settings.target_external = false;
+        assert!(settings.replication(source).is_ok());
+        settings.target_external = true;
+        settings.mode = Mode::Asynchronous;
         settings.permissions = Some(Permissions::Inherit);
         assert_eq!(
             settings.replication(source).unwrap().permissions,

@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0051.
+-- Generated from the complete mysql migration chain through 0052.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -60,10 +60,12 @@ CREATE TABLE `bucket_change_gates` (
   `bucket_id` binary(16) NOT NULL,
   `subscribers` int NOT NULL DEFAULT '0',
   `managed` int NOT NULL DEFAULT '0',
+  `required_targets` int NOT NULL DEFAULT '0',
   PRIMARY KEY (`bucket_id`),
   CONSTRAINT `bucket_change_gates_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
   CONSTRAINT `bucket_change_gates_chk_1` CHECK ((`subscribers` >= 0)),
-  CONSTRAINT `bucket_change_gates_chk_2` CHECK ((`managed` >= 0))
+  CONSTRAINT `bucket_change_gates_chk_2` CHECK ((`managed` >= 0)),
+  CONSTRAINT `bucket_change_gates_chk_3` CHECK ((`required_targets` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `bucket_domains` (
@@ -872,6 +874,7 @@ CREATE TABLE `redundancy_links` (
   `reconcile_prefix` text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
   `reconciled_at` datetime(6) DEFAULT NULL,
   `next_reconcile_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `synchronous` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `redundancy_links_destination` (`source_bucket`,`target_domain`),
   KEY `redundancy_links_source` (`source_bucket`,`id`),
@@ -880,6 +883,7 @@ CREATE TABLE `redundancy_links` (
   KEY `redundancy_links_target` (`target_bucket`),
   KEY `redundancy_links_external` (`external_bucket`),
   KEY `redundancy_links_due` (`state`,`next_reconcile_at`,`id`),
+  KEY `redundancy_links_admission` (`source_bucket`,`synchronous`,`state`,`id`),
   CONSTRAINT `redundancy_links_ibfk_1` FOREIGN KEY (`id`) REFERENCES `transfer_runs` (`task_id`),
   CONSTRAINT `redundancy_links_ibfk_2` FOREIGN KEY (`source_bucket`) REFERENCES `buckets` (`id`),
   CONSTRAINT `redundancy_links_ibfk_3` FOREIGN KEY (`target_bucket`) REFERENCES `buckets` (`id`),
@@ -889,7 +893,62 @@ CREATE TABLE `redundancy_links` (
   CONSTRAINT `redundancy_links_chk_3` CHECK ((`state` in (_utf8mb4'preparing',_utf8mb4'active',_utf8mb4'reconciling',_utf8mb4'catchup',_utf8mb4'idle',_utf8mb4'pausing',_utf8mb4'paused',_utf8mb4'removing'))),
   CONSTRAINT `redundancy_links_chk_4` CHECK (((`target_bucket` is null) <> (`external_bucket` is null))),
   CONSTRAINT `redundancy_links_chk_5` CHECK (((`target_bucket` is null) or (`source_bucket` <> `target_bucket`))),
-  CONSTRAINT `redundancy_links_chk_6` CHECK (((length(`target_prefix`) <= 1024) and (length(`reconcile_prefix`) <= 1024)))
+  CONSTRAINT `redundancy_links_chk_6` CHECK (((length(`target_prefix`) <= 1024) and (length(`reconcile_prefix`) <= 1024))),
+  CONSTRAINT `redundancy_synchronous_local` CHECK (((`synchronous` = 0) or (`target_bucket` is not null)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `replica_publications` (
+  `id` binary(16) NOT NULL,
+  `source_bucket` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `source_pin` bigint DEFAULT NULL,
+  `phase` varchar(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'admitted',
+  `early_ack` tinyint(1) NOT NULL DEFAULT '0',
+  `intent` json DEFAULT NULL,
+  `intent_hash` binary(32) DEFAULT NULL,
+  `result` json DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  KEY `source_bucket` (`source_bucket`),
+  KEY `replica_publications_pin` (`source_pin`),
+  KEY `replica_publications_recovery` (`phase`,`updated_at`,`id`),
+  CONSTRAINT `replica_publications_ibfk_1` FOREIGN KEY (`source_bucket`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `replica_publications_ibfk_2` FOREIGN KEY (`source_pin`) REFERENCES `streams` (`id`),
+  CONSTRAINT `replica_publications_chk_1` CHECK ((`phase` in (_utf8mb4'admitted',_utf8mb4'preparing',_utf8mb4'published',_utf8mb4'aborted'))),
+  CONSTRAINT `replica_publications_chk_2` CHECK ((length(`object_key`) between 1 and 1024)),
+  CONSTRAINT `replica_publications_chk_3` CHECK (((`intent_hash` is null) or (length(`intent_hash`) = 32)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `replica_targets` (
+  `publication_id` binary(16) NOT NULL,
+  `link_id` binary(16) NOT NULL,
+  `link_revision` bigint NOT NULL,
+  `target_bucket` binary(16) NOT NULL,
+  `target_key` varbinary(1024) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `profile_revision` bigint NOT NULL,
+  `authority` json NOT NULL,
+  `permissions` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `expected_version` bigint DEFAULT NULL,
+  `candidate` bigint DEFAULT NULL,
+  `task_id` binary(16) DEFAULT NULL,
+  `phase` varchar(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'admitted',
+  PRIMARY KEY (`publication_id`,`link_id`),
+  UNIQUE KEY `replica_targets_task` (`task_id`),
+  KEY `target_bucket` (`target_bucket`),
+  KEY `storage_id` (`storage_id`),
+  KEY `replica_targets_link` (`link_id`,`phase`,`publication_id`),
+  KEY `replica_targets_candidate` (`candidate`),
+  CONSTRAINT `replica_targets_ibfk_1` FOREIGN KEY (`publication_id`) REFERENCES `replica_publications` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `replica_targets_ibfk_2` FOREIGN KEY (`target_bucket`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `replica_targets_ibfk_3` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT `replica_targets_ibfk_4` FOREIGN KEY (`candidate`) REFERENCES `streams` (`id`),
+  CONSTRAINT `replica_targets_ibfk_5` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`),
+  CONSTRAINT `replica_targets_chk_1` CHECK ((`link_revision` > 0)),
+  CONSTRAINT `replica_targets_chk_2` CHECK ((`profile_revision` > 0)),
+  CONSTRAINT `replica_targets_chk_3` CHECK ((`phase` in (_utf8mb4'admitted',_utf8mb4'preparing',_utf8mb4'prepared',_utf8mb4'published',_utf8mb4'aborted'))),
+  CONSTRAINT `replica_targets_chk_4` CHECK ((length(`target_key`) between 1 and 1024))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `runtime_samples` (
@@ -1143,11 +1202,14 @@ CREATE TABLE `streams` (
   `http_compression` json NOT NULL DEFAULT (json_object()),
   `payload_type` varchar(6) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'chunks',
   `payload_revision` bigint NOT NULL DEFAULT '1',
+  `publication_id` binary(16) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `streams_owner` (`owner_task_id`),
   KEY `streams_cleanup` (`state`,`touched_at`,`id`),
   KEY `streams_writing` (`bucket_id`,`object_key`,`state`),
+  KEY `streams_publication` (`publication_id`),
   CONSTRAINT `streams_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `streams_ibfk_1` FOREIGN KEY (`publication_id`) REFERENCES `replica_publications` (`id`),
   CONSTRAINT `streams_owner` FOREIGN KEY (`owner_task_id`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
   CONSTRAINT `streams_chk_1` CHECK ((`payload_type` in (_ascii'chunks',_ascii'raw'))),
   CONSTRAINT `streams_chk_2` CHECK ((`payload_revision` > 0)),
@@ -1614,6 +1676,24 @@ CREATE TRIGGER `objects_capture_update` AFTER UPDATE ON `objects` FOR EACH ROW B
                 ON DUPLICATE KEY UPDATE object_key=IF(BINARY transfer_changes.object_key=BINARY VALUES(object_key),transfer_changes.object_key,NULL),
                     source_version=VALUES(source_version),snapshot=VALUES(snapshot),revision=transfer_changes.revision+1;
         END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `redundancy_required_delete` AFTER DELETE ON `redundancy_links` FOR EACH ROW BEGIN
+    IF OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing') THEN
+        UPDATE bucket_change_gates SET required_targets=required_targets-1 WHERE bucket_id=OLD.source_bucket;
+    END IF;
+END;
+
+CREATE TRIGGER `redundancy_required_insert` AFTER INSERT ON `redundancy_links` FOR EACH ROW BEGIN
+    IF NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing') THEN
+        UPDATE bucket_change_gates SET required_targets=required_targets+1 WHERE bucket_id=NEW.source_bucket;
+    END IF;
+END;
+
+CREATE TRIGGER `redundancy_required_update` AFTER UPDATE ON `redundancy_links` FOR EACH ROW BEGIN
+    IF (NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing')) <> (OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing')) THEN
+        UPDATE bucket_change_gates SET required_targets=required_targets+IF(NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing'),1,-1) WHERE bucket_id=NEW.source_bucket;
     END IF;
 END;
 

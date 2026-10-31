@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
-import { Plus, RefreshCw } from 'lucide-vue-next'
+import { HardDrive, Plus, RefreshCw } from 'lucide-vue-next'
 import { api, params, uuid, write, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { locale, t } from '../app/i18n'
+import EmptyState from './EmptyState.vue'
 import ErrorNotice from '../components/ErrorNotice.vue'
 import UiCheckbox from '../components/ui/UiCheckbox.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
@@ -18,7 +19,7 @@ type Action = components['schemas']['RedundancyAction']
 const props = defineProps<{ bucket: Bucket; buckets: Bucket[] }>()
 const base = computed(() => '/api/v1/buckets/' + props.bucket.id + '/redundancy')
 const cursor = ref(''), creating = ref(false), target = ref(''), prefix = ref(''), acl = ref(''), deletes = ref(false)
-const maxPending = ref(4096)
+const maxPending = ref(4096), mode = ref<NonNullable<Settings['mode']>>('asynchronous')
 const busy = ref(false), error = ref<unknown>(), checked = ref<Preview>(), creationId = ref('')
 const action = ref<{ link: Link; name: Action }>(), scanPrefix = ref('')
 const actionOpen = computed({ get: () => !!action.value, set: value => { if (!value) action.value = undefined } })
@@ -38,11 +39,12 @@ const permissionOptions = computed(() => [
   {value:'',label:t('redundancyDefaultAcl')},
   ...['inherit','ignore','public_read','private'].filter(v => v==='ignore'||selected.value?.actions.includes('object.acl')).map(v=>({value:v,label:t('replicationPermission_'+v)})),
 ])
-watch(target, () => { acl.value = ''; deletes.value = false })
-watch([target,prefix,acl,deletes,maxPending], () => { checked.value = undefined; creationId.value = '' })
+watch(target, () => { acl.value = ''; deletes.value = false; if (selected.value?.external) mode.value = 'asynchronous' })
+const modes = computed(() => (selected.value?.external ? ['asynchronous'] : ['asynchronous','synchronous']).map(value=>({value,label:t('redundancyMode_'+value)})))
+watch([target,prefix,acl,deletes,maxPending,mode], () => { checked.value = undefined; creationId.value = '' })
 const settings = computed<Settings>(() => ({target_bucket:target.value.replace(/^external:/,''),target_external:!!selected.value?.external,
-  target_prefix:prefix.value,max_pending_keys:maxPending.value,mode:'asynchronous',permissions:acl.value ? acl.value as NonNullable<Settings['permissions']> : null,propagate_deletes:deletes.value}))
-function openCreate() { maxPending.value=4096; error.value=undefined; target.value=''; prefix.value=''; acl.value=''; deletes.value=false; checked.value=undefined; creationId.value=''; creating.value=true }
+  target_prefix:prefix.value,max_pending_keys:maxPending.value,mode:mode.value,permissions:acl.value ? acl.value as NonNullable<Settings['permissions']> : null,propagate_deletes:deletes.value}))
+function openCreate() { maxPending.value=4096; mode.value='asynchronous'; error.value=undefined; target.value=''; prefix.value=''; acl.value=''; deletes.value=false; checked.value=undefined; creationId.value=''; creating.value=true }
 async function create() {
   if (!selected.value || busy.value) return
   busy.value=true; error.value=undefined
@@ -68,13 +70,21 @@ function destination(link: Link) {
 }
 </script>
 <template>
-  <div class="form-stack">
-    <div class="row-between"><div><h2>{{ t('redundancyTitle') }}</h2><p class="field-help">{{ t('redundancyHint') }}</p></div><div class="actions"><button type="button" class="icon-button" :aria-label="t('refresh')" @click="links.refetch()"><RefreshCw :size="16"/></button><button v-if="canCreate" type="button" class="primary" @click="openCreate"><Plus :size="16"/>{{ t('redundancyAdd') }}</button></div></div>
+  <div class="bucket-panel form-stack">
+    <header class="bucket-section-head">
+      <div class="bucket-heading"><span class="policy-icon lilac"><HardDrive :size="22" aria-hidden="true" /></span><div><h2>{{ t('redundancyTitle') }}</h2><p class="field-help">{{ t('redundancyHint') }}</p></div></div>
+      <div class="actions"><button type="button" class="icon-button" :aria-label="t('refresh')" @click="links.refetch()"><RefreshCw :size="16"/></button><button v-if="canCreate" type="button" class="primary" @click="openCreate"><Plus :size="16"/>{{ t('redundancyAdd') }}</button></div>
+    </header>
     <ErrorNotice v-if="links.error.value || external.error.value" :error="links.error.value || external.error.value"/>
-    <p v-if="links.data.value && !links.data.value.links.length" class="field-help">{{ t('redundancyEmpty') }}</p>
-    <article v-for="link in links.data.value?.links || []" :key="link.id" class="surface form-stack">
-      <div class="row-between"><div><span class="eyebrow">{{ t(link.source_bucket===bucket.id?'redundancyOutgoing':'redundancyIncoming') }}</span><h3>{{ destination(link) }}</h3><code>{{ link.settings.target_prefix || '/' }}</code></div><span class="badge">{{ t('redundancyStatus_'+link.status) }}</span></div>
-      <p>{{ t('redundancyConfirmed') }}: {{ link.confirmed ?? '—' }} · {{ t('redundancyPending') }}: {{ link.pending }} · {{ t('redundancyLastCheck') }}: {{ link.reconciled_at ? new Date(link.reconciled_at).toLocaleString(locale) : '—' }}</p>
+    <EmptyState v-if="links.data.value && !links.data.value.links.length" compact class="bucket-subpanel" :title="t('redundancyEmpty')" />
+    <article v-for="link in links.data.value?.links || []" :key="link.id" class="bucket-subpanel form-stack">
+      <div class="bucket-section-head"><div><span class="eyebrow">{{ t(link.source_bucket===bucket.id?'redundancyOutgoing':'redundancyIncoming') }}</span><h3>{{ destination(link) }}</h3><code>{{ link.settings.target_prefix || '/' }}</code></div><span class="badge">{{ t('redundancyStatus_'+link.status) }}</span></div>
+      <dl class="bucket-metrics">
+        <div><dt>{{ t('redundancyMode') }}</dt><dd>{{ t('redundancyMode_'+(link.settings.mode || 'asynchronous')) }}</dd></div>
+        <div><dt>{{ t('redundancyConfirmed') }}</dt><dd>{{ link.confirmed ?? '—' }}</dd></div>
+        <div><dt>{{ t('redundancyPending') }}</dt><dd>{{ link.pending }}</dd></div>
+        <div><dt>{{ t('redundancyLastCheck') }}</dt><dd>{{ link.reconciled_at ? new Date(link.reconciled_at).toLocaleString(locale) : '—' }}</dd></div>
+      </dl>
       <p class="field-help">{{ t(link.settings.propagate_deletes?'redundancyDeleteOn':'redundancyDeleteOff') }} <span v-if="link.settings.target_external">{{ t('redundancyExternalHint') }}</span></p>
       <p v-if="link.queued_keys >= (link.settings.max_pending_keys ?? 4096)" role="status">{{ t('redundancyQueueFull') }}</p>
       <p v-if="link.error" role="status">{{ link.error }}</p>
@@ -82,22 +92,26 @@ function destination(link: Link) {
     </article>
     <UiListFooter :first="!!cursor" :next="!!links.data.value?.next_after" @first="cursor=''" @next="cursor=links.data.value?.next_after || ''"/>
     <UiDialog v-model:open="creating" :busy="busy" :title="t('redundancyAdd')">
-      <ErrorNotice v-if="error" :error="error"/>
-      <fieldset class="form-stack" :disabled="busy || !!checked">
-        <label>{{ t('replicationTarget') }}<UiSelect v-model="target" :options="resources" :label="t('replicationTarget')" searchable/></label>
-        <button v-if="external.hasNextPage.value" type="button" :disabled="external.isFetchingNextPage.value" @click="external.fetchNextPage()">{{ t('nextPage') }}</button>
-        <label class="field">{{ t('redundancyPrefix') }}<input v-model="prefix" maxlength="1024"></label>
-        <label>{{ t('replicationPermissions') }}<UiSelect v-model="acl" :options="permissionOptions" :label="t('replicationPermissions')"/></label>
-        <label class="field">{{ t('redundancyQueueLimit') }}<input v-model.number="maxPending" type="number" min="1" max="1000000" step="1" required></label>
-        <UiCheckbox v-model="deletes" :disabled="!canDelete" :label="t('redundancyPropagateDeletes')"/>
-      </fieldset>
-      <p class="field-help">{{ t(selected?.external?'redundancyExternalHint':'redundancyManagedHint') }}</p>
-      <p v-if="checked" class="info-callout">{{ t('redundancyReview') }} {{ selected?.label }} / {{ checked.settings.target_prefix }}</p>
+      <div class="form-stack">
+        <ErrorNotice v-if="error" :error="error"/>
+        <fieldset class="form-stack" :disabled="busy || !!checked">
+          <label class="field"><span>{{ t('replicationTarget') }}</span><UiSelect v-model="target" :options="resources" :disabled="busy || !!checked" :label="t('replicationTarget')" searchable/></label>
+          <button v-if="external.hasNextPage.value" type="button" :disabled="external.isFetchingNextPage.value" @click="external.fetchNextPage()">{{ t('nextPage') }}</button>
+          <label class="field"><span>{{ t('redundancyMode') }}</span><UiSelect v-model="mode" :options="modes" :disabled="busy || !!checked" :label="t('redundancyMode')"/></label>
+          <p v-if="mode==='synchronous'" class="field-help">{{ t('redundancySyncHint') }}</p>
+          <label class="field">{{ t('redundancyPrefix') }}<input v-model="prefix" maxlength="1024"></label>
+          <label class="field"><span>{{ t('replicationPermissions') }}</span><UiSelect v-model="acl" :options="permissionOptions" :disabled="busy || !!checked" :label="t('replicationPermissions')"/></label>
+          <label class="field">{{ t('redundancyQueueLimit') }}<input v-model.number="maxPending" type="number" min="1" max="1000000" step="1" required></label>
+          <UiCheckbox v-model="deletes" :disabled="busy || !!checked || !canDelete" :label="t('redundancyPropagateDeletes')"/>
+        </fieldset>
+        <p class="field-help">{{ t(selected?.external?'redundancyExternalHint':'redundancyManagedHint') }}</p>
+        <p v-if="checked" class="info-callout">{{ t('redundancyReview') }} {{ selected?.label }} / {{ checked.settings.target_prefix }}</p>
+      </div>
       <template #footer><button v-if="checked" :disabled="busy" @click="checked=undefined">{{ t('redundancyEdit') }}</button><button :disabled="busy" @click="creating=false">{{ t('cancel') }}</button><button class="primary" :disabled="busy || !selected" @click="create">{{ t(checked?'redundancyAdd':'redundancyPreview') }}</button></template>
     </UiDialog>
     <UiDialog v-model:open="actionOpen" :busy="busy" :title="t('redundancyAction_'+(action?.name || 'reconcile'))">
-      <template v-if="action"><ErrorNotice v-if="error" :error="error"/><p>{{ destination(action.link) }} / {{ action.link.settings.target_prefix }}</p>
-        <p>{{ t('redundancyExplain_'+action.name) }}</p><label v-if="action.name==='reconcile'" class="field">{{ t('redundancyScanPrefix') }}<input v-model="scanPrefix" maxlength="1024"></label></template>
+      <div v-if="action" class="form-stack"><ErrorNotice v-if="error" :error="error"/><p>{{ destination(action.link) }} / {{ action.link.settings.target_prefix }}</p>
+        <p>{{ t('redundancyExplain_'+action.name) }}</p><label v-if="action.name==='reconcile'" class="field">{{ t('redundancyScanPrefix') }}<input v-model="scanPrefix" maxlength="1024"></label></div>
       <template #footer><button :disabled="busy" @click="action=undefined">{{ t('cancel') }}</button><button :disabled="busy" :class="action?.name==='remove'?'danger-button':'primary'" @click="apply">{{ t('redundancyAction_'+(action?.name || 'reconcile')) }}</button></template>
     </UiDialog>
   </div>

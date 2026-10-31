@@ -128,6 +128,42 @@ async fn activate(db: &mut Tx<'_>, id: Uuid, options: &Options) -> Result<()> {
     Ok(())
 }
 
+pub(super) async fn freeze(
+    db: &mut Tx<'_>,
+    bucket: Uuid,
+    key: &str,
+    stream: crate::model::Id,
+    required: i32,
+    attach: bool,
+) -> Result<Uuid> {
+    let id = Uuid::now_v7();
+    q::publication(id, bucket, key, stream)
+        .execute(&mut **db)
+        .await?;
+    let targets = q::freeze_targets(id, bucket, key)
+        .execute(&mut **db)
+        .await?
+        .rows_affected();
+    ensure!(
+        targets == u64::try_from(required)?,
+        s3s::s3_error!(
+            InvalidArgument,
+            "a redundancy target key exceeds 1024 bytes"
+        )
+    );
+    if attach {
+        ensure!(
+            q::attach_publication(id, stream)
+                .execute(&mut **db)
+                .await?
+                .rows_affected()
+                == 1,
+            Error::OperationAborted
+        );
+    }
+    Ok(id)
+}
+
 // Callers supplying an owner have already locked its current execution token.
 pub(super) async fn writable(
     db: &mut Tx<'_>,
@@ -135,8 +171,18 @@ pub(super) async fn writable(
     key: &str,
     owner: Option<Uuid>,
 ) -> Result<()> {
-    let managed = q::gate(bucket).fetch_one(&mut **db).await?;
-    admitted(db, bucket, key, owner, managed).await
+    writable_targets(db, bucket, key, owner).await.map(|_| ())
+}
+
+pub(super) async fn writable_targets(
+    db: &mut Tx<'_>,
+    bucket: Uuid,
+    key: &str,
+    owner: Option<Uuid>,
+) -> Result<i32> {
+    let (managed, required) = q::gate(bucket).fetch_one(&mut **db).await?;
+    admitted(db, bucket, key, owner, managed).await?;
+    Ok(required)
 }
 
 pub(super) async fn admitted(
@@ -178,6 +224,15 @@ pub(super) async fn removable(db: &mut Tx<'_>, bucket: Uuid) -> Result<()> {
         !q::referenced(bucket).fetch_one(&mut **db).await?,
         s3s::s3_error!(OperationAborted, "remove the bucket redundancy link first")
     );
+    loop {
+        let rows = super::replica_queries::terminal(bucket)
+            .fetch_all(&mut **db)
+            .await?;
+        if rows.is_empty() {
+            break;
+        }
+        super::replica_transactions::prune(db, rows).await?;
+    }
     Ok(())
 }
 
@@ -397,8 +452,13 @@ impl RedundancyStore for Backend {
                         reset_scan(&mut run);
                     }
                     CommandAction::Retry => {
+                        let retried = super::replica_queries::retry(id)
+                            .execute(&mut *db)
+                            .await?
+                            .rows_affected();
                         ensure!(
-                            row.task_state == "failed"
+                            retried != 0
+                                || row.task_state == "failed"
                                 || state == "idle" && run.progress.0.conflicts > 0,
                             Error::OperationAborted
                         );
@@ -529,6 +589,16 @@ pub(super) async fn finish(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
     let id = run.task_id;
     if run.phase == "cancel" {
         let state = q::state(id).fetch_one(&mut **db).await?;
+        if super::replica_queries::draining(id)
+            .fetch_one(&mut **db)
+            .await?
+            .0
+        {
+            r::task_state(id, "paused", Some("replica_drain"))
+                .execute(&mut **db)
+                .await?;
+            return Ok(());
+        }
         super::replication_remote_queries::forget(id)
             .execute(&mut **db)
             .await?;

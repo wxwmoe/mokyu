@@ -244,10 +244,9 @@ impl App {
                 authority,
                 u.bucket_id,
                 &u.object_key,
-                "object",
+                crate::model::StreamPurpose::Object,
                 u.metadata.clone(),
                 u.public_read,
-                true,
                 Some(u.id),
                 None,
             )

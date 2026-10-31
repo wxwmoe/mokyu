@@ -9,7 +9,19 @@ fieldset.form-stack { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
 .form-stack .select-trigger { min-width: 0; }
 .form-stack .field-help { line-height: 1.65; }
 
+.bucket-panel { gap: 24px; padding: 20px clamp(0px, 2vw, 24px) 12px; }
+.bucket-panel h2 { font-size: 18px; }
+.bucket-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px 20px; flex-wrap: wrap; }
+.bucket-heading { display: flex; min-width: 0; gap: 12px; align-items: center; }
+.bucket-heading > div { display: grid; min-width: 0; gap: 4px; }
 .bucket-subpanel { min-width: 0; padding: clamp(14px, 2vw, 20px); border-radius: 16px; background: var(--surface-soft); border: 1px solid var(--line-soft); }
+.bucket-section-head .actions, .bucket-panel .actions { gap: 8px; }
+.bucket-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(130px, 100%), 1fr)); gap: 12px; margin: 0; }
+.bucket-metrics > div { display: grid; align-content: start; gap: 4px; }
+.bucket-metrics dt { color: var(--muted); font-size: var(--small-size, 12px); }
+.bucket-metrics dd { margin: 0; font-weight: var(--ui-weight, 700); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 @media (max-width: 640px) {
   .form-stack .form-pair { grid-template-columns: minmax(0, 1fr); gap: 14px; }
+  .bucket-panel { padding: 12px 0 4px; gap: 20px; }
+  .bucket-heading { align-items: flex-start; }
 }

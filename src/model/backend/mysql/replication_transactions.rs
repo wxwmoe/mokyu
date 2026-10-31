@@ -60,7 +60,7 @@ async fn authorize(
     write: bool,
 ) -> Result<()> {
     let options = &run.options.0;
-    let authority = if write && run.redundancy_id.is_some() {
+    let authority = if write && (run.redundancy_id.is_some() || run.replica_link.is_some()) {
         super::redundancy_transactions::authority(options, principal.clone())
     } else if write {
         options.authority(principal.clone())
@@ -280,7 +280,7 @@ impl ReplicationStore for Backend {
         q::task_lock(id).fetch_one(&mut *db).await?;
         let mut run = load(&mut db, id).await?;
         ensure!(
-            run.redundancy_id.is_none(),
+            run.redundancy_id.is_none() && run.replica_link.is_none(),
             s3s::s3_error!(
                 InvalidRequest,
                 "use the redundancy link to control this task"
@@ -303,6 +303,10 @@ impl ReplicationStore for Backend {
             !matches!(run.phase.as_str(), "complete" | "cancelled"),
             Error::OperationAborted
         );
+        if run.error.as_deref() == Some("replica_pending") {
+            ensure!(matches!(command, Command::Cancel), Error::OperationAborted);
+            super::replica_transactions::failed(&mut db, id, "operation_aborted").await?;
+        }
         match command {
             Command::Pause => {
                 q::task_state(id, "paused", None).execute(&mut *db).await?;
@@ -675,6 +679,9 @@ async fn finish_item(
     output: Option<Id>,
     error: Option<&str>,
 ) -> Result<()> {
+    if run.replica_link.is_some() && run.phase != "cancel" && state != "completed" {
+        return Err(Error::OperationAborted.into());
+    }
     if let Some(id) = item.candidate {
         if output != Some(id) {
             q::abandon(id).execute(&mut **db).await?;
@@ -698,6 +705,15 @@ async fn finish_item(
 }
 
 async fn current(db: &mut Tx<'_>, run: &q::Run, item: &q::Entry) -> Result<bool> {
+    if run.replica_link.is_some() {
+        let Some(version) = item.source_pin else {
+            return Ok(false);
+        };
+        return Ok(super::replica_queries::staged_source(run.task_id, version)
+            .fetch_optional(&mut **db)
+            .await?
+            .is_some_and(|source| source.snapshot() == item.snapshot.0));
+    }
     if run.frozen() {
         let Some(version) = item.source_pin else {
             return Ok(false);
@@ -774,13 +790,23 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
         run.phase = "verify".into();
         return Ok(());
     };
-    super::redundancy_transactions::writable(
-        db,
-        run.options.0.target_bucket,
-        &item.target_key,
-        run.redundancy_id,
-    )
-    .await?;
+    if let Some(link) = run.replica_link {
+        super::replica_transactions::manager(
+            db,
+            run.options.0.target_bucket,
+            &item.target_key,
+            link,
+        )
+        .await?;
+    } else {
+        super::redundancy_transactions::writable(
+            db,
+            run.options.0.target_bucket,
+            &item.target_key,
+            run.redundancy_id,
+        )
+        .await?;
+    }
     if run.options.0.operation == Operation::Move {
         super::redundancy_transactions::writable(
             db,
@@ -810,7 +836,10 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
                     .permissions
                     .public(expected.public, Some(target.public_read));
                 expected.payload = target.payload_type.clone();
-                if run.options.0.operation == Operation::Copy && target.snapshot() == expected {
+                if run.replica_link.is_none()
+                    && run.options.0.operation == Operation::Copy
+                    && target.snapshot() == expected
+                {
                     return finish_item(db, run, &item, "skipped", Some(target.id), None).await;
                 }
                 let raw_allowed = target.payload_type != "raw"
@@ -1092,7 +1121,8 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
                 .permissions
                 .public(expected.public, Some(target.public_read));
             expected.payload = target.payload_type.clone();
-            if equal
+            if run.replica_link.is_none()
+                && equal
                 && reusable(db, &item, target).await?
                 && options.operation == Operation::Copy
                 && target.snapshot() == expected
@@ -1136,10 +1166,9 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             authority: Permit::system(),
             bucket: options.target_bucket,
             key: item.target_key.clone(),
-            stream_type: "object".into(),
+            purpose: crate::model::StreamPurpose::Copy,
             metadata: item.snapshot.0.metadata.clone(),
             public: false,
-            claim_object: false,
             completion: None,
             owner: Some((task.id, task.token)),
         };
@@ -1161,7 +1190,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
         item.snapshot.0.payload == "raw"
     };
     let mut end = item.position_bytes;
-    if item.snapshot.0.size > 0 {
+    if end < item.snapshot.0.size {
         if run.source_storage()? != run.storage()? && !item.reuse_target {
             end = super::transfer_transactions::project(
                 db,
@@ -1265,6 +1294,20 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
     )
     .execute(&mut **db)
     .await?;
+    if run.replica_link.is_some() {
+        super::replica_transactions::prepared(
+            db,
+            run.task_id,
+            candidate,
+            if raw { "raw" } else { "chunks" },
+        )
+        .await?;
+        q::finish_item(item.id, "completed", Some(candidate), None)
+            .execute(&mut **db)
+            .await?;
+        run.progress.0.completed += 1;
+        return Ok(());
+    }
     let job = StorageMigration {
         source_bucket: options.source_bucket,
         source_key: item.source_key.clone(),
@@ -1280,7 +1323,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
         .into(),
         public_read: public,
     };
-    if run.frozen() {
+    let result = if run.frozen() {
         transactions::publish_import_in(
             db,
             task,
@@ -1290,9 +1333,19 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             item.target_version,
             public,
         )
-        .await?;
+        .await
     } else {
-        transactions::publish_migration_in(db, task, candidate, &job).await?;
+        transactions::publish_migration_in(db, task, candidate, &job).await
+    };
+    if let Err(error) = result {
+        if error.is::<crate::model::ReplicaPending>() {
+            q::advance(item.id, "copying", end)
+                .execute(&mut **db)
+                .await?;
+            super::replica_transactions::park(db, task).await?;
+            return Ok(());
+        }
+        return Err(error);
     }
     finish_item(db, run, &item, "completed", Some(candidate), None).await
 }

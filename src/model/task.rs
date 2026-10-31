@@ -9,6 +9,29 @@ pub(crate) struct Execution {
     pub(crate) token: Uuid,
 }
 
+pub(crate) fn present(value: &mut serde_json::Value) {
+    if value["state"] == "paused" && value["error"] == "replica_pending" {
+        value["state"] = "running".into();
+        value["blocked"] = "replica_pending".into();
+        value["error"] = serde_json::Value::Null;
+    }
+    if let Some(detail) = value["detail"].as_object_mut() {
+        for key in [
+            "authority",
+            "replica_parked",
+            "source_operation",
+            "source_inputs",
+            "sweep_page",
+            "node_pack",
+            "node_raw",
+            "node_conversion",
+            "node_migration",
+        ] {
+            detail.remove(key);
+        }
+    }
+}
+
 /// Persistent task control operations shared by single-container and cluster
 /// schedulers. Callers wake local workers after committed state transitions.
 #[async_trait]

@@ -261,6 +261,7 @@ pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
         phase: match value.phase {
             write::Phase::Active => wire::WritePhase::WriteActive,
             write::Phase::Busy => wire::WritePhase::WriteBusy,
+            write::Phase::Preparing => wire::WritePhase::WritePreparing,
             write::Phase::Aborted => wire::WritePhase::WriteAborted,
             write::Phase::Expired => wire::WritePhase::WriteExpired,
             write::Phase::Published => wire::WritePhase::WritePublished,

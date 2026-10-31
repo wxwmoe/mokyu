@@ -36,6 +36,7 @@ pub(crate) struct Outcome {
     pub(crate) task_id: Option<Uuid>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Receipt {
     pub(crate) id: Uuid,
     pub(crate) bucket: Uuid,
@@ -65,6 +66,33 @@ pub(crate) struct StorageMigration {
     pub(crate) target_version: Option<Id>,
     pub(crate) action: String,
     pub(crate) public_read: bool,
+}
+
+impl StorageMigration {
+    pub(crate) fn transfer(&self) -> ObjectTransfer<'_> {
+        ObjectTransfer {
+            source_bucket: self.source_bucket,
+            source_key: &self.source_key,
+            source_version: self.source_version,
+            target_bucket: self.target_bucket,
+            target_key: &self.target_key,
+            target_version: self.target_version,
+        }
+    }
+}
+
+impl ObjectTransfer<'_> {
+    pub(crate) fn media_intent(
+        &self,
+        permit: &Permit,
+        action: &str,
+        public: bool,
+        expected_public: Option<bool>,
+    ) -> Value {
+        serde_json::json!({"operation":action,"permit":permit,"expected_public":expected_public,
+            "transfer":StorageMigration{source_bucket:self.source_bucket,source_key:self.source_key.into(),source_version:self.source_version,
+            target_bucket:self.target_bucket,target_key:self.target_key.into(),target_version:self.target_version,action:action.into(),public_read:public}})
+    }
 }
 
 #[async_trait]
@@ -100,6 +128,11 @@ pub(crate) trait ObjectStore: Send + Sync {
         expected_public: Option<bool>,
     ) -> Result<()>;
     async fn queue_migration(&self, permit: &Permit, job: &StorageMigration) -> Result<()>;
+    async fn resume_migration(
+        &self,
+        task: crate::model::task::Execution,
+        job: &StorageMigration,
+    ) -> Result<bool>;
     async fn complete_migration(
         &self,
         task: Uuid,

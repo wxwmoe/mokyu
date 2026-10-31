@@ -168,6 +168,7 @@ pub(crate) struct Lookup {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Phase {
     Active,
+    Preparing,
     Busy,
     Aborted,
     Expired,

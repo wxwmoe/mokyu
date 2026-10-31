@@ -186,6 +186,14 @@ pub(super) async fn replay(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
     let Some(change) = change else {
         if run.redundancy_id.is_none() {
             c::forget(run.task_id).execute(&mut **db).await?;
+        } else if super::redundancy_queries::pending(run.task_id)
+            .fetch_one(&mut **db)
+            .await?
+        {
+            q::task_state(run.task_id, "paused", Some("replica_pending"))
+                .execute(&mut **db)
+                .await?;
+            return Ok(());
         }
         run.phase = if run.options.0.external() {
             "verify"

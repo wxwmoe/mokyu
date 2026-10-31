@@ -14,10 +14,9 @@ fn stream(bucket: Uuid, key: &str) -> StreamCreate {
         authority: Permit::for_action(Principal::Local, bucket, Action::Write),
         bucket,
         key: key.into(),
-        stream_type: "object".into(),
+        purpose: crate::model::StreamPurpose::Object,
         metadata: json!({"content_type":"application/octet-stream"}),
         public: false,
-        claim_object: true,
         completion: None,
         owner: None,
     }
@@ -110,8 +109,7 @@ async fn sqlite_content_contract() -> Result<()> {
         .await?;
     assert!(backend.create(stream(bucket, "paused")).await.is_err());
     let mut part = stream(bucket, "part");
-    part.stream_type = "part".into();
-    part.claim_object = false;
+    part.purpose = crate::model::StreamPurpose::Part;
     backend.create(part).await?;
     let upload = Uuid::new_v4();
     sqlx::query("INSERT INTO uploads(id,bucket_id,object_key,access_key,state) VALUES(?,?,?,'fixture','completing')").bind(upload).bind(bucket).bind(b"completion".as_slice()).execute(db).await?;

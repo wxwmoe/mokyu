@@ -56,6 +56,7 @@ struct Operation {
     id: String,
     stream: String,
     bucket: Uuid,
+    key: Option<String>,
     request: Request,
     grants: Vec<Arc<Grant>>,
     backend: Arc<super::body::Backend>,
@@ -226,9 +227,12 @@ impl Writes {
         };
         let node = &self.reads.node;
         let started = Instant::now();
+        let key = (!part).then(|| input.key.clone());
         let reply = node.client.begin_write(input).await?;
         ensure!(reply.operation_id == id, "invalid write identity");
-        self.accept(request, reply, held, started, part, limit)
+        let mut operation = self.accept(request, reply, held, started, part, limit)?;
+        operation.key = key;
+        Ok(operation)
     }
 
     fn accept(
@@ -270,6 +274,7 @@ impl Writes {
             bucket: Uuid::parse_str(&reply.bucket_id)?,
             id,
             stream: reply.stream_id,
+            key: None,
             request,
             grants,
             backend,
@@ -429,7 +434,7 @@ impl Writes {
         if_none: Option<String>,
     ) -> Result<wire::WriteReply> {
         operation.check()?;
-        let reply = self
+        let mut reply = self
             .reads
             .node
             .client
@@ -443,6 +448,28 @@ impl Writes {
                 if_none,
             })
             .await?;
+        if reply.phase == wire::WritePhase::WritePreparing as i32 {
+            let waiter = operation.key.as_ref().map(|key| {
+                self.reads
+                    .node
+                    .completion_waiters
+                    .register(operation.bucket, key)
+            });
+            let fallback = tokio::sync::Notify::new();
+            let waiter = waiter.as_deref().unwrap_or(&fallback);
+            tokio::time::timeout(crate::upload::multipart::completion_timeout(), async {
+                loop {
+                    ensure!(reply.operation_id == operation.id && reply.stream_id == operation.stream, "invalid preparation receipt");
+                    let notified = waiter.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    reply = self.reads.node.client.write_status(operation.lookup()).await?;
+                    if reply.phase != wire::WritePhase::WritePreparing as i32 { break }
+                    tokio::select! { _ = notified => {}, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
+                }
+                Ok::<_, anyhow::Error>(())
+            }).await.map_err(|_| s3s::s3_error!(RequestTimeout))??;
+        }
         // Publication retires the lease; a confirmed terminal receipt wins over late renewals.
         ensure!(
             reply.operation_id == operation.id

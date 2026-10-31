@@ -114,6 +114,7 @@ async fn fail_replication(
     q::release_permits(&[token, maintenance])
         .execute(&mut **db)
         .await?;
+    super::super::replica_transactions::failed(db, task, error).await?;
     q::finish(task, token, 0, false, Some(error))
         .execute(&mut **db)
         .await?;
@@ -683,6 +684,9 @@ async fn finish(
     q::release_permits(&permit_tokens)
         .execute(&mut **db)
         .await?;
+    if let Some(reason) = error {
+        super::super::replica_transactions::failed(db, task, reason).await?;
+    }
     q::finish(task, row.token, deleted, complete, error)
         .execute(&mut **db)
         .await?;
@@ -753,13 +757,7 @@ async fn cleanup(
         .fetch_all(&mut **db)
         .await?;
     for stream in streams {
-        if queries::claim_stale_stream(stream, retention, Some(storage), false)
-            .build()
-            .execute(&mut **db)
-            .await?
-            .rows_affected()
-            == 1
-        {
+        if claim_stale_stream_in(db, stream, Some(storage), retention, false).await? {
             count += cleanup_stream_in(db, stream, maximum as i64).await?;
         }
     }

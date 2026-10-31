@@ -299,7 +299,8 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
     crate::faults::point("media-before-publish").await;
     let _coord = app.coord.lock().await;
     app.writable()?;
-    app.objects
+    let result = app
+        .objects
         .move_object(
             permit,
             ObjectTransfer {
@@ -311,7 +312,9 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
                 target_version: item.target_version,
             },
         )
-        .await?;
+        .await;
+    drop(_coord);
+    app.wait_publication(result).await?;
     app.wake_gc.notify_one();
     Ok(())
 }
@@ -384,7 +387,14 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
     }
     let (id, _pin) = app
         .new_stream(
-            permit, target, key, "object", meta, public, false, None, None,
+            permit,
+            target,
+            key,
+            crate::model::StreamPurpose::Copy,
+            meta,
+            public,
+            None,
+            None,
         )
         .await?;
     let result = async {
@@ -397,7 +407,8 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         crate::faults::point("media-before-publish").await;
         let _coord = app.coord.lock().await;
         app.writable()?;
-        app.objects
+        let result = app
+            .objects
             .publish_copy(
                 permit,
                 ObjectTransfer {
@@ -412,8 +423,9 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
                 public,
                 replace.then_some(source.public_read),
             )
-            .await?;
-        Ok::<_, anyhow::Error>(())
+            .await;
+        drop(_coord);
+        app.wait_publication(result).await
     }
     .await;
     if result.is_err() {

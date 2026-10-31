@@ -57,10 +57,9 @@ impl App {
                 &Permit::system(),
                 job.bucket,
                 &job.object_key,
-                "object",
+                crate::model::StreamPurpose::Internal,
                 stream.metadata.clone(),
                 stream.public_read,
-                false,
                 None,
                 Some((task.id, task.token)),
             )

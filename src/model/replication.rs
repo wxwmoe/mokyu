@@ -283,6 +283,7 @@ pub(crate) struct Run {
     pub sealed: bool,
     pub scan_end: Option<String>,
     pub redundancy_id: Option<Uuid>,
+    pub replica_link: Option<Uuid>,
 }
 impl Run {
     #[cfg(feature = "fault-injection")]
@@ -328,14 +329,24 @@ impl Run {
             .ok_or_else(|| super::Error::OperationAborted.into())
     }
     pub(crate) fn view(self) -> Replication {
-        let phase = self.phase_label().to_owned();
+        let waiting = self.state == "paused" && self.error.as_deref() == Some("replica_pending");
+        let phase = if waiting {
+            "replicas"
+        } else {
+            self.phase_label()
+        }
+        .to_owned();
         Replication {
             id: self.task_id,
-            state: self.state,
+            state: if waiting {
+                "running".into()
+            } else {
+                self.state
+            },
             phase,
             options: self.options.0,
             progress: self.progress.0,
-            error: self.error,
+            error: if waiting { None } else { self.error },
             captured: self.captured,
             sealed: self.sealed,
             redundancy_id: self.redundancy_id,

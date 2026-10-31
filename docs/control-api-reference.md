@@ -228,7 +228,7 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 | `GET /{id}` | 查询 `revision`、`status`、进度、`queued_keys`、`confirmed` 及最近对账时间 |
 | `POST /{id}/command` | 提交 `{revision,action,prefix?}`，返回 202；动作为 `pause`、`resume`、`retry`、`reconcile` 或 `remove`，仅对账可指定来源前缀 |
 
-创建和预览使用 `target_bucket`、`target_external`、`target_prefix`、`mode`、`permissions`、`propagate_deletes`、`max_pending_keys`。异步模式为 `asynchronous`；每条关系最多保留的不同待处理键默认 4096，可选 1–1000000。权限选项与数据复制相同，缺省时内部目标继承、外部目标不传递。删除传播仅适用于内部目标。解除完成前目标命名空间仍由关系占用；解除不会清理已发布副本。
+创建和预览使用 `target_bucket`、`target_external`、`target_prefix`、`mode`、`permissions`、`propagate_deletes`、`max_pending_keys`。默认模式为 `asynchronous`；同一部署内的独立后端也可选 `synchronous`，外部目标不接受此模式。每条关系最多保留的不同待处理键默认 4096，可选 1–1000000。权限选项与数据复制相同，缺省时内部目标继承、外部目标不传递。删除传播仅适用于内部目标。解除完成前目标命名空间仍由关系占用；解除不会清理已发布副本。
 
 ## 上传与传输中心
 

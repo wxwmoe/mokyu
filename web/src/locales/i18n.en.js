@@ -1,6 +1,12 @@
 export default {
   externalConnectionSettings: "Connection settings",
   externalAuthentication: "Authentication",
+  blocked_replica_pending: "Waiting for required replicas",
+  replicationPhase_replicas: "Waiting for required replicas",
+  redundancyMode: "Write confirmation",
+  redundancyMode_asynchronous: "Asynchronous",
+  redundancyMode_synchronous: "Synchronous",
+  redundancySyncHint: "Writes that require backend durability wait for all synchronous destinations. Buffered writes keep their original acknowledgement policy.",
   redundancyTitle: "Storage redundancy",
   redundancyHint: "Keep copies on independent storage backends. Each destination catches up separately.",
   redundancyAdd: "Add destination",

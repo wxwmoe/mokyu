@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0098.
+-- Generated from the complete postgres migration chain through 0099.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -88,6 +88,21 @@ BEGIN
         UPDATE redundancy_backlogs SET queued_keys=queued_keys+1 WHERE id=NEW.task_id;
     ELSE
         UPDATE redundancy_backlogs SET queued_keys=queued_keys-1 WHERE id=OLD.task_id;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+CREATE FUNCTION public.count_required_targets() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    delta INTEGER := 0;
+BEGIN
+    IF TG_OP<>'INSERT' AND OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing') THEN delta := delta-1; END IF;
+    IF TG_OP<>'DELETE' AND NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing') THEN delta := delta+1; END IF;
+    IF delta<>0 THEN
+        UPDATE bucket_change_gates SET required_targets=required_targets+delta WHERE bucket_id=COALESCE(NEW.source_bucket,OLD.source_bucket);
     END IF;
     RETURN NULL;
 END;
@@ -775,7 +790,9 @@ CREATE TABLE public.bucket_change_gates (
     bucket_id uuid NOT NULL,
     subscribers integer DEFAULT 0 NOT NULL,
     managed integer DEFAULT 0 NOT NULL,
+    required_targets integer DEFAULT 0 NOT NULL,
     CONSTRAINT bucket_change_gates_managed_check CHECK ((managed >= 0)),
+    CONSTRAINT bucket_change_gates_required_targets_check CHECK ((required_targets >= 0)),
     CONSTRAINT bucket_change_gates_subscribers_check CHECK ((subscribers >= 0))
 );
 
@@ -1358,7 +1375,6 @@ CREATE TABLE public.node_writes (
     checksum_algorithm text,
     completion_upload uuid,
     CONSTRAINT node_writes_check CHECK (((state = 'active'::text) = (completed_at IS NULL))),
-    CONSTRAINT node_writes_check1 CHECK (((publish_hash IS NULL) = (result IS NULL))),
     CONSTRAINT node_writes_check2 CHECK (((state = 'published'::text) = (result IS NOT NULL))),
     CONSTRAINT node_writes_check3 CHECK (((upload_id IS NULL) = (part_number IS NULL))),
     CONSTRAINT node_writes_check4 CHECK (((upload_id IS NULL) OR (copy_source IS NULL))),
@@ -1371,6 +1387,7 @@ CREATE TABLE public.node_writes (
     CONSTRAINT node_writes_part_number_check CHECK (((part_number >= 1) AND (part_number <= 10000))),
     CONSTRAINT node_writes_profile_check CHECK (((jsonb_typeof(profile) = 'object'::text) AND (octet_length((profile)::text) <= 32768))),
     CONSTRAINT node_writes_publish_hash_check CHECK ((octet_length(publish_hash) = 32)),
+    CONSTRAINT node_writes_publish_receipt CHECK (((result IS NULL) OR (publish_hash IS NOT NULL))),
     CONSTRAINT node_writes_request_hash_check CHECK ((octet_length(request_hash) = 32)),
     CONSTRAINT node_writes_result_check CHECK (((jsonb_typeof(result) = 'object'::text) AND (octet_length((result)::text) <= 4096))),
     CONSTRAINT node_writes_state_check CHECK ((state = ANY (ARRAY['active'::text, 'aborted'::text, 'published'::text])))
@@ -1753,12 +1770,51 @@ CREATE TABLE public.redundancy_links (
     reconcile_prefix text DEFAULT ''::text NOT NULL COLLATE pg_catalog."C",
     reconciled_at timestamp with time zone,
     next_reconcile_at timestamp with time zone DEFAULT now() NOT NULL,
+    synchronous boolean DEFAULT false NOT NULL,
     CONSTRAINT redundancy_links_check CHECK (((target_bucket IS NULL) <> (external_bucket IS NULL))),
     CONSTRAINT redundancy_links_check1 CHECK (((target_bucket IS NULL) OR (source_bucket <> target_bucket))),
     CONSTRAINT redundancy_links_check2 CHECK (((octet_length(target_prefix) <= 1024) AND (octet_length(reconcile_prefix) <= 1024))),
+    CONSTRAINT redundancy_links_check3 CHECK (((NOT synchronous) OR (target_bucket IS NOT NULL))),
     CONSTRAINT redundancy_links_revision_check CHECK ((revision > 0)),
     CONSTRAINT redundancy_links_scan_credit_check CHECK (((scan_credit >= 0) AND (scan_credit <= 64))),
     CONSTRAINT redundancy_links_state_check CHECK ((state = ANY (ARRAY['preparing'::text, 'active'::text, 'reconciling'::text, 'catchup'::text, 'idle'::text, 'pausing'::text, 'paused'::text, 'removing'::text])))
+);
+
+CREATE TABLE public.replica_publications (
+    id uuid NOT NULL,
+    source_bucket uuid NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    source_pin uuid,
+    phase text DEFAULT 'admitted'::text NOT NULL,
+    early_ack boolean DEFAULT false NOT NULL,
+    intent jsonb,
+    intent_hash bytea,
+    result jsonb,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT replica_publications_intent_hash_check CHECK (((intent_hash IS NULL) OR (octet_length(intent_hash) = 32))),
+    CONSTRAINT replica_publications_object_key_check CHECK (((octet_length(object_key) >= 1) AND (octet_length(object_key) <= 1024))),
+    CONSTRAINT replica_publications_phase_check CHECK ((phase = ANY (ARRAY['admitted'::text, 'preparing'::text, 'published'::text, 'aborted'::text])))
+);
+
+CREATE TABLE public.replica_targets (
+    publication_id uuid NOT NULL,
+    link_id uuid NOT NULL,
+    link_revision bigint NOT NULL,
+    target_bucket uuid NOT NULL,
+    target_key text NOT NULL COLLATE pg_catalog."C",
+    storage_id uuid NOT NULL,
+    profile_revision bigint NOT NULL,
+    authority jsonb NOT NULL,
+    permissions text NOT NULL,
+    expected_version uuid,
+    candidate uuid,
+    task_id uuid,
+    phase text DEFAULT 'admitted'::text NOT NULL,
+    CONSTRAINT replica_targets_link_revision_check CHECK ((link_revision > 0)),
+    CONSTRAINT replica_targets_phase_check CHECK ((phase = ANY (ARRAY['admitted'::text, 'preparing'::text, 'prepared'::text, 'published'::text, 'aborted'::text]))),
+    CONSTRAINT replica_targets_profile_revision_check CHECK ((profile_revision > 0)),
+    CONSTRAINT replica_targets_target_key_check CHECK (((octet_length(target_key) >= 1) AND (octet_length(target_key) <= 1024)))
 );
 
 CREATE TABLE public.runtime_samples (
@@ -2031,6 +2087,7 @@ CREATE TABLE public.streams (
     http_compression jsonb DEFAULT '{}'::jsonb NOT NULL,
     payload_type text DEFAULT 'chunks'::text NOT NULL,
     payload_revision bigint DEFAULT 1 NOT NULL,
+    publication_id uuid,
     CONSTRAINT streams_kind_check CHECK ((stream_type = ANY (ARRAY['object'::text, 'part'::text]))),
     CONSTRAINT streams_payload_revision_check CHECK ((payload_revision > 0)),
     CONSTRAINT streams_payload_type_check CHECK ((payload_type = ANY (ARRAY['chunks'::text, 'raw'::text]))),
@@ -2691,6 +2748,12 @@ ALTER TABLE ONLY public.redundancy_catalog
 ALTER TABLE ONLY public.redundancy_links
     ADD CONSTRAINT redundancy_links_pkey PRIMARY KEY (id);
 
+ALTER TABLE ONLY public.replica_publications
+    ADD CONSTRAINT replica_publications_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.replica_targets
+    ADD CONSTRAINT replica_targets_pkey PRIMARY KEY (publication_id, link_id);
+
 ALTER TABLE ONLY public.runtime_samples
     ADD CONSTRAINT runtime_history_pkey PRIMARY KEY (sampled_at);
 
@@ -3003,6 +3066,8 @@ CREATE INDEX raw_uploads_due ON public.raw_uploads USING btree (next_attempt_at,
 
 CREATE INDEX raw_uploads_node ON public.raw_uploads USING btree (node_id) WHERE (node_id IS NOT NULL);
 
+CREATE INDEX redundancy_links_admission ON public.redundancy_links USING btree (source_bucket, synchronous, state, id);
+
 CREATE UNIQUE INDEX redundancy_links_destination ON public.redundancy_links USING btree (source_bucket, target_domain);
 
 CREATE INDEX redundancy_links_due ON public.redundancy_links USING btree (state, next_reconcile_at, id);
@@ -3016,6 +3081,16 @@ CREATE INDEX redundancy_links_source_domain ON public.redundancy_links USING btr
 CREATE INDEX redundancy_links_target ON public.redundancy_links USING btree (target_bucket);
 
 CREATE INDEX redundancy_links_target_domain ON public.redundancy_links USING btree (target_domain);
+
+CREATE INDEX replica_publications_pin ON public.replica_publications USING btree (source_pin);
+
+CREATE INDEX replica_publications_recovery ON public.replica_publications USING btree (phase, updated_at, id);
+
+CREATE INDEX replica_targets_candidate ON public.replica_targets USING btree (candidate);
+
+CREATE INDEX replica_targets_link ON public.replica_targets USING btree (link_id, phase, publication_id);
+
+CREATE UNIQUE INDEX replica_targets_task ON public.replica_targets USING btree (task_id);
 
 CREATE INDEX runtime_cluster_time ON public.runtime_samples USING btree (sampled_at DESC) WHERE ((data ->> 'scope'::text) = 'cluster'::text);
 
@@ -3038,6 +3113,8 @@ CREATE INDEX stream_lease_stream ON public.stream_leases USING btree (stream_id,
 CREATE UNIQUE INDEX stream_write_lease ON public.stream_leases USING btree (stream_id) WHERE (lease_type = 'write'::text);
 
 CREATE INDEX streams_cleanup ON public.streams USING btree (state, touched_at, id);
+
+CREATE INDEX streams_publication ON public.streams USING btree (publication_id) WHERE (publication_id IS NOT NULL);
 
 CREATE INDEX streams_task_owner ON public.streams USING btree (owner_task_id) WHERE (owner_task_id IS NOT NULL);
 
@@ -3188,6 +3265,8 @@ CREATE TRIGGER quota_upload_delete BEFORE DELETE ON public.uploads FOR EACH ROW 
 CREATE TRIGGER quota_upload_end AFTER UPDATE OF state ON public.uploads FOR EACH ROW EXECUTE FUNCTION public.quota_upload_end();
 
 CREATE TRIGGER raw_notify AFTER UPDATE OF quarantine_code ON public.raw_sources FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_health();
+
+CREATE TRIGGER redundancy_links_required AFTER INSERT OR DELETE OR UPDATE OF synchronous, state ON public.redundancy_links FOR EACH ROW EXECUTE FUNCTION public.count_required_targets();
 
 CREATE TRIGGER service_grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.s3_credential_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_service_authorization();
 
@@ -3590,6 +3669,27 @@ ALTER TABLE ONLY public.redundancy_links
 ALTER TABLE ONLY public.redundancy_links
     ADD CONSTRAINT redundancy_links_target_bucket_fkey FOREIGN KEY (target_bucket) REFERENCES public.buckets(id);
 
+ALTER TABLE ONLY public.replica_publications
+    ADD CONSTRAINT replica_publications_source_bucket_fkey FOREIGN KEY (source_bucket) REFERENCES public.buckets(id);
+
+ALTER TABLE ONLY public.replica_publications
+    ADD CONSTRAINT replica_publications_source_pin_fkey FOREIGN KEY (source_pin) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.replica_targets
+    ADD CONSTRAINT replica_targets_candidate_fkey FOREIGN KEY (candidate) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.replica_targets
+    ADD CONSTRAINT replica_targets_publication_id_fkey FOREIGN KEY (publication_id) REFERENCES public.replica_publications(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.replica_targets
+    ADD CONSTRAINT replica_targets_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.replica_targets
+    ADD CONSTRAINT replica_targets_target_bucket_fkey FOREIGN KEY (target_bucket) REFERENCES public.buckets(id);
+
+ALTER TABLE ONLY public.replica_targets
+    ADD CONSTRAINT replica_targets_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id);
+
 ALTER TABLE ONLY public.runtime_settings
     ADD CONSTRAINT runtime_settings_updated_by_fkey FOREIGN KEY (updated_by_user_id) REFERENCES public.web_users(id) ON DELETE SET NULL;
 
@@ -3631,6 +3731,9 @@ ALTER TABLE ONLY public.streams
 
 ALTER TABLE ONLY public.streams
     ADD CONSTRAINT streams_owner_task_fkey FOREIGN KEY (owner_task_id) REFERENCES public.tasks(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.streams
+    ADD CONSTRAINT streams_publication_id_fkey FOREIGN KEY (publication_id) REFERENCES public.replica_publications(id);
 
 ALTER TABLE ONLY public.tasks
     ADD CONSTRAINT tasks_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE SET NULL;

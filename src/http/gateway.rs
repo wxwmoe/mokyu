@@ -481,10 +481,9 @@ impl S3 for Gateway {
                     &authority,
                     b.id,
                     &i.key,
-                    "object",
+                    crate::model::StreamPurpose::Object,
                     serde_json::to_value(metadata!(i))?,
                     canned(i.acl.as_ref())?,
-                    true,
                     None,
                     None,
                 )
@@ -957,10 +956,9 @@ impl S3 for Gateway {
                     &authority,
                     b.id,
                     &i.key,
-                    "object",
+                    crate::model::StreamPurpose::Object,
                     meta,
                     canned(i.acl.as_ref())?,
-                    true,
                     None,
                     None,
                 )

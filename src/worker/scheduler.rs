@@ -386,7 +386,14 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
     app.task_execution
         .finish(crate::model::TaskFinish {
             execution,
-            error: result.as_ref().err().map(ToString::to_string),
+            error: result.as_ref().err().map(|error| {
+                if task_type == "storage_migration"
+                    && let Some(code) = crate::model::replica_rejection(error)
+                {
+                    return code.to_owned();
+                }
+                error.to_string()
+            }),
         })
         .await?;
     #[cfg(feature = "fault-injection")]

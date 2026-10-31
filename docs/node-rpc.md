@@ -179,7 +179,9 @@ CheckRawFiles 每次接收最多 128 个不重复的 UUID，返回 `pending`、`
 
 CheckLocalFiles 对 Multipart 文件返回同样的有界状态记录，所属节点的 `pending` 项携带存储和长度以恢复写缓存占用。远端确认后释放上传额度，物理文件仍受分片和读取引用保护；只有 `removable` 项可以删除。
 
-写入 `operation_id` 使用 UUIDv7。首次准入接受过去 15 分钟至未来 30 秒内的时间戳；节点应同步系统时钟。相同操作与相同参数重放原上下文，参数变化返回 `AlreadyExists`。活动写入重放会重验原授权；同一节点的其他 boot 或凭据代次不能继续该写入。WriteStatus 可查询该节点的历史回执，返回 `WRITE_ACTIVE`、`WRITE_ABORTED`、`WRITE_EXPIRED` 或 `WRITE_PUBLISHED`；stream 被回收后仍保留终态回执，桶和 stream 身份可能为空。
+提交严格写入后，`WRITE_PREPARING` 表示 control 已持久接收发布意图。节点使用原操作查询结果；对象变化通知可提前唤醒等待者，断线后仍可通过 WriteStatus 确认。传输正文由节点直接访问后端。
+
+写入 `operation_id` 使用 UUIDv7。首次准入接受过去 15 分钟至未来 30 秒内的时间戳；节点应同步系统时钟。相同操作与相同参数重放原上下文，参数变化返回 `AlreadyExists`。活动写入重放会重验原授权；同一节点的其他 boot 或凭据代次不能继续该写入。WriteStatus 可查询该节点的历史回执，返回 `WRITE_ACTIVE`、`WRITE_PREPARING`、`WRITE_ABORTED`、`WRITE_EXPIRED` 或 `WRITE_PUBLISHED`；stream 被回收后仍保留终态回执，桶和 stream 身份可能为空。
 
 每节点最多 4096 个有效写入。`WRITE_PROTECTION` 为 90 秒租约，复用 NodeSession 的批量续期与释放，不能恢复已经过期的租约；释放会取消未发布的写入。取消可重复执行，回执不随 stream 回收丢失；准入时分批清理超过一天且无有效租约的回执。清理后的操作时间已超出首次准入窗口，不能重新执行。
 

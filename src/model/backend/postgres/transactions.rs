@@ -760,6 +760,25 @@ impl QuotaStore for Backend {
 
 #[async_trait::async_trait]
 impl PublishStore for Backend {
+    async fn replicas_ready(&self, publication: Uuid) -> Result<bool> {
+        let (phase, result) = super::replica_queries::state(publication)
+            .fetch_one(&self.pool)
+            .await?;
+        if phase == "published" {
+            return Ok(true);
+        }
+        if phase == "aborted" {
+            return Err(crate::model::publish::reject_replica(
+                result.as_ref().and_then(|r| r.0["error"].as_str()),
+            ));
+        }
+        let (_, failed) = super::replica_queries::readiness(publication)
+            .fetch_one(&self.pool)
+            .await?;
+        anyhow::ensure!(!failed, crate::model::Error::OperationAborted);
+        Ok(false)
+    }
+
     async fn publish(
         &self,
         id: Id,
@@ -768,11 +787,22 @@ impl PublishStore for Backend {
         completion: Option<(uuid::Uuid, String, Value, Uuid)>,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
-        let result = publish_in(&mut tx, id, if_match, if_none, completion).await?;
-        if result {
+        let result = publish_in(&mut tx, id, if_match, if_none, completion).await;
+        if matches!(&result, Ok(true))
+            || result
+                .as_ref()
+                .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+        {
             tx.commit().await?;
+        } else if let Some(reason) = result
+            .as_ref()
+            .err()
+            .and_then(crate::model::replica_rejection)
+        {
+            tx.rollback().await?;
+            reject_admission(&self.pool, id, reason).await?;
         }
-        Ok(result)
+        result
     }
 }
 
@@ -788,10 +818,11 @@ pub(super) async fn publish_in(
             .fetch_one(&mut **tx)
             .await?;
     authority.lock(tx).await?;
-    let (bucket, object_key, state, size, payload_type, marked) = queries::lock_writing_stream(id)
-        .fetch_one(&mut **tx)
-        .await?;
-    let (bucket_state, _, managed) = super::redundancy_queries::admission(bucket)
+    let (bucket, object_key, state, size, payload_type, marked, publication) =
+        queries::lock_writing_stream(id)
+            .fetch_one(&mut **tx)
+            .await?;
+    let (bucket_state, _, managed, _) = super::redundancy_queries::admission(bucket)
         .fetch_one(&mut **tx)
         .await?;
     if bucket_state != "active" {
@@ -840,6 +871,11 @@ pub(super) async fn publish_in(
             "cannot publish a mapping with gaps or overlaps"
         );
         require_sources(tx, Some(id), &[]).await?;
+    }
+    if let Some(publication) = publication {
+        let intent = crate::model::write_intent(if_match.as_ref(), if_none.as_ref(), &completion)?;
+        super::replica_transactions::publish(tx, publication, bucket, &object_key, id, &intent)
+            .await?;
     }
     if !apply_publish(tx, id, bucket, &object_key, old, completion.as_ref()).await? {
         return Ok(false);
@@ -1355,6 +1391,180 @@ pub(super) async fn create_stream(
     Ok(id)
 }
 
+pub(super) async fn install_replica(
+    db: &mut super::replica_queries::Tx<'_>,
+    bucket: Uuid,
+    key: &str,
+    expected: Option<Id>,
+    candidate: Id,
+) -> Result<()> {
+    let (old, token) = queries::lock_object_version(bucket, key)
+        .fetch_one(&mut **db)
+        .await?;
+    ensure!(
+        old == expected && token == candidate,
+        s3s::s3_error!(PreconditionFailed)
+    );
+    let stream = super::replica_queries::candidate(candidate)
+        .fetch_one(&mut **db)
+        .await?
+        .stream;
+    ensure!(
+        stream.state == "writing" && stream.bucket_id == bucket && stream.object_key == key,
+        crate::model::Error::OperationAborted
+    );
+    ensure!(
+        super::replication_queries::ready(candidate, &stream.payload_type)
+            .fetch_one(&mut **db)
+            .await?,
+        crate::model::Error::SourceUnavailable
+    );
+    ensure!(
+        apply_publish(db, candidate, bucket, key, old, None).await?,
+        crate::model::Error::OperationAborted
+    );
+    Ok(())
+}
+
+pub(super) async fn validate_replica_node(
+    db: &mut super::replica_queries::Tx<'_>,
+    stream: Id,
+    node: Option<(Uuid, Uuid)>,
+) -> Result<()> {
+    if let Some((node, operation)) = node {
+        let row = queries::node_write(node, operation)
+            .fetch_one(&mut **db)
+            .await?;
+        ensure!(
+            row.state == "active"
+                && row.publish_hash.is_some()
+                && row.stream_id.map(Id::from) == Some(stream),
+            Error::OperationAborted
+        );
+        if let Some(source) = &row.copy_source {
+            queries::node_copy_source(source)
+                .fetch_optional(&mut **db)
+                .await?
+                .ok_or(Error::NodeExpired)?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn finish_replica_node(
+    db: &mut super::replica_queries::Tx<'_>,
+    stream: Id,
+    node: Option<(Uuid, Uuid)>,
+) -> Result<()> {
+    if let Some((node, operation)) = node {
+        let row = queries::node_write(node, operation)
+            .fetch_one(&mut **db)
+            .await?;
+        let hash = row.publish_hash.ok_or(Error::OperationAborted)?;
+        let source = super::replica_queries::candidate(stream)
+            .fetch_one(&mut **db)
+            .await?
+            .stream;
+        let (_, modified) = queries::node_write_size(stream)
+            .fetch_one(&mut **db)
+            .await?;
+        let result = crate::model::node_write::Published {
+            size: source.size,
+            etag: source.etag,
+            modified,
+        };
+        queries::seal_stream_uploads(stream)
+            .execute(&mut **db)
+            .await?;
+        ensure!(
+            queries::publish_node_write(node, operation, &hash, &result)
+                .execute(&mut **db)
+                .await?
+                .rows_affected()
+                == 1,
+            Error::OperationAborted
+        );
+        if let Some(lease) = row.lease_id {
+            queries::release_node_write_leases(&[lease])
+                .execute(&mut **db)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn abort_replica_node(
+    db: &mut super::replica_queries::Tx<'_>,
+    node: Option<(Uuid, Uuid)>,
+) -> Result<()> {
+    if let Some((node, operation)) = node {
+        let row = queries::node_write(node, operation)
+            .fetch_one(&mut **db)
+            .await?;
+        super::replication_import_queries::abort_write(node, operation)
+            .execute(&mut **db)
+            .await?;
+        if let Some(lease) = row.lease_id {
+            queries::release_node_write_leases(&[lease])
+                .execute(&mut **db)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn reject_admission(pool: &PgPool, id: Id, reason: &str) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    super::replica_transactions::reap_admission(&mut tx, id, Some(reason)).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(super) async fn discard_replica(
+    db: &mut super::replica_queries::Tx<'_>,
+    bucket: Uuid,
+    stream: Id,
+) -> Result<()> {
+    let row = super::replica_queries::candidate(stream)
+        .fetch_optional(&mut **db)
+        .await?;
+    if let Some(row) = row
+        && row.stream.state == "writing"
+        && row.stream.bucket_id == bucket
+    {
+        super::replica_queries::unclaim(bucket, &row.stream.object_key, stream)
+            .execute(&mut **db)
+            .await?;
+        super::replication_queries::abandon(stream)
+            .execute(&mut **db)
+            .await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn enqueue_replica(
+    db: &mut super::replica_queries::Tx<'_>,
+    bucket: Uuid,
+    detail: Value,
+) -> Result<Uuid> {
+    enqueue_task(db, "storage_migration", Some(bucket), detail, true).await
+}
+
+pub(super) async fn reserve_replica(
+    db: &mut super::replica_queries::Tx<'_>,
+    input: &StreamCreate,
+    size: i64,
+) -> Result<Id> {
+    let stream = queries::insert_stream(input).fetch_one(&mut **db).await?;
+    queries::claim_object(input.bucket, &input.key, stream)
+        .execute(&mut **db)
+        .await?;
+    queries::reserve_quota(stream, size, false, None, None)
+        .fetch_one(&mut **db)
+        .await?;
+    Ok(stream)
+}
+
 pub(super) async fn create_stream_in(
     tx: &mut Transaction<'_, Postgres>,
     mut input: StreamCreate,
@@ -1375,13 +1585,13 @@ pub(super) async fn create_stream_in(
             .add(input.bucket, crate::authorization::Action::Acl);
     }
     input.authority.lock(tx).await?;
-    let (state, paused, managed) = super::redundancy_queries::admission(input.bucket)
+    let (state, paused, managed, required) = super::redundancy_queries::admission(input.bucket)
         .fetch_one(&mut **tx)
         .await?;
     if state != "active" {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
-    if input.owner.is_none() || input.claim_object {
+    if input.owner.is_none() || input.purpose == crate::model::StreamPurpose::Object {
         super::redundancy_transactions::accept_origin(
             tx,
             input.bucket,
@@ -1397,7 +1607,7 @@ pub(super) async fn create_stream_in(
         )
         .await?;
     }
-    if paused && input.stream_type == "object" {
+    if paused && input.purpose.stream_type() == "object" {
         let finishing: bool =
             queries::completing_upload(input.completion, input.bucket, &input.key)
                 .fetch_one(&mut **tx)
@@ -1412,7 +1622,11 @@ pub(super) async fn create_stream_in(
     if let Some(ttl) = ttl_seconds {
         create_write_lease(tx, id, ttl).await?;
     }
-    if input.claim_object {
+    if required != 0 && input.purpose.publishes() {
+        super::redundancy_transactions::freeze(tx, input.bucket, &input.key, id, required, true)
+            .await?;
+    }
+    if input.purpose == crate::model::StreamPurpose::Object {
         queries::claim_object(input.bucket, &input.key, id)
             .execute(&mut **tx)
             .await?;
@@ -2941,7 +3155,7 @@ async fn commit_upload_part_in(
         return Err(s3s::s3_error!(OperationAborted, "part was superseded").into());
     }
     require_writing_stream(tx, stream).await?;
-    let (_, _, _, size, payload, _) = queries::lock_writing_stream(stream)
+    let (_, _, _, size, payload, _, _) = queries::lock_writing_stream(stream)
         .fetch_one(&mut **tx)
         .await?;
     if payload == "raw" {
@@ -3136,6 +3350,17 @@ async fn abort_multipart_in(
     {
         if expired {
             return Ok(false);
+        }
+        if queries::completion_state(upload)
+            .fetch_optional(&mut **db)
+            .await?
+            .is_some_and(|(state, _, live)| state == "completing" && live)
+        {
+            return Err(s3s::s3_error!(
+                OperationAborted,
+                "multipart publication is already in progress"
+            )
+            .into());
         }
         return Err(s3s::s3_error!(NoSuchUpload).into());
     }
@@ -4403,6 +4628,13 @@ pub(super) async fn cleanup_history(
     queries::cleanup_statement_timeout(timeout_ms.max(1).to_string())
         .execute(&mut *tx)
         .await?;
+    if section == "tasks" {
+        super::replica_transactions::reap_abandoned(&mut tx, batch).await?;
+        let expired = super::replica_queries::expired(age, batch)
+            .fetch_all(&mut *tx)
+            .await?;
+        super::replica_transactions::prune(&mut tx, expired).await?;
+    }
     let count = queries::cleanup_history(section, age, batch, active)?
         .execute(&mut *tx)
         .await?
@@ -4415,6 +4647,7 @@ pub(super) async fn recover_runtime(pool: &PgPool, maintenance: bool) -> Result<
     let mut tx = pool.begin().await?;
     queries::reset_access_coverage().execute(&mut *tx).await?;
     queries::abandon_startup_streams().execute(&mut *tx).await?;
+    super::replica_transactions::recover_admissions(&mut tx).await?;
     queries::fail_startup_chunks().execute(&mut *tx).await?;
     queries::retire_startup_encodings()
         .execute(&mut *tx)
@@ -4440,16 +4673,30 @@ pub(super) async fn claim_stale_stream(
 ) -> Result<bool> {
     let mut tx = pool.begin().await?;
     queries::cleanup_limits(&mut tx).await?;
-    if queries::claim_stale_stream(id, retention, storage, single)
-        .build()
-        .execute(&mut *tx)
-        .await?
-        .rows_affected()
-        == 0
-    {
-        return Ok(false);
+    let claimed = claim_stale_stream_in(&mut tx, id, storage, retention, single).await?;
+    if claimed {
+        tx.commit().await?;
     }
-    tx.commit().await?;
+    Ok(claimed)
+}
+
+async fn claim_stale_stream_in(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Id,
+    storage: Option<Uuid>,
+    retention: Option<f64>,
+    single: bool,
+) -> Result<bool> {
+    let Some(publication) = queries::claim_stale_stream(id, retention, storage, single)
+        .build_query_scalar::<Option<Uuid>>()
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(false);
+    };
+    if publication.is_some() {
+        super::replica_transactions::reap_admission(tx, id, None).await?;
+    }
     Ok(true)
 }
 pub(super) async fn cleanup_stream(pool: &PgPool, id: Id, batch: i64) -> Result<usize> {
@@ -5060,7 +5307,7 @@ pub(super) async fn lock_media_scope(
     Ok(())
 }
 
-async fn selected_object(
+pub(super) async fn selected_object(
     tx: &mut Transaction<'_, Postgres>,
     bucket: Uuid,
     key: &str,
@@ -5116,44 +5363,94 @@ pub(super) async fn move_object(
     permit: &Permit,
     input: ObjectTransfer<'_>,
 ) -> Result<()> {
-    let target = input.target_bucket;
     let mut tx = pool.begin().await?;
-    lock_media_scope(&mut tx, permit).await?;
-    super::redundancy_transactions::writable(&mut tx, input.target_bucket, input.target_key, None)
-        .await?;
-    super::redundancy_transactions::writable(&mut tx, input.source_bucket, input.source_key, None)
+    let result = move_object_in(&mut tx, permit, input, None).await;
+    if result.is_ok()
+        || result
+            .as_ref()
+            .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+    {
+        tx.commit().await?;
+    }
+    result
+}
+
+pub(super) async fn move_object_in(
+    tx: &mut super::replica_queries::Tx<'_>,
+    permit: &Permit,
+    input: ObjectTransfer<'_>,
+    resumed: Option<Uuid>,
+) -> Result<()> {
+    let target = input.target_bucket;
+    lock_media_scope(tx, permit).await?;
+    let required = super::redundancy_transactions::writable_targets(
+        tx,
+        input.target_bucket,
+        input.target_key,
+        None,
+    )
+    .await?;
+    super::redundancy_transactions::writable(tx, input.source_bucket, input.source_key, None)
         .await?;
     selected_object(
-        &mut tx,
+        tx,
         input.source_bucket,
         input.source_key,
         Some(input.source_version),
     )
     .await?;
     let key = input.target_key;
-    let old = selected_object(&mut tx, target, key, input.target_version).await?;
+    let old = selected_object(tx, target, key, input.target_version).await?;
     let public: bool = queries::stream_public(input.source_version)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     if public {
         Permit::for_action(permit.principal.clone(), target, Action::Acl)
-            .lock(&mut tx)
+            .lock(tx)
             .await?;
     }
+    let publication = if resumed.is_some() {
+        resumed
+    } else if required != 0 {
+        Some(
+            super::redundancy_transactions::freeze(
+                tx,
+                input.target_bucket,
+                input.target_key,
+                input.source_version,
+                required,
+                false,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    if let Some(publication) = publication {
+        let intent = input.media_intent(permit, "move", public, None);
+        super::replica_transactions::publish(
+            tx,
+            publication,
+            input.target_bucket,
+            input.target_key,
+            input.source_version,
+            &intent,
+        )
+        .await?;
+    }
     queries::tombstone_object(input.source_bucket, input.source_key, Uuid::new_v4())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::move_stream(input.source_version, target, key)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::upsert_object(target, key, input.source_version)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if let Some(old) = old {
-        queries::retire_stream(old).execute(&mut *tx).await?;
+        queries::retire_stream(old).execute(&mut **tx).await?;
     }
-    complete_media_operation(&mut tx, Some(input.source_version)).await?;
-    tx.commit().await?;
+    complete_media_operation(tx, Some(input.source_version)).await?;
     Ok(())
 }
 
@@ -5165,47 +5462,79 @@ pub(super) async fn publish_copy(
     public: bool,
     expected_public: Option<bool>,
 ) -> Result<()> {
-    let (target, key, expected) = (input.target_bucket, input.target_key, input.target_version);
     let mut tx = pool.begin().await?;
+    let result = publish_copy_in(&mut tx, permit, input, id, public, expected_public).await;
+    if result.is_ok()
+        || result
+            .as_ref()
+            .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+    {
+        tx.commit().await?;
+    }
+    result
+}
+
+pub(super) async fn publish_copy_in(
+    tx: &mut super::replica_queries::Tx<'_>,
+    permit: &Permit,
+    input: ObjectTransfer<'_>,
+    id: Id,
+    public: bool,
+    expected_public: Option<bool>,
+) -> Result<()> {
+    let (target, key, expected) = (input.target_bucket, input.target_key, input.target_version);
     let mut authority = permit.clone();
     if public {
         authority.add(target, Action::Acl);
     }
-    lock_media_scope(&mut tx, &authority).await?;
-    super::redundancy_transactions::writable(&mut tx, input.target_bucket, input.target_key, None)
+    lock_media_scope(tx, &authority).await?;
+    super::redundancy_transactions::writable(tx, input.target_bucket, input.target_key, None)
         .await?;
     selected_object(
-        &mut tx,
+        tx,
         input.source_bucket,
         input.source_key,
         Some(input.source_version),
     )
     .await?;
-    let old = selected_object(&mut tx, target, key, expected).await?;
+    let old = selected_object(tx, target, key, expected).await?;
     if let Some(expected_public) = expected_public {
         let current: bool = queries::stream_public(input.source_version)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
         if current != expected_public {
             return Err(s3s::s3_error!(PreconditionFailed).into());
         }
     }
-    require_writing_stream(&mut tx, id).await?;
-    let (_, _, _, size, payload, _) = queries::lock_writing_stream(id).fetch_one(&mut *tx).await?;
+    require_writing_stream(tx, id).await?;
+    let (_, _, _, size, payload, _, publication_id) = queries::lock_writing_stream(id)
+        .fetch_one(&mut **tx)
+        .await?;
     if payload == "raw" {
-        validate_raw(&mut tx, id, size).await?;
+        validate_raw(tx, id, size).await?;
     } else {
-        require_sources(&mut tx, Some(id), &[]).await?;
+        require_sources(tx, Some(id), &[]).await?;
     }
-    queries::publish_copy_stream(id).execute(&mut *tx).await?;
+    if let Some(publication) = publication_id {
+        let intent = input.media_intent(permit, "copy", public, expected_public);
+        super::replica_transactions::publish(
+            tx,
+            publication,
+            input.target_bucket,
+            input.target_key,
+            id,
+            &intent,
+        )
+        .await?;
+    }
+    queries::publish_copy_stream(id).execute(&mut **tx).await?;
     queries::upsert_object(target, key, id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if let Some(old) = old {
-        queries::retire_stream(old).execute(&mut *tx).await?;
+        queries::retire_stream(old).execute(&mut **tx).await?;
     }
-    complete_media_operation(&mut tx, Some(id)).await?;
-    tx.commit().await?;
+    complete_media_operation(tx, Some(id)).await?;
     Ok(())
 }
 
@@ -5244,13 +5573,47 @@ pub(super) async fn queue_storage_migration(
         &mut tx,
         "storage_migration",
         Some(job.target_bucket),
-        serde_json::to_value(job)?,
+        serde_json::json!({"job":job,"authority":authority}),
         false,
     )
     .await?;
     queue_media_operation(&mut tx, task).await?;
     tx.commit().await?;
     Ok(())
+}
+
+pub(super) async fn resume_migration(
+    pool: &PgPool,
+    task: Execution,
+    job: &StorageMigration,
+) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let resumed = resume_migration_in(&mut tx, task, job).await?;
+    tx.commit().await?;
+    Ok(resumed)
+}
+
+pub(super) async fn resume_migration_in(
+    tx: &mut super::replica_queries::Tx<'_>,
+    task: Execution,
+    job: &StorageMigration,
+) -> Result<bool> {
+    let Some((stream, _)) = super::replica_queries::parked_stream(task.id)
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(false);
+    };
+    ensure!(
+        super::replication_queries::adopt(stream, task)
+            .execute(&mut **tx)
+            .await?
+            .rows_affected()
+            == 1,
+        crate::model::Error::OperationAborted
+    );
+    complete_storage_migration_in(tx, task.id, task.token, stream, job).await?;
+    Ok(true)
 }
 
 pub(super) async fn complete_storage_migration(
@@ -5273,7 +5636,20 @@ pub(super) async fn complete_storage_migration_in(
     destination: Id,
     job: &StorageMigration,
 ) -> Result<()> {
-    publish_migration_in(tx, id, lease_token, destination, job).await?;
+    if let Err(error) = publish_migration_in(tx, id, lease_token, destination, job).await {
+        if error.is::<crate::model::ReplicaPending>() {
+            super::replica_transactions::park(
+                tx,
+                Execution {
+                    id,
+                    token: lease_token,
+                },
+            )
+            .await?;
+            return Ok(());
+        }
+        return Err(error);
+    }
     let completed = queries::complete_migration_task(id, lease_token)
         .execute(&mut **tx)
         .await?;
@@ -5317,13 +5693,35 @@ pub(super) async fn publish_migration_in(
         "source object changed during storage migration"
     );
     require_writing_stream(tx, destination).await?;
-    let (_, _, _, size, payload, _) = queries::lock_writing_stream(destination)
+    let (_, _, _, size, payload, _, publication_id) = queries::lock_writing_stream(destination)
         .fetch_one(&mut **tx)
         .await?;
     if payload == "raw" {
         validate_raw(tx, destination, size).await?;
     } else {
         require_sources(tx, Some(destination), &[]).await?;
+    }
+    if let Some(publication) = publication_id {
+        let record = queries::lock_task_detail(Execution {
+            id,
+            token: lease_token,
+        })
+        .fetch_one(&mut **tx)
+        .await?;
+        if let Some(grant) = record.get("authority") {
+            lock_media_scope(tx, &serde_json::from_value(grant.clone())?).await?;
+        }
+        let details =
+            serde_json::json!({"operation":"task","task":id,"method":"migration","job":job});
+        super::replica_transactions::publish(
+            tx,
+            publication,
+            job.target_bucket,
+            &job.target_key,
+            destination,
+            &details,
+        )
+        .await?;
     }
     let published = queries::publish_migration_stream(destination, id, lease_token)
         .execute(&mut **tx)
@@ -6522,6 +6920,10 @@ pub(super) async fn finish_task(pool: &PgPool, input: crate::model::TaskFinish) 
         return Ok(());
     };
     let failed = state == "running" && input.error.is_some();
+    if failed && task_type == "storage_migration" {
+        super::replica_transactions::failed(&mut tx, task.id, input.error.as_deref().unwrap())
+            .await?;
+    }
     if failed && matches!(task_type.as_str(), "pack" | "unpack") {
         queries::defer_pack_changes(task.id)
             .execute(&mut *tx)
@@ -6551,6 +6953,8 @@ pub(super) async fn finish_task(pool: &PgPool, input: crate::model::TaskFinish) 
         queries::requeue_owned_task(task.id, task.token)
             .execute(&mut *tx)
             .await?;
+        // A control batch may have made the next stage executable by a node.
+        queries::notify_work(task.id).execute(&mut *tx).await?;
     } else {
         queries::release_task_lease(task.id, task.token)
             .execute(&mut *tx)
@@ -10633,12 +11037,11 @@ pub(super) async fn begin_node_write(
             authority,
             bucket: bucket.id,
             key: input.intent.key.clone(),
-            stream_type: if input.intent.part.is_some() {
-                "part"
+            purpose: if input.intent.part.is_some() {
+                crate::model::StreamPurpose::Part
             } else {
-                "object"
-            }
-            .into(),
+                crate::model::StreamPurpose::Object
+            },
             metadata: upload.as_ref().map_or_else(
                 || input.intent.metadata.clone(),
                 |upload| upload.metadata.clone(),
@@ -10647,7 +11050,6 @@ pub(super) async fn begin_node_write(
                 .as_ref()
                 .is_some_and(|_| upload.as_ref().unwrap().public_read)
                 || input.intent.public,
-            claim_object: input.intent.part.is_none(),
             completion: completion.as_ref().map(|value| value.upload),
             owner: None,
         },
@@ -10797,10 +11199,21 @@ pub(super) async fn node_write_reply(
     cached: Option<&[crate::model::node_read::Version]>,
 ) -> Result<crate::model::node_write::Reply> {
     use crate::model::{Error, node_read as read, node_write as write};
+    if owned.state == "aborted"
+        && owned.publish_hash.is_some()
+        && let Some((reason,)) =
+            super::replica_queries::node_failure(state.node_id, owned.operation_id)
+                .fetch_optional(&mut *db)
+                .await?
+    {
+        return Err(crate::model::publish::reject_replica(reason.as_deref()));
+    }
     let phase = if owned.state == "published" {
         write::Phase::Published
     } else if owned.state == "aborted" {
         write::Phase::Aborted
+    } else if owned.state == "active" && owned.publish_hash.is_some() {
+        write::Phase::Preparing
     } else if owned.valid_for_ms > 0
         && owned.credential_generation == state.credential_generation
         && owned.boot_id == run.boot
@@ -11161,7 +11574,7 @@ async fn require_node_write(
     row: &queries::NodeWrite,
 ) -> Result<Id> {
     ensure!(
-        row.state == "active" && row.valid_for_ms > 0,
+        row.state == "active" && row.publish_hash.is_none() && row.valid_for_ms > 0,
         Error::NodeExpired
     );
     ensure!(
@@ -11850,17 +12263,53 @@ pub(super) async fn publish_node_write(
                 .map(|value| s3s::dto::ETagCondition::parse_http_header(value.as_bytes()))
                 .transpose()
         };
-        ensure!(
-            publish_in(
-                &mut tx,
-                stream,
-                condition(input.if_match)?,
-                condition(input.if_none)?,
-                completion
-            )
-            .await?,
-            Error::OperationAborted
-        );
+        match publish_in(
+            &mut tx,
+            stream,
+            condition(input.if_match)?,
+            condition(input.if_none)?,
+            completion,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(Error::OperationAborted.into()),
+            Err(error) if error.is::<crate::model::ReplicaPending>() => {
+                let publication = error
+                    .downcast_ref::<crate::model::ReplicaPending>()
+                    .unwrap()
+                    .0;
+                ensure!(
+                    super::replica_queries::node(publication, node.node_id, input.operation)
+                        .execute(&mut *tx)
+                        .await?
+                        .rows_affected()
+                        == 1,
+                    Error::OperationAborted
+                );
+                ensure!(
+                    queries::stage_node_write(node.node_id, input.operation, &hash)
+                        .execute(&mut *tx)
+                        .await?
+                        .rows_affected()
+                        == 1,
+                    Error::OperationAborted
+                );
+                let row = queries::node_write(node.node_id, input.operation)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                let reply = node_write_reply(&mut tx, node, key, input.run, row, None).await?;
+                tx.commit().await?;
+                return Ok(reply);
+            }
+            Err(error) => {
+                if let Some(reason) = crate::model::replica_rejection(&error) {
+                    tx.rollback().await?;
+                    reject_admission(pool, stream, reason).await?;
+                }
+                return Err(error);
+            }
+        }
     }
     let (_, modified) = queries::node_write_size(stream).fetch_one(&mut *tx).await?;
     queries::seal_stream_uploads(stream)
@@ -12759,7 +13208,10 @@ pub(super) async fn publish_import_in(
     super::redundancy_transactions::writable(tx, bucket, key, Some(task.id)).await?;
     let old = selected_object(tx, bucket, key, expected).await?;
     require_writing_stream(tx, id).await?;
-    let stream = super::replication_import_queries::stream(id)
+    let crate::model::PublishingStream {
+        stream,
+        publication_id,
+    } = super::replica_queries::candidate(id)
         .fetch_one(&mut **tx)
         .await?;
     ensure!(
@@ -12770,6 +13222,10 @@ pub(super) async fn publish_import_in(
         validate_raw(tx, id, stream.size).await?;
     } else {
         require_sources(tx, Some(id), &[]).await?;
+    }
+    if let Some(publication) = publication_id {
+        let details = serde_json::json!({"operation":"task","task":task.id,"method":"import","expected":expected,"public":public});
+        super::replica_transactions::publish(tx, publication, bucket, key, id, &details).await?;
     }
     ensure!(
         queries::publish_migration_stream(id, task.id, task.token)

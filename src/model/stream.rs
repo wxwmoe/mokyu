@@ -12,14 +12,31 @@ use uuid::Uuid;
 #[path = "../../tests/recovery/http_compression.rs"]
 pub(crate) mod compression_tests;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamPurpose {
+    Object,
+    Copy,
+    Part,
+    Internal,
+}
+
+impl StreamPurpose {
+    pub(crate) fn stream_type(self) -> &'static str {
+        if self == Self::Part { "part" } else { "object" }
+    }
+
+    pub(crate) fn publishes(self) -> bool {
+        matches!(self, Self::Object | Self::Copy)
+    }
+}
+
 pub(crate) struct StreamCreate {
     pub(crate) authority: Permit,
     pub(crate) bucket: Uuid,
     pub(crate) key: String,
-    pub(crate) stream_type: String,
+    pub(crate) purpose: StreamPurpose,
     pub(crate) metadata: Value,
     pub(crate) public: bool,
-    pub(crate) claim_object: bool,
     pub(crate) completion: Option<Uuid>,
     pub(crate) owner: Option<(Uuid, Uuid)>,
 }

@@ -1,6 +1,12 @@
 export default {
   externalConnectionSettings: "连接设置",
   externalAuthentication: "身份凭据",
+  blocked_replica_pending: "等待同步副本完成",
+  replicationPhase_replicas: "等待同步副本完成",
+  redundancyMode: "写入确认",
+  redundancyMode_asynchronous: "异步",
+  redundancyMode_synchronous: "同步",
+  redundancySyncHint: "需后端落盘的写入等待所有同步目标确认，本地缓冲写入保持原有确认时点",
   redundancyTitle: "存储冗余",
   redundancyHint: "将副本保存在不同的存储后端，每个目标独立追赶源桶的变更",
   redundancyAdd: "添加冗余目标",

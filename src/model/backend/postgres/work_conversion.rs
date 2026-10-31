@@ -127,10 +127,13 @@ pub(super) async fn prepare(
                 authority: Permit::system(),
                 bucket: job.bucket,
                 key: job.object_key.clone(),
-                stream_type: if part { "part" } else { "object" }.into(),
+                purpose: if part {
+                    crate::model::StreamPurpose::Part
+                } else {
+                    crate::model::StreamPurpose::Internal
+                },
                 metadata: original.metadata.clone(),
                 public: original.public_read,
-                claim_object: false,
                 completion: None,
                 owner: Some((task.id, task.token)),
             },

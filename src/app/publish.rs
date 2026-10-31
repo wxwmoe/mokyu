@@ -53,18 +53,21 @@ impl App {
         self.writable()?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("source-before-publish").await;
-        let _coord = self.coord.lock().await;
-        self.writable()?;
         let cache_change = self.public_reads.changing_object(object.0, object.1);
-        if !self
-            .publish
-            .publish(id, if_match.cloned(), if_none.cloned(), completion)
-            .await?
-        {
-            return Err(s3_error!(OperationAborted).into());
-        }
+        let result = {
+            let _coord = self.coord.lock().await;
+            self.writable()?;
+            self.publish
+                .publish(id, if_match.cloned(), if_none.cloned(), completion)
+                .await
+        };
+        self.wait_publication(match result {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(s3_error!(OperationAborted).into()),
+            Err(error) => Err(error),
+        })
+        .await?;
         drop(cache_change);
-        drop(_coord);
         if self
             .storage
             .buffered_writes
@@ -82,6 +85,27 @@ impl App {
         crate::faults::point("object-published").await;
         Ok(())
     }
+    pub(crate) async fn wait_publication(&self, result: Result<()>) -> Result<()> {
+        let Err(error) = result else { return Ok(()) };
+        let Some(pending) = error.downcast_ref::<crate::model::ReplicaPending>() else {
+            return Err(error);
+        };
+        self.wake_tasks.notify_one();
+        tokio::time::timeout(crate::upload::multipart::completion_timeout(), async {
+            let mut interval = std::time::Duration::from_millis(100);
+            loop {
+                self.ensure_mode()?;
+                if self.publish.replicas_ready(pending.0).await? {
+                    return Ok(());
+                }
+                tokio::time::sleep(interval).await;
+                interval = (interval * 2).min(std::time::Duration::from_secs(2));
+            }
+        })
+        .await
+        .map_err(|_| s3s::s3_error!(RequestTimeout, "replica publication is still in progress"))?
+    }
+
     pub async fn delete_object(
         &self,
         principal: &Principal,

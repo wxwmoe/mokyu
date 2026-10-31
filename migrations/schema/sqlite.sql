@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0052.
+-- Generated from the complete sqlite migration chain through 0053.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -46,7 +46,7 @@ CREATE TABLE "audit_events" (
 CREATE TABLE bucket_change_gates (
     bucket_id BLOB PRIMARY KEY REFERENCES buckets(id) ON DELETE CASCADE,
     subscribers INTEGER NOT NULL DEFAULT 0 CHECK (subscribers>=0)
-, managed INTEGER NOT NULL DEFAULT 0 CHECK (managed>=0));
+, managed INTEGER NOT NULL DEFAULT 0 CHECK (managed>=0), required_targets INTEGER NOT NULL DEFAULT 0 CHECK (required_targets>=0));
 
 CREATE TABLE bucket_domains (
     host TEXT NOT NULL PRIMARY KEY,
@@ -665,10 +665,51 @@ CREATE TABLE redundancy_links (
     state TEXT NOT NULL DEFAULT 'preparing' CHECK (state IN ('preparing','active','reconciling','catchup','idle','pausing','paused','removing')),
     reconcile_prefix TEXT NOT NULL DEFAULT '',
     reconciled_at TEXT,
-    next_reconcile_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    next_reconcile_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), synchronous INTEGER NOT NULL DEFAULT 0 CHECK (synchronous IN (0,1)) CHECK (NOT synchronous OR target_bucket IS NOT NULL),
     CHECK ((target_bucket IS NULL)<>(external_bucket IS NULL)),
     CHECK (target_bucket IS NULL OR source_bucket<>target_bucket),
     CHECK (length(CAST(target_prefix AS BLOB))<=1024 AND length(CAST(reconcile_prefix AS BLOB))<=1024)
+);
+
+CREATE TABLE replica_publications (
+    id BLOB NOT NULL PRIMARY KEY,
+    source_bucket BLOB NOT NULL,
+    object_key BLOB NOT NULL,
+    source_pin INTEGER,
+    phase text NOT NULL DEFAULT 'admitted' CHECK (phase IN ('admitted','preparing','published','aborted')),
+    early_ack INTEGER NOT NULL DEFAULT 0 CHECK (early_ack IN (0,1)),
+    intent TEXT,
+    intent_hash BLOB,
+    result TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    FOREIGN KEY (source_bucket) REFERENCES buckets(id),
+    FOREIGN KEY (source_pin) REFERENCES streams(id),
+    CHECK (length(object_key) BETWEEN 1 AND 1024),
+    CHECK (intent_hash IS NULL OR length(intent_hash)=32)
+);
+
+CREATE TABLE replica_targets (
+    publication_id BLOB NOT NULL,
+    link_id BLOB NOT NULL,
+    link_revision BIGINT NOT NULL CHECK (link_revision>0),
+    target_bucket BLOB NOT NULL,
+    target_key BLOB NOT NULL,
+    storage_id BLOB NOT NULL,
+    profile_revision BIGINT NOT NULL CHECK (profile_revision>0),
+    authority TEXT NOT NULL,
+    permissions text NOT NULL,
+    expected_version INTEGER,
+    candidate INTEGER,
+    task_id BLOB,
+    phase text NOT NULL DEFAULT 'admitted' CHECK (phase IN ('admitted','preparing','prepared','published','aborted')),
+    PRIMARY KEY (publication_id,link_id),
+    FOREIGN KEY (publication_id) REFERENCES replica_publications(id) ON DELETE CASCADE,
+    FOREIGN KEY (target_bucket) REFERENCES buckets(id),
+    FOREIGN KEY (storage_id) REFERENCES storages(id),
+    FOREIGN KEY (candidate) REFERENCES streams(id),
+    FOREIGN KEY (task_id) REFERENCES tasks(id),
+    CHECK (length(target_key) BETWEEN 1 AND 1024)
 );
 
 CREATE TABLE runtime_samples (
@@ -865,7 +906,7 @@ CREATE TABLE streams (
     owner_task_id BLOB CHECK (owner_task_id IS NULL OR length(owner_task_id)=16),
     owner_execution_token BLOB CHECK (owner_execution_token IS NULL OR length(owner_execution_token)=16),
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    touched_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), http_compression TEXT CHECK (json_valid(http_compression)) NOT NULL DEFAULT '{}', payload_type TEXT NOT NULL DEFAULT 'chunks' CHECK (payload_type IN ('chunks','raw')), payload_revision INTEGER NOT NULL DEFAULT 1 CHECK (payload_revision>0),
+    touched_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), http_compression TEXT CHECK (json_valid(http_compression)) NOT NULL DEFAULT '{}', payload_type TEXT NOT NULL DEFAULT 'chunks' CHECK (payload_type IN ('chunks','raw')), payload_revision INTEGER NOT NULL DEFAULT 1 CHECK (payload_revision>0), publication_id BLOB REFERENCES replica_publications(id),
     CONSTRAINT streams_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id),
     CONSTRAINT streams_owner FOREIGN KEY (owner_task_id) REFERENCES tasks(id) ON DELETE SET NULL,
     CONSTRAINT streams_key CHECK (length(CAST(object_key AS BLOB)) BETWEEN 1 AND 1024),
@@ -1306,6 +1347,8 @@ CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability IN ('buffered'
 
 CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
 
+CREATE INDEX redundancy_links_admission ON redundancy_links(source_bucket,synchronous,state,id);
+
 CREATE UNIQUE INDEX redundancy_links_destination ON redundancy_links(source_bucket,target_domain);
 
 CREATE INDEX redundancy_links_due ON redundancy_links(state,next_reconcile_at,id);
@@ -1328,6 +1371,16 @@ CREATE INDEX refresh_session ON session_refresh_tokens(session_id);
 
 CREATE INDEX refresh_successor ON session_refresh_tokens(replaced_by) WHERE replaced_by IS NOT NULL;
 
+CREATE INDEX replica_publications_pin ON replica_publications(source_pin);
+
+CREATE INDEX replica_publications_recovery ON replica_publications(phase,updated_at,id);
+
+CREATE INDEX replica_targets_candidate ON replica_targets(candidate);
+
+CREATE INDEX replica_targets_link ON replica_targets(link_id,phase,publication_id);
+
+CREATE UNIQUE INDEX replica_targets_task ON replica_targets(task_id);
+
 CREATE INDEX reservations_replaced ON quota_reservations(bucket_id,object_key,replaced_stream_id);
 
 CREATE INDEX s3_credentials_creator ON s3_credentials(created_by);
@@ -1343,6 +1396,8 @@ CREATE INDEX storages_block_key ON storages(block_key_id);
 CREATE INDEX streams_cleanup ON streams(state,touched_at,id);
 
 CREATE INDEX streams_owner_task_id_fk ON streams(owner_task_id);
+
+CREATE INDEX streams_publication ON streams(publication_id) WHERE publication_id IS NOT NULL;
 
 CREATE INDEX streams_writing ON streams(bucket_id,object_key,state);
 
@@ -1461,6 +1516,21 @@ END;
 CREATE TRIGGER packs_nonce_insert BEFORE INSERT ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
 
 CREATE TRIGGER packs_nonce_update BEFORE UPDATE ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
+
+CREATE TRIGGER redundancy_required_delete AFTER DELETE ON redundancy_links WHEN OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing')
+BEGIN
+    UPDATE bucket_change_gates SET required_targets=required_targets-1 WHERE bucket_id=OLD.source_bucket;
+END;
+
+CREATE TRIGGER redundancy_required_insert AFTER INSERT ON redundancy_links WHEN NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing')
+BEGIN
+    UPDATE bucket_change_gates SET required_targets=required_targets+1 WHERE bucket_id=NEW.source_bucket;
+END;
+
+CREATE TRIGGER redundancy_required_update AFTER UPDATE OF synchronous,state ON redundancy_links WHEN (NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing')) <> (OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing'))
+BEGIN
+    UPDATE bucket_change_gates SET required_targets=required_targets+CASE WHEN NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing') THEN 1 ELSE -1 END WHERE bucket_id=NEW.source_bucket;
+END;
 
 CREATE TRIGGER streams_capture AFTER UPDATE OF public_read,metadata,checksums,etag,size,payload_type ON streams
 WHEN NEW.state='ready' AND NEW.stream_type='object'

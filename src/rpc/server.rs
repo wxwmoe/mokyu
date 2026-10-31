@@ -1181,6 +1181,7 @@ impl NodeMultipart for Service {
         let phase = match phase {
             model::node_write::Phase::Published => wire::WritePhase::WritePublished,
             model::node_write::Phase::Busy => wire::WritePhase::WriteBusy,
+            model::node_write::Phase::Preparing => wire::WritePhase::WritePreparing,
             _ => wire::WritePhase::WriteExpired,
         } as i32;
         Ok(Response::new(wire::CompleteState {

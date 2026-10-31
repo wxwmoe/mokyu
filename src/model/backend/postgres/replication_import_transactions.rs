@@ -46,7 +46,7 @@ async fn create(
     task: Execution,
     run: &Run,
     plan: &Plan,
-    _lease: bool,
+    part: bool,
 ) -> Result<Id> {
     let source = plan
         .state
@@ -59,14 +59,17 @@ async fn create(
             authority: run.options.0.authority(run.authority.0.clone()),
             bucket: run.options.0.target_bucket,
             key: plan.target()?,
-            stream_type: "object".into(),
+            purpose: if part {
+                crate::model::StreamPurpose::Internal
+            } else {
+                crate::model::StreamPurpose::Copy
+            },
             metadata: import::metadata(source)?,
             public: false,
-            claim_object: false,
             completion: None,
             owner: Some((task.id, task.token)),
         },
-        _lease.then_some(crate::model::node_write::LEASE_SECONDS),
+        part.then_some(crate::model::node_write::LEASE_SECONDS),
     )
     .await
 }
@@ -443,7 +446,7 @@ pub(super) async fn complete(
         } else if finish.status == "completed" {
             let candidate = item.candidate.ok_or(Error::OperationAborted)?;
             adopt(db, task, candidate).await?;
-            super::transactions::publish_import_in(
+            if let Err(error) = super::transactions::publish_import_in(
                 db,
                 task,
                 candidate,
@@ -455,7 +458,15 @@ pub(super) async fn complete(
                     plan.state.target_public,
                 ),
             )
-            .await?;
+            .await
+            {
+                if error.is::<crate::model::ReplicaPending>() {
+                    r::save(item_id, &plan.state).execute(&mut **db).await?;
+                    super::replica_transactions::park(db, task).await?;
+                    return Ok(());
+                }
+                return Err(error);
+            }
             Some(candidate)
         } else if finish.status == "skipped" {
             item.target_version

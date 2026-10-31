@@ -11,12 +11,27 @@ impl App {
         lease_token: Uuid,
         detail: Value,
     ) -> Result<bool> {
+        let parked = !detail["replica_parked"].is_null();
         let job: StorageMigration =
             serde_json::from_value(detail.get("job").cloned().unwrap_or(detail))?;
         ensure!(
             matches!(job.action.as_str(), "copy" | "move"),
             "invalid storage migration action"
         );
+        if parked
+            && self
+                .objects
+                .resume_migration(
+                    crate::model::task::Execution {
+                        id,
+                        token: lease_token,
+                    },
+                    &job,
+                )
+                .await?
+        {
+            return Ok(true);
+        }
         let (source, _source_pin) = self.current(job.source_bucket, &job.source_key).await?;
         ensure!(
             source.id == job.source_version,
@@ -50,10 +65,9 @@ impl App {
                 &authority,
                 job.target_bucket,
                 &job.target_key,
-                "object",
+                crate::model::StreamPurpose::Copy,
                 source.metadata.clone(),
                 job.public_read,
-                false,
                 None,
                 Some((id, lease_token)),
             )
@@ -71,6 +85,7 @@ impl App {
             .await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("migration-before-publish").await;
+            drop(_storage_permit);
             let _coord = self.coord.lock().await;
             self.writable()?;
             let _cache = self.public_reads.changing();

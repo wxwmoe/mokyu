@@ -14,10 +14,9 @@ async fn stream(backend: &Backend, bucket: Uuid, key: &str) -> Result<Id> {
             authority: Permit::for_action(Principal::Local, bucket, Action::Write),
             bucket,
             key: key.into(),
-            stream_type: "object".into(),
+            purpose: crate::model::StreamPurpose::Object,
             metadata: json!({"content_type":"image/png"}),
             public: false,
-            claim_object: true,
             completion: None,
             owner: None,
         })
@@ -300,10 +299,9 @@ async fn sqlite_quota_and_publication_contract() -> Result<()> {
                 authority: Permit::for_action(Principal::Local, bucket, Action::Write),
                 bucket,
                 key: "multipart".into(),
-                stream_type: "part".into(),
+                purpose: crate::model::StreamPurpose::Part,
                 metadata: json!({}),
                 public: false,
-                claim_object: false,
                 completion: None,
                 owner: None,
             })

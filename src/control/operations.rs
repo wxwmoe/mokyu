@@ -737,21 +737,13 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         Command::Task(Tasks::List) => {
             let mut tasks = app.task_control.all().await?;
             for task in &mut tasks {
-                if let Some(detail) = task["detail"].as_object_mut() {
-                    detail.remove("source_operation");
-                    detail.remove("source_inputs");
-                    detail.remove("sweep_page");
-                }
+                crate::model::task::present(task);
             }
             Ok(json!(tasks))
         }
         Command::Task(Tasks::Show { id }) => {
             let mut task = app.task_control.raw(id).await?.context("task not found")?;
-            if let Some(detail) = task["detail"].as_object_mut() {
-                detail.remove("source_operation");
-                detail.remove("source_inputs");
-                detail.remove("sweep_page");
-            }
+            crate::model::task::present(&mut task);
             Ok(task)
         }
         Command::Task(Tasks::Pause { id }) => app.task_change(principal, id, false).await,

@@ -81,7 +81,7 @@ impl Writes {
         let mut waiter = None;
         let work = match wire::WritePhase::try_from(reply.phase)? {
             wire::WritePhase::WritePublished => return output(&bucket, &key, &value),
-            wire::WritePhase::WriteBusy => {
+            wire::WritePhase::WriteBusy | wire::WritePhase::WritePreparing => {
                 let resolved: crate::app::Bucket = request.material(
                     request
                         .reply
@@ -102,6 +102,7 @@ impl Writes {
             wire::WritePhase::WriteActive => {
                 let mut operation =
                     self.accept(request, reply, held, started, false, value.size as u64)?;
+                operation.key = Some(key.clone());
                 let writes = self.clone();
                 let name = key.clone();
                 Some(tokio::spawn(
@@ -213,7 +214,7 @@ impl Writes {
                         wire::WritePhase::WritePublished => {
                             return Ok(serde_json::from_slice(&reply.summary_json)?);
                         }
-                        wire::WritePhase::WriteBusy => {}
+                        wire::WritePhase::WriteBusy | wire::WritePhase::WritePreparing => {}
                         _ => return Err(multipart::completion_retry().into()),
                     }
                     #[cfg(feature = "fault-injection")]

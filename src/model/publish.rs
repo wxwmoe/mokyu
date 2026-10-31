@@ -6,10 +6,69 @@ use s3s::s3_error;
 use serde_json::Value;
 use uuid::Uuid;
 
+#[derive(Debug)]
+pub(crate) struct ReplicaPending(pub Uuid);
+
+impl std::fmt::Display for ReplicaPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "waiting for replica publication {}", self.0)
+    }
+}
+
+impl std::error::Error for ReplicaPending {}
+
+pub(crate) fn replica_rejection(error: &anyhow::Error) -> Option<&'static str> {
+    if let Some(error) = error.downcast_ref::<s3s::S3Error>() {
+        return match error.code() {
+            s3s::S3ErrorCode::AccessDenied => Some("access_denied"),
+            s3s::S3ErrorCode::PreconditionFailed => Some("precondition_failed"),
+            s3s::S3ErrorCode::OperationAborted => Some("operation_aborted"),
+            _ => None,
+        };
+    }
+    match super::error(error) {
+        Some(super::Error::QuotaExceeded) => Some("quota_exceeded"),
+        Some(super::Error::OperationAborted | super::Error::NodeExpired) => {
+            Some("operation_aborted")
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn reject_replica(code: Option<&str>) -> anyhow::Error {
+    match code {
+        Some("access_denied") => s3_error!(AccessDenied).into(),
+        Some("precondition_failed") => s3_error!(PreconditionFailed).into(),
+        Some("quota_exceeded") => super::Error::QuotaExceeded.into(),
+        _ => super::Error::OperationAborted.into(),
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct PublishingStream {
+    #[sqlx(flatten)]
+    pub stream: crate::app::StoredStream,
+    pub publication_id: Option<Uuid>,
+}
+
+pub(crate) fn write_intent(
+    if_match: Option<&ETagCondition>,
+    if_none: Option<&ETagCondition>,
+    completion: &Option<(Uuid, String, Value, Uuid)>,
+) -> Result<Value> {
+    let header =
+        |value: &ETagCondition| -> Result<String> { Ok(value.to_http_header()?.to_str()?.into()) };
+    Ok(
+        serde_json::json!({"operation":"write","if_match":if_match.map(header).transpose()?,
+        "if_none":if_none.map(header).transpose()?,"completion":completion}),
+    )
+}
+
 /// The publish transaction is owned by the backend so authorization, object
 /// locks, upload completion and audit checkpoints keep one lock order.
 #[async_trait]
 pub(crate) trait PublishStore: Send + Sync {
+    async fn replicas_ready(&self, publication: Uuid) -> Result<bool>;
     async fn publish(
         &self,
         stream: Id,

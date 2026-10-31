@@ -72,7 +72,10 @@ pub(crate) use id::Id;
 pub(crate) use multipart::MultipartStore;
 pub(crate) use object::{ObjectChange, ObjectStore};
 pub(crate) use packing::PackingStore;
-pub(crate) use publish::{PublishStore, check_write_conditions};
+pub(crate) use publish::{
+    PublishStore, PublishingStream, ReplicaPending, check_write_conditions, replica_rejection,
+    write_intent,
+};
 
 pub(crate) fn error(source: &anyhow::Error) -> Option<Error> {
     source
@@ -92,7 +95,7 @@ pub(crate) use settings::{
 pub(crate) use storage::{StorageRecord, StorageRecordStore};
 pub(crate) use stream::{
     CachedExtent, CachedStream, CompressionObservation, ReadRoute, ReadSnapshot, StreamCreate,
-    StreamStore, StreamTail,
+    StreamPurpose, StreamStore, StreamTail,
 };
 pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord};
 

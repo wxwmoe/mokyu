@@ -1,6 +1,12 @@
 export default {
   externalConnectionSettings: "接続設定",
   externalAuthentication: "認証情報",
+  blocked_replica_pending: "同期先への書き込みを待機中",
+  replicationPhase_replicas: "同期先への書き込みを待機中",
+  redundancyMode: "書き込みの確認",
+  redundancyMode_asynchronous: "非同期",
+  redundancyMode_synchronous: "同期",
+  redundancySyncHint: "永続化が必要な書き込みはすべての同期先の完了を待ちます。ローカルにバッファできる書き込みの応答時点は変わりません",
   redundancyTitle: "ストレージの冗長化",
   redundancyHint: "異なるストレージにコピーを保存し、それぞれがコピー元の変更を反映します",
   redundancyAdd: "コピー先を追加",

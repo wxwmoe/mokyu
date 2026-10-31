@@ -472,9 +472,9 @@ pub(super) fn write_authorization(id: Id) -> Scalar<'static, sqlx::types::Json<P
 
 pub(super) fn lock_writing_stream(
     id: Id,
-) -> Rows<'static, (Uuid, String, String, i64, String, bool)> {
+) -> Rows<'static, (Uuid, String, String, i64, String, bool, Option<Uuid>)> {
     sqlx::query_as(
-        "SELECT bucket_id,object_key,state,size,payload_type,COALESCE((metadata->'user') ? 'mokyu-replica-origin',false) FROM streams WHERE id=$1 FOR UPDATE",
+        "SELECT bucket_id,object_key,state,size,payload_type,COALESCE((metadata->'user') ? 'mokyu-replica-origin',false),publication_id FROM streams WHERE id=$1 FOR UPDATE",
     )
     .bind(id)
 }
@@ -557,7 +557,7 @@ pub(super) fn lock_stale_tasks() -> Scalar<'static, Uuid> {
 }
 
 pub(super) fn abandon_task_streams<'q>(ids: &'q [Uuid]) -> Statement<'q> {
-    sqlx::query("UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE state='writing' AND owner_task_id=ANY($1) AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i JOIN transfer_items t ON t.id=i.item_id WHERE i.part_stream=streams.id OR t.candidate=streams.id)")
+    sqlx::query("UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE state='writing' AND owner_task_id=ANY($1) AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i JOIN transfer_items t ON t.id=i.item_id WHERE i.part_stream=streams.id OR t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared'))")
         .bind(ids)
 }
 
@@ -736,7 +736,7 @@ pub(super) fn complete_upload<'q>(
     stream: Id,
     token: Uuid,
 ) -> Statement<'q> {
-    sqlx::query("UPDATE uploads SET state='completed',result=$3,output_stream=$4,touched_at=now() WHERE id=$1 AND state='completing' AND manifest_hash=$2 AND completion_token=$5 AND completion_expires_at>clock_timestamp()")
+    sqlx::query("UPDATE uploads SET state='completed',result=$3,output_stream=$4,touched_at=now() WHERE id=$1 AND state='completing' AND manifest_hash=$2 AND completion_token=$5 AND (completion_expires_at>clock_timestamp() OR output_stream=$4)")
         .bind(id)
         .bind(hash)
         .bind(result)
@@ -763,9 +763,9 @@ pub(super) fn task_control(id: Uuid) -> Rows<'static, (bool, String, Value)> {
 pub(super) fn change_task_state(id: Uuid, parent: bool, resume: bool) -> Statement<'static> {
     let query = if resume {
         if parent {
-            "UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE (id=$1 OR parent_task_id=$1) AND state IN ('paused','failed') AND coalesce(detail->>'test_stopped','false')<>'true'"
+            "UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE (id=$1 OR parent_task_id=$1) AND state IN ('paused','failed') AND COALESCE(error,'') NOT IN ('replica_pending','replica_drain') AND coalesce(detail->>'test_stopped','false')<>'true'"
         } else {
-            "UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE id=$1 AND state IN ('paused','failed') AND coalesce(detail->>'test_stopped','false')<>'true'"
+            "UPDATE tasks SET state='queued',error=NULL,updated_at=now() WHERE id=$1 AND state IN ('paused','failed') AND COALESCE(error,'') NOT IN ('replica_pending','replica_drain') AND coalesce(detail->>'test_stopped','false')<>'true'"
         }
     } else if parent {
         "UPDATE tasks SET state='paused',updated_at=now() WHERE (id=$1 OR parent_task_id=$1) AND state IN ('queued','running')"
@@ -988,7 +988,7 @@ pub(super) fn insert_stream(input: &StreamCreate) -> Scalar<'_, Id> {
 
         .bind(input.bucket)
         .bind(&input.key)
-        .bind(&input.stream_type)
+        .bind(input.purpose.stream_type())
         .bind(&input.metadata)
         .bind(input.public)
         .bind(sqlx::types::Json(&input.authority))
@@ -3517,7 +3517,7 @@ pub(super) fn begin_upload_completion<'a>(
 }
 
 pub(super) fn abort_multipart(id: Uuid, expired: bool) -> Statement<'static> {
-    sqlx::query("UPDATE uploads SET state='aborted',touched_at=now() WHERE id=$1 AND state IN ('active','completing') AND (NOT $2 OR (state='active' AND NOT EXISTS(SELECT 1 FROM parts part JOIN stream_leases l ON l.stream_id=part.write_token WHERE part.upload_id=uploads.id AND l.expires_at>now()) AND EXISTS(SELECT 1 FROM buckets b JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=uploads.bucket_id AND uploads.touched_at<now()-(left(p.multipart_idle_timeout,-1)::bigint*CASE right(p.multipart_idle_timeout,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*interval '1 second')))").bind(id).bind(expired)
+    sqlx::query("UPDATE uploads SET state='aborted',touched_at=now() WHERE id=$1 AND state IN ('active','completing') AND output_stream IS NULL AND (NOT $2 OR (state='active' AND NOT EXISTS(SELECT 1 FROM parts part JOIN stream_leases l ON l.stream_id=part.write_token WHERE part.upload_id=uploads.id AND l.expires_at>now()) AND EXISTS(SELECT 1 FROM buckets b JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=uploads.bucket_id AND uploads.touched_at<now()-(left(p.multipart_idle_timeout,-1)::bigint*CASE right(p.multipart_idle_timeout,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*interval '1 second')))").bind(id).bind(expired)
 }
 
 pub(super) fn upload_bucket(id: Uuid) -> Scalar<'static, Uuid> {
@@ -3766,7 +3766,7 @@ impl MultipartStore for Backend {
         Ok(())
     }
     async fn retry_complete(&self, upload: Uuid, token: Uuid) -> Result<()> {
-        sqlx::query("UPDATE uploads SET state='active',completion_token=NULL,completion_expires_at=NULL,touched_at=clock_timestamp() WHERE id=$1 AND completion_token=$2 AND state='completing'").bind(upload).bind(token).execute(&self.pool).await?;
+        sqlx::query("UPDATE uploads SET state='active',completion_token=NULL,completion_expires_at=NULL,touched_at=clock_timestamp() WHERE id=$1 AND completion_token=$2 AND state='completing' AND output_stream IS NULL").bind(upload).bind(token).execute(&self.pool).await?;
         Ok(())
     }
     async fn renew_complete(
@@ -5157,7 +5157,7 @@ pub(super) fn reset_access_coverage() -> Statement<'static> {
 }
 pub(super) fn abandon_startup_streams() -> Statement<'static> {
     sqlx::query(
-        "UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE state='writing' AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i JOIN transfer_items t ON t.id=i.item_id WHERE i.part_stream=streams.id OR t.candidate=streams.id)",
+        "UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE state='writing' AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i JOIN transfer_items t ON t.id=i.item_id WHERE i.part_stream=streams.id OR t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared'))",
     )
 }
 pub(super) fn fail_startup_chunks() -> Statement<'static> {
@@ -5179,7 +5179,9 @@ pub(super) fn clear_pack_inputs() -> Statement<'static> {
     sqlx::query("DELETE FROM pack_inputs")
 }
 pub(super) fn reset_completing_uploads() -> Statement<'static> {
-    sqlx::query("UPDATE uploads SET state='active' WHERE state='completing'")
+    sqlx::query(
+        "UPDATE uploads SET state='active' WHERE state='completing' AND output_stream IS NULL",
+    )
 }
 pub(super) fn reset_startup_tasks(maintenance: bool) -> Statement<'static> {
     sqlx::query("UPDATE tasks SET state=CASE WHEN task_type IN ('purge','pack','unpack','upload','cache_flush','storage_migration','rewrite') AND $1 THEN 'paused' ELSE 'queued' END,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=now() WHERE state='running' OR (task_type IN ('purge','pack','unpack','upload','cache_flush','storage_migration','rewrite') AND state='queued' AND $1)").bind(maintenance)
@@ -5210,7 +5212,7 @@ fn stale_stream_filter(query: &mut QueryBuilder<Postgres>, retention: Option<f64
     if !single {
         query.push(" AND NOT EXISTS(SELECT 1 FROM stream_leases l WHERE l.stream_id=s.id AND l.expires_at>now())");
     }
-    query.push(" AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_changes p WHERE p.source_version=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i WHERE i.part_stream=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>now()))");
+    query.push(" AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_changes p WHERE p.source_version=s.id) AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=s.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=s.id AND rt.phase IN ('preparing','prepared')) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i WHERE i.part_stream=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.lease_token=s.owner_lease_token AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>now()))");
 }
 pub(super) fn stale_streams(
     active: &[Id],
@@ -5249,6 +5251,7 @@ pub(super) fn claim_stale_stream(
             .push(")");
     }
     stale_stream_filter(&mut query, retention, single);
+    query.push(" RETURNING s.publication_id");
     query
 }
 
@@ -5368,7 +5371,7 @@ pub(super) fn cleanup_history<'q>(
             "DELETE FROM integrity_issues WHERE id IN (SELECT i.id FROM integrity_issues i JOIN tasks t ON t.id=i.task_id WHERE t.state='completed' AND t.updated_at<now()-$1*interval '1 second' ORDER BY i.id LIMIT $2 FOR UPDATE OF i SKIP LOCKED)"
         }
         "tasks" => {
-            "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks t WHERE state='completed' AND updated_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id) AND NOT EXISTS(SELECT 1 FROM external_tests e WHERE e.id=t.id AND e.cleanup_required) ORDER BY updated_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
+            "DELETE FROM tasks WHERE id IN (SELECT id FROM tasks t WHERE state='completed' AND updated_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id) AND NOT EXISTS(SELECT 1 FROM external_tests e WHERE e.id=t.id AND e.cleanup_required) AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.task_id=t.id) ORDER BY updated_at,id LIMIT $2 FOR UPDATE SKIP LOCKED)"
         }
         "sessions" => {
             "DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions s WHERE expires_at<now()-$1*interval '1 second' AND NOT EXISTS(SELECT 1 FROM session_refresh_tokens r WHERE r.session_id=s.id AND r.revoked_at IS NULL AND r.expires_at>now()) ORDER BY expires_at,token_hash LIMIT $2 FOR UPDATE SKIP LOCKED)"
@@ -6203,7 +6206,7 @@ pub(super) fn publish_copy_stream(stream: Id) -> Statement<'static> {
 
 pub(super) fn abandon_copy_stream(stream: Id) -> Statement<'static> {
     sqlx::query(
-        "UPDATE streams SET state='abandoned',touched_at=now() WHERE id=$1 AND state='writing'",
+        "UPDATE streams SET state='abandoned',touched_at=now() WHERE id=$1 AND state='writing' AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared'))",
     )
     .bind(stream)
 }
@@ -6221,7 +6224,7 @@ pub(super) fn complete_migration_task(task: Uuid, token: Uuid) -> Statement<'sta
 }
 
 pub(super) fn abandon_migration_stream(stream: Id) -> Statement<'static> {
-    sqlx::query("UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE id=$1 AND state='writing'").bind(stream)
+    sqlx::query("UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_lease_token=NULL,touched_at=now() WHERE id=$1 AND state='writing' AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared'))").bind(stream)
 }
 
 #[async_trait::async_trait]
@@ -6290,6 +6293,13 @@ impl ObjectStore for Backend {
     }
     async fn queue_migration(&self, permit: &Permit, job: &StorageMigration) -> Result<()> {
         transactions::queue_storage_migration(&self.pool, permit, job).await
+    }
+    async fn resume_migration(
+        &self,
+        task: crate::model::task::Execution,
+        job: &StorageMigration,
+    ) -> Result<bool> {
+        transactions::resume_migration(&self.pool, task, job).await
     }
     async fn complete_migration(
         &self,
@@ -7111,7 +7121,14 @@ pub(super) fn task_page(
     let mut sql = sqlx::QueryBuilder::new(JOB_SQL);
     sql.push(" WHERE true");
     if let Some(value) = q.state {
-        sql.push(" AND t.state=").push_bind(value);
+        match value.as_str() {
+            "running" => sql
+                .push(" AND (t.state='running' OR t.state='paused' AND t.error='replica_pending')"),
+            "paused" => {
+                sql.push(" AND t.state='paused' AND COALESCE(t.error,'')<>'replica_pending'")
+            }
+            _ => sql.push(" AND t.state=").push_bind(value),
+        };
     }
     if let Some(value) = q.policy {
         sql.push(" AND coalesce(t.detail->>'policy',t.task_type)=")
@@ -10374,7 +10391,7 @@ pub(super) fn scope_upload_task(
 }
 
 pub(super) fn completion_state(upload: Uuid) -> Rows<'static, (String, Option<String>, bool)> {
-    sqlx::query_as("SELECT state,manifest_hash,COALESCE(completion_expires_at>clock_timestamp(),false) FROM uploads WHERE id=$1 FOR UPDATE").bind(upload)
+    sqlx::query_as("SELECT state,manifest_hash,(output_stream IS NOT NULL OR COALESCE(completion_expires_at>clock_timestamp(),false)) FROM uploads WHERE id=$1 FOR UPDATE").bind(upload)
 }
 pub(super) fn completion_parts(upload: Uuid) -> Rows<'static, (i32, Id)> {
     sqlx::query_as("SELECT part_number,stream_id FROM parts WHERE upload_id=$1 AND stream_id IS NOT NULL ORDER BY part_number").bind(upload)
@@ -11215,7 +11232,7 @@ pub(super) fn node_write_limit(id: Uuid) -> Scalar<'static, Option<i32>> {
 }
 
 pub(super) fn node_write_cleanup(node: Uuid) -> Statement<'static> {
-    sqlx::query("DELETE FROM node_writes WHERE node_id=$1 AND operation_id IN (SELECT w.operation_id FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND COALESCE(w.completed_at,w.created_at)<clock_timestamp()-interval '1 day' AND (l.id IS NULL OR l.expires_at<=clock_timestamp()) ORDER BY w.created_at LIMIT 64)").bind(node)
+    sqlx::query("DELETE FROM node_writes WHERE node_id=$1 AND operation_id IN (SELECT w.operation_id FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND (w.state<>'active' OR w.publish_hash IS NULL) AND COALESCE(w.completed_at,w.created_at)<clock_timestamp()-interval '1 day' AND (l.id IS NULL OR l.expires_at<=clock_timestamp()) ORDER BY w.created_at LIMIT 64)").bind(node)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11258,12 +11275,12 @@ pub(super) fn abort_node_writes<'q>(
     operations: &'q [Uuid],
     leases: &'q [Uuid],
 ) -> Rows<'q, (Option<Uuid>, Option<Uuid>)> {
-    sqlx::query_as("UPDATE node_writes SET state='aborted',completed_at=clock_timestamp() WHERE node_id=$1 AND credential_generation=$2 AND boot_id=$3 AND fence=$4 AND state='active' AND (operation_id=ANY($5) OR lease_id=ANY($6)) RETURNING stream_id,lease_id")
+    sqlx::query_as("UPDATE node_writes SET state='aborted',completed_at=clock_timestamp() WHERE node_id=$1 AND credential_generation=$2 AND boot_id=$3 AND fence=$4 AND state='active' AND publish_hash IS NULL AND (operation_id=ANY($5) OR lease_id=ANY($6)) RETURNING stream_id,lease_id")
         .bind(state.node_id).bind(state.credential_generation).bind(run.boot).bind(run.fence).bind(operations).bind(leases)
 }
 
 pub(super) fn abandon_node_streams(ids: &[Uuid]) -> Statement<'_> {
-    sqlx::query("UPDATE streams SET state='abandoned',touched_at=clock_timestamp() WHERE id=ANY($1) AND state='writing'").bind(ids)
+    sqlx::query("UPDATE streams SET state='abandoned',touched_at=clock_timestamp() WHERE id=ANY($1) AND state='writing' AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared'))").bind(ids)
 }
 
 pub(super) fn release_node_write_leases(ids: &[Uuid]) -> Statement<'_> {
@@ -11358,6 +11375,11 @@ pub(super) fn commit_node_write_batch<'q>(
 
 pub(super) fn node_write_size(stream: Id) -> Rows<'static, (i64, DateTime<Utc>)> {
     sqlx::query_as("SELECT size,touched_at FROM streams WHERE id=$1 FOR UPDATE").bind(stream)
+}
+
+pub(super) fn stage_node_write<'q>(node: Uuid, operation: Uuid, hash: &'q [u8]) -> Statement<'q> {
+    sqlx::query("UPDATE node_writes SET publish_hash=$3 WHERE node_id=$1 AND operation_id=$2 AND state='active' AND publish_hash IS NULL")
+        .bind(node).bind(operation).bind(hash)
 }
 
 pub(super) fn publish_node_write<'q>(

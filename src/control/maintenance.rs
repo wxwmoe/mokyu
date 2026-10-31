@@ -38,14 +38,7 @@ pub(super) struct Job {
     blocked: Option<String>,
 }
 fn job(mut value: Value) -> Result<Job> {
-    if let Some(detail) = value["detail"].as_object_mut() {
-        detail.remove("source_operation");
-        detail.remove("source_inputs");
-        detail.remove("sweep_page");
-        detail.remove("node_pack");
-        detail.remove("node_raw");
-        detail.remove("node_conversion");
-    }
+    crate::model::task::present(&mut value);
     let task_type = value["task_type"].as_str().unwrap_or("unknown").to_owned();
     value["task_type"] = json!(task_type);
     value["status"] = value["state"].clone();
@@ -129,6 +122,15 @@ mod tests {
         assert_eq!(job.created_by, "Scheduler");
         assert_eq!(job.processed, "0");
         assert_eq!(job.detail, json!({"role":"child"}));
+        let mut waiting = serde_json::to_value(&job).unwrap();
+        waiting["state"] = "paused".into();
+        waiting["error"] = "replica_pending".into();
+        waiting["detail"] = json!({"authority":{"access":"private"},"replica_parked":1});
+        let waiting = super::job(waiting).unwrap();
+        assert_eq!(waiting.state, "running");
+        assert_eq!(waiting.blocked.as_deref(), Some("replica_pending"));
+        assert!(waiting.error.is_none());
+        assert_eq!(waiting.detail, json!({}));
     }
 }
 async fn guard(app: &App, actor: &Identity) -> Result<Box<dyn crate::model::AdminGuard>> {

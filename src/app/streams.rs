@@ -63,10 +63,9 @@ impl App {
         authority: &Permit,
         bucket: Uuid,
         key: &str,
-        stream_type: &str,
+        purpose: crate::model::StreamPurpose,
         metadata: Value,
         public: bool,
-        claim_object: bool,
         completion: Option<Uuid>,
         owner: Option<(Uuid, Uuid)>,
     ) -> Result<(Id, Active)> {
@@ -80,10 +79,9 @@ impl App {
             authority: authority.clone(),
             bucket,
             key: key.into(),
-            stream_type: stream_type.into(),
+            purpose,
             metadata,
             public,
-            claim_object,
             completion,
             owner,
         };

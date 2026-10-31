@@ -3065,7 +3065,7 @@ export interface components {
             task_id: string;
         };
         /** @enum {string} */
-        RedundancyMode: "asynchronous";
+        RedundancyMode: "asynchronous" | "synchronous";
         RedundancyPage: {
             links: components["schemas"]["RedundancyLink"][];
             /** Format: uuid */
