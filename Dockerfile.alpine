@@ -7,6 +7,19 @@ RUN --mount=type=cache,target=/root/.npm if [ "$WEB_UI" = true ]; then npm ci; f
 COPY web ./
 RUN if [ "$WEB_UI" = true ]; then npm run build; else mkdir -p dist; fi
 
+FROM alpine:3.23 AS image-codecs
+RUN apk add --no-cache build-base ca-certificates cmake git ninja nasm pkgconf \
+    brotli-dev libpng-dev libjpeg-turbo-dev lcms2-dev libheif-dev libwebp-dev vips-dev
+WORKDIR /build/image
+COPY native/image/dependencies.sh ./
+RUN sh dependencies.sh
+FROM image-codecs AS image-tools
+RUN apk add --no-cache libjxl-dev libavif-dev
+COPY native/image/hdr.sh ./
+RUN sh hdr.sh
+COPY native/image/build.sh native/image/image.c native/image/source.h native/image/encode.h native/image/hdr.h native/image/io.h native/image/jpeg.cc ./
+RUN sh build.sh
+
 FROM rust:1.96.0-alpine3.23 AS build
 ARG WEB_UI=true
 RUN apk add --no-cache build-base cmake protobuf-dev
@@ -22,7 +35,11 @@ RUN --mount=type=cache,id=mokyu-alpine-registry,target=/usr/local/cargo/registry
     else cargo build --release --locked --no-default-features --bin mokyu; fi \
     && cp target/release/mokyu /mokyu
 
-FROM alpine:3.23
+FROM alpine:3.23 AS image-runtime
+RUN apk add --no-cache vips vips-heif vips-jxl libavif
+COPY --from=image-tools /opt/mokyu /opt/mokyu
+
+FROM image-runtime
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /mokyu /usr/local/bin/mokyu
 RUN mkdir -p /data/multipart /data/chunks /config \

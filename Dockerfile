@@ -7,6 +7,22 @@ RUN --mount=type=cache,target=/root/.npm if [ "$WEB_UI" = true ]; then npm ci; f
 COPY web ./
 RUN if [ "$WEB_UI" = true ]; then npm run build; else mkdir -p dist; fi
 
+FROM rust:1.96.0-bookworm AS image-codecs
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends \
+       build-essential ca-certificates cmake git ninja-build nasm pkg-config \
+       libbrotli-dev libpng-dev libjpeg-dev liblcms2-dev libheif-dev libwebp-dev libvips-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /build/image
+COPY native/image/dependencies.sh ./
+RUN sh dependencies.sh
+FROM image-codecs AS image-tools
+RUN apt-get update && apt-get install -y --no-install-recommends libjxl-dev libavif-dev && rm -rf /var/lib/apt/lists/*
+COPY native/image/hdr.sh ./
+RUN sh hdr.sh
+COPY native/image/build.sh native/image/image.c native/image/source.h native/image/encode.h native/image/hdr.h native/image/io.h native/image/jpeg.cc ./
+RUN sh build.sh
+
 FROM rust:1.96.0-bookworm AS build
 ARG WEB_UI=true
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
@@ -24,9 +40,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     else cargo build --release --locked --no-default-features --bin mokyu; fi \
     && cp target/release/mokyu /mokyu
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS image-runtime
+COPY --from=image-codecs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends libvips42 libjxl0.7 libavif15 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=image-tools /opt/mokyu /opt/mokyu
+
+FROM image-runtime
 ENV MALLOC_MMAP_THRESHOLD_=131072
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /mokyu /usr/local/bin/mokyu
 RUN mkdir -p /data/multipart /data/chunks /config \
     && chown -R 10001:10001 /data
