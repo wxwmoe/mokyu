@@ -6,7 +6,8 @@ use utoipa::ToSchema;
 macro_rules! values {
     ($name:ident, $($item:ident => $word:literal),+ $(,)?) => {
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-        pub(crate) enum $name { $(#[serde(rename=$word)] $item),+ }
+        #[serde(rename_all = "lowercase")]
+        pub(crate) enum $name { $($item),+ }
         impl $name {
             pub fn word(self) -> &'static str { match self { $(Self::$item => $word),+ } }
         }

@@ -12,6 +12,7 @@ mod error;
 pub(crate) mod external;
 pub(crate) mod external_test;
 mod id;
+pub(crate) mod image_styles;
 pub(crate) mod integrity;
 pub(crate) mod key;
 pub(crate) mod key_replacement;
@@ -129,6 +130,7 @@ pub(crate) struct Stores {
     pub(crate) storage_records: Arc<dyn StorageRecordStore>,
     pub(crate) replications: Arc<dyn replication::ReplicationStore>,
     pub(crate) redundancy: Arc<dyn redundancy::RedundancyStore>,
+    pub(crate) image_styles: Arc<dyn image_styles::ImageStore>,
     pub(crate) tiering: Arc<dyn tiering::TieringStore>,
     pub(crate) external_buckets: Arc<dyn external::ExternalStore>,
     pub(crate) chunks: Arc<dyn ChunkStore>,

@@ -3286,7 +3286,7 @@ pub(super) async fn domain_change(
     Ok(())
 }
 
-async fn lock_bucket_settings(
+pub(super) async fn lock_bucket_settings(
     connection: &mut MySqlConnection,
     principal: &Principal,
     bucket: Uuid,

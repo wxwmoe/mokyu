@@ -21,6 +21,8 @@ pub enum Command {
         ready: bool,
     },
     #[command(subcommand)]
+    Styles(Styles),
+    #[command(subcommand)]
     Bucket(Buckets),
     #[command(name = "cred")]
     #[command(subcommand)]
@@ -620,6 +622,12 @@ impl Command {
 
     pub fn audit_action(&self) -> Option<&'static str> {
         match self {
+            Self::Styles(Styles::Export(_)) => None,
+            Self::Styles(Styles::Import(args)) => args
+                .document
+                .as_ref()
+                .is_some_and(|doc| doc.get("apply").and_then(Value::as_bool) == Some(true))
+                .then_some("image_styles.import"),
             Self::Init { .. }
             | Self::Status { .. }
             | Self::Audit { .. }
@@ -769,4 +777,42 @@ pub enum Users {
     Delete {
         username: String,
     },
+}
+
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Styles {
+    Import(StyleImport),
+    Export(StyleExport),
+}
+#[derive(clap::Args, Serialize, Deserialize)]
+pub struct StyleImport {
+    #[arg(long)]
+    pub bucket: String,
+    #[arg(long, conflicts_with = "file", required_unless_present = "file")]
+    pub text: Option<String>,
+    #[arg(long, conflicts_with = "text", required_unless_present = "text")]
+    pub file: Option<PathBuf>,
+    #[arg(long, default_value = "")]
+    pub name_prefix: String,
+    #[arg(long, default_value = "error", value_enum)]
+    pub on_conflict: crate::model::image_styles::Conflict,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[arg(long = "line", value_delimiter = ',')]
+    pub lines: Vec<u64>,
+    #[arg(skip)]
+    pub document: Option<Value>,
+}
+#[derive(clap::Args, Serialize, Deserialize)]
+pub struct StyleExport {
+    #[arg(long)]
+    pub bucket: String,
+    #[arg(long)]
+    pub output: Option<PathBuf>,
+    #[arg(long, conflicts_with = "names")]
+    pub name_prefix: Option<String>,
+    #[arg(long = "name", conflicts_with = "name_prefix")]
+    pub names: Vec<String>,
+    #[arg(skip)]
+    pub document: Option<Value>,
 }

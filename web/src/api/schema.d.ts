@@ -320,6 +320,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/image-processing": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["image_settings_save"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/image-processing/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["image_style_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/image-processing/styles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["image_styles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/image-processing/styles/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["image_styles_download"];
+        put?: never;
+        post: operations["image_styles_export"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/image-processing/styles/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["image_styles_import"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/object": {
         parameters: {
             query?: never;
@@ -2102,6 +2182,8 @@ export interface components {
     schemas: {
         /** @enum {string} */
         Action: "bucket.list" | "object.read" | "object.write" | "object.delete" | "object.acl" | "bucket.settings" | "storage.inspect";
+        /** @enum {string} */
+        Anchor: "center" | "north" | "south" | "east" | "west" | "northwest" | "northeast" | "southwest" | "southeast";
         ApiInfo: {
             contract: string;
             product: string;
@@ -2373,6 +2455,7 @@ export interface components {
         };
         ErrorBody: {
             code: string;
+            detail?: string | null;
             error: string;
             request_id?: string | null;
         };
@@ -2506,7 +2589,78 @@ export interface components {
             /** Format: uuid */
             test_id: string;
         };
+        /** @enum {string} */
+        Fit: "contain" | "cover";
+        /** @enum {string} */
+        Format: "source" | "jpeg" | "png" | "webp" | "jxl" | "avif" | "auto";
         Id: string;
+        ImageExport: {
+            after?: string | null;
+            names?: string[] | null;
+            prefix?: string | null;
+            /** Format: int64 */
+            revision?: number | null;
+        };
+        ImageExportPage: {
+            next?: string | null;
+            /** Format: int64 */
+            revision: number;
+            text: string;
+        };
+        ImageMapping: {
+            auto: string;
+            formats: {
+                [key: string]: string;
+            };
+        };
+        ImagePolicy: {
+            delimiters: string[];
+            enabled: boolean;
+            /** Format: int64 */
+            input_limit: number;
+            mapping?: components["schemas"]["ImageMapping"] | null;
+            /**
+             * Format: int32
+             * @default 150000000
+             */
+            max_pixels: number;
+            protect_original: boolean;
+        };
+        ImagePreview: {
+            key: string;
+            /** Format: int64 */
+            revision: number;
+            rule: components["schemas"]["Pipeline"];
+        };
+        ImageSettings: {
+            policy: components["schemas"]["ImagePolicy"];
+            /** Format: int64 */
+            revision: number;
+        };
+        ImageStyle: {
+            enabled: boolean;
+            name: string;
+            rule: components["schemas"]["Pipeline"];
+        };
+        ImageStyleEdit: {
+            /** @enum {string} */
+            action: "put";
+            style: components["schemas"]["ImageStyle"];
+        } | {
+            /** @enum {string} */
+            action: "remove";
+            name: string;
+        };
+        ImageStylePage: {
+            settings: components["schemas"]["ImageSettings"];
+            styles: components["schemas"]["ImageStyle"][];
+        };
+        ImageUpdate: {
+            edits?: components["schemas"]["ImageStyleEdit"][];
+            policy?: components["schemas"]["ImagePolicy"] | null;
+            /** Format: int64 */
+            revision: number;
+        };
         IntegrityIssue: {
             /** Format: uuid */
             bucket_id?: string | null;
@@ -2941,6 +3095,36 @@ export interface components {
                 [key: string]: string;
             };
         };
+        Operation: {
+            /** @enum {string} */
+            operation: "orient";
+        } | {
+            /** Format: int32 */
+            index: number;
+            /** @enum {string} */
+            operation: "frame";
+        } | {
+            /** Format: int32 */
+            height?: number | null;
+            mode: components["schemas"]["Fit"];
+            /** @enum {string} */
+            operation: "resize";
+            upscale: boolean;
+            /** Format: int32 */
+            width?: number | null;
+        } | {
+            anchor: components["schemas"]["Anchor"];
+            /** Format: int32 */
+            height: number;
+            /** @enum {string} */
+            operation: "crop";
+            /** Format: int32 */
+            width: number;
+        } | {
+            color: string;
+            /** @enum {string} */
+            operation: "background";
+        };
         Outcome: {
             code?: string | null;
             output_version?: components["schemas"]["Id"] | null;
@@ -3026,6 +3210,9 @@ export interface components {
             selected_bytes: string;
             unconfirmed_bytes: string;
         };
+        Pipeline: {
+            stages: components["schemas"]["Stage"][];
+        };
         Policy: {
             active?: components["schemas"]["Job"] | null;
             enabled: boolean;
@@ -3091,6 +3278,8 @@ export interface components {
         ProjectMode: {
             enabled: boolean;
         };
+        /** @enum {string} */
+        QualityMode: "exact" | "cap" | "relative" | "source";
         QuarantinedSource: components["schemas"]["SourceScope"] & {
             code: string;
             /** Format: uuid */
@@ -3439,6 +3628,14 @@ export interface components {
         };
         /** @enum {string} */
         SourceType: "chunk" | "pack" | "raw";
+        Stage: {
+            format: components["schemas"]["Format"];
+            operations: components["schemas"]["Operation"][];
+            progressive: boolean;
+            /** Format: int32 */
+            quality?: number | null;
+            quality_mode: components["schemas"]["QualityMode"];
+        };
         StorageInput: {
             access_key?: string | null;
             /** Format: uuid */
@@ -3636,6 +3833,32 @@ export interface components {
             updated_at: string;
             /** Format: int32 */
             upload_concurrency?: number | null;
+        };
+        /** @enum {string} */
+        StyleConflict: "error" | "skip" | "replace";
+        StyleImport: {
+            apply?: boolean;
+            conflict?: components["schemas"]["StyleConflict"];
+            prefix?: string;
+            /** Format: int64 */
+            revision?: number | null;
+            selected?: number[] | null;
+            text: string;
+        };
+        StyleImportResult: {
+            applied: boolean;
+            /** Format: int64 */
+            revision: number;
+            rows: components["schemas"]["StyleImportRow"][];
+        };
+        StyleImportRow: {
+            body?: string | null;
+            error?: string | null;
+            /** Format: int32 */
+            line: number;
+            name: string;
+            outcome: string;
+            syntax: string;
         };
         SweepRequest: {
             older_than: string;
@@ -4475,6 +4698,179 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    image_settings_save: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImageUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImageSettings"];
+                };
+            };
+        };
+    };
+    image_style_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImagePreview"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/*": unknown;
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            415: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    image_styles: {
+        parameters: {
+            query?: {
+                after?: string | null;
+                prefix?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImageStylePage"];
+                };
+            };
+        };
+    };
+    image_styles_download: {
+        parameters: {
+            query?: {
+                revision?: number | null;
+                prefix?: string | null;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": string;
+                };
+            };
+        };
+    };
+    image_styles_export: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ImageExport"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ImageExportPage"];
+                };
+            };
+        };
+    };
+    image_styles_import: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StyleImport"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StyleImportResult"];
                 };
             };
         };

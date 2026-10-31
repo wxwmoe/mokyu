@@ -68,6 +68,7 @@ pub(crate) async fn connect(
         external_buckets: backend.clone(),
         replications: backend.clone(),
         redundancy: backend.clone(),
+        image_styles: backend.clone(),
         tiering: backend.clone(),
         chunks: backend.clone(),
     };

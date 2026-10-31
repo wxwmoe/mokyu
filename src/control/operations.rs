@@ -771,6 +771,22 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             )
             .await
         }
+        Command::Styles(crate::cli::Styles::Import(args)) => {
+            let bucket = app.bucket(&args.bucket, true).await?.id;
+            let input =
+                serde_json::from_value(args.document.context("missing image import batch")?)?;
+            Ok(serde_json::to_value(
+                super::image_styles::import_styles(app, principal, bucket, input).await?,
+            )?)
+        }
+        Command::Styles(crate::cli::Styles::Export(args)) => {
+            let bucket = app.bucket(&args.bucket, true).await?.id;
+            let input =
+                serde_json::from_value(args.document.context("missing image export selection")?)?;
+            Ok(serde_json::to_value(
+                super::image_styles::export_styles(app, principal, bucket, &input).await?,
+            )?)
+        }
         Command::Bucket(Buckets::List) => {
             let buckets: Vec<Bucket> = app.buckets.all().await?;
             Ok(serde_json::to_value(buckets)?)

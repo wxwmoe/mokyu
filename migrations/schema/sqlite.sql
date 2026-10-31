@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0055.
+-- Generated from the complete sqlite migration chain through 0056.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -83,7 +83,7 @@ CREATE TABLE buckets (
     settings_revision INTEGER NOT NULL DEFAULT 0,
     uploads_paused INTEGER CHECK (uploads_paused IN (0,1)) NOT NULL DEFAULT FALSE,
     public_base_url TEXT NOT NULL DEFAULT (''),
-    storage_id BLOB CHECK (storage_id IS NULL OR length(storage_id)=16) NOT NULL,
+    storage_id BLOB CHECK (storage_id IS NULL OR length(storage_id)=16) NOT NULL, image_revision INTEGER NOT NULL DEFAULT 0, image_families INTEGER NOT NULL DEFAULT 0, image_policy TEXT, image_import_token TEXT,
     UNIQUE (id,project_id),
     CONSTRAINT buckets_state CHECK (state IN ('active','purging')),
     CONSTRAINT buckets_project FOREIGN KEY (project_id) REFERENCES projects(id),
@@ -242,6 +242,15 @@ CREATE TABLE fragments (
     CONSTRAINT fragments_stream FOREIGN KEY (owner_stream) REFERENCES streams(id) ON DELETE SET NULL,
     CONSTRAINT fragments_size CHECK (size BETWEEN 1 AND 4194304)
 ) STRICT;
+
+CREATE TABLE image_styles (
+    bucket_id BLOB NOT NULL,
+    name TEXT COLLATE BINARY NOT NULL,
+    enabled BOOLEAN NOT NULL,
+    body TEXT NOT NULL,
+    PRIMARY KEY (bucket_id, name),
+    FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE CASCADE
+);
 
 CREATE TABLE integrity_issues (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -2321,6 +2321,12 @@ impl Storage {
     pub(crate) fn http_work(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.pack_work.clone().try_acquire_many_owned(32).ok()
     }
+    pub(crate) fn image_work(&self, bytes: u64) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.pack_work
+            .clone()
+            .try_acquire_many_owned(bytes.div_ceil(1024 * 1024).try_into().ok()?)
+            .ok()
+    }
     pub async fn encode_pack(
         &self,
         mut p: crate::content::pack::Pack,

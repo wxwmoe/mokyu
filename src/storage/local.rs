@@ -388,6 +388,29 @@ impl Disk {
         existing: bool,
         path: &std::path::Path,
     ) -> Result<Reservation> {
+        self.reserve_bound(area, bytes, existing, path, true)
+    }
+    pub(crate) fn image_workspace(
+        self: &Arc<Self>,
+        bytes: u64,
+        path: &std::path::Path,
+    ) -> Result<Reservation> {
+        self.reserve_bound(
+            Area::Thumbnails,
+            bytes.div_ceil(65536) * 65536,
+            false,
+            path,
+            false,
+        )
+    }
+    fn reserve_bound(
+        self: &Arc<Self>,
+        area: Area,
+        bytes: u64,
+        existing: bool,
+        path: &std::path::Path,
+        retained: bool,
+    ) -> Result<Reservation> {
         let mut usage = self.usage.lock().unwrap();
         let bytes = if matches!(area, Area::Multipart) {
             let granularity = fs2::allocation_granularity(path)?.max(1);
@@ -402,7 +425,7 @@ impl Disk {
             .checked_add(bytes)
             .context("disk accounting overflow")?;
         ensure!(
-            self.limits[area as usize].is_none_or(|n| next <= n),
+            !retained || self.limits[area as usize].is_none_or(|n| next <= n),
             "local storage quota exhausted"
         );
         let space = Space::claim(

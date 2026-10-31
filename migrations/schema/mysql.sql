@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0054.
+-- Generated from the complete mysql migration chain through 0055.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -111,6 +111,10 @@ CREATE TABLE `buckets` (
   `uploads_paused` tinyint(1) NOT NULL DEFAULT '0',
   `public_base_url` text /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */ NOT NULL DEFAULT (_utf8mb4''),
   `storage_id` binary(16) NOT NULL,
+  `image_revision` bigint NOT NULL DEFAULT '0',
+  `image_families` bigint NOT NULL DEFAULT '0',
+  `image_policy` text /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */,
+  `image_import_token` varchar(64) /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */ DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`),
   UNIQUE KEY `buckets_id_project` (`id`,`project_id`),
@@ -118,7 +122,7 @@ CREATE TABLE `buckets` (
   KEY `buckets_storage` (`storage_id`),
   CONSTRAINT `buckets_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`),
   CONSTRAINT `buckets_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
-  CONSTRAINT `buckets_state` CHECK ((`state` in (_utf8mb4'active',_utf8mb4'purging')))
+  CONSTRAINT `buckets_state` CHECK ((`state` in (_ascii'active',_ascii'purging')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
 
 CREATE TABLE `cache_pins` (
@@ -333,6 +337,15 @@ CREATE TABLE `fragments` (
   CONSTRAINT `fragments_stream` FOREIGN KEY (`owner_stream`) REFERENCES `streams` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fragments_chk_1` CHECK ((((`file_id` is null) = (`file_offset` is null)) and ((`file_offset` is null) or (`file_offset` >= 0)))),
   CONSTRAINT `fragments_size` CHECK ((`size` between 1 and 4194304))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `image_styles` (
+  `bucket_id` binary(16) NOT NULL,
+  `name` varchar(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `enabled` tinyint(1) NOT NULL,
+  `body` text COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`bucket_id`,`name`),
+  CONSTRAINT `image_styles_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `integrity_issues` (

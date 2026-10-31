@@ -157,6 +157,8 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/replications/{id}/items"
                 | "/api/v1/buckets/{bucket}/redundancy"
                 | "/api/v1/buckets/{bucket}/redundancy/{id}"
+                | "/api/v1/buckets/{bucket}/image-processing/styles"
+                | "/api/v1/buckets/{bucket}/image-processing/styles/export"
                 | "/api/v1/external-buckets"
                 | "/api/v1/external-buckets/{id}"
                 | "/api/v1/usage/summary"
@@ -193,11 +195,15 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/buckets/{bucket}/redundancy"
                 | "/api/v1/buckets/{bucket}/redundancy/preview"
                 | "/api/v1/buckets/{bucket}/redundancy/{id}/command"
+                | "/api/v1/buckets/{bucket}/image-processing/preview"
+                | "/api/v1/buckets/{bucket}/image-processing/styles/import"
+                | "/api/v1/buckets/{bucket}/image-processing/styles/export"
                 | "/api/v1/buckets"
                 | "/api/v1/api-tokens"
                 | "/api/v1/buckets/{bucket}/uploads"
                 | "/api/v1/uploads/{id}/complete"
         ) | ("PUT", "/api/v1/account")
+            | ("PUT", "/api/v1/buckets/{bucket}/image-processing")
             | ("PUT", "/api/v1/uploads/{id}/parts/{number}")
             | ("DELETE", "/api/v1/uploads/{id}")
             | ("PUT" | "DELETE", "/api/v1/api-tokens/{id}")

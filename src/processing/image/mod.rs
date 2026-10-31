@@ -1,6 +1,7 @@
 mod accept;
 mod compat;
 mod engine;
+pub(crate) mod job;
 mod rule;
 #[cfg(test)]
 mod tests;

@@ -3,6 +3,9 @@ pub(crate) const USER_LOCK: i64 = 734922709851002;
 mod connection;
 mod external_queries;
 mod external_transactions;
+mod image_queries;
+#[path = "../image_transactions.rs"]
+mod image_transactions;
 mod migration;
 mod queries;
 mod read_sources;
@@ -212,6 +215,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         external_buckets: backend.clone(),
         replications: backend.clone(),
         redundancy: backend.clone(),
+        image_styles: backend.clone(),
         tiering: backend.clone(),
         chunks: backend,
     }

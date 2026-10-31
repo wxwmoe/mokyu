@@ -22,6 +22,7 @@ export function report(error: unknown) {
 export function errorText(error: unknown) {
   if (error instanceof ApiError) {
     const translated = t(`error_${error.code}`)
+    if(error.detail)return (translated.startsWith('error_')?error.code:translated)+': '+error.detail
     return translated.startsWith('error_') ? `${error.status} ${error.code}` : translated
   }
   return error instanceof Error ? error.message : String(error)

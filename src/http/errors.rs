@@ -55,6 +55,12 @@ impl HttpError {
         {
             response.headers_mut().extend(headers.clone());
         }
+        if let Some(detail) = self
+            .0
+            .downcast_ref::<crate::model::image_styles::InvalidImageInput>()
+        {
+            response.extensions_mut().insert(detail.clone());
+        }
         response
     }
 }

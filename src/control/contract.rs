@@ -37,6 +37,8 @@ pub(crate) struct ErrorBody {
     pub error: String,
     pub code: String,
     pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[utoipa::path(get, path = "/api/v1/info", responses((status = 200, body = ApiInfo)))]
@@ -99,6 +101,12 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::redundancy::get))
         .routes(routes!(super::redundancy::command))
         .routes(routes!(super::tiering::get, super::tiering::save))
+        .routes(routes!(super::image_styles::page))
+        .routes(routes!(super::image_styles::save))
+        .routes(routes!(super::image_styles::import))
+        .routes(routes!(super::image_styles::download))
+        .routes(routes!(super::image_styles::stream))
+        .routes(routes!(super::image_styles::preview))
         .routes(routes!(super::tiering::preview))
         .routes(routes!(super::tiering::transition))
         .routes(routes!(super::tiering::units))
@@ -293,6 +301,10 @@ pub(crate) async fn errors(
             error: status.canonical_reason().unwrap_or("Request failed").into(),
             code,
             request_id,
+            detail: response
+                .extensions()
+                .get::<crate::model::image_styles::InvalidImageInput>()
+                .map(|e| e.0.clone()),
         }),
     )
         .into_response();

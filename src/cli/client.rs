@@ -22,6 +22,9 @@ fn read_json(path: &Path, limit: usize, label: &str) -> Result<Value> {
     Ok(serde_json::from_slice(&bytes)?)
 }
 pub async fn client(path: &Path, mut command: Command) -> Result<()> {
+    if let Command::Styles(styles) = command {
+        return super::styles::execute(path, styles).await;
+    }
     match &mut command {
         Command::User(Users::Membership { file, document, .. })
         | Command::Bucket(Buckets::Tiering {

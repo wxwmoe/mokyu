@@ -18,7 +18,7 @@ export function uuid() {
 export const queries = new QueryClient({ defaultOptions: { queries: { staleTime: 15_000, retry: 1, refetchOnWindowFocus: false } } })
 
 export class ApiError extends Error {
-  constructor(public status: number, public code: string, public requestId?: string) {
+  constructor(public status: number, public code: string, public requestId?: string, public detail?: string) {
     super(code)
   }
 }
@@ -45,18 +45,19 @@ function clearRefresh() {
   try { localStorage.removeItem(refreshStorageKey) } catch { /* storage is optional */ }
 }
 
-async function request<T>(path: string, init: RequestInit = {}, format: 'json' | 'blob' = 'json'): Promise<T> {
+async function request<T>(path: string, init: RequestInit = {}, format: 'json' | 'blob' | 'response' = 'json'): Promise<T> {
   const expected = generation
   let reply: Response
   try { reply = await fetch(path, { credentials: 'same-origin', ...init }) }
   catch (error) { if (error instanceof DOMException && error.name === 'AbortError') throw error; throw new ApiError(0, 'Network') }
   if (!reply.ok) {
     const error = await reply.json().catch(() => ({}))
-    throw new ApiError(reply.status, error.code || 'RequestFailed', error.request_id || reply.headers.get('x-request-id'))
+    throw new ApiError(reply.status, error.code || 'RequestFailed', error.request_id || reply.headers.get('x-request-id'), typeof error.detail==='string'?error.detail:undefined)
   }
   const rotated = reply.headers.get('x-mokyu-refresh-token')
   if (rotated && generation === expected) saveRefresh(rotated)
   if (format === 'blob') return await reply.blob() as T
+  if (format === 'response') return reply as T
   if (reply.status === 204) return undefined as T
   const body = await reply.json()
   if (body && typeof body === 'object' && 'refresh_token' in body) {
@@ -153,7 +154,7 @@ export async function ensureAuth() {
   else if (session.value && !recoveryNeeded && Date.now() >= Math.max(deadline, retryAt)) await refreshAuth()
 }
 
-export async function api<T>(path: string, init: RequestInit = {}, format: 'json' | 'blob' = 'json'): Promise<T> {
+export async function api<T>(path: string, init: RequestInit = {}, format: 'json' | 'blob' | 'response' = 'json'): Promise<T> {
   const managed = !path.startsWith('/api/v1/auth/') && path !== '/api/v1/account/reauth'
   if (managed) await ensureAuth()
   const send = () => {

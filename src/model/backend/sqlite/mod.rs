@@ -1,6 +1,9 @@
 mod connection;
 mod external_queries;
 mod external_transactions;
+mod image_queries;
+#[path = "../image_transactions.rs"]
+mod image_transactions;
 mod migration;
 mod queries;
 mod redundancy_queries;

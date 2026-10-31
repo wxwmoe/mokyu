@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0101.
+-- Generated from the complete postgres migration chain through 0102.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -830,6 +830,10 @@ CREATE TABLE public.buckets (
     uploads_paused boolean DEFAULT false NOT NULL,
     public_base_url text DEFAULT ''::text NOT NULL,
     storage_id uuid CONSTRAINT buckets_storage_target_id_not_null NOT NULL,
+    image_revision bigint DEFAULT 0 NOT NULL,
+    image_families bigint DEFAULT 0 NOT NULL,
+    image_policy text,
+    image_import_token character varying(64),
     CONSTRAINT buckets_state_check CHECK ((state = ANY (ARRAY['active'::text, 'purging'::text])))
 );
 
@@ -988,6 +992,13 @@ CREATE TABLE public.fragments (
     CONSTRAINT fragments_size_check CHECK (((size >= 1) AND (size <= 4194304)))
 )
 WITH (autovacuum_vacuum_scale_factor='0.05', autovacuum_analyze_scale_factor='0.02');
+
+CREATE TABLE public.image_styles (
+    bucket_id uuid NOT NULL,
+    name character varying(128) NOT NULL COLLATE pg_catalog."C",
+    enabled boolean NOT NULL,
+    body text NOT NULL
+);
 
 CREATE TABLE public.integrity_issues (
     id uuid DEFAULT uuidv7() NOT NULL,
@@ -2600,6 +2611,9 @@ ALTER TABLE ONLY public.fragments
 ALTER TABLE ONLY public.s3_credential_grants
     ADD CONSTRAINT grants_pkey PRIMARY KEY (access_key, bucket_id);
 
+ALTER TABLE ONLY public.image_styles
+    ADD CONSTRAINT image_styles_pkey PRIMARY KEY (bucket_id, name);
+
 ALTER TABLE ONLY public.integrity_issues
     ADD CONSTRAINT integrity_issues_pkey PRIMARY KEY (id);
 
@@ -3524,6 +3538,9 @@ ALTER TABLE ONLY public.s3_credential_grants
 
 ALTER TABLE ONLY public.s3_credential_grants
     ADD CONSTRAINT grants_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.image_styles
+    ADD CONSTRAINT image_styles_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.integrity_issues
     ADD CONSTRAINT integrity_issues_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;

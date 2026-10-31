@@ -3,6 +3,7 @@ use anyhow::Result;
 mod auth;
 mod client;
 mod commands;
+mod styles;
 mod transport;
 
 pub use client::client;

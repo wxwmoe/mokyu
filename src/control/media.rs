@@ -38,10 +38,13 @@ pub struct Thumbnails {
     disk: Arc<Disk>,
     capacity: u64,
     entries: Mutex<VecDeque<(Id, u64)>>,
-    job: Arc<Semaphore>,
+    pub(crate) job: Arc<Semaphore>,
 }
 impl Thumbnails {
     pub async fn new(config: &config::Config, disk: Arc<Disk>) -> Result<Self> {
+        if let Err(error) = crate::processing::image::job::recover(&disk).await {
+            tracing::warn!(%error,"image workspace recovery incomplete");
+        }
         let cache = Self {
             root: config.instance.data_path.join("thumbnails"),
             disk,

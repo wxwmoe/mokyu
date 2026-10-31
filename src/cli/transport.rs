@@ -31,7 +31,10 @@ pub(super) async fn rpc(target: &CliTarget, command: &Command) -> Result<Value> 
     ensure!(
         status.is_success() && reply["ok"] == true,
         "{}",
-        reply["error"].as_str().unwrap_or("CLI request failed")
+        reply["detail"]
+            .as_str()
+            .or_else(|| reply["error"].as_str())
+            .unwrap_or("CLI request failed")
     );
     Ok(reply["result"].clone())
 }
