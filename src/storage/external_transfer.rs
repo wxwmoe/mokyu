@@ -245,6 +245,7 @@ pub(crate) async fn execute(
             Outcome::Started { .. } => Some("external-upload-started"),
             Outcome::Transferred(_) => Some("external-part-uploaded"),
             Outcome::Written(_) => Some("external-upload-completed"),
+            Outcome::Finalized { .. } => Some("external-finalized"),
             _ => None,
         };
         if let Some(point) = point {

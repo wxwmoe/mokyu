@@ -2977,12 +2977,14 @@ export interface components {
             confirm?: boolean;
         };
         Replication: {
+            captured: boolean;
             error?: string | null;
             /** Format: uuid */
             id: string;
             options: components["schemas"]["ReplicationOptions"];
             phase: string;
             progress: components["schemas"]["ReplicationProgress"];
+            sealed: boolean;
             state: string;
         };
         /** @enum {string} */
@@ -3008,6 +3010,7 @@ export interface components {
             conflict?: components["schemas"]["ReplicationConflict"];
             operation: components["schemas"]["ReplicationOperation"];
             permissions?: components["schemas"]["ReplicationPermissions"];
+            propagate_deletes?: boolean;
             scope: components["schemas"]["ReplicationScope"];
             /** Format: uuid */
             source_bucket: string;

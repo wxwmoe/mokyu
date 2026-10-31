@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0050.
+-- Generated from the complete sqlite migration chain through 0051.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -42,6 +42,11 @@ CREATE TABLE "audit_events" (
     http_status INTEGER,
     detail TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(detail))
 ) STRICT;
+
+CREATE TABLE bucket_change_gates (
+    bucket_id BLOB PRIMARY KEY REFERENCES buckets(id) ON DELETE CASCADE,
+    subscribers INTEGER NOT NULL DEFAULT 0 CHECK (subscribers>=0)
+);
 
 CREATE TABLE bucket_domains (
     host TEXT NOT NULL PRIMARY KEY,
@@ -872,6 +877,16 @@ CREATE TABLE "token_external_grants" (
     PRIMARY KEY (token_id,bucket_id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE transfer_changes (
+    task_id BLOB NOT NULL REFERENCES transfer_subscriptions(task_id) ON DELETE CASCADE,
+    object_key TEXT NOT NULL CHECK (length(CAST(object_key AS BLOB)) BETWEEN 1 AND 1024),
+    source_version INTEGER REFERENCES streams(id),
+    snapshot TEXT,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision>0),
+    PRIMARY KEY (task_id,object_key),
+    CHECK ((source_version IS NULL)=(snapshot IS NULL))
+);
+
 CREATE TABLE transfer_connections (
     task_id BLOB NOT NULL,
     external_id BLOB NOT NULL,
@@ -919,7 +934,7 @@ CREATE TABLE transfer_items (
     snapshot TEXT NOT NULL,
     state TEXT NOT NULL DEFAULT 'planning',
     position_bytes BIGINT NOT NULL DEFAULT 0 CHECK (position_bytes>=0),
-    error TEXT, reuse_target INTEGER NOT NULL DEFAULT 0 CHECK (reuse_target IN (0,1)),
+    error TEXT, reuse_target INTEGER NOT NULL DEFAULT 0 CHECK (reuse_target IN (0,1)), confirmation TEXT,
     CHECK (state IN ('planning','planned','copying','completed','skipped','conflict','cancelled'))
 );
 
@@ -951,7 +966,7 @@ CREATE TABLE transfer_runs (
     generation BIGINT NOT NULL DEFAULT 1 CHECK (generation>0),
     phase TEXT NOT NULL DEFAULT 'scan',
     cursor_key TEXT,
-    progress TEXT NOT NULL, storage_id BLOB, source_storage_id BLOB, profile_revision BIGINT,
+    progress TEXT NOT NULL, storage_id BLOB, source_storage_id BLOB, profile_revision BIGINT, scanned BOOLEAN NOT NULL DEFAULT FALSE, captured BOOLEAN NOT NULL DEFAULT FALSE, sealed BOOLEAN NOT NULL DEFAULT FALSE, scan_end TEXT,
     CHECK (phase IN ('scan','plan','verify','publish','cancel','complete','cancelled'))
 );
 
@@ -984,6 +999,13 @@ CREATE TABLE transfer_spans (
     length INT NOT NULL CHECK (length>0),
     hash BLOB NOT NULL CHECK (length(hash)=32),
     UNIQUE (unit_id,source_offset)
+);
+
+CREATE TABLE transfer_subscriptions (
+    task_id BLOB PRIMARY KEY REFERENCES transfer_runs(task_id) ON DELETE CASCADE,
+    bucket_id BLOB NOT NULL REFERENCES buckets(id),
+    scope TEXT NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 CREATE TABLE uploads (
@@ -1287,6 +1309,8 @@ CREATE INDEX token_external_bucket ON token_external_grants(bucket_id);
 
 CREATE INDEX token_grants_bucket ON token_bucket_grants(bucket_id);
 
+CREATE INDEX transfer_changes_source ON transfer_changes(source_version);
+
 CREATE INDEX transfer_connections_external ON transfer_connections(external_id);
 
 CREATE INDEX transfer_imports_part ON transfer_imports(part_stream);
@@ -1317,6 +1341,8 @@ CREATE INDEX transfer_sources_raw ON transfer_sources(source_raw);
 
 CREATE INDEX transfer_sources_work ON transfer_sources(task_id,state,id);
 
+CREATE INDEX transfer_subscriptions_bucket ON transfer_subscriptions(bucket_id) WHERE active;
+
 CREATE INDEX uploads_cleanup ON uploads(state,touched_at,id);
 
 CREATE INDEX uploads_listing ON uploads(bucket_id,object_key,id);
@@ -1329,13 +1355,80 @@ CREATE INDEX usage_requested ON usage_summary(requested_at,id);
 
 CREATE UNIQUE INDEX web_uploads_client ON web_uploads(user_id,client_id);
 
+CREATE TRIGGER buckets_change_gate AFTER INSERT ON buckets BEGIN
+    INSERT INTO bucket_change_gates(bucket_id) VALUES(NEW.id);
+END;
+
 CREATE TRIGGER chunk_encodings_nonce_insert BEFORE INSERT ON chunk_encodings WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
 
 CREATE TRIGGER chunk_encodings_nonce_update BEFORE UPDATE ON chunk_encodings WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
 
+CREATE TRIGGER objects_capture_delete AFTER DELETE ON objects
+WHEN OLD.stream_id IS NOT NULL AND EXISTS(SELECT 1 FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id AND subscribers>0)
+BEGIN
+    INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
+        SELECT task_id,CAST(OLD.object_key AS TEXT),NULL,NULL FROM transfer_subscriptions
+        WHERE bucket_id=OLD.bucket_id AND active AND (
+            scope->>'selection'='all'
+            OR scope->>'selection'='prefix' AND substr(CAST(OLD.object_key AS TEXT),1,length(scope->>'prefix'))=scope->>'prefix'
+            OR scope->>'selection'='objects' AND EXISTS(SELECT 1 FROM json_each(scope,'$.keys') WHERE value=CAST(OLD.object_key AS TEXT)))
+        ON CONFLICT(task_id,object_key) DO UPDATE SET source_version=NULL,snapshot=NULL,revision=transfer_changes.revision+1;
+END;
+
+CREATE TRIGGER objects_capture_insert AFTER INSERT ON objects
+WHEN NEW.stream_id IS NOT NULL AND EXISTS(SELECT 1 FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id AND subscribers>0)
+BEGIN
+    INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
+        SELECT t.task_id,CAST(NEW.object_key AS TEXT),s.id,
+            json_object('metadata',json(s.metadata),'checksums',json(s.checksums),'public',json(CASE WHEN s.public_read THEN 'true' ELSE 'false' END),
+                'size',s.size,'etag',s.etag,'payload',s.payload_type)
+        FROM transfer_subscriptions t JOIN streams s ON s.id=NEW.stream_id
+        WHERE t.bucket_id=NEW.bucket_id AND t.active AND (
+            t.scope->>'selection'='all'
+            OR t.scope->>'selection'='prefix' AND substr(CAST(NEW.object_key AS TEXT),1,length(t.scope->>'prefix'))=t.scope->>'prefix'
+            OR t.scope->>'selection'='objects' AND EXISTS(SELECT 1 FROM json_each(t.scope,'$.keys') WHERE value=CAST(NEW.object_key AS TEXT)))
+        ON CONFLICT(task_id,object_key) DO UPDATE SET source_version=excluded.source_version,
+            snapshot=excluded.snapshot,revision=transfer_changes.revision+1;
+END;
+
+CREATE TRIGGER objects_capture_update AFTER UPDATE OF stream_id ON objects
+WHEN OLD.stream_id IS NOT NEW.stream_id AND EXISTS(SELECT 1 FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id AND subscribers>0)
+BEGIN
+    INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
+        SELECT t.task_id,CAST(NEW.object_key AS TEXT),s.id,
+            CASE WHEN s.id IS NOT NULL THEN json_object('metadata',json(s.metadata),'checksums',json(s.checksums),
+                'public',json(CASE WHEN s.public_read THEN 'true' ELSE 'false' END),'size',s.size,'etag',s.etag,'payload',s.payload_type) END
+        FROM transfer_subscriptions t LEFT JOIN streams s ON s.id=NEW.stream_id
+        WHERE t.bucket_id=NEW.bucket_id AND t.active AND (
+            t.scope->>'selection'='all'
+            OR t.scope->>'selection'='prefix' AND substr(CAST(NEW.object_key AS TEXT),1,length(t.scope->>'prefix'))=t.scope->>'prefix'
+            OR t.scope->>'selection'='objects' AND EXISTS(SELECT 1 FROM json_each(t.scope,'$.keys') WHERE value=CAST(NEW.object_key AS TEXT)))
+        ON CONFLICT(task_id,object_key) DO UPDATE SET source_version=excluded.source_version,
+            snapshot=excluded.snapshot,revision=transfer_changes.revision+1;
+END;
+
 CREATE TRIGGER packs_nonce_insert BEFORE INSERT ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
 
 CREATE TRIGGER packs_nonce_update BEFORE UPDATE ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
+
+CREATE TRIGGER streams_capture AFTER UPDATE OF public_read,metadata,checksums,etag,size,payload_type ON streams
+WHEN NEW.state='ready' AND NEW.stream_type='object'
+    AND (OLD.public_read IS NOT NEW.public_read OR OLD.metadata IS NOT NEW.metadata OR OLD.checksums IS NOT NEW.checksums
+        OR OLD.etag IS NOT NEW.etag OR OLD.size IS NOT NEW.size OR OLD.payload_type IS NOT NEW.payload_type)
+    AND EXISTS(SELECT 1 FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id AND subscribers>0)
+    AND EXISTS(SELECT 1 FROM objects WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND stream_id=NEW.id)
+BEGIN
+    INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
+        SELECT task_id,CAST(NEW.object_key AS TEXT),NEW.id,
+            json_object('metadata',json(NEW.metadata),'checksums',json(NEW.checksums),'public',json(CASE WHEN NEW.public_read THEN 'true' ELSE 'false' END),
+                'size',NEW.size,'etag',NEW.etag,'payload',NEW.payload_type)
+        FROM transfer_subscriptions WHERE bucket_id=NEW.bucket_id AND active AND (
+            scope->>'selection'='all'
+            OR scope->>'selection'='prefix' AND substr(CAST(NEW.object_key AS TEXT),1,length(scope->>'prefix'))=scope->>'prefix'
+            OR scope->>'selection'='objects' AND EXISTS(SELECT 1 FROM json_each(scope,'$.keys') WHERE value=CAST(NEW.object_key AS TEXT)))
+        ON CONFLICT(task_id,object_key) DO UPDATE SET source_version=excluded.source_version,
+            snapshot=excluded.snapshot,revision=transfer_changes.revision+1;
+END;
 
 CREATE VIEW token_bucket_access AS
 SELECT t.id AS token_id,g.bucket_id,

@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0049.
+-- Generated from the complete mysql migration chain through 0050.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -55,6 +55,14 @@ CREATE TABLE `audit_events` (
   CONSTRAINT `audit_outcome` CHECK ((`outcome` in (_ascii'unknown',_ascii'succeeded',_ascii'failed',_ascii'partial'))),
   CONSTRAINT `audit_source` CHECK ((`source` in (_utf8mb4'web',_utf8mb4'token',_utf8mb4'cli',_utf8mb4's3')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
+
+CREATE TABLE `bucket_change_gates` (
+  `bucket_id` binary(16) NOT NULL,
+  `subscribers` int NOT NULL DEFAULT '0',
+  PRIMARY KEY (`bucket_id`),
+  CONSTRAINT `bucket_change_gates_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `bucket_change_gates_chk_1` CHECK ((`subscribers` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `bucket_domains` (
   `host` varchar(253) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
@@ -1143,6 +1151,22 @@ CREATE TABLE `token_external_grants` (
   CONSTRAINT `token_external_actions` CHECK ((`actions` <= 31))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `transfer_changes` (
+  `task_id` binary(16) NOT NULL,
+  `object_key` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `key_hash` binary(32) GENERATED ALWAYS AS (unhex(sha2(cast(`object_key` as char charset binary),256))) STORED,
+  `source_version` bigint DEFAULT NULL,
+  `snapshot` json DEFAULT NULL,
+  `revision` bigint NOT NULL DEFAULT '1',
+  UNIQUE KEY `task_id` (`task_id`,`key_hash`),
+  KEY `transfer_changes_source` (`source_version`),
+  CONSTRAINT `transfer_changes_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_subscriptions` (`task_id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_changes_ibfk_2` FOREIGN KEY (`source_version`) REFERENCES `streams` (`id`),
+  CONSTRAINT `transfer_changes_chk_1` CHECK ((`revision` > 0)),
+  CONSTRAINT `transfer_changes_chk_2` CHECK ((length(`object_key`) between 1 and 1024)),
+  CONSTRAINT `transfer_changes_chk_3` CHECK (((`source_version` is null) = (`snapshot` is null)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `transfer_connections` (
   `task_id` binary(16) NOT NULL,
   `external_id` binary(16) NOT NULL,
@@ -1203,6 +1227,7 @@ CREATE TABLE `transfer_items` (
   `error` varchar(24) COLLATE utf8mb4_bin DEFAULT NULL,
   `reuse_target` tinyint(1) NOT NULL DEFAULT '0',
   `source_key_hash` binary(32) GENERATED ALWAYS AS (unhex(sha2(cast(`source_key` as char charset binary),256))) STORED,
+  `confirmation` json DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `transfer_items_work` (`task_id`,`state`,`id`),
   KEY `transfer_items_source_pin` (`source_pin`),
@@ -1258,6 +1283,10 @@ CREATE TABLE `transfer_runs` (
   `cursor_key` text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin,
   `progress` json NOT NULL,
   `source_storage_id` binary(16) DEFAULT NULL,
+  `scanned` tinyint(1) NOT NULL DEFAULT '0',
+  `captured` tinyint(1) NOT NULL DEFAULT '0',
+  `sealed` tinyint(1) NOT NULL DEFAULT '0',
+  `scan_end` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
   PRIMARY KEY (`task_id`),
   KEY `transfer_runs_creator` (`created_by`,`task_id`),
   CONSTRAINT `transfer_runs_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE,
@@ -1314,6 +1343,17 @@ CREATE TABLE `transfer_spans` (
   CONSTRAINT `transfer_spans_ibfk_1` FOREIGN KEY (`unit_id`) REFERENCES `transfer_sources` (`id`) ON DELETE CASCADE,
   CONSTRAINT `transfer_spans_chk_1` CHECK ((`source_offset` >= 0)),
   CONSTRAINT `transfer_spans_chk_2` CHECK ((`length` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `transfer_subscriptions` (
+  `task_id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `scope` json NOT NULL,
+  `active` tinyint(1) NOT NULL DEFAULT '1',
+  PRIMARY KEY (`task_id`),
+  KEY `transfer_subscriptions_bucket` (`bucket_id`,`active`),
+  CONSTRAINT `transfer_subscriptions_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
+  CONSTRAINT `transfer_subscriptions_ibfk_2` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `uploads` (
@@ -1436,6 +1476,8 @@ CREATE SQL SECURITY DEFINER VIEW `token_bucket_access` AS select `t`.`id` AS `to
 
 CREATE SQL SECURITY DEFINER VIEW `token_external_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),31,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_external_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_external_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
 
+CREATE TRIGGER `buckets_change_gate` AFTER INSERT ON `buckets` FOR EACH ROW INSERT INTO bucket_change_gates(bucket_id) VALUES(NEW.id);
+
 CREATE TRIGGER `encodings_owner_insert` BEFORE INSERT ON `chunk_encodings` FOR EACH ROW BEGIN
     IF NEW.owner_task IS NOT NULL AND NEW.owner_stream IS NOT NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='encoding owners are exclusive';
@@ -1445,5 +1487,68 @@ END;
 CREATE TRIGGER `encodings_owner_update` BEFORE UPDATE ON `chunk_encodings` FOR EACH ROW BEGIN
     IF NEW.owner_task IS NOT NULL AND NEW.owner_stream IS NOT NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='encoding owners are exclusive';
+    END IF;
+END;
+
+CREATE TRIGGER `objects_capture_delete` AFTER DELETE ON `objects` FOR EACH ROW BEGIN
+    DECLARE readers INTEGER DEFAULT 0;
+    IF OLD.stream_id IS NOT NULL THEN
+        SELECT subscribers INTO readers FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id LOCK IN SHARE MODE;
+        IF readers>0 THEN
+            INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
+                SELECT task_id,CAST(OLD.object_key AS CHAR CHARACTER SET utf8mb4),NULL,NULL FROM transfer_subscriptions
+                WHERE bucket_id=OLD.bucket_id AND active AND (
+                    JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection'))='all'
+                    OR JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection'))='prefix' AND
+                        LEFT(OLD.object_key,OCTET_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(scope,'$.prefix'))))=CAST(JSON_UNQUOTE(JSON_EXTRACT(scope,'$.prefix')) AS BINARY)
+                    OR JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection'))='objects' AND
+                        JSON_CONTAINS(JSON_EXTRACT(scope,'$.keys'),JSON_QUOTE(CAST(OLD.object_key AS CHAR CHARACTER SET utf8mb4))))
+                ON DUPLICATE KEY UPDATE object_key=IF(BINARY transfer_changes.object_key=BINARY VALUES(object_key),transfer_changes.object_key,NULL),
+                    source_version=NULL,snapshot=NULL,revision=transfer_changes.revision+1;
+        END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `objects_capture_insert` AFTER INSERT ON `objects` FOR EACH ROW BEGIN
+    DECLARE readers INTEGER DEFAULT 0;
+    IF NEW.stream_id IS NOT NULL THEN
+        SELECT subscribers INTO readers FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF readers>0 THEN
+            INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
+                SELECT t.task_id,CAST(NEW.object_key AS CHAR CHARACTER SET utf8mb4),s.id,
+                    JSON_OBJECT('metadata',JSON_EXTRACT(s.metadata,'$'),'checksums',JSON_EXTRACT(s.checksums,'$'),
+                        'public',JSON_EXTRACT(IF(s.public_read,'true','false'),'$'),'size',s.size,'etag',s.etag,'payload',s.payload_type)
+                FROM transfer_subscriptions t JOIN streams s ON s.id=NEW.stream_id
+                WHERE t.bucket_id=NEW.bucket_id AND t.active AND (
+                    JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='all'
+                    OR JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='prefix' AND
+                        LEFT(NEW.object_key,OCTET_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.prefix'))))=CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.prefix')) AS BINARY)
+                    OR JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='objects' AND
+                        JSON_CONTAINS(JSON_EXTRACT(t.scope,'$.keys'),JSON_QUOTE(CAST(NEW.object_key AS CHAR CHARACTER SET utf8mb4))))
+                ON DUPLICATE KEY UPDATE object_key=IF(BINARY transfer_changes.object_key=BINARY VALUES(object_key),transfer_changes.object_key,NULL),
+                    source_version=VALUES(source_version),snapshot=VALUES(snapshot),revision=transfer_changes.revision+1;
+        END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `objects_capture_update` AFTER UPDATE ON `objects` FOR EACH ROW BEGIN
+    DECLARE readers INTEGER DEFAULT 0;
+    IF NOT (OLD.stream_id<=>NEW.stream_id AND OLD.catalog_public<=>NEW.catalog_public) THEN
+        SELECT subscribers INTO readers FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF readers>0 THEN
+            INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
+                SELECT t.task_id,CAST(NEW.object_key AS CHAR CHARACTER SET utf8mb4),s.id,
+                    IF(s.id IS NULL,NULL,JSON_OBJECT('metadata',JSON_EXTRACT(s.metadata,'$'),'checksums',JSON_EXTRACT(s.checksums,'$'),
+                        'public',JSON_EXTRACT(IF(s.public_read,'true','false'),'$'),'size',s.size,'etag',s.etag,'payload',s.payload_type))
+                FROM transfer_subscriptions t LEFT JOIN streams s ON s.id=NEW.stream_id
+                WHERE t.bucket_id=NEW.bucket_id AND t.active AND (
+                    JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='all'
+                    OR JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='prefix' AND
+                        LEFT(NEW.object_key,OCTET_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.prefix'))))=CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.prefix')) AS BINARY)
+                    OR JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='objects' AND
+                        JSON_CONTAINS(JSON_EXTRACT(t.scope,'$.keys'),JSON_QUOTE(CAST(NEW.object_key AS CHAR CHARACTER SET utf8mb4))))
+                ON DUPLICATE KEY UPDATE object_key=IF(BINARY transfer_changes.object_key=BINARY VALUES(object_key),transfer_changes.object_key,NULL),
+                    source_version=VALUES(source_version),snapshot=VALUES(snapshot),revision=transfer_changes.revision+1;
+        END IF;
     END IF;
 END;

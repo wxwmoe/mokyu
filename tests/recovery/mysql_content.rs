@@ -152,6 +152,13 @@ async fn mysql_content_contract() -> Result<()> {
     .await
     .expect("unrelated stream cleanup blocked an active encoding")?;
     assert_eq!(retired.rows_affected(), 0);
+    let retired = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        super::queries::retire_failed_encodings(&chunk(storage, first, 77)).execute(db),
+    )
+    .await
+    .expect("unrelated allocation cleanup blocked an active encoding")?;
+    assert_eq!(retired.rows_affected(), 0);
     writing.rollback().await?;
     backend.complete(first, 0, &physical).await?;
     assert!(backend.complete(first, 0, &physical).await.is_err());
@@ -165,6 +172,22 @@ async fn mysql_content_contract() -> Result<()> {
     let (reused, existing) = backend.allocate(chunk(storage, first, 1)).await?;
     assert!(existing);
     assert_eq!(reused.id, physical.id);
+    let mut unrelated = db.begin().await?;
+    super::queries::lock_chunk(physical.id)
+        .fetch_one(&mut *unrelated)
+        .await?;
+    let mut lookup = db.begin().await?;
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            super::queries::reusable_chunk(&mut lookup, &chunk(storage, first, 77)),
+        )
+        .await
+        .expect("deduplication lookup locked an unrelated chunk")?
+        .is_none()
+    );
+    lookup.rollback().await?;
+    unrelated.rollback().await?;
     assert!(!backend.can_stage_reuse(physical.id).await?);
     backend.reference(first, 32, physical.id, 32).await?;
     let all = backend.extents_for_copy(first, 0).await?;

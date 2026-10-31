@@ -1,4 +1,7 @@
-use super::{Backend, queries, replication_queries as q, transactions};
+use super::{
+    Backend, queries, replication_change_queries as c, replication_change_transactions as changes,
+    replication_queries as q, transactions,
+};
 use crate::{
     authorization::{Permit, Principal},
     model::{
@@ -20,7 +23,7 @@ use uuid::Uuid;
 type Tx<'a> = Transaction<'a, Sqlite>;
 
 fn detail(run: &q::Run) -> serde_json::Value {
-    json!({"operation":"replication","phase":run.phase,"storage_id":run.storage_id,
+    json!({"operation":"replication","phase":run.phase_label(),"storage_id":run.storage_id,
         "execution_mode":run.mode,"progress":run.progress.0,
         "external":run.options.0.external(),"source_bucket":run.options.0.source_bucket,"target_bucket":run.options.0.target_bucket})
 }
@@ -31,6 +34,9 @@ pub(super) async fn save(db: &mut Tx<'_>, run: &q::Run) -> Result<()> {
         &run.phase,
         run.cursor_key.as_deref(),
         &run.progress.0,
+        run.scanned,
+        run.sealed,
+        run.scan_end.as_deref(),
     )
     .execute(&mut **db)
     .await?;
@@ -190,6 +196,7 @@ impl ReplicationStore for Backend {
         )
         .execute(&mut *db)
         .await?;
+        changes::activate(&mut db, id, options).await?;
         for connection in connections {
             connection.validate(id)?;
             q::connection(id, connection).execute(&mut *db).await?;
@@ -312,6 +319,8 @@ impl ReplicationStore for Backend {
     async fn step(&self, task: Execution) -> Result<Step> {
         let mut db = self.write.begin_with(queries::BEGIN_WRITE).await?;
         let mut run = owned(&mut db, task).await?;
+        #[cfg(feature = "fault-injection")]
+        let boundary = run.boundary();
         if run.options.0.external() {
             if let Some(step) =
                 super::replication_remote_transactions::preflight(&mut db, &run).await?
@@ -325,6 +334,10 @@ impl ReplicationStore for Backend {
             let connections = q::connections(task.id).fetch_all(&mut *db).await?;
             save(&mut db, &run).await?;
             db.commit().await?;
+            #[cfg(feature = "fault-injection")]
+            if let Some(boundary) = boundary {
+                crate::faults::point(boundary).await;
+            }
             return Ok(match plan {
                 Some(plan) => Step::External {
                     plan: Box::new(plan),
@@ -357,6 +370,10 @@ impl ReplicationStore for Backend {
         };
         save(&mut db, &run).await?;
         db.commit().await?;
+        #[cfg(feature = "fault-injection")]
+        if let Some(boundary) = boundary {
+            crate::faults::point(boundary).await;
+        }
         #[cfg(feature = "fault-injection")]
         if run.progress.0.completed > completed {
             crate::faults::point("replication-published").await;
@@ -465,7 +482,7 @@ impl ReplicationStore for Backend {
 
 pub(super) async fn source_page(
     db: &mut Tx<'_>,
-    run: &q::Run,
+    run: &mut q::Run,
 ) -> Result<Vec<(String, Option<q::Source>)>> {
     let options = run.options.0.clone();
     let rows: Vec<(String, Option<q::Source>)> = match &options.scope {
@@ -502,22 +519,39 @@ pub(super) async fn source_page(
                 Scope::Prefix { prefix } => prefix.as_str(),
                 _ => "",
             };
-            q::scan(options.source_bucket, run.cursor_key.as_deref(), prefix)
-                .fetch_all(&mut **db)
-                .await?
-                .into_iter()
-                .map(|source| (source.object_key.clone(), Some(source)))
-                .collect()
+            if run.scan_end.is_none() {
+                let limit = model::changes::prefix_limit(prefix);
+                run.scan_end = Some(
+                    c::upper(options.source_bucket, prefix, limit.as_deref())
+                        .fetch_optional(&mut **db)
+                        .await?
+                        .unwrap_or_default(),
+                );
+            }
+            q::scan(
+                options.source_bucket,
+                run.cursor_key.as_deref(),
+                prefix,
+                run.scan_end.as_deref().unwrap(),
+            )
+            .fetch_all(&mut **db)
+            .await?
+            .into_iter()
+            .map(|source| (source.object_key.clone(), Some(source)))
+            .collect()
         }
     };
     Ok(rows)
 }
 
 async fn scan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
+    if run.scanned {
+        return changes::replay(db, run).await;
+    }
     let options = run.options.0.clone();
     let rows = source_page(db, run).await?;
     if rows.is_empty() {
-        run.phase = "plan".into();
+        run.scanned = true;
         return Ok(());
     }
     let target_keys: Vec<_> = rows
@@ -567,6 +601,7 @@ async fn scan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
         run.progress.0.conflicts += i64::from(error.is_some());
         run.cursor_key = Some(key);
     }
+    run.phase = "plan".into();
     Ok(())
 }
 
@@ -583,6 +618,11 @@ async fn finish_item(
             q::abandon(id).execute(&mut **db).await?;
         }
     }
+    if state == "completed" {
+        if let Some(output) = output {
+            changes::confirm(db, item, run.options.0.target_bucket, output).await?;
+        }
+    }
     q::finish_item(item.id, state, output, error)
         .execute(&mut **db)
         .await?;
@@ -596,6 +636,19 @@ async fn finish_item(
 }
 
 async fn current(db: &mut Tx<'_>, run: &q::Run, item: &q::Entry) -> Result<bool> {
+    if run.frozen() {
+        let Some(version) = item.source_pin else {
+            return Ok(false);
+        };
+        return Ok(c::frozen(version)
+            .fetch_optional(&mut **db)
+            .await?
+            .is_some_and(|source| {
+                source.size == item.snapshot.0.size
+                    && source.etag == item.snapshot.0.etag
+                    && source.payload_type == item.snapshot.0.payload
+            }));
+    }
     let source = q::source(run.options.0.source_bucket, &item.source_key)
         .fetch_optional(&mut **db)
         .await?;
@@ -692,7 +745,10 @@ async fn plan(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
                     return Ok(());
                 }
             }
-            if !equal && run.options.0.conflict != Conflict::Overwrite {
+            if !equal
+                && !changes::owned(&item, &target)
+                && run.options.0.conflict != Conflict::Overwrite
+            {
                 return finish_item(
                     db,
                     run,
@@ -913,6 +969,9 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             .await?
     };
     let Some(item) = item else {
+        if changes::advance(db, run).await? {
+            return Ok(());
+        }
         if !super::transfer_transactions::cleanup(db, run.task_id).await? {
             return Ok(());
         }
@@ -959,7 +1018,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             {
                 return finish_item(db, run, &item, "skipped", Some(target.id), None).await;
             }
-            if !equal && options.conflict != Conflict::Overwrite {
+            if !equal && !changes::owned(&item, target) && options.conflict != Conflict::Overwrite {
                 return finish_item(
                     db,
                     run,
@@ -1140,11 +1199,27 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
         .into(),
         public_read: public,
     };
-    transactions::publish_migration_in(db, task, candidate, &job).await?;
+    if run.frozen() {
+        transactions::publish_import_in(
+            db,
+            task,
+            candidate,
+            options.target_bucket,
+            &item.target_key,
+            item.target_version,
+            public,
+        )
+        .await?;
+    } else {
+        transactions::publish_migration_in(db, task, candidate, &job).await?;
+    }
     finish_item(db, run, &item, "completed", Some(candidate), None).await
 }
 
 async fn cancel(db: &mut Tx<'_>, run: &mut q::Run) -> Result<()> {
+    if !changes::cancel(db, run).await? {
+        return Ok(());
+    }
     let rows = q::live(run.task_id).fetch_all(&mut **db).await?;
     if rows.is_empty() {
         if !super::transfer_transactions::cleanup(db, run.task_id).await? {

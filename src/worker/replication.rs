@@ -3,6 +3,7 @@ use crate::{
     model::{replication::Step, task::Execution},
 };
 use anyhow::Result;
+use std::sync::atomic::Ordering;
 
 struct Export<'a> {
     app: &'a App,
@@ -425,12 +426,20 @@ impl App {
     }
 
     pub(crate) async fn replication_batch(&self, task: Execution) -> Result<bool> {
-        let result = {
+        let step = async {
             let _coord = self.coord.lock().await;
+            // A peer may have disabled maintenance before this control refreshed it.
+            if self.maintenance.load(Ordering::Acquire) || self.draining.load(Ordering::Acquire) {
+                return Ok(Step::Continue);
+            }
             self.writable()?;
             let _cache = self.public_reads.changing();
-            self.replications.step(task).await?
+            self.replications.step(task).await
         };
+        #[cfg(feature = "fault-injection")]
+        let result = crate::faults::defer(step).await?;
+        #[cfg(not(feature = "fault-injection"))]
+        let result = step.await?;
         if let Step::External { plan, connections } = &result {
             anyhow::ensure!(self.role == "single", "external transfers require a worker");
             let snapshots = connections

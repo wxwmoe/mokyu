@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+#[path = "replication_changes.rs"]
+pub(crate) mod changes;
 #[path = "replication_external.rs"]
 pub(crate) mod external;
 #[path = "replication_import.rs"]
@@ -82,6 +84,8 @@ pub(crate) struct Options {
     pub conflict: Conflict,
     #[serde(default)]
     pub permissions: Permissions,
+    #[serde(default)]
+    pub propagate_deletes: bool,
 }
 
 fn valid_key(key: &str, prefix: bool) -> bool {
@@ -104,6 +108,13 @@ impl Options {
                 && !self.target_bucket.is_nil()
                 && valid_key(&self.target_prefix, true),
             invalid()
+        );
+        ensure!(
+            !self.propagate_deletes || self.operation == Operation::Copy && !self.external(),
+            s3s::s3_error!(
+                InvalidArgument,
+                "delete propagation requires an internal copy"
+            )
         );
         if let Some(key) = &self.target_key {
             ensure!(
@@ -240,6 +251,9 @@ impl Options {
         }
         if self.target_external == external {
             permit.add(self.target_bucket, Action::Write);
+            if self.propagate_deletes {
+                permit.add(self.target_bucket, Action::Delete);
+            }
             if self.permissions != Permissions::Ignore {
                 permit.add(self.target_bucket, Action::Acl);
             }
@@ -264,8 +278,33 @@ pub(crate) struct Run {
     pub state: String,
     pub error: Option<String>,
     pub mode: String,
+    pub scanned: bool,
+    pub captured: bool,
+    pub sealed: bool,
+    pub scan_end: Option<String>,
 }
 impl Run {
+    #[cfg(feature = "fault-injection")]
+    pub(crate) fn boundary(&self) -> Option<&'static str> {
+        (self.phase == "scan" && self.captured && !self.sealed).then_some(if self.scanned {
+            "replication-sealed"
+        } else {
+            "replication-page"
+        })
+    }
+
+    pub(crate) fn frozen(&self) -> bool {
+        self.captured && self.sealed && self.options.0.operation == Operation::Copy
+    }
+
+    pub(crate) fn phase_label(&self) -> &str {
+        if self.phase == "scan" && self.scanned {
+            if self.captured { "catchup" } else { "compare" }
+        } else {
+            &self.phase
+        }
+    }
+
     pub(crate) fn storage(&self) -> Result<Uuid> {
         self.storage_id
             .ok_or_else(|| super::Error::OperationAborted.into())
@@ -286,13 +325,16 @@ impl Run {
             .ok_or_else(|| super::Error::OperationAborted.into())
     }
     pub(crate) fn view(self) -> Replication {
+        let phase = self.phase_label().to_owned();
         Replication {
             id: self.task_id,
             state: self.state,
-            phase: self.phase,
+            phase,
             options: self.options.0,
             progress: self.progress.0,
             error: self.error,
+            captured: self.captured,
+            sealed: self.sealed,
         }
     }
 }
@@ -318,6 +360,8 @@ pub(crate) struct Replication {
     pub options: Options,
     pub progress: Progress,
     pub error: Option<String>,
+    pub captured: bool,
+    pub sealed: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -409,7 +453,7 @@ pub(crate) trait ReplicationStore: Send + Sync {
     ) -> Result<()>;
 }
 
-#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Snapshot {
     pub metadata: Value,
     pub checksums: Value,
@@ -429,6 +473,22 @@ pub(crate) fn same_source(left: &RawSource, right: &RawSource) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn delete_propagation_requires_an_internal_copy_and_target_delete_grant() {
+        let mut value = options(Scope::All);
+        value.propagate_deletes = true;
+        assert!(value.validate().is_ok());
+        assert!(
+            value.authority(Principal::Local).resources[&value.target_bucket]
+                .contains(&Action::Delete)
+        );
+        value.operation = Operation::Move;
+        assert!(value.validate().is_err());
+        value.operation = Operation::Copy;
+        value.target_external = true;
+        assert!(value.validate().is_err());
+    }
+
     fn options(scope: Scope) -> Options {
         Options {
             source_bucket: Uuid::new_v4(),
@@ -441,6 +501,7 @@ mod tests {
             target_key: None,
             conflict: Conflict::Report,
             permissions: Permissions::Inherit,
+            propagate_deletes: false,
         }
     }
 

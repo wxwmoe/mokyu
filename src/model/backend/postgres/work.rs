@@ -930,6 +930,8 @@ pub(crate) async fn exchange(
     key: &Key,
     input: work::Exchange,
 ) -> Result<work::Reply> {
+    #[cfg(feature = "fault-injection")]
+    let mut boundary = None;
     let hash = input.hash()?;
     let issued = write::operation_time(input.operation)?;
     let mut tx = pool.begin().await?;
@@ -1106,6 +1108,8 @@ pub(crate) async fn exchange(
                             continue;
                         }
                     }
+                    #[cfg(feature = "fault-injection")]
+                    let checkpoint = run.boundary().filter(|name| crate::faults::requested(name));
                     let next = match super::super::replication_remote_transactions::prepare(
                         &mut tx, execution, &mut run,
                     )
@@ -1149,6 +1153,11 @@ pub(crate) async fn exchange(
                     )
                     .execute(&mut *tx)
                     .await?;
+                    #[cfg(feature = "fault-injection")]
+                    if checkpoint.is_some() {
+                        boundary = checkpoint;
+                        break;
+                    }
                     continue;
                 }
             }
@@ -1525,6 +1534,10 @@ pub(crate) async fn exchange(
         .await?;
     let value = reply(node, key, &input, row)?;
     tx.commit().await?;
+    #[cfg(feature = "fault-injection")]
+    if let Some(boundary) = boundary {
+        crate::faults::point(boundary).await;
+    }
     Ok(value)
 }
 

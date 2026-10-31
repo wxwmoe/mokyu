@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0096.
+-- Generated from the complete postgres migration chain through 0097.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -155,6 +155,78 @@ BEGIN
     UPDATE api_tokens SET authorization_revision=authorization_revision+1 WHERE id=COALESCE(NEW.token_id,OLD.token_id);
     RETURN NULL;
 END $$;
+
+CREATE FUNCTION public.mokyu_capture_change(bucket uuid, object_name text, version uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    readers integer;
+    value jsonb;
+BEGIN
+    -- A shared gate covers the commit; activation and sealing hold it exclusively.
+    SELECT subscribers INTO readers FROM bucket_change_gates WHERE bucket_id=bucket FOR SHARE;
+    IF readers IS NULL OR readers=0 THEN
+        RETURN;
+    END IF;
+    IF version IS NOT NULL THEN
+        SELECT jsonb_build_object('metadata',metadata,'checksums',checksums,'public',public_read,
+            'size',size,'etag',etag,'payload',payload_type) INTO STRICT value FROM streams WHERE id=version;
+    END IF;
+    INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
+        SELECT task_id,object_name,version,value FROM transfer_subscriptions
+        WHERE bucket_id=bucket AND active AND (
+            scope->>'selection'='all'
+            OR scope->>'selection'='prefix' AND left(object_name,char_length(scope->>'prefix'))=scope->>'prefix'
+            OR scope->>'selection'='objects' AND scope->'keys' ? object_name)
+        ON CONFLICT (task_id,object_key) DO UPDATE SET
+            source_version=EXCLUDED.source_version,snapshot=EXCLUDED.snapshot,
+            revision=transfer_changes.revision+1;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_capture_object() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    bucket uuid;
+    object_name text;
+    version uuid;
+BEGIN
+    IF TG_OP='DELETE' THEN
+        IF OLD.stream_id IS NULL THEN RETURN NULL; END IF;
+        bucket:=OLD.bucket_id;
+        object_name:=OLD.object_key;
+    ELSE
+        IF TG_OP='INSERT' AND NEW.stream_id IS NULL THEN RETURN NULL; END IF;
+        IF TG_OP='UPDATE' AND OLD.stream_id IS NOT DISTINCT FROM NEW.stream_id THEN RETURN NULL; END IF;
+        bucket:=NEW.bucket_id;
+        object_name:=NEW.object_key;
+        version:=NEW.stream_id;
+    END IF;
+    PERFORM mokyu_capture_change(bucket,object_name,version);
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_capture_stream() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM objects WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND stream_id=NEW.id) THEN
+        PERFORM mokyu_capture_change(NEW.bucket_id,NEW.object_key,NEW.id);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_change_gate() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    INSERT INTO bucket_change_gates(bucket_id) VALUES(NEW.id);
+    RETURN NULL;
+END
+$$;
 
 CREATE FUNCTION public.mokyu_notify_bucket() RETURNS trigger
     LANGUAGE plpgsql
@@ -684,6 +756,12 @@ CREATE TABLE public.audit_events (
     detail jsonb DEFAULT '{}'::jsonb NOT NULL,
     CONSTRAINT audit_events_outcome_check CHECK ((outcome = ANY (ARRAY['unknown'::text, 'succeeded'::text, 'failed'::text, 'partial'::text]))),
     CONSTRAINT audit_events_source_check CHECK ((source = ANY (ARRAY['web'::text, 'token'::text, 'cli'::text, 's3'::text])))
+);
+
+CREATE TABLE public.bucket_change_gates (
+    bucket_id uuid NOT NULL,
+    subscribers integer DEFAULT 0 NOT NULL,
+    CONSTRAINT bucket_change_gates_subscribers_check CHECK ((subscribers >= 0))
 );
 
 CREATE TABLE public.bucket_domains (
@@ -2021,6 +2099,17 @@ CREATE VIEW public.token_external_access AS
      JOIN public.token_external_grants g ON ((g.token_id = t.id)))
      LEFT JOIN public.user_external_access a ON (((a.user_id = t.user_id) AND (a.bucket_id = g.bucket_id))));
 
+CREATE TABLE public.transfer_changes (
+    task_id uuid NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    source_version uuid,
+    snapshot jsonb,
+    revision bigint DEFAULT 1 NOT NULL,
+    CONSTRAINT transfer_changes_check CHECK (((source_version IS NULL) = (snapshot IS NULL))),
+    CONSTRAINT transfer_changes_object_key_check CHECK (((octet_length(object_key) >= 1) AND (octet_length(object_key) <= 1024))),
+    CONSTRAINT transfer_changes_revision_check CHECK ((revision > 0))
+);
+
 CREATE TABLE public.transfer_connections (
     task_id uuid NOT NULL,
     external_id uuid NOT NULL,
@@ -2068,6 +2157,7 @@ CREATE TABLE public.transfer_items (
     position_bytes bigint DEFAULT 0 NOT NULL,
     error text,
     reuse_target boolean DEFAULT false NOT NULL,
+    confirmation jsonb,
     CONSTRAINT transfer_items_position_bytes_check CHECK ((position_bytes >= 0)),
     CONSTRAINT transfer_items_state_check CHECK ((state = ANY (ARRAY['planning'::text, 'planned'::text, 'copying'::text, 'completed'::text, 'skipped'::text, 'conflict'::text, 'cancelled'::text])))
 );
@@ -2107,6 +2197,10 @@ CREATE TABLE public.transfer_runs (
     cursor_key text,
     progress jsonb NOT NULL,
     source_storage_id uuid,
+    scanned boolean DEFAULT false NOT NULL,
+    captured boolean DEFAULT false NOT NULL,
+    sealed boolean DEFAULT false NOT NULL,
+    scan_end text,
     CONSTRAINT transfer_runs_generation_check CHECK ((generation > 0)),
     CONSTRAINT transfer_runs_phase_check CHECK ((phase = ANY (ARRAY['scan'::text, 'plan'::text, 'verify'::text, 'publish'::text, 'cancel'::text, 'complete'::text, 'cancelled'::text])))
 );
@@ -2145,6 +2239,13 @@ CREATE TABLE public.transfer_spans (
     CONSTRAINT transfer_spans_hash_check CHECK ((octet_length(hash) = 32)),
     CONSTRAINT transfer_spans_length_check CHECK ((length > 0)),
     CONSTRAINT transfer_spans_source_offset_check CHECK ((source_offset >= 0))
+);
+
+CREATE TABLE public.transfer_subscriptions (
+    task_id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    scope jsonb NOT NULL,
+    active boolean DEFAULT true NOT NULL
 );
 
 CREATE TABLE public.uploads (
@@ -2231,6 +2332,9 @@ ALTER TABLE ONLY public.api_tokens
 
 ALTER TABLE ONLY public.audit_events
     ADD CONSTRAINT audit_events_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.bucket_change_gates
+    ADD CONSTRAINT bucket_change_gates_pkey PRIMARY KEY (bucket_id);
 
 ALTER TABLE ONLY public.buckets
     ADD CONSTRAINT buckets_id_project_id_key UNIQUE (id, project_id);
@@ -2580,6 +2684,9 @@ ALTER TABLE ONLY public.token_external_grants
 ALTER TABLE ONLY public.token_bucket_grants
     ADD CONSTRAINT token_grants_pkey PRIMARY KEY (token_id, bucket_id);
 
+ALTER TABLE ONLY public.transfer_changes
+    ADD CONSTRAINT transfer_changes_pkey PRIMARY KEY (task_id, object_key);
+
 ALTER TABLE ONLY public.transfer_connections
     ADD CONSTRAINT transfer_connections_pkey PRIMARY KEY (task_id, external_id);
 
@@ -2618,6 +2725,9 @@ ALTER TABLE ONLY public.transfer_spans
 
 ALTER TABLE ONLY public.transfer_spans
     ADD CONSTRAINT transfer_spans_unit_id_source_offset_key UNIQUE (unit_id, source_offset);
+
+ALTER TABLE ONLY public.transfer_subscriptions
+    ADD CONSTRAINT transfer_subscriptions_pkey PRIMARY KEY (task_id);
 
 ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_pkey PRIMARY KEY (id);
@@ -2874,6 +2984,8 @@ CREATE INDEX token_bucket_grants_bucket ON public.token_bucket_grants USING btre
 
 CREATE INDEX token_external_bucket ON public.token_external_grants USING btree (bucket_id);
 
+CREATE INDEX transfer_changes_source ON public.transfer_changes USING btree (source_version);
+
 CREATE INDEX transfer_connections_external ON public.transfer_connections USING btree (external_id);
 
 CREATE INDEX transfer_imports_part ON public.transfer_imports USING btree (part_stream);
@@ -2904,6 +3016,8 @@ CREATE INDEX transfer_sources_raw ON public.transfer_sources USING btree (source
 
 CREATE INDEX transfer_sources_work ON public.transfer_sources USING btree (task_id, state, id);
 
+CREATE INDEX transfer_subscriptions_bucket ON public.transfer_subscriptions USING btree (bucket_id) WHERE active;
+
 CREATE INDEX uploads_bucket_transfers ON public.uploads USING btree (bucket_id, created_at DESC, id);
 
 CREATE INDEX uploads_expiry ON public.uploads USING btree (state, touched_at, id);
@@ -2923,6 +3037,8 @@ CREATE INDEX usage_history_snapshot ON public.usage_history USING btree (snapsho
 CREATE INDEX web_users_directory ON public.web_users USING btree (username COLLATE "C");
 
 CREATE TRIGGER bucket_settings_revision BEFORE UPDATE OF cors, website_enabled, index_document, error_document, project_id, state, uploads_paused, public_base_url ON public.buckets FOR EACH ROW EXECUTE FUNCTION public.bucket_settings_revision();
+
+CREATE TRIGGER buckets_change_gate AFTER INSERT ON public.buckets FOR EACH ROW EXECUTE FUNCTION public.mokyu_change_gate();
 
 CREATE TRIGGER buckets_notify AFTER DELETE OR UPDATE ON public.buckets FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_bucket();
 
@@ -2953,6 +3069,8 @@ CREATE TRIGGER external_token_authorization AFTER INSERT OR DELETE OR UPDATE ON 
 CREATE TRIGGER grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.member_bucket_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
 
 CREATE TRIGGER member_authorization AFTER INSERT OR DELETE OR UPDATE ON public.project_members FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
+
+CREATE TRIGGER objects_capture AFTER INSERT OR DELETE OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.mokyu_capture_object();
 
 CREATE TRIGGER objects_notify AFTER INSERT OR DELETE OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_object();
 
@@ -2996,6 +3114,8 @@ CREATE TRIGGER storages_block_key_validate BEFORE INSERT OR UPDATE OF block_key_
 
 CREATE TRIGGER storages_notify AFTER DELETE OR UPDATE ON public.storages FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_storage();
 
+CREATE TRIGGER streams_capture AFTER UPDATE OF public_read, metadata, checksums, etag, size, payload_type ON public.streams FOR EACH ROW WHEN (((new.state = 'ready'::text) AND (new.stream_type = 'object'::text) AND ((old.public_read IS DISTINCT FROM new.public_read) OR (old.metadata IS DISTINCT FROM new.metadata) OR (old.checksums IS DISTINCT FROM new.checksums) OR (old.etag IS DISTINCT FROM new.etag) OR (old.size IS DISTINCT FROM new.size) OR (old.payload_type IS DISTINCT FROM new.payload_type)))) EXECUTE FUNCTION public.mokyu_capture_stream();
+
 CREATE TRIGGER streams_clear_write_lease AFTER UPDATE OF state ON public.streams FOR EACH ROW EXECUTE FUNCTION public.clear_stream_write_lease();
 
 CREATE TRIGGER streams_notify AFTER UPDATE OF public_read, metadata, etag, size, payload_revision ON public.streams FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_stream();
@@ -3008,6 +3128,9 @@ CREATE TRIGGER user_authorization BEFORE UPDATE OF role, enabled, password_hash 
 
 ALTER TABLE ONLY public.api_tokens
     ADD CONSTRAINT api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.web_users(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.bucket_change_gates
+    ADD CONSTRAINT bucket_change_gates_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.buckets
     ADD CONSTRAINT buckets_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id);
@@ -3435,6 +3558,12 @@ ALTER TABLE ONLY public.token_bucket_grants
 ALTER TABLE ONLY public.token_bucket_grants
     ADD CONSTRAINT token_grants_token_id_fkey FOREIGN KEY (token_id) REFERENCES public.api_tokens(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.transfer_changes
+    ADD CONSTRAINT transfer_changes_source_version_fkey FOREIGN KEY (source_version) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.transfer_changes
+    ADD CONSTRAINT transfer_changes_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_subscriptions(task_id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY public.transfer_connections
     ADD CONSTRAINT transfer_connections_external_id_fkey FOREIGN KEY (external_id) REFERENCES public.external_buckets(id);
 
@@ -3494,6 +3623,12 @@ ALTER TABLE ONLY public.transfer_sources
 
 ALTER TABLE ONLY public.transfer_spans
     ADD CONSTRAINT transfer_spans_unit_id_fkey FOREIGN KEY (unit_id) REFERENCES public.transfer_sources(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.transfer_subscriptions
+    ADD CONSTRAINT transfer_subscriptions_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);
+
+ALTER TABLE ONLY public.transfer_subscriptions
+    ADD CONSTRAINT transfer_subscriptions_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_runs(task_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);

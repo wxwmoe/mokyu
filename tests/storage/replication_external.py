@@ -138,6 +138,57 @@ def run(restart):
         assert body('forced-private') == b'' and not public('forced-private')
     result.append('same-body reuse, conflict preservation and overwrite')
 
+    if not export:
+        for key in ('online/a', 'online/z'):
+            put(key, b'initial observation', public=not remote)
+        marker = fixture.arm('external-finalized')
+        try:
+            task = create(dict(selection='prefix', prefix='online/'), target_prefix='online-out/')
+            wait(lambda: marker.with_suffix('.hit').exists(), 'first observation was not finalized')
+            put('online/a', b'new observed body', public=False)
+            put('online/-late', b'new key behind the first listing')
+            marker.unlink(missing_ok=True)
+            final = finish(task)
+            assert final['sealed'] and not final['captured'] and final['progress']['completed'] == 3, final
+            assert body('online-out/a') == b'new observed body'
+            assert body('online-out/-late') == b'new key behind the first listing'
+            assert body('online-out/z') == b'initial observation'
+            if not remote:
+                assert not public('online-out/a')
+        finally:
+            marker.unlink(missing_ok=True)
+        put('online-race', b'first observed body')
+        marker = fixture.arm('external-finalized')
+        try:
+            task = create(dict(selection='objects', keys=['online-race']), target_key='online-race')
+            wait(lambda: marker.with_suffix('.hit').exists(), 'target race boundary was not reached')
+            put('online-race', b'independent target write', source=False)
+            put('online-race', b'new source observation')
+            marker.unlink(missing_ok=True)
+            assert finish(task, failed=True)['progress']['conflicts'] == 1
+            assert body('online-race') == b'independent target write'
+        finally:
+            marker.unlink(missing_ok=True)
+        result.append('repeated external observation catches replacements and earlier keys while preserving an independently replaced target')
+    else:
+        put('sealed/a', b'bounded native source')
+        page, seal = fixture.arm('replication-page'), fixture.arm('replication-sealed')
+        try:
+            task = create(dict(selection='prefix', prefix='sealed/'), target_prefix='sealed-out/')
+            wait(lambda: page.with_suffix('.hit').exists(), 'native export page was not reached')
+            put('sealed/z', b'captured native source')
+            page.unlink(missing_ok=True)
+            wait(lambda: seal.with_suffix('.hit').exists(), 'native export did not seal')
+            put('sealed/z', b'newer than the sealed export')
+            seal.unlink(missing_ok=True)
+            assert finish(task)['progress']['completed'] == 2
+            assert body('sealed-out/z') == b'captured native source'
+            assert body('sealed/z', True) == b'newer than the sealed export'
+        finally:
+            page.unlink(missing_ok=True)
+            seal.unlink(missing_ok=True)
+        result.append('native export catches keys beyond the scan bound and reads its sealed retired source directly')
+
     for point in ('external-upload-started', 'external-part-uploaded', 'external-upload-completed') if export else ():
         marker = fixture.arm(point)
         destination = 'changed-source-' + point
@@ -146,7 +197,11 @@ def run(restart):
         assert database.query('SELECT COUNT(*) AS n FROM transfer_items WHERE task_id=%s AND source_pin IS NOT NULL', uuid.UUID(task))[0]['n'] == 1
         put('in/large', b'new source', public=True)
         marker.unlink(missing_ok=True)
-        assert finish(task, failed=True)['progress']['conflicts'] == 1
+        if point == 'external-upload-completed':
+            assert finish(task, failed=True)['progress']['conflicts'] == 1
+        else:
+            assert finish(task)['progress']['completed'] == 1
+            assert body(destination) == b'new source' and public(destination)
         assert body('in/large', True) == b'new source'
         assert not client.list_multipart_uploads(Bucket=bucket, Prefix=scopes[1] + destination).get('Uploads')
         assert database.query('SELECT COUNT(*) AS n FROM transfer_items WHERE task_id=%s AND source_pin IS NOT NULL', uuid.UUID(task))[0]['n'] == 0
@@ -160,7 +215,8 @@ def run(restart):
         wait(lambda: fixture.api('/api/v1/replications/' + task)['state'] == 'paused', 'task did not pause')
         put('in/large', b'changed between work assignments', public=True)
         fixture.api('/api/v1/replications/' + task + '/command', 'resume', expected=202)
-        assert finish(task, failed=True)['progress']['conflicts'] == 1
+        assert finish(task)['progress']['completed'] == 1
+        assert body('changed-while-paused') == b'changed between work assignments'
         assert body('in/large', True) == b'changed between work assignments'
         assert not client.list_multipart_uploads(Bucket=bucket, Prefix=scopes[1] + 'changed-while-paused').get('Uploads')
         put('in/large', data, public=True)
@@ -169,10 +225,11 @@ def run(restart):
         wait(lambda: marker.with_suffix('.hit').exists(), 'ACL-change fault point not reached', seconds=180)
         client.put_object_acl(Bucket=bucket, Key=scopes[0] + 'in/large', ACL='private')
         marker.unlink(missing_ok=True)
-        assert finish(task, failed=True)['progress']['conflicts'] == 1
+        assert finish(task)['progress']['completed'] == 1
+        assert body('changed-acl') == data and not public('changed-acl')
         assert body('in/large', True) == data
         client.put_object_acl(Bucket=bucket, Key=scopes[0] + 'in/large', ACL='public-read')
-        result.append('native source pins, replacement at create/part/complete and concurrent ACL changes preserve sources and clean known uploads')
+        result.append('native source changes before sealing catch up and clean known uploads; unconfirmed completed output remains a conflict')
 
     for point in ('external-part-uploaded', 'external-upload-completed'):
         marker = fixture.arm(point)
@@ -194,7 +251,10 @@ def run(restart):
             assert public(destination)
         saved = database.query('SELECT e.state FROM transfer_external_items e JOIN transfer_items i ON i.id=e.item_id WHERE i.task_id=%s', uuid.UUID(task))[0]['state']
         state = saved if isinstance(saved, dict) else json.loads(saved)
-        assert state['starts'] == 1 and state['phase'] == 'done' and state['upload'] is None, state
+        assert state['starts'] == int(bool(export)) and state['phase'] == 'done' and state['upload'] is None, state
+        assert not state['cleanup_pending'], state
+        if not export:
+            assert state['previous']['object'] == state['output'], 'comparison replaced its confirmed target'
     result.append('process crashes after part upload and remote completion resume persisted receipts without a new upload')
     marker = fixture.arm('external-part-uploaded')
     task = create(dict(selection='objects', keys=['in/large']), target_key='cancelled')
