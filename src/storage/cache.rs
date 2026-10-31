@@ -259,6 +259,14 @@ pub(crate) struct ReadContext {
     pub(crate) capture: Option<Arc<Mutex<crate::app::responses::Mapping>>>,
 }
 impl ReadContext {
+    pub(crate) fn integrity(mode: &str) -> &str {
+        // Cached derivatives must never preserve bytes from an unchecked source.
+        if crate::status::access::DERIVING.try_with(|_| ()).is_ok() {
+            "inline"
+        } else {
+            mode
+        }
+    }
     pub fn user(
         range: bool,
         checks: Arc<crate::app::checks::Checks>,

@@ -27,7 +27,7 @@ impl Reads {
         } else {
             crate::storage::resource_gate::FOREGROUND
         };
-        match backend.profile.read_integrity.as_str() {
+        match crate::storage::ReadContext::integrity(&backend.profile.read_integrity) {
             "background" => {
                 let reads = self.clone();
                 let request = prepared.clone();
@@ -70,7 +70,7 @@ impl Reads {
             return Ok(None);
         }
         let backend = prepared.backend(source.storage_id)?;
-        match backend.profile.read_integrity.as_str() {
+        match crate::storage::ReadContext::integrity(&backend.profile.read_integrity) {
             "background" if complete => {
                 let reads = self.clone();
                 let request = prepared.clone();

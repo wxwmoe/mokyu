@@ -17,7 +17,8 @@ pub(super) fn buckets(routes: &[ReadRoute]) -> Rows<'static, Resolved> {
     let values: Vec<_> = routes
         .iter()
         .enumerate()
-        .map(|(ordinal, route)| match route {
+        .map(|(ordinal, route)| match route.base() {
+            ReadRoute::Image { .. } => unreachable!(),
             ReadRoute::Bucket { name, alias, .. } => {
                 json!({"ordinal":ordinal,"name":name,"alias":alias.as_ref().map(|(name, _)|name)})
             }

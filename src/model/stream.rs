@@ -73,6 +73,10 @@ pub(crate) struct CachedStream {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ReadRoute {
+    Image {
+        route: Box<ReadRoute>,
+        request: crate::processing::image::request::Request,
+    },
     Bucket {
         name: String,
         key: String,
@@ -85,8 +89,32 @@ pub(crate) enum ReadRoute {
 }
 
 impl ReadRoute {
-    pub fn key<'a>(&'a self, bucket: &Bucket) -> &'a str {
+    pub fn base(&self) -> &Self {
         match self {
+            Self::Image { route, .. } => route.base(),
+            _ => self,
+        }
+    }
+    pub fn image(&self) -> Option<&crate::processing::image::request::Request> {
+        match self {
+            Self::Image { request, .. } => Some(request),
+            _ => None,
+        }
+    }
+    pub fn bytes(&self) -> usize {
+        match self {
+            Self::Image { route, request } => {
+                route.bytes() + serde_json::to_vec(request).map_or(usize::MAX / 2, |v| v.len()) * 4
+            }
+            Self::Host { host, key } => host.len() + key.len(),
+            Self::Bucket { name, key, alias } => {
+                name.len() + key.len() + alias.as_ref().map_or(0, |(a, b)| a.len() + b.len())
+            }
+        }
+    }
+    pub fn key<'a>(&'a self, bucket: &Bucket) -> &'a str {
+        match self.base() {
+            Self::Image { .. } => unreachable!(),
             Self::Bucket { key, alias, .. } => alias
                 .as_ref()
                 .filter(|(name, _)| name == &bucket.name)
@@ -98,6 +126,7 @@ impl ReadRoute {
 
 #[derive(Clone)]
 pub(crate) struct ReadSnapshot {
+    pub image: Option<crate::processing::image::request::Selection>,
     pub bucket: Bucket,
     pub stream: Option<StoredStream>,
     pub raw: Option<crate::model::raw::RawRange>,

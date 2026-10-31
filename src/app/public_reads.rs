@@ -223,7 +223,12 @@ fn route_key(route: &ReadRoute, bucket: bool) -> Key {
         hash.update(&(value.len() as u64).to_le_bytes());
         hash.update(value.as_bytes());
     };
-    match route {
+    if !bucket && let Some(request) = route.image() {
+        value("image");
+        value(&serde_json::to_string(request).expect("serializable image request"));
+    }
+    match route.base() {
+        ReadRoute::Image { .. } => unreachable!(),
         ReadRoute::Host { host, key } => {
             value("host");
             value(host);
@@ -568,17 +573,15 @@ impl Cache {
         generation: u64,
         confirmed: Option<Confirmation>,
     ) {
-        let route_bytes = match route {
-            ReadRoute::Host { host, key } => host.len() + key.len(),
-            ReadRoute::Bucket { name, key, alias } => {
-                name.len() + key.len() + alias.as_ref().map_or(0, |(a, b)| a.len() + b.len())
-            }
-        };
-        if route_bytes > 4096 {
+        let route_bytes = route.bytes();
+        if route_bytes > 64 * 1024 {
             return;
         }
         let bytes = 8192
             + route_bytes * 2
+            + snapshot.image.as_ref().map_or(0, |image| {
+                serde_json::to_vec(image).map_or(LIMIT, |v| v.len().saturating_mul(4))
+            })
             + snapshot.bucket.cors.bytes()
             + snapshot.stream.as_ref().map_or(0, |s| {
                 json_bytes(&s.metadata)
@@ -630,18 +633,16 @@ impl Cache {
         let Some(stream) = &snapshot.stream else {
             return;
         };
-        let route_bytes = match route {
-            ReadRoute::Host { host, key } => host.len() + key.len(),
-            ReadRoute::Bucket { name, key, alias } => {
-                name.len() + key.len() + alias.as_ref().map_or(0, |(a, b)| a.len() + b.len())
-            }
-        };
-        if route_bytes > 4096 {
+        let route_bytes = route.bytes();
+        if route_bytes > 64 * 1024 {
             return;
         }
         let bucket = &snapshot.bucket;
         let bytes = 4096
             + route_bytes * 2
+            + snapshot.image.as_ref().map_or(0, |image| {
+                serde_json::to_vec(image).map_or(LIMIT, |v| v.len().saturating_mul(4))
+            })
             + profiles.capacity() * 32
             + [
                 &bucket.name,
@@ -1242,6 +1243,7 @@ mod tests {
                 key: "object".into(),
             },
             Arc::new(ReadSnapshot {
+                image: None,
                 bucket: Bucket {
                     id,
                     project_id: Uuid::new_v4(),
@@ -1249,6 +1251,7 @@ mod tests {
                     storage_id: Some(Uuid::new_v4()),
                     state: "active".into(),
                     settings_revision: 1,
+                    image_revision: 0,
                     uploads_paused: false,
                     public_base_url: String::new(),
                     cors: json!([]).into(),

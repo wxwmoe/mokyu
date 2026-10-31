@@ -3,11 +3,9 @@ use crate::model::Id;
 use crate::{
     app::{Active, App, Metadata, StoredStream},
     authorization::Action,
-    config,
     http::{HttpError, ReadOptions, problem},
-    storage::{Area, Disk},
 };
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use axum::{
     Json,
     body::Body,
@@ -16,143 +14,13 @@ use axum::{
     response::Response,
 };
 use chrono::{DateTime, Utc};
-use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::VecDeque,
-    io::Cursor,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
-use tokio::sync::Semaphore;
+use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 const THUMB_LIMIT: usize = 640 * 1024;
 const TEXT_LIMIT: usize = 64 * 1024;
-const CACHE_ENTRIES: usize = 4096;
-
-pub struct Thumbnails {
-    root: PathBuf,
-    disk: Arc<Disk>,
-    capacity: u64,
-    entries: Mutex<VecDeque<(Id, u64)>>,
-    pub(crate) job: Arc<Semaphore>,
-}
-impl Thumbnails {
-    pub async fn new(config: &config::Config, disk: Arc<Disk>) -> Result<Self> {
-        if let Err(error) = crate::processing::image::job::recover(&disk).await {
-            tracing::warn!(%error,"image workspace recovery incomplete");
-        }
-        let cache = Self {
-            root: config.instance.data_path.join("thumbnails"),
-            disk,
-            capacity: config::cache_bytes(&config.instance.thumbnail_cache_size)?,
-            entries: Mutex::new(VecDeque::new()),
-            job: Arc::new(Semaphore::new(1)),
-        };
-        if let Err(error) = cache.scan().await {
-            tracing::warn!(%error,"thumbnail cache scan incomplete; previews remain available");
-        }
-        Ok(cache)
-    }
-    async fn scan(&self) -> Result<()> {
-        tokio::fs::create_dir_all(&self.root).await?;
-        let mut files = tokio::fs::read_dir(&self.root).await?;
-        while let Some(file) = files.next_entry().await? {
-            if !file.file_type().await?.is_file() {
-                continue;
-            }
-            let name = file.file_name();
-            let id = name
-                .to_str()
-                .and_then(|s| s.strip_prefix("v1-"))
-                .and_then(|s| s.parse::<Id>().ok());
-            if let Some(id) = id {
-                if self.entries.lock().unwrap().len() == CACHE_ENTRIES {
-                    tokio::fs::remove_file(file.path()).await?;
-                    continue;
-                }
-                let size = file.metadata().await?.len();
-                self.disk.account_existing(Area::Thumbnails, size);
-                self.entries.lock().unwrap().push_back((id, size));
-            } else {
-                tokio::fs::remove_file(file.path()).await?;
-            }
-        }
-        self.trim(0)
-    }
-    fn path(&self, id: Id) -> PathBuf {
-        self.root.join(format!("v1-{id}"))
-    }
-    fn trim(&self, incoming: u64) -> Result<()> {
-        let mut entries = self.entries.lock().unwrap();
-        let attempts = entries.len();
-        for _ in 0..attempts {
-            if self.disk.used()[2].saturating_add(incoming) <= self.capacity
-                && entries.len() < CACHE_ENTRIES
-            {
-                break;
-            }
-            let (id, size) = entries.pop_front().unwrap();
-            match std::fs::remove_file(self.path(id)) {
-                Ok(()) => self.disk.release(Area::Thumbnails, size),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    self.disk.release(Area::Thumbnails, size)
-                }
-                Err(_) => entries.push_back((id, size)),
-            }
-        }
-        ensure!(
-            entries.len() < CACHE_ENTRIES
-                && self.disk.used()[2].saturating_add(incoming) <= self.capacity,
-            "thumbnail cache is full"
-        );
-        Ok(())
-    }
-    async fn get(&self, id: Id) -> Option<Vec<u8>> {
-        let data = crate::storage::read_bounded(self.path(id), THUMB_LIMIT + 32)
-            .await
-            .ok()?;
-        (data.len() > 32 && blake3::hash(&data[32..]).as_bytes() == &data[..32])
-            .then(|| data[32..].to_vec())
-    }
-    fn put(&self, id: Id, data: &[u8]) -> Result<()> {
-        if self.capacity == 0 {
-            return Ok(());
-        }
-        std::fs::create_dir_all(&self.root)?;
-        ensure!(data.len() <= THUMB_LIMIT, "thumbnail exceeds bound");
-        // A damaged entry keeps its charge until its file is actually removed.
-        let mut entries = self.entries.lock().unwrap();
-        if let Some(index) = entries.iter().position(|(key, _)| *key == id) {
-            match std::fs::remove_file(self.path(id)) {
-                Ok(()) => (),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
-                Err(e) => return Err(e.into()),
-            }
-            let (_, size) = entries.remove(index).unwrap();
-            self.disk.release(Area::Thumbnails, size);
-        }
-        drop(entries);
-        let size = data.len() as u64 + 32;
-        self.trim(size)?;
-        let ticket = self.disk.reserve(Area::Thumbnails, size)?;
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(self.path(id))?;
-        // Reads verify the digest; interrupted writes remain charged and can be evicted.
-        ticket.commit();
-        self.entries.lock().unwrap().push_back((id, size));
-        file.write_all(blake3::hash(data).as_bytes())?;
-        file.write_all(data)?;
-        Ok(())
-    }
-}
-
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ObjectQuery {
@@ -217,6 +85,32 @@ fn preview_type(metadata: &Metadata) -> &'static str {
         _ => "none",
     }
 }
+fn thumbnail_type(metadata: &Metadata) -> bool {
+    metadata
+        .content_encoding
+        .as_ref()
+        .is_none_or(|v| v.is_empty() || v == "identity")
+        && matches!(
+            metadata
+                .content_type
+                .as_deref()
+                .unwrap_or("")
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "image/jpeg"
+                | "image/png"
+                | "image/webp"
+                | "image/gif"
+                | "image/avif"
+                | "image/jxl"
+                | "image/heic"
+                | "image/heif"
+        )
+}
 async fn current(
     app: &App,
     actor: &Identity,
@@ -248,13 +142,7 @@ pub(super) async fn detail(
     let (stream, _pin) = current(&app, &actor, bucket, &q, Action::List).await?;
     let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
     let preview = preview_type(&metadata);
-    let thumbnail = preview == "image"
-        && !metadata
-            .content_type
-            .as_deref()
-            .unwrap_or("")
-            .starts_with("image/avif")
-        && stream.size <= 32 * 1024 * 1024;
+    let thumbnail = thumbnail_type(&metadata) && stream.size <= 32 * 1024 * 1024;
     Ok(Json(ObjectDetail {
         etag: stream.etag.clone(),
         preview,
@@ -335,157 +223,34 @@ pub(super) async fn thumbnail(
     Query(q): Query<ObjectQuery>,
 ) -> Result<Response, HttpError> {
     let (stream, pin) = current(&app, &actor, bucket, &q, Action::Read).await?;
-    let original_size = stream.size;
-    let mut spans = None;
-    let mut deferred = None;
-    let data = if let Some(data) = app.thumbnails.get(stream.id).await {
-        if app.storage.access.collecting() {
-            spans = app
-                .response_mapping(&stream)
-                .await
-                .ok()
-                .flatten()
-                .map(|mapped| mapped.2);
-        }
-        data
-    } else {
-        let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
-        if preview_type(&metadata) != "image" {
-            return Err(problem(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "PreviewUnavailable",
-            ));
-        }
-        let job = app
-            .thumbnails
-            .job
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "PreviewBusy"))?;
-        let allowance =
-            (app.budget.data_slots as u64 * app.budget.slot_bytes).min(192 * 1024 * 1024);
-        let source_limit = (allowance / 8).min(32 * 1024 * 1024) as usize;
-        if stream.size > source_limit as i64 {
-            return Err(problem(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "PreviewTooLarge",
-            ));
-        }
-        let permits = app.admit(false).await?;
-        let extra = app
-            .slots
-            .clone()
-            .try_acquire_many_owned(
-                (allowance.div_ceil(app.budget.slot_bytes) as u32).saturating_sub(1),
-            )
-            .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "PreviewBusy"))?;
-        let id = stream.id;
-        let end = stream.size;
-        let body = Body::new(s3s::Body::from(
-            app.body(stream, pin, 0..end, permits, false, None).await?,
+    let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
+    if !thumbnail_type(&metadata) || stream.size > 32 * 1024 * 1024 {
+        return Err(problem(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "PreviewUnavailable",
         ));
-        let read = Arc::new(Mutex::new(crate::status::access::DerivedRead::default()));
-        deferred = Some(read.clone());
-        let source = tokio::time::timeout(
-            Duration::from_secs(15),
-            crate::status::access::DERIVING.scope(read, axum::body::to_bytes(body, source_limit)),
-        )
-        .await
-        .map_err(|_| problem(StatusCode::GATEWAY_TIMEOUT, "PreviewTimeout"))??;
-        let retained = app
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| problem(StatusCode::SERVICE_UNAVAILABLE, "PreviewBusy"))?;
-        let cpu = app.storage.cpu.clone().acquire_owned().await?;
-        let cache = app.thumbnails.clone();
-        let task = tokio::task::spawn_blocking(move || {
-            let (_job, _memory, _retained, _cpu) = (job, extra, retained, cpu);
-            let data = make_thumbnail(&source, allowance)?;
-            if let Err(error) = cache.put(id, &data) {
-                tracing::warn!(%error,"thumbnail cache write skipped");
-            }
-            Ok::<_, anyhow::Error>(data)
-        });
-        tokio::time::timeout(Duration::from_secs(15), task)
-            .await
-            .map_err(|_| problem(StatusCode::GATEWAY_TIMEOUT, "PreviewTimeout"))??
-            .map_err(|error| {
-                tracing::debug!(%error,"thumbnail unavailable");
-                problem(StatusCode::UNSUPPORTED_MEDIA_TYPE, "PreviewUnavailable")
-            })?
-    };
+    }
+    let product = crate::processing::image::job::execute(
+        app.clone(), stream, pin,
+        crate::processing::image::Pipeline::parse_native(
+            "mokyu/v1/frame,index=0/orient/resize,mode=contain,width=384,height=384,upscale=false/encode,format=png"
+        )?,
+        None, crate::processing::image::InputLimits::new(32 * 1024 * 1024), THUMB_LIMIT as u64,
+    ).await.map_err(|error| {
+        if error.downcast_ref::<s3s::S3Error>().is_some() {
+            HttpError(error)
+        } else if error.is::<std::io::Error>() || error.is::<tokio::time::error::Elapsed>() {
+            problem(StatusCode::SERVICE_UNAVAILABLE, "PreviewBusy")
+        } else {
+            tracing::debug!(%error, "management preview unavailable");
+            problem(StatusCode::UNSUPPORTED_MEDIA_TYPE, "PreviewUnavailable")
+        }
+    })?;
+    current(&app, &actor, bucket, &q, Action::Read).await?;
     Ok(Response::builder()
         .header("content-type", "image/png")
-        .header("content-length", data.len())
+        .header("content-length", product.output.bytes)
         .header("cache-control", "private, no-store")
         .header("x-content-type-options", "nosniff")
-        .body(Body::from_stream(futures_util::stream::once(async move {
-            if let Some(read) = deferred {
-                read.lock()
-                    .unwrap()
-                    .served(&app.storage.access, original_size);
-            } else {
-                crate::app::responses::demand_spans(
-                    spans.as_deref().unwrap_or_default(),
-                    &app.storage.access,
-                    0..original_size,
-                );
-            }
-            Ok::<_, std::convert::Infallible>(bytes::Bytes::from(data))
-        })))?)
-}
-fn make_thumbnail(source: &[u8], allowance: u64) -> Result<Vec<u8>> {
-    let format = image::guess_format(source)?;
-    ensure!(
-        matches!(
-            format,
-            ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::Gif | ImageFormat::WebP
-        ),
-        "unsupported image format"
-    );
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(16384);
-    limits.max_image_height = Some(16384);
-    limits.max_alloc = Some(allowance / 3);
-    let mut reader = ImageReader::with_format(Cursor::new(source), format);
-    reader.limits(limits);
-    let mut decoder = reader.into_decoder()?;
-    let (w, h) = decoder.dimensions();
-    ensure!(
-        w > 0 && h > 0 && u64::from(w) * u64::from(h) <= (allowance / 12).min(16_000_000),
-        "image pixel limit exceeded"
-    );
-    let orientation = decoder.orientation()?;
-    let decoded = DynamicImage::from_decoder(decoder)?;
-    let mut thumbnail = decoded.thumbnail(w.min(384), h.min(384));
-    thumbnail.apply_orientation(orientation);
-    let mut result = Cursor::new(Vec::new());
-    thumbnail.write_to(&mut result, ImageFormat::Png)?;
-    let data = result.into_inner();
-    ensure!(data.len() <= THUMB_LIMIT, "encoded thumbnail exceeds bound");
-    Ok(data)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn bounded_still_thumbnail() {
-        let source = DynamicImage::new_rgb8(800, 400);
-        for format in [
-            ImageFormat::Jpeg,
-            ImageFormat::Png,
-            ImageFormat::Gif,
-            ImageFormat::WebP,
-        ] {
-            let mut bytes = Cursor::new(Vec::new());
-            source.write_to(&mut bytes, format).unwrap();
-            let result = make_thumbnail(bytes.get_ref(), 192 * 1024 * 1024).unwrap();
-            let image = image::load_from_memory(&result).unwrap();
-            assert_eq!((image.width(), image.height()), (384, 192));
-            assert!(make_thumbnail(bytes.get_ref(), 1024).is_err());
-        }
-        assert!(make_thumbnail(b"<svg onload='alert(1)'/>", 192 * 1024 * 1024).is_err());
-    }
+        .body(product.body().await?)?)
 }

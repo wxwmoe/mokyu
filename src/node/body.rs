@@ -79,7 +79,7 @@ pub(super) struct Limits {
     pub(super) io: Arc<Semaphore>,
     cpu: Arc<Semaphore>,
     packs: Arc<Semaphore>,
-    http: Arc<Semaphore>,
+    pub(super) http: Arc<Semaphore>,
     pool: Arc<compression::Pool>,
     pub(super) files: Arc<super::files::Cache>,
     pub(super) diagnostics: Arc<Diagnostics>,
@@ -90,7 +90,7 @@ pub(super) struct Reader {
     pub(super) io: Arc<Semaphore>,
     pub(super) cpu: Arc<Semaphore>,
     packs: Arc<Semaphore>,
-    http: Arc<Semaphore>,
+    pub(super) http: Arc<Semaphore>,
     pack_units: u32,
     pub(super) workspace: u64,
     pub(super) pool: Arc<compression::Pool>,
@@ -291,7 +291,9 @@ impl Reader {
         };
         let verify = prepared.verify
             || if let Some(id) = source.storage()? {
-                prepared.backend(id)?.profile.read_integrity == "inline"
+                crate::storage::ReadContext::integrity(
+                    &prepared.backend(id)?.profile.read_integrity,
+                ) == "inline"
             } else {
                 true
             };
@@ -591,8 +593,9 @@ impl Reader {
         }
         ensure!(source.medium == "shared_s3", "invalid node raw medium");
         let backend = prepared.backend(source.storage_id)?;
-        let verify =
-            verify_backend || prepared.verify || backend.profile.read_integrity == "inline";
+        let verify = verify_backend
+            || prepared.verify
+            || crate::storage::ReadContext::integrity(&backend.profile.read_integrity) == "inline";
         let lock = self.files.raw_lock(source, &backend.profile);
         let _miss = match &lock {
             Some(lock) => Some(lock.lock().await),

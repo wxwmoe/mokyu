@@ -6,15 +6,14 @@ use crate::{
     config,
     http::gateway,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use axum::{
     body::Body,
     http::{HeaderMap, HeaderValue, Method, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use hyper::body::Body as _;
 use s3s::dto::{ETagCondition, Range, Timestamp, TimestampFormat};
-use serde_json::Value;
 use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
@@ -133,17 +132,26 @@ pub async fn s3_http(
         let signed = target.signed;
         let virtual_bucket = target.virtual_bucket.as_deref();
         let alias = target.alias.as_deref();
-        // Conditional GETs keep the second authority check after metadata evaluation.
-        let route = (read
-            && (head || !super::object::conditional(request.headers()))
-            && query.iter().all(|name| {
-                let lower = name.to_ascii_lowercase();
-                lower.starts_with("x-amz-")
-                    || lower.starts_with("response-")
-                    || matches!(name.as_str(), "" | "x-id" | "versionId" | "partNumber")
-            }))
-        .then(|| read_route(request.uri().path(), virtual_bucket, alias))
-        .flatten();
+        let image_uri = request.uri().clone();
+        let route = read
+            .then(|| read_route(request.uri().path(), virtual_bucket, alias))
+            .flatten()
+            .filter(|route| {
+                object_read(route, query)
+                    && (!signed || head || !super::object::conditional(request.headers()))
+            });
+        let route = if let Some(route) = route {
+            Some(if !signed {
+                crate::model::ReadRoute::Image {
+                    route: Box::new(route),
+                    request: super::image::request(request.uri().query())?,
+                }
+            } else {
+                route
+            })
+        } else {
+            None
+        };
         let access = access_key(request.headers(), request.uri().query());
         let prepared = if let Some(route) = route {
             app.prepare_read(
@@ -229,6 +237,18 @@ pub async fn s3_http(
                     StatusCode::FORBIDDEN
                 };
             return Ok(response);
+        }
+        if !signed
+            && let Some(image) = Box::pin(super::image::single(
+                app.clone(),
+                prepared.clone(),
+                image_uri,
+                request.headers().clone(),
+                request.method().clone(),
+            ))
+            .await?
+        {
+            return Ok(image.map(s3s::Body::http_body_unsync));
         }
         let delete = request.method() == Method::POST && query.iter().any(|n| n == "delete");
         let complete = request.method() == Method::POST && query.iter().any(|n| n == "uploadId");
@@ -791,4 +811,30 @@ pub(crate) async fn respond(
         ))
     };
     Ok(response.body(body)?)
+}
+
+pub(super) fn object_read(route: &crate::model::ReadRoute, query: &[String]) -> bool {
+    let object = match route.base() {
+        crate::model::ReadRoute::Image { .. } => unreachable!(),
+        crate::model::ReadRoute::Bucket { key, alias, .. } => {
+            !key.is_empty() || alias.as_ref().is_some_and(|(_, key)| !key.is_empty())
+        }
+        crate::model::ReadRoute::Host { key, .. } => !key.is_empty(),
+    };
+    object
+        && !query.iter().any(|name| {
+            matches!(
+                name.as_str(),
+                "acl"
+                    | "attributes"
+                    | "legal-hold"
+                    | "retention"
+                    | "tagging"
+                    | "torrent"
+                    | "uploadId"
+                    | "uploads"
+                    | "restore"
+                    | "select"
+            )
+        })
 }

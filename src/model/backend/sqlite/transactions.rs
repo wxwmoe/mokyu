@@ -2005,9 +2005,10 @@ pub(super) async fn create_stream_in(
             .add(input.bucket, crate::authorization::Action::Acl);
     }
     lock_permit(tx, &input.authority).await?;
-    let (state, paused, managed, required) = super::redundancy_queries::admission(input.bucket)
-        .fetch_one(&mut **tx)
-        .await?;
+    let (state, paused, managed, required, image_policy) =
+        super::redundancy_queries::admission(input.bucket)
+            .fetch_one(&mut **tx)
+            .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
     if input.owner.is_none() || input.purpose == crate::model::StreamPurpose::Object {
         super::redundancy_transactions::accept_origin(
@@ -2022,6 +2023,7 @@ pub(super) async fn create_stream_in(
             &input.key,
             input.owner.map(|(id, _)| id),
             managed,
+            image_policy.as_deref(),
         )
         .await?;
     }
@@ -2742,9 +2744,10 @@ pub(super) async fn publish_in(
                 && key.as_slice() == stream.object_key.as_bytes()),
         crate::model::Error::OperationAborted
     );
-    let (state, _, managed, _) = super::redundancy_queries::admission(stream.bucket_id)
-        .fetch_one(&mut **tx)
-        .await?;
+    let (state, _, managed, _, image_policy) =
+        super::redundancy_queries::admission(stream.bucket_id)
+            .fetch_one(&mut **tx)
+            .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
     super::redundancy_transactions::admitted(
         tx,
@@ -2752,6 +2755,7 @@ pub(super) async fn publish_in(
         &stream.object_key,
         None,
         managed,
+        image_policy.as_deref(),
     )
     .await?;
     super::redundancy_transactions::accept_origin(

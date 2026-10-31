@@ -43,6 +43,7 @@ pub struct Bucket {
     pub storage_id: Option<Uuid>,
     pub state: String,
     pub settings_revision: i64,
+    pub image_revision: i64,
     pub uploads_paused: bool,
     pub public_base_url: String,
     pub cors: crate::http::cors::Policy,
@@ -230,7 +231,7 @@ pub struct App {
     pub node: std::sync::OnceLock<crate::cluster::NodeState>,
     pub node_boot: std::sync::OnceLock<Uuid>,
     pub storage: Arc<Storage>,
-    pub thumbnails: Arc<crate::control::media::Thumbnails>,
+    pub images: Arc<crate::processing::image::job::Service>,
     pub statistics: crate::status::stats::Statistics,
     pub compression_observations: Arc<compression::Observations>,
     pub(crate) credential_activity: Arc<credential_activity::Activity>,
@@ -342,8 +343,21 @@ impl App {
         } else {
             tracing::info!("no store configured; configure a store before accepting objects");
         }
-        let thumbnails =
-            Arc::new(crate::control::media::Thumbnails::new(&config, storage.disk.clone()).await?);
+        let slots = Arc::new(Semaphore::new(budget.data_slots));
+        let images = crate::processing::image::job::Service::new(
+            crate::processing::image::job::Resources {
+                disk: storage.disk.clone(),
+                cpu: storage.cpu.clone(),
+                work: storage.pack_work.clone(),
+                slots: slots.clone(),
+                memory: u64::from(budget.pack_memory_units) * 1024 * 1024,
+                access: storage.access.clone(),
+            },
+            config::cache_bytes(&config.instance.image_cache_size)?,
+        );
+        if let Err(error) = images.cache.ready().await {
+            tracing::warn!(%error, "image cache recovery incomplete");
+        }
         let (compression_observations, compression_receiver) = compression::Observations::new();
         let (credential_activity, credential_receiver) = credential_activity::Activity::new();
         let response_cache = responses::Cache::new(budget.response_cache_bytes);
@@ -365,7 +379,7 @@ impl App {
             uploads: Arc::new(Semaphore::new(budget.upload_concurrency)),
             completions: Arc::new(Semaphore::new(budget.upload_concurrency)),
             reads: Arc::new(Semaphore::new(budget.read_concurrency)),
-            slots: Arc::new(Semaphore::new(budget.data_slots)),
+            slots,
             config,
             runtime_defaults,
             runtime_revisions: RwLock::new(runtime_revisions),
@@ -405,7 +419,7 @@ impl App {
             node: std::sync::OnceLock::new(),
             node_boot: std::sync::OnceLock::new(),
             storage,
-            thumbnails,
+            images,
             statistics: crate::status::stats::Statistics::default(),
             compression_observations,
             credential_activity,

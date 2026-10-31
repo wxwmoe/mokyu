@@ -5,7 +5,7 @@ use utoipa::ToSchema;
 
 macro_rules! values {
     ($name:ident, $($item:ident => $word:literal),+ $(,)?) => {
-        #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+        #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
         #[serde(rename_all = "lowercase")]
         pub(crate) enum $name { $($item),+ }
         impl $name {
@@ -24,7 +24,7 @@ values!(Fit, Contain=>"contain", Cover=>"cover");
 values!(Anchor, Center=>"center", North=>"north", South=>"south", East=>"east", West=>"west", Northwest=>"northwest", Northeast=>"northeast", Southwest=>"southwest", Southeast=>"southeast");
 values!(QualityMode, Exact=>"exact", Cap=>"cap", Relative=>"relative", Source=>"source");
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Operation {
     Orient,
@@ -47,7 +47,7 @@ pub(crate) enum Operation {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Stage {
     pub operations: Vec<Operation>,
@@ -67,7 +67,7 @@ impl Default for Stage {
         }
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Pipeline {
     pub stages: Vec<Stage>,

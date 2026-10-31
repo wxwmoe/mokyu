@@ -121,6 +121,12 @@ static void encode(VipsImage *im, Source *s, const char *fmt, int q, int progres
         encode_avif(im, s, pixels, depth, hdr, q, out);
     g_free(pixels);
 }
+static void describe(const Source *s) {
+    printf("{\"width\":%d,\"height\":%d,\"format\":\"%s\",\"range\":\"%s\",\"frames\":%d,"
+           "\"alpha\":%s}", s->image->Xsize, s->image->Ysize, s->format, s->range, s->frames,
+           s->alpha ? "true" : "false");
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "version")) {
         puts(IMAGE_VERSION);
@@ -135,10 +141,8 @@ int main(int argc, char **argv) {
     Source s;
     read_source(argv[2], page, pixels, !strcmp(argv[1], "render"), 1, &s);
     if (!strcmp(argv[1], "probe")) {
-        printf("{\"width\":%d,\"height\":%d,\"format\":\"%s\",\"range\":\"%s\",\"frames\":%d,"
-               "\"alpha\":%s}\n",
-               s.image->Xsize, s.image->Ysize, s.format, s.range, s.frames,
-               s.alpha ? "true" : "false");
+        describe(&s);
+        putchar('\n');
         g_object_unref(s.image);
         vips_shutdown();
         return 0;
@@ -166,9 +170,24 @@ int main(int argc, char **argv) {
             fail("source quality is unavailable");
         q = MIN(q, s.quality);
     }
+    putchar('[');
+    if (page > 0 && s.frames > 1) {
+        Source original;
+        read_source(argv[2], -1, pixels, 0, 1, &original);
+        describe(&original);
+        g_object_unref(original.image);
+    } else {
+        describe(&s);
+    }
     VipsImage *im = operations(&s, argc - 10, argv + 10, pixels);
     encode(im, &s, fmt, q, progressive, out);
     g_object_unref(im);
+    Source image;
+    read_source(out, -1, pixels, 0, 0, &image);
+    putchar(',');
+    describe(&image);
+    puts("]");
+    g_object_unref(image.image);
     vips_shutdown();
     return 0;
 }

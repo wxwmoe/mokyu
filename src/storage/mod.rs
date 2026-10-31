@@ -93,7 +93,7 @@ pub struct Storage {
     pack_live: Mutex<HashMap<(Id, bool), std::sync::Weak<LoadedPack>>>,
     pack_memory: Arc<Semaphore>,
     pack_memory_units: u32,
-    pack_work: Arc<Semaphore>,
+    pub(crate) pack_work: Arc<Semaphore>,
     inspection: tokio::sync::Mutex<()>,
     targets: RwLock<HashMap<Uuid, Arc<StoreBackend>>>,
     store_defaults: (usize, usize, usize),
@@ -369,7 +369,7 @@ impl Storage {
                     .as_deref()
                     .map(config::cache_bytes)
                     .transpose()?,
-                Some(config::cache_bytes(&c.instance.thumbnail_cache_size)?),
+                Some(config::cache_bytes(&c.instance.image_cache_size)?),
             ],
             floor: config::bytes(&c.instance.min_free_space)?,
             spaces: Mutex::default(),
@@ -2086,6 +2086,7 @@ impl Storage {
         let mode = profile
             .as_ref()
             .map_or("inline", |profile| profile.read_integrity.as_str());
+        let mode = ReadContext::integrity(mode);
         let (raw, retained, trace) = self.read_chunk(c, context, mode == "inline").await?;
         if let Some(context) = context
             && let Some(checks) = &context.checks
@@ -2320,12 +2321,6 @@ impl Storage {
     }
     pub(crate) fn http_work(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.pack_work.clone().try_acquire_many_owned(32).ok()
-    }
-    pub(crate) fn image_work(&self, bytes: u64) -> Option<tokio::sync::OwnedSemaphorePermit> {
-        self.pack_work
-            .clone()
-            .try_acquire_many_owned(bytes.div_ceil(1024 * 1024).try_into().ok()?)
-            .ok()
     }
     pub async fn encode_pack(
         &self,

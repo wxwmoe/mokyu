@@ -135,7 +135,7 @@ async fn runtime_point(app: &App) -> Result<RuntimePoint> {
         upload_bytes: upload_bytes.to_string(),
         upload_limit: upload_limit.to_string(),
         multipart_bytes: local[0].to_string(),
-        thumbnail_bytes: local[2].to_string(),
+        image_bytes: local[2].to_string(),
         rss_bytes: memory["rss_bytes"].as_u64().map(|v| v.to_string()),
     })
 }

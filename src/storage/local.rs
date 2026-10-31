@@ -13,7 +13,7 @@ use uuid::Uuid;
 pub(crate) enum Area {
     Multipart = 0,
     Cache = 1,
-    Thumbnails = 2,
+    Images = 2,
 }
 
 #[cfg(test)]
@@ -172,7 +172,7 @@ impl Reservation {
     pub(crate) fn commit(mut self) {
         self.committed = true;
     }
-    fn commit_written(mut self, bytes: u64) {
+    pub(crate) fn commit_written(mut self, bytes: u64) {
         let mut usage = self.disk.usage.lock().unwrap();
         usage.used[self.area as usize] = usage.used[self.area as usize]
             .saturating_sub(self.bytes)
@@ -378,6 +378,7 @@ impl Disk {
             size,
         }
     }
+    #[cfg(test)]
     pub(crate) fn reserve(self: &Arc<Self>, area: Area, bytes: u64) -> Result<Reservation> {
         self.reserve_at(area, bytes, false, &self.root)
     }
@@ -396,7 +397,7 @@ impl Disk {
         path: &std::path::Path,
     ) -> Result<Reservation> {
         self.reserve_bound(
-            Area::Thumbnails,
+            Area::Images,
             bytes.div_ceil(65536) * 65536,
             false,
             path,

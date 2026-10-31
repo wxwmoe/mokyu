@@ -45,7 +45,7 @@ min_free_space = "1GiB"
 response_cache_size = "64MiB" # Public response memory; omitted or 0B disables it.
 write_memory_size = "64MiB" # Optional single-container volatile S3 writes; omitted or 0B disables RAM.
 #upload_cache_size = "2GiB"
-thumbnail_cache_size = "256MiB"
+image_cache_size = "256MiB"
 
 # Connection pools and resource budgets
 # Sized for the 1GiB Compose example with the default 32MiB S3 packs.

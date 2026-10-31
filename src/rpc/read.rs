@@ -227,6 +227,8 @@ pub(crate) fn cached(values: Vec<wire::Cached>) -> Result<Vec<read::Version>, St
                 Ok(wire::MaterialType::BlockKey) => read::MaterialType::Key,
                 Ok(wire::MaterialType::S3Credential) => read::MaterialType::Credential,
                 Ok(wire::MaterialType::ReadPolicy) => read::MaterialType::Policy,
+                Ok(wire::MaterialType::ImagePolicy) => read::MaterialType::ImagePolicy,
+                Ok(wire::MaterialType::ImageStyle) => read::MaterialType::ImageStyle,
                 _ => return Err(invalid()),
             };
             if value.id.is_empty()
@@ -258,7 +260,7 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         _ => return Err(invalid()),
     };
     if input.include.is_empty()
-        || input.include.len() > 4
+        || input.include.len() > 5
         || !text(&input.access_key, 128)
         || (web && !input.access_key.is_empty())
     {
@@ -268,13 +270,15 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
     let mut mapping = false;
     let mut protection = false;
     let mut policy = false;
+    let mut image = false;
     for include in input.include {
         if !seen.insert(include) {
             return Err(invalid());
         }
         match wire::ReadInclude::try_from(include) {
             Ok(wire::ReadInclude::Object) => {}
-            Ok(wire::ReadInclude::Mapping) if !head => mapping = true,
+            Ok(wire::ReadInclude::Mapping) => mapping = true,
+            Ok(wire::ReadInclude::Image) if input.access_key.is_empty() => image = true,
             Ok(wire::ReadInclude::Policy) => policy = true,
             Ok(wire::ReadInclude::Protection) if !head && !web && !input.access_key.is_empty() => {
                 protection = true
@@ -347,6 +351,18 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
             })
         })
         .transpose()?;
+    if (head && mapping && !image) || (!image && !input.image_query.is_empty()) {
+        return Err(invalid());
+    }
+    let route = if image {
+        ReadRoute::Image {
+            route: Box::new(route),
+            request: crate::processing::image::request::Request::parse(&input.image_query)
+                .map_err(|_| invalid())?,
+        }
+    } else {
+        route
+    };
     Ok(read::Query {
         run,
         operation,
@@ -393,13 +409,22 @@ pub(super) fn refresh(
                 run: input.run.clone(),
                 operation_id: run.boot.to_string(),
                 route: item.route,
+                image_query: item.image_query,
                 body: item.body,
                 method: wire::ReadMethod::Get as i32,
                 surface: surface as i32,
-                include: vec![
-                    wire::ReadInclude::Object as i32,
-                    wire::ReadInclude::Policy as i32,
-                ],
+                include: if item.image {
+                    vec![
+                        wire::ReadInclude::Object as i32,
+                        wire::ReadInclude::Policy as i32,
+                        wire::ReadInclude::Image as i32,
+                    ]
+                } else {
+                    vec![
+                        wire::ReadInclude::Object as i32,
+                        wire::ReadInclude::Policy as i32,
+                    ]
+                },
                 ..Default::default()
             })
         })
@@ -445,6 +470,8 @@ pub(crate) fn version(value: read::Version) -> wire::Cached {
         read::MaterialType::Key => wire::MaterialType::BlockKey,
         read::MaterialType::Credential => wire::MaterialType::S3Credential,
         read::MaterialType::Policy => wire::MaterialType::ReadPolicy,
+        read::MaterialType::ImagePolicy => wire::MaterialType::ImagePolicy,
+        read::MaterialType::ImageStyle => wire::MaterialType::ImageStyle,
     };
     wire::Cached {
         r#type: r#type as i32,
@@ -473,6 +500,9 @@ pub(crate) fn reply(input: read::Reply) -> wire::ReadReply {
         mapping: input.mapping.map(version),
         credential: input.credential.map(version),
         policy: input.policy.map(version),
+        image_policy: input.image_policy.map(version),
+        image_style: input.image_style.map(version),
+        source_key: input.source_key,
         grants: input.grants.into_iter().map(grant).collect(),
         next: input.next.map(|cursor| wire::ReadCursor {
             lease_id: cursor.lease.to_string(),
@@ -606,7 +636,8 @@ mod tests {
             reads: vec![
                 wire::RefreshRead {
                     route: request.route,
-                    body: None
+                    body: None,
+                    ..Default::default()
                 };
                 32
             ],

@@ -3489,11 +3489,11 @@ export interface components {
             cache_limit: string;
             db_pool_idle: string;
             db_pool_size: string;
+            image_bytes: string;
             multipart_bytes: string;
             queue_running?: string | null;
             queue_waiting?: string | null;
             rss_bytes?: string | null;
-            thumbnail_bytes: string;
             upload_bytes: string;
             upload_limit: string;
         };
@@ -3521,10 +3521,10 @@ export interface components {
             /** Format: date-time */
             epoch: string;
             failed: string;
+            image_bytes: string;
             multipart_bytes: string;
             requests: string;
             rss_bytes?: string | null;
-            thumbnail_bytes: string;
             upload_bytes: string;
             upload_limit: string;
         };

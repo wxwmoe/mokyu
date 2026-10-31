@@ -17,10 +17,20 @@ tokio::task_local! { pub(crate) static DERIVING: Arc<Mutex<DerivedRead>>; }
 #[derive(Default)]
 pub(crate) struct DerivedRead {
     sources: std::collections::HashMap<crate::model::tiering::Source, (usize, bool)>,
+    cached: std::collections::BTreeMap<uuid::Uuid, i64>,
     bytes: usize,
 }
 
 impl DerivedRead {
+    fn record_cached(&mut self, chunks: &std::collections::BTreeMap<uuid::Uuid, i64>) {
+        for (&id, &bytes) in chunks {
+            if bytes <= 0 || self.cached.len() >= 256 && !self.cached.contains_key(&id) {
+                continue;
+            }
+            *self.cached.entry(id).or_default() += bytes;
+            self.bytes += bytes as usize;
+        }
+    }
     fn record(&mut self, source: crate::model::tiering::Source, bytes: usize, origin: bool) {
         if self.sources.len() >= 256 && !self.sources.contains_key(&source) {
             return;
@@ -42,6 +52,7 @@ impl DerivedRead {
         for (&source, &(bytes, origin)) in &self.sources {
             access.demand(&mut req, source, bytes, origin);
         }
+        access.cached(self.cached.clone());
     }
 }
 
@@ -79,6 +90,28 @@ impl DemandRead {
 mod demand_tests {
     use super::*;
     use crate::model::tiering::{Source, Unit};
+    #[tokio::test]
+    async fn derived_reads_defer_cached_and_origin_demand_until_output() {
+        let access = Access::new(32);
+        access.collect(true);
+        access.take();
+        let state = Arc::new(Mutex::new(DerivedRead::default()));
+        let chunk = uuid::Uuid::from_u128(100);
+        let raw = uuid::Uuid::from_u128(101);
+        DERIVING
+            .scope(state.clone(), async {
+                access.cached([(chunk, 7)].into_iter().collect());
+                access.demand(&mut DemandRead::default(), Source::Raw(raw), 11, true);
+            })
+            .await;
+        let batch = access.take();
+        assert!(batch.cached.is_empty() && batch.demand.is_empty());
+        state.lock().unwrap().served(&access, 18);
+        let batch = access.take();
+        assert_eq!(batch.cached.len(), 1);
+        assert_eq!(batch.demand.len(), 1);
+        assert!(!batch.dropped);
+    }
     #[tokio::test]
     async fn served_spans_vote_once_and_only_for_the_member_read() {
         let access = Access::new(4);
@@ -187,6 +220,12 @@ impl Access {
     }
     pub(crate) fn cached(&self, chunks: std::collections::BTreeMap<uuid::Uuid, i64>) {
         if chunks.is_empty() || !self.collecting() {
+            return;
+        }
+        if DERIVING
+            .try_with(|deferred| deferred.lock().unwrap().record_cached(&chunks))
+            .is_ok()
+        {
             return;
         }
         let (ids, bytes): (Vec<_>, Vec<_>) = chunks.into_iter().unzip();

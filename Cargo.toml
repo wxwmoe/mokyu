@@ -34,7 +34,6 @@ hyper = { version = "=1.11.1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "service", "server-auto", "client-legacy"] }
 hyper-rustls = { version = "=0.27.10", default-features = false, features = ["native-tokio", "http1", "aws-lc-rs", "tls12"] }
 hickory-resolver = { version = "=0.26.3", default-features = false, features = ["system-config", "tokio"] }
-image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 libc = "0.2"
 log = "0.4"
 md-5 = "0.10"

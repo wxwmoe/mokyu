@@ -118,6 +118,8 @@ message RefreshReadsRequest {
 message RefreshRead {
   ReadRoute route = 1;
   CachedBody body = 2;
+  bool image = 3;
+  string image_query = 4;
 }
 
 message RefreshReadsReply {
@@ -697,6 +699,7 @@ enum ReadInclude {
   MAPPING = 2;
   POLICY = 3;
   PROTECTION = 4;
+  IMAGE = 5;
 }
 
 message BucketRoute {
@@ -732,6 +735,8 @@ enum MaterialType {
   BLOCK_KEY = 5;
   S3_CREDENTIAL = 6;
   READ_POLICY = 7;
+  IMAGE_POLICY = 8;
+  IMAGE_STYLE = 9;
 }
 
 // Revisions bind deployment, purpose, identity and material; never authorization.
@@ -763,6 +768,7 @@ message ReadRequest {
   uint32 max_bytes = 11;
   repeated ReadHeader overrides = 12;
   CachedBody body = 13;
+  string image_query = 14;
 }
 
 // The client pins these verified bytes until the request finishes.
@@ -850,4 +856,7 @@ message ReadReply {
   string etag = 13;
   bool body_reused = 14;
   Cached policy = 15;
+  Cached image_policy = 16;
+  Cached image_style = 17;
+  string source_key = 18;
 }

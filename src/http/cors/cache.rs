@@ -649,6 +649,7 @@ mod tests {
             storage_id: Some(Uuid::new_v4()),
             state: "active".into(),
             settings_revision: 1,
+            image_revision: 0,
             uploads_paused: false,
             public_base_url: String::new(),
             cors:

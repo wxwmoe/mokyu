@@ -72,7 +72,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `instance.response_cache_size` | `0B` | 对象响应缓存的内存额度，包含正文、索引和公开元数据的扩充份额；公共读取与已授权的签名 S3 共用，示例显式设为 `64MiB`，省略或 `0B` 关闭；启用至少 `4MiB`，需要重启 |
 | `instance.write_memory_size` | `0B` | 单容器 S3 volatile 写缓存的共享内存额度；示例 `64MiB`，最少 `4KiB`，按 `4KiB` 向下取整，需重启 |
 | `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
-| `instance.thumbnail_cache_size` | `256MiB` | 缩略图缓存上限 |
+| `instance.image_cache_size` | `256MiB` | 管理预览与公共图片处理共用的派生图像缓存上限 |
 | `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
 | `instance.database_connections` | 自动 | 单容器/control 数据库连接池上限，control 至少 5；data/worker/node 禁止配置 |
 | `instance.database_read_connections` | 启用从库时 `min(4, max(1, database_connections / 4))` | control 从库池的独立上限；正整数，需同时配置 replica_database；不扣减主库预算 |

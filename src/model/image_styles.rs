@@ -32,6 +32,7 @@ pub(crate) fn validation_error(error: anyhow::Error) -> anyhow::Error {
 pub(crate) fn name(value: &str) -> Result<()> {
     ensure!(
         (1..=128).contains(&value.len())
+            && value != "management-preview"
             && value.as_bytes()[0].is_ascii_alphanumeric()
             && value
                 .bytes()
@@ -57,6 +58,10 @@ impl Mapping {
     }
     pub fn validate(&self) -> Result<()> {
         name(&self.auto)?;
+        ensure!(
+            self.formats.contains_key("jpeg"),
+            "JPEG mapping is required for automatic fallback"
+        );
         ensure!(
             (1..=5).contains(&self.formats.len()),
             "choose at least one fixed format"
@@ -308,6 +313,12 @@ pub(crate) fn export(rows: &[Style]) -> String {
 }
 #[async_trait]
 pub(crate) trait ImageStore: Send + Sync {
+    async fn resolve(
+        &self,
+        bucket: Uuid,
+        key: &str,
+        request: &crate::processing::image::request::Request,
+    ) -> Result<crate::processing::image::request::Selection>;
     async fn page(
         &self,
         principal: &Principal,
@@ -363,6 +374,9 @@ mod tests {
             formats: BTreeMap::from([("jpeg".into(), "Default.format".into())]),
         };
         mapping.validate().unwrap();
+        let mut missing = mapping.clone();
+        missing.formats = BTreeMap::from([("webp".into(), "Web.format".into())]);
+        assert!(missing.validate().is_err());
         assert_eq!(
             Mapping::family("Image.Auto.Redirect", &mapping.auto),
             Some("Image.")

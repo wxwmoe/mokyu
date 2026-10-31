@@ -70,7 +70,7 @@ pub(crate) struct RuntimePoint {
     pub(crate) upload_bytes: String,
     pub(crate) upload_limit: String,
     pub(crate) multipart_bytes: String,
-    pub(crate) thumbnail_bytes: String,
+    pub(crate) image_bytes: String,
     pub(crate) rss_bytes: Option<String>,
 }
 
@@ -235,7 +235,7 @@ impl NodeSample {
                 upload_bytes: number(&cache["upload_bytes"]).to_string(),
                 upload_limit: number(&cache["upload_limit"]).to_string(),
                 multipart_bytes: number(&cache["multipart_bytes"]).to_string(),
-                thumbnail_bytes: number(&cache["thumbnail_bytes"]).to_string(),
+                image_bytes: number(&cache["image_bytes"]).to_string(),
                 rss_bytes: s["process_memory"]["rss_bytes"]
                     .as_u64()
                     .map(|v| v.to_string()),
@@ -290,7 +290,7 @@ impl NodeSample {
             &p.upload_bytes,
             &p.upload_limit,
             &p.multipart_bytes,
-            &p.thumbnail_bytes,
+            &p.image_bytes,
         ]
     }
     fn delta(&self, previous: &Self, max_seconds: u64) -> Option<([u64; 6], u64)> {
@@ -331,7 +331,7 @@ pub(crate) struct RuntimeGauges {
     pub upload_bytes: String,
     pub upload_limit: String,
     pub multipart_bytes: String,
-    pub thumbnail_bytes: String,
+    pub image_bytes: String,
     pub rss_bytes: Option<String>,
     pub db_pool_size: String,
     pub db_pool_idle: String,
@@ -468,7 +468,7 @@ pub(crate) fn aggregate_runtime(
             upload_bytes: totals[2].to_string(),
             upload_limit: totals[3].to_string(),
             multipart_bytes: totals[4].to_string(),
-            thumbnail_bytes: totals[5].to_string(),
+            image_bytes: totals[5].to_string(),
             rss_bytes: memory_known.then(|| rss.to_string()),
             db_pool_size: totals[6].to_string(),
             db_pool_idle: totals[7].to_string(),
@@ -523,7 +523,7 @@ mod runtime_tests {
                     upload_bytes: "5".into(),
                     upload_limit: "50".into(),
                     multipart_bytes: "3".into(),
-                    thumbnail_bytes: "2".into(),
+                    image_bytes: "2".into(),
                     rss_bytes: Some("1000".into()),
                 },
                 db_pool_size: 3,

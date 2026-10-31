@@ -201,7 +201,7 @@ pub(crate) fn instance_config(config: &crate::config::Instance) -> Result<Value>
                 | "response_cache_size"
                 | "write_memory_size"
                 | "upload_cache_size"
-                | "thumbnail_cache_size"
+                | "image_cache_size"
                 | "request_connections"
                 | "database_connections"
                 | "database_read_connections"

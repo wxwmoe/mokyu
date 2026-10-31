@@ -28,7 +28,7 @@ mod uploads;
 
 pub(super) struct Cache {
     root: PathBuf,
-    disk: Arc<Disk>,
+    pub(super) disk: Arc<Disk>,
     fifo: tokio::sync::Mutex<Fifo>,
     writes: tokio::sync::Mutex<()>,
     ready: OnceCell<()>,
@@ -711,7 +711,7 @@ impl Cache {
         let capacity = self.disk.upload_capacity().ok();
         let used = self.disk.used();
         serde_json::json!({ "hits": self.hits.load(Ordering::Relaxed), "lookups": self.lookups.load(Ordering::Relaxed),
-            "entries": self.fifo.lock().await.entries.len(), "bytes": used[1], "multipart_bytes": used[0], "thumbnail_bytes": used[2],
+            "entries": self.fifo.lock().await.entries.len(), "bytes": used[1], "multipart_bytes": used[0], "image_bytes": used[2],
             "limit": capacity.map(|value| value.0), "upload_limit": capacity.map(|value| value.1), "upload_bytes": capacity.map(|value| value.2),
             "fills": self.pending.lock().unwrap().len() })
     }

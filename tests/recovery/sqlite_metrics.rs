@@ -25,7 +25,7 @@ fn point(at: DateTime<Utc>) -> RuntimePoint {
         upload_bytes: "9".into(),
         upload_limit: "10".into(),
         multipart_bytes: "11".into(),
-        thumbnail_bytes: "12".into(),
+        image_bytes: "12".into(),
         rss_bytes: None,
     }
 }

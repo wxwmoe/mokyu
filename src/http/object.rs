@@ -248,6 +248,34 @@ pub(crate) async fn read(
     overrides: &HeaderMap,
     checksum: bool,
 ) -> Result<Read> {
+    if bucket_info.image_revision > 0 && !crate::app::reads::image_selected(bucket_info.id, key) {
+        let route = crate::model::ReadRoute::Image {
+            route: Box::new(crate::model::ReadRoute::Bucket {
+                name: bucket_info.name.clone(),
+                key: key.to_owned(),
+                alias: None,
+            }),
+            request: Default::default(),
+        };
+        let prepared = app
+            .prepare_read(&route, None, reuse_public(request))
+            .await?;
+        if let Some(response) = Box::pin(super::image::single(
+            app.clone(),
+            prepared,
+            format!("/{}", crate::app::listing::encode_key(key)).parse()?,
+            request.clone(),
+            if head {
+                axum::http::Method::HEAD
+            } else {
+                axum::http::Method::GET
+            },
+        ))
+        .await?
+        {
+            return super::image::read(response);
+        }
+    }
     let deadline = crate::app::readiness::deadline();
     let bucket = bucket_info.id;
     if bucket_info.state != "active" {

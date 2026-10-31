@@ -275,6 +275,7 @@ pub(crate) struct Reads {
     pub(crate) node: Arc<NodeContext>,
     pub(super) cache: Cache,
     slots: Arc<Semaphore>,
+    pub(crate) images: Arc<crate::processing::image::job::Service>,
     pub(super) reader: super::body::Reader,
     pub(super) checks: Arc<crate::content::checks::Checks>,
     pub(super) bodies: Arc<crate::app::responses::Cache>,
@@ -302,6 +303,70 @@ pub(crate) struct Prepared {
 }
 
 impl Prepared {
+    pub(crate) fn image_state(&self, route: &crate::model::ReadRoute) -> Result<Vec<u8>> {
+        let bucket = super::delivery::bucket(self)?.context("image bucket missing")?;
+        let object: read::Object =
+            self.material(self.reply.object.as_ref().context("image object missing")?)?;
+        crate::processing::image::request::state(
+            &bucket,
+            Some(&object.stream()),
+            self.image(route)?.as_ref(),
+        )
+    }
+    pub(crate) fn image_demand(&self, size: i64) -> Result<Vec<crate::app::responses::DemandSpan>> {
+        let Some(version) = &self.reply.mapping else {
+            return Ok(Vec::new());
+        };
+        let mapping: read::Mapping = self.material(version)?;
+        if mapping.start != 0 || mapping.end != size || mapping.segments.len() > 256 {
+            return Ok(Vec::new());
+        }
+        let mut offset = 0;
+        let mut spans = Vec::new();
+        for segment in &mapping.segments {
+            let Some(source) = segment.source.cached_source() else {
+                return Ok(Vec::new());
+            };
+            spans.push((offset, offset + segment.length, source));
+            offset += segment.length;
+        }
+        Ok(spans)
+    }
+    pub(crate) fn image(
+        &self,
+        route: &crate::model::ReadRoute,
+    ) -> Result<Option<crate::processing::image::request::Selection>> {
+        let Some(request) = route.image() else {
+            return Ok(None);
+        };
+        let Some(bucket) = super::delivery::bucket(self)? else {
+            return Ok(None);
+        };
+        let Some(version) = &self.reply.image_policy else {
+            ensure!(bucket.image_revision == 0, "image policy missing");
+            return Ok(None);
+        };
+        let settings: crate::model::image_styles::Settings = self.material(version)?;
+        ensure!(
+            settings.revision == bucket.image_revision && version.id == bucket.id.to_string(),
+            "image policy revision mismatch"
+        );
+        let mut styles = std::collections::BTreeMap::new();
+        if let Some(version) = &self.reply.image_style {
+            let style: crate::model::image_styles::Style = self.material(version)?;
+            ensure!(
+                version.id == format!("{}:{}", bucket.id, style.name),
+                "image style identity mismatch"
+            );
+            styles.insert(style.name.clone(), style);
+        }
+        let selected = request.select(route.key(&bucket), settings, &styles)?;
+        ensure!(
+            selected.key == self.reply.source_key,
+            "image source mismatch"
+        );
+        Ok(Some(selected))
+    }
     pub(super) fn storage_versions(&self) -> Vec<wire::Cached> {
         self.materials
             .values()
@@ -362,6 +427,12 @@ impl Prepared {
         material(&self.materials, version)
     }
 
+    pub(crate) fn memory(&self) -> Arc<OwnedSemaphorePermit> {
+        self.memory.clone()
+    }
+    pub(crate) fn needs_source(&self) -> bool {
+        self.reply.mapping.is_none() && self.cached_body.is_none()
+    }
     pub(crate) fn check(&self) -> Result<()> {
         self.run.check()?;
         for grant in &self.grants {
@@ -372,6 +443,10 @@ impl Prepared {
 }
 
 impl Reads {
+    pub(crate) fn image_generation(&self) -> u64 {
+        self.public_generation();
+        self.public.generation()
+    }
     pub(crate) fn report_foreground(self: &Arc<Self>) {
         *self.node.foreground.lock().unwrap() = Arc::downgrade(self);
     }
@@ -399,7 +474,19 @@ impl Reads {
             receiver,
         ));
         let (public, receiver) = crate::app::public_reads::Cache::new(cors.clone(), &bodies);
+        let images = crate::processing::image::job::Service::new(
+            crate::processing::image::job::Resources {
+                disk: reader.files.disk.clone(),
+                cpu: reader.cpu.clone(),
+                work: reader.http.clone(),
+                slots: slots.clone(),
+                memory: u64::from(budget.pack_memory_units) * 1024 * 1024,
+                access: node.access.clone(),
+            },
+            crate::config::cache_bytes(&node.config.instance.image_cache_size)?,
+        );
         Ok(Self {
+            images,
             node: node.clone(),
             cache: Cache {
                 public: Arc::downgrade(&public),
@@ -418,8 +505,19 @@ impl Reads {
         })
     }
 
-    pub(crate) async fn open(&self, mut input: wire::ReadRequest) -> Result<Prepared> {
-        let memory = Arc::new(self.slots.clone().acquire_owned().await?);
+    pub(crate) async fn open(&self, input: wire::ReadRequest) -> Result<Prepared> {
+        self.open_memory(input, None).await
+    }
+    pub(crate) async fn open_memory(
+        &self,
+        mut input: wire::ReadRequest,
+        memory: Option<Arc<OwnedSemaphorePermit>>,
+    ) -> Result<Prepared> {
+        let memory = if let Some(memory) = memory {
+            memory
+        } else {
+            Arc::new(self.slots.clone().acquire_owned().await?)
+        };
         let snapshot = self.node.snapshot()?;
         let generation = self.public_generation();
         ensure!(

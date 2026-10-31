@@ -157,6 +157,7 @@ impl App {
                     .profile(row.source.storage_id)?
                     .read_integrity
                     .clone();
+                let mode = crate::storage::ReadContext::integrity(&mode).to_owned();
                 let reader = pin
                     .with_read_lease(self.storage.raw_reader(&row.source, mode == "inline"))
                     .await?;

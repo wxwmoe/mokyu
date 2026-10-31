@@ -1,7 +1,9 @@
 mod accept;
+mod cache;
 mod compat;
 mod engine;
 pub(crate) mod job;
+pub(crate) mod request;
 mod rule;
 #[cfg(test)]
 mod tests;

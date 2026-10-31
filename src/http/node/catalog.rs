@@ -2,31 +2,6 @@ use super::*;
 use crate::model::node_request::Catalog;
 use wire::prepare_request_input::Query;
 
-pub(super) fn object_read(route: &ReadRoute, query: &[String]) -> bool {
-    let object = match route {
-        ReadRoute::Bucket { key, alias, .. } => {
-            !key.is_empty() || alias.as_ref().is_some_and(|(_, key)| !key.is_empty())
-        }
-        ReadRoute::Host { key, .. } => !key.is_empty(),
-    };
-    object
-        && !query.iter().any(|name| {
-            matches!(
-                name.as_str(),
-                "acl"
-                    | "attributes"
-                    | "legal-hold"
-                    | "retention"
-                    | "tagging"
-                    | "torrent"
-                    | "uploadId"
-                    | "uploads"
-                    | "restore"
-                    | "select"
-            )
-        })
-}
-
 pub(super) fn query(
     method: &Method,
     uri: &hyper::Uri,
@@ -275,6 +250,7 @@ pub(super) fn objects(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::s3::object_read;
 
     #[test]
     fn catalog_routes_keep_objects_and_pagination_distinct() -> Result<()> {

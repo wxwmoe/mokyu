@@ -75,6 +75,7 @@ impl PreparedRequest {
 }
 
 struct RequestRead {
+    route: ReadRoute,
     input: wire::ReadRequest,
     prepared: Prepared,
     deadline: tokio::time::Instant,
@@ -154,17 +155,26 @@ impl Gateway {
 
     async fn prepare(
         &self,
-        route: ReadRoute,
+        mut route: ReadRoute,
         access: ReadAccess,
         method: &Method,
         web: bool,
         headers: &HeaderMap,
         overrides: &HeaderMap,
+        image_query: Option<&str>,
     ) -> Result<RequestRead> {
         let (access, anonymous) = match access {
             ReadAccess::Anonymous => (None, true),
             ReadAccess::Signed(key) => (key, false),
         };
+        if anonymous && *method != Method::OPTIONS {
+            route = ReadRoute::Image {
+                route: Box::new(route),
+                request: super::image::request(image_query)?,
+            };
+        }
+        let read_route = route.clone();
+        let image = route.image().cloned();
         let head = method != Method::GET;
         let reuse = anonymous
             && access.is_none()
@@ -186,21 +196,26 @@ impl Gateway {
                 HeaderValue::from_static("identity"),
             );
         }
-        let route = match route {
+        let route = match route.base() {
+            ReadRoute::Image { .. } => unreachable!(),
             ReadRoute::Bucket { name, key, alias } => {
                 wire::read_route::Route::Bucket(wire::BucketRoute {
-                    name,
-                    key,
+                    name: name.clone(),
+                    key: key.clone(),
                     alias_name: alias
                         .as_ref()
                         .map(|value| value.0.clone())
                         .unwrap_or_default(),
-                    alias_key: alias.map(|value| value.1).unwrap_or_default(),
+                    alias_key: alias
+                        .as_ref()
+                        .map(|value| value.1.clone())
+                        .unwrap_or_default(),
                 })
             }
-            ReadRoute::Host { host, key } => {
-                wire::read_route::Route::Host(wire::HostRoute { host, key })
-            }
+            ReadRoute::Host { host, key } => wire::read_route::Route::Host(wire::HostRoute {
+                host: host.clone(),
+                key: key.clone(),
+            }),
         };
         let fields = |headers: &HeaderMap, allowed: &[&str]| {
             headers
@@ -212,7 +227,7 @@ impl Gateway {
                 })
                 .collect()
         };
-        let input = wire::ReadRequest {
+        let mut input = wire::ReadRequest {
             route: Some(wire::ReadRoute { route: Some(route) }),
             access_key: access.unwrap_or_default(),
             method: if head {
@@ -241,6 +256,13 @@ impl Gateway {
             overrides: fields(overrides, crate::rpc::read::OVERRIDES),
             ..Default::default()
         };
+        if let Some(image) = image {
+            input.include.push(wire::ReadInclude::Image as i32);
+            if !input.include.contains(&(wire::ReadInclude::Mapping as i32)) {
+                input.include.push(wire::ReadInclude::Mapping as i32);
+            }
+            input.image_query = image.query();
+        }
         let deadline = crate::app::readiness::deadline();
         let prepared = if reuse {
             self.reads
@@ -250,6 +272,7 @@ impl Gateway {
             self.reads.open(input.clone()).await?
         };
         Ok(RequestRead {
+            route: read_route,
             input,
             prepared,
             deadline,
@@ -285,6 +308,104 @@ impl Gateway {
         .await
     }
 
+    async fn image(
+        &self,
+        mut request: RequestRead,
+        image: crate::processing::image::request::Selection,
+        uri: hyper::Uri,
+        headers: HeaderMap,
+        method: Method,
+    ) -> Result<Response> {
+        drop(request.compression.take());
+        request.prepared.check()?;
+        if request.prepared.reply.outcome == wire::ReadOutcome::Pending as i32 {
+            tokio::time::sleep_until(request.deadline).await;
+            let next = self
+                .reads
+                .open_memory(request.input.clone(), Some(request.prepared.memory()))
+                .await?;
+            ensure!(
+                next.reply.credential == request.prepared.reply.credential
+                    && next.reply.bucket == request.prepared.reply.bucket
+                    && next.reply.image_policy == request.prepared.reply.image_policy
+                    && next.reply.image_style == request.prepared.reply.image_style,
+                s3s::s3_error!(OperationAborted)
+            );
+            request.prepared = next;
+        }
+        if request.prepared.reply.outcome != wire::ReadOutcome::Ready as i32 {
+            let response = self.finish(request, &HeaderMap::new()).await?;
+            drop(response);
+            return Err(s3s::s3_error!(OperationAborted).into());
+        }
+        let object: read::Object = request.prepared.material(
+            request
+                .prepared
+                .reply
+                .object
+                .as_ref()
+                .context("image source missing")?,
+        )?;
+        ensure!(object.public, s3s::s3_error!(AccessDenied));
+        let generation = self.reads.image_generation();
+        let run = request.prepared.run.clone();
+        let slot = request.prepared.memory();
+        let verify = request.input.clone();
+        let route = request.route.clone();
+        let expected = request.prepared.image_state(&route)?;
+        let validation_memory = slot.clone();
+        let reads = self.reads.clone();
+        let spans = request.prepared.image_demand(object.size)?;
+        let image = super::image::respond(
+            self.reads.images.clone(),
+            object.stream(),
+            image,
+            uri,
+            headers,
+            method,
+            Some(slot),
+            Some(run.clone()),
+            spans,
+            async move {
+                if request.prepared.needs_source() {
+                    let next = reads
+                        .open_memory(request.input.clone(), Some(request.prepared.memory()))
+                        .await?;
+                    ensure!(
+                        next.reply.object == request.prepared.reply.object
+                            && next.reply.image_policy == request.prepared.reply.image_policy
+                            && next.reply.image_style == request.prepared.reply.image_style,
+                        s3s::s3_error!(OperationAborted)
+                    );
+                    request.prepared = next;
+                }
+                let response =
+                    delivery::response(&reads, request.prepared, false, &HeaderMap::new(), None)
+                        .await?;
+                let body = response.body.context("image source body missing")?;
+                Ok(Body::new(s3s::Body::from(body)))
+            },
+        )
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("image-public-validation").await;
+        run.check()?;
+        if self.reads.image_generation() != generation
+            && !self.reads.image_current(&route, &expected)
+        {
+            let fresh = self
+                .reads
+                .open_memory(verify, Some(validation_memory))
+                .await?;
+            ensure!(
+                fresh.reply.outcome == wire::ReadOutcome::Ready as i32
+                    && fresh.image_state(&route)? == expected,
+                s3s::s3_error!(OperationAborted)
+            );
+        }
+        Ok(image)
+    }
+
     fn cors(&self, prepared: &Prepared, headers: &HeaderMap, method: &Method) -> Result<HeaderMap> {
         let Some(mut bucket) = delivery::bucket(prepared)? else {
             return Ok(HeaderMap::new());
@@ -316,6 +437,7 @@ impl Gateway {
         headers: HeaderMap,
         method: Method,
     ) -> Result<Response, super::HttpError> {
+        let uri = format!("/{}", crate::app::listing::encode_key(&key)).parse()?;
         let prepared = self
             .prepare(
                 ReadRoute::Host { host, key },
@@ -324,9 +446,19 @@ impl Gateway {
                 true,
                 &headers,
                 &HeaderMap::new(),
+                None,
             )
             .await
             .map_err(delivery::error)?;
+        if let Some(image) = prepared
+            .prepared
+            .image(&prepared.route)?
+            .filter(|i| i.rule.is_some() || i.settings.policy.protect_original)
+        {
+            return Box::pin(self.image(prepared, image, uri, headers, method))
+                .await
+                .map_err(|e| super::HttpError(delivery::error(e).into()));
+        }
         Ok(self
             .finish(prepared, &HeaderMap::new())
             .await
@@ -391,6 +523,7 @@ impl Gateway {
                     true,
                     request.headers(),
                     &HeaderMap::new(),
+                    request.uri().query(),
                 )
                 .await
                 .map_err(delivery::error)?;
@@ -412,11 +545,25 @@ impl Gateway {
                 *response.headers_mut() = cors;
                 return Ok(response);
             }
-            let result = self
-                .finish(prepared, &HeaderMap::new())
+            let image = prepared.prepared.image(&prepared.route)?;
+            let result = if let Some(image) =
+                image.filter(|i| i.rule.is_some() || i.settings.policy.protect_original)
+            {
+                Box::pin(self.image(
+                    prepared,
+                    image,
+                    request.uri().clone(),
+                    request.headers().clone(),
+                    request.method().clone(),
+                ))
                 .await
-                .map(|read| read.response())
-                .map_err(|error| super::HttpError(delivery::error(error).into()));
+                .map_err(|e| super::HttpError(delivery::error(e).into()))
+            } else {
+                self.finish(prepared, &HeaderMap::new())
+                    .await
+                    .map(|read| read.response())
+                    .map_err(|error| super::HttpError(delivery::error(error).into()))
+            };
             let result = match result {
                 Err(error)
                     if bucket.website_enabled && error.has_code(s3s::S3ErrorCode::NoSuchKey) =>
@@ -468,6 +615,7 @@ impl Gateway {
             super::transport::authority(&mut request)?;
             self.reads.node.snapshot()?;
             let target = s3::Target::new(&request, &self.settings)?;
+            let image_uri = request.uri().clone();
             let route = s3::read_route(
                 request.uri().path(),
                 target.virtual_bucket.as_deref(),
@@ -494,7 +642,7 @@ impl Gateway {
             } else {
                 HeaderMap::new()
             };
-            let object_read = read && catalog::object_read(&route, &target.query);
+            let object_read = read && s3::object_read(&route, &target.query);
             let prepared = if object_read || request.method() == Method::OPTIONS {
                 PreparedRequest::Read(
                     self.prepare(
@@ -511,6 +659,7 @@ impl Gateway {
                         false,
                         request.headers(),
                         &overrides,
+                        request.uri().query(),
                     )
                     .await?,
                 )
@@ -623,6 +772,26 @@ impl Gateway {
                     StatusCode::FORBIDDEN
                 };
                 return Ok(response);
+            }
+            if !target.signed
+                && let PreparedRequest::Read(read) = &prepared
+                && let Some(image) = read
+                    .prepared
+                    .image(&read.route)?
+                    .filter(|i| i.rule.is_some() || i.settings.policy.protect_original)
+            {
+                let PreparedRequest::Read(read) = prepared else {
+                    unreachable!()
+                };
+                return Ok(Box::pin(self.image(
+                    read,
+                    image,
+                    image_uri,
+                    request.headers().clone(),
+                    request.method().clone(),
+                ))
+                .await?
+                .map(s3s::Body::http_body_unsync));
             }
             let post = request.method() == Method::POST;
             s3::check_control_body(

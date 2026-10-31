@@ -128,7 +128,7 @@ onBeforeUnmount(()=>{if(downloadUrl)URL.revokeObjectURL(downloadUrl);emit('dirty
           <div class="image-setting"><UiCheckbox :model-value="!!policy.mapping" :label="t('imageMapping')" :disabled="locked" @update:model-value="mapped" /><p v-if="policy.mapping" class="field-help">{{ t('imageMappingHint') }}</p></div>
           <template v-if="policy.mapping">
             <label class="field"><span>{{ t('imageAutoTag') }}</span><input v-model="policy.mapping.auto" maxlength="128" required placeholder="auto"></label>
-            <div class="form-pair"><label v-for="fmt in formats" :key="fmt" class="field"><span>{{ t('imageFormat_'+fmt) }}</span><input :value="policy.mapping.formats[fmt] || ''" maxlength="128" :placeholder="t('imageMappingOff')" @input="mapping(fmt,($event.target as HTMLInputElement).value)"></label></div>
+            <div class="form-pair"><label v-for="fmt in formats" :key="fmt" class="field"><span>{{ t('imageFormat_'+fmt) }}</span><input :value="policy.mapping.formats[fmt] || ''" maxlength="128" :required="fmt==='jpeg'" :placeholder="fmt==='jpeg'?'jpeg':t('imageMappingOff')" @input="mapping(fmt,($event.target as HTMLInputElement).value)"></label></div>
           </template>
           <p class="field-help">{{ t('imageDefaultHint') }}</p>
         </section>

@@ -16,15 +16,13 @@ async fn large_source_downscale() {
     )
     .unwrap();
     let path = dir.join("small");
-    let original = probe(&source, limits).await.unwrap();
-    assert!(original.width * original.height > limits.pixels);
-    render(&source, &path, &small, limits).await.unwrap();
-    let scaled = probe(&path, limits).await.unwrap();
-    assert_eq!(scaled.width.max(scaled.height), 32);
+    let result = render(&source, &path, &small, limits).await.unwrap();
+    assert!(result.source.width * result.source.height > limits.pixels);
+    assert_eq!(result.image.width.max(result.image.height), 32);
     let full = Pipeline::parse("mokyu/v1/encode,format=jpeg").unwrap();
     let denied = dir.join("denied");
     assert!(render(&source, &denied, &full, limits).await.is_err());
-    limits.input.pixels = original.width * original.height - 1;
+    limits.input.pixels = result.source.width * result.source.height - 1;
     assert!(render(&source, &denied, &small, limits).await.is_err());
     assert!(!denied.exists());
 }
@@ -54,8 +52,9 @@ async fn image_output_matrix() {
                 )
                 .await
                 .unwrap_or_else(|e| panic!("S{:02} on {name}: {e:#}", i + 1));
-                assert_eq!(out.format, pipeline.format());
-                assert!(out.bytes > 0);
+                assert_eq!(out.output.format, pipeline.format());
+                assert_eq!(out.image.format, out.output.format.word());
+                assert!(out.output.bytes > 0);
             }
         }
     }
@@ -112,7 +111,8 @@ async fn image_boundary_cases() {
                 rule.stages.last_mut().unwrap().format=format;
             }
             let r=render(&case.input,&out.join(&case.id),&rule,limit).await?;
-            Ok::<_,anyhow::Error>(serde_json::json!({"source":src,"format":r.format,"bytes":r.bytes,"rule":rule.text()}))
+            assert_eq!(serde_json::to_value(&r.source)?, serde_json::to_value(&src)?);
+            Ok::<_,anyhow::Error>(serde_json::json!({"source":src,"format":r.output.format,"bytes":r.output.bytes,"rule":rule.text()}))
         }.await;
         assert_eq!(result.is_err(), case.error, "{}: {result:?}", case.id);
         records.push(serde_json::json!({"id":case.id,"result":result.map_err(|e|e.to_string())}));

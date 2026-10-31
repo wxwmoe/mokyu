@@ -187,8 +187,8 @@ pub(super) async fn writable_targets(
     key: &str,
     owner: Option<Uuid>,
 ) -> Result<i32> {
-    let (managed, required) = q::gate(bucket).fetch_one(&mut **db).await?;
-    admitted(db, bucket, key, owner, managed).await?;
+    let (managed, required, image_policy) = q::gate(bucket).fetch_one(&mut **db).await?;
+    admitted(db, bucket, key, owner, managed, image_policy.as_deref()).await?;
     Ok(required)
 }
 
@@ -198,7 +198,9 @@ pub(super) async fn admitted(
     key: &str,
     owner: Option<Uuid>,
     managed: i32,
+    image_policy: Option<&str>,
 ) -> Result<()> {
+    super::image_transactions::writable(db, bucket, key, image_policy).await?;
     if managed != 0 {
         if let Some((id, state)) = q::manager(bucket, key).fetch_optional(&mut **db).await? {
             ensure!(

@@ -11,9 +11,22 @@ use std::{
 use uuid::Uuid;
 
 tokio::task_local! { static REQUEST: Option<Arc<Prepared>>; }
+pub(crate) fn image_selected(bucket: Uuid, key: &str) -> bool {
+    REQUEST
+        .try_with(|r| {
+            r.as_ref().is_some_and(|r| {
+                r.access.is_none()
+                    && r.snapshot.bucket.id == bucket
+                    && r.key == key
+                    && r.snapshot.image.is_some()
+            })
+        })
+        .unwrap_or(false)
+}
 
 pub(crate) struct Prepared {
     pub snapshot: Arc<ReadSnapshot>,
+    pub route: ReadRoute,
     key: String,
     access: Option<String>,
     pin: Mutex<Option<Active>>,
@@ -195,7 +208,11 @@ impl App {
         {
             // Immutable body hits need no source pin; misses recheck and pin in App::current.
             return Ok(Some(Arc::new(Prepared {
-                key: route.key(&entry.snapshot.bucket).to_owned(),
+                route: route.clone(),
+                key: entry.snapshot.image.as_ref().map_or_else(
+                    || route.key(&entry.snapshot.bucket).to_owned(),
+                    |image| image.key.clone(),
+                ),
                 snapshot: entry.snapshot.clone(),
                 access: None,
                 pin: Mutex::new(None),
@@ -229,8 +246,12 @@ impl App {
                     .map(|row| self.storage.physical_pin(row.source.address()))
             })
             .flatten();
-        let key = route.key(&snapshot.bucket).to_owned();
+        let key = snapshot.image.as_ref().map_or_else(
+            || route.key(&snapshot.bucket).to_owned(),
+            |image| image.key.clone(),
+        );
         Ok(Some(Arc::new(Prepared {
+            route: route.clone(),
             snapshot,
             key,
             access: access.map(str::to_owned),

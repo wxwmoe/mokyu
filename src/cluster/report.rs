@@ -37,7 +37,7 @@ async fn collect(app: &App, restricted: bool) -> Result<(Value, Value)> {
         "upload_slots_available": app.uploads.available_permits(), "read_slots_available": app.reads.available_permits(),
         "io": app.storage.statistics(),
         "cache": {"bytes": local[1], "limit": cache_limit, "upload_bytes": upload_bytes,
-            "upload_limit": upload_limit, "multipart_bytes": local[0], "thumbnail_bytes": local[2],
+            "upload_limit": upload_limit, "multipart_bytes": local[0], "image_bytes": local[2],
             "hits": app.storage.cache_hits.load(Relaxed),
             "backend_read_bytes": app.storage.backend_read_bytes.load(Relaxed),
             "backend_write_bytes": app.storage.backend_write_bytes.load(Relaxed)},

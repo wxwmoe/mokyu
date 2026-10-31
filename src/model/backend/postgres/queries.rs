@@ -843,8 +843,8 @@ pub(super) fn current_stream<'q>(
     }).bind(bucket).bind(key)
 }
 
-pub(super) async fn read_snapshot(
-    pool: &sqlx::PgPool,
+pub(super) async fn read_snapshot<'e>(
+    pool: impl sqlx::Executor<'e, Database = sqlx::Postgres>,
     route: &crate::model::ReadRoute,
     access: Option<&str>,
 ) -> Result<Option<crate::model::ReadSnapshot>> {
@@ -853,7 +853,8 @@ pub(super) async fn read_snapshot(
     let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
         "SELECT b.*,s.id AS stream_id,s.bucket_id AS stream_bucket_id,s.object_key AS stream_object_key,s.stream_type AS stream_stream_type,s.payload_type AS stream_payload_type,s.payload_revision AS stream_payload_revision,s.state AS stream_state,s.size AS stream_size,s.etag AS stream_etag,s.metadata AS stream_metadata,s.public_read AS stream_public_read,s.checksums AS stream_checksums,s.http_compression AS stream_http_compression,s.created_at AS stream_created_at,s.touched_at AS stream_touched_at,(SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,c.secret_encrypted AS read_secret,EXISTS(SELECT 1 FROM s3_credential_grants g WHERE g.access_key=c.access_key_id AND g.bucket_id=b.id AND c.project_id=b.project_id AND 'object.read'=ANY(g.actions)) AS read_allowed FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.object_key=",
     );
-    match route {
+    match route.base() {
+        crate::model::ReadRoute::Image { .. } => unreachable!(),
         ReadRoute::Bucket {
             key,
             alias: Some((alias, alias_key)),
@@ -874,7 +875,8 @@ pub(super) async fn read_snapshot(
     }
     query.push(" LEFT JOIN streams s ON s.id=o.stream_id AND s.state='ready' LEFT JOIN raw_ranges e ON e.stream_id=s.id AND e.offset_bytes=0 AND e.length=s.size AND NOT EXISTS(SELECT 1 FROM raw_ranges other WHERE other.stream_id=s.id AND other.offset_bytes<>0) LEFT JOIN raw_sources r ON r.id=e.source_id LEFT JOIN s3_credentials c ON c.access_key_id=")
         .push_bind(access).push(" AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>now()) WHERE b.id=(");
-    match route {
+    match route.base() {
+        crate::model::ReadRoute::Image { .. } => unreachable!(),
         ReadRoute::Host { host, .. } => {
             query
                 .push("SELECT bucket_id FROM bucket_domains WHERE host=")
@@ -933,6 +935,7 @@ pub(super) async fn read_snapshot(
         None
     };
     Ok(Some(crate::model::ReadSnapshot {
+        image: None,
         bucket: Bucket::from_row(&row)?,
         stream,
         raw,
@@ -8579,6 +8582,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::app::Bucket {
             storage_id: row.try_get("storage_id")?,
             state: row.try_get("state")?,
             settings_revision: row.try_get("settings_revision")?,
+            image_revision: row.try_get("image_revision")?,
             uploads_paused: row.try_get("uploads_paused")?,
             public_base_url: row.try_get("public_base_url")?,
             cors: row.try_get::<serde_json::Value, _>("cors")?.into(),
@@ -10738,7 +10742,8 @@ pub(super) fn node_read_credential(access: &str) -> Rows<'_, (i64, Vec<u8>)> {
 }
 
 pub(super) fn node_read_bucket(route: &crate::model::ReadRoute) -> Rows<'_, Bucket> {
-    match route {
+    match route.base() {
+        crate::model::ReadRoute::Image { .. } => unreachable!(),
         crate::model::ReadRoute::Bucket { name, alias, .. } => sqlx::query_as("SELECT * FROM buckets WHERE id=(SELECT id FROM buckets WHERE name IN ($1,$2) ORDER BY CASE WHEN name=$2 THEN 0 ELSE 1 END LIMIT 1) FOR SHARE")
             .bind(name).bind(alias.as_ref().map(|(name, _)| name)),
         crate::model::ReadRoute::Host { host, .. } => sqlx::query_as("SELECT b.* FROM buckets b JOIN bucket_domains d ON d.bucket_id=b.id WHERE d.host=$1 FOR SHARE OF b,d").bind(host),

@@ -79,7 +79,7 @@ pub fn seconds(s: &str) -> Result<u64> {
 pub(crate) fn validate_runtime(instance: &Instance, runtime: &RuntimeSettings) -> Result<()> {
     runtime.io.validate()?;
     runtime.web.validate()?;
-    cache_bytes(&instance.thumbnail_cache_size)?;
+    cache_bytes(&instance.image_cache_size)?;
     seconds(&instance.compression_idle_timeout)?;
     bytes(&runtime.requests.s3_chunk_limit)?;
     ensure!(

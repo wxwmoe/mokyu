@@ -6,6 +6,17 @@ use crate::{
 use std::{sync::atomic::Ordering::Relaxed, time::Duration};
 
 impl Reads {
+    pub(crate) fn image_current(&self, route: &ReadRoute, expected: &[u8]) -> bool {
+        self.public.entry(route).is_some_and(|entry| {
+            self.public.reusable(&entry, |p| self.current_profiles(p))
+                && crate::processing::image::request::state(
+                    &entry.snapshot.bucket,
+                    entry.snapshot.stream.as_ref(),
+                    entry.snapshot.image.as_ref(),
+                )
+                .is_ok_and(|state| state == expected)
+        })
+    }
     pub(crate) fn notify_public(
         &self,
         reset: bool,
@@ -113,7 +124,10 @@ impl Reads {
             }
         }
         let prepared = self.open(input).await?;
-        if let Some((snapshot, confirmation)) = self.public_confirmation(&prepared).ok().flatten()
+        if let Some((snapshot, confirmation)) = self
+            .public_confirmation(&prepared, &query.route)
+            .ok()
+            .flatten()
             && let Some(generation) = prepared.public_generation
         {
             self.public.queue_with(
@@ -130,6 +144,7 @@ impl Reads {
     fn public_confirmation(
         &self,
         prepared: &Prepared,
+        route: &ReadRoute,
     ) -> Result<Option<(Arc<ReadSnapshot>, Confirmation)>> {
         if prepared.reply.outcome != wire::ReadOutcome::Ready as i32
             || prepared.reply.credential.is_some()
@@ -225,6 +240,7 @@ impl Reads {
         self.cors.current(&mut bucket);
         Ok(Some((
             Arc::new(ReadSnapshot {
+                image: prepared.image(route)?,
                 bucket,
                 stream: Some(object.stream()),
                 raw: None,
@@ -311,6 +327,8 @@ impl Reads {
                         let candidate = self.candidate(&request);
                         let item = wire::RefreshRead {
                             route: request.route.clone(),
+                            image: request.include.contains(&(wire::ReadInclude::Image as i32)),
+                            image_query: request.image_query.clone(),
                             body: candidate
                                 .as_ref()
                                 .and_then(|(_, entry)| super::super::cache::claim(entry)),
@@ -406,7 +424,7 @@ impl Reads {
                             continue;
                         }
                         if let Some((snapshot, confirmation)) =
-                            self.public_confirmation(&prepared)?
+                            self.public_confirmation(&prepared, &job.entry.route)?
                         {
                             self.public.put(
                                 &job.entry.route,
@@ -484,6 +502,19 @@ impl Reads {
             &policy,
             &[],
         )?);
+        if let Some(image) = &entry.snapshot.image {
+            reply.image(deployment, bucket.id, image, &[])?;
+            query.prepare_image(image);
+            if image
+                .rule
+                .as_ref()
+                .is_some_and(|rule| self.images.cached(stream, rule))
+            {
+                query.head = true;
+                query.mapping = false;
+                query.body = None;
+            }
+        }
         let candidate = if query.head || bucket_only {
             None
         } else {
@@ -496,6 +527,15 @@ impl Reads {
             let Some(proof) = body.node_body() else {
                 return Ok(None);
             };
+            if !proof.verified
+                && entry
+                    .snapshot
+                    .image
+                    .as_ref()
+                    .is_some_and(|image| image.rule.is_some())
+            {
+                return Ok(None);
+            }
             if entry.mapping != Some(proof.mapping.revision)
                 || proof.policy != crate::http::object::POLICY as u32
             {
@@ -568,7 +608,9 @@ impl Reads {
 }
 
 fn request(route: &ReadRoute, head: bool) -> wire::ReadRequest {
-    let route = match route {
+    let image = route.image();
+    let route = match route.base() {
+        ReadRoute::Image { .. } => unreachable!(),
         ReadRoute::Host { host, key } => wire::read_route::Route::Host(wire::HostRoute {
             host: host.clone(),
             key: key.clone(),
@@ -586,7 +628,7 @@ fn request(route: &ReadRoute, head: bool) -> wire::ReadRequest {
             })
         }
     };
-    wire::ReadRequest {
+    let mut input = wire::ReadRequest {
         surface: if matches!(route, wire::read_route::Route::Host(_)) {
             wire::ReadSurface::Web
         } else {
@@ -611,7 +653,12 @@ fn request(route: &ReadRoute, head: bool) -> wire::ReadRequest {
             ]
         },
         ..Default::default()
+    };
+    if let Some(image) = image {
+        input.include.push(wire::ReadInclude::Image as i32);
+        input.image_query = image.query();
     }
+    input
 }
 
 async fn run(reads: Weak<Reads>, mut receiver: tokio::sync::mpsc::Receiver<Work>) {
@@ -721,7 +768,8 @@ async fn run(reads: Weak<Reads>, mut receiver: tokio::sync::mpsc::Receiver<Work>
                         return Ok(false);
                     }
                     reads.public.remove(&entry);
-                    if let Some((snapshot, confirmation)) = reads.public_confirmation(&prepared)?
+                    if let Some((snapshot, confirmation)) =
+                        reads.public_confirmation(&prepared, &entry.route)?
                         && let Some(generation) = prepared.public_generation
                     {
                         reads.public.put(

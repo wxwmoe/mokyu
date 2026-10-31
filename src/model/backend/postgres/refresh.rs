@@ -279,16 +279,43 @@ async fn load(
         let route = &routes[row.ordinal as usize];
         // Bucket aliases take precedence, including when both names exist.
         if buckets.contains_key(route)
-            && !matches!(route, ReadRoute::Bucket { alias:Some((name,_)), .. } if name == &row.bucket.name)
+            && !matches!(route.base(), ReadRoute::Bucket { alias:Some((name,_)), .. } if name == &row.bucket.name)
         {
             continue;
         }
         buckets.insert(route.clone(), row.bucket);
     }
-    let wanted: BTreeSet<_> = buckets
+    let mut images = HashMap::new();
+    let mut resolved = HashMap::new();
+    for (route, bucket) in buckets.iter().filter(|(_, b)| b.state == "active") {
+        let mut key = route.key(bucket).to_owned();
+        if let Some(request) = route
+            .image()
+            .filter(|request| bucket.image_revision > 0 || request.explicit())
+        {
+            match super::image_transactions::resolve(&mut tx, bucket.id, &key, request).await {
+                Ok(image) => {
+                    key = image.key.clone();
+                    images.insert(route.clone(), image);
+                }
+                Err(error)
+                    if error.downcast_ref::<s3s::S3Error>().is_some_and(|e| {
+                        matches!(
+                            e.code(),
+                            s3s::S3ErrorCode::InvalidArgument | s3s::S3ErrorCode::AccessDenied
+                        )
+                    }) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        resolved.insert(route.clone(), key);
+    }
+    let wanted: BTreeSet<_> = resolved
         .iter()
-        .filter(|(_, b)| b.state == "active")
-        .map(|(r, b)| (b.id, r.key(b).to_owned()))
+        .map(|(r, key)| (buckets[r].id, key.clone()))
         .collect();
     let (ids, keys): (Vec<_>, Vec<_>) = wanted.into_iter().unzip();
     let streams: HashMap<_, _> = sql::streams(&ids, &keys)
@@ -304,7 +331,9 @@ async fn load(
         .flat_map(|p| &p.input.reads)
         .filter(|q| q.body.is_some())
     {
-        if let Some(stream) = stream(&buckets, &streams, &query.route).filter(|s| s.public_read) {
+        if let Some(stream) =
+            stream(&buckets, &streams, &resolved, &query.route).filter(|s| s.public_read)
+        {
             match stream.payload_type.as_str() {
                 "raw" => {
                     raw.insert(stream.id);
@@ -340,7 +369,7 @@ async fn load(
     let mut stores: BTreeSet<_> = buckets.values().filter_map(|b| b.storage_id).collect();
     for request in pending {
         for query in &request.input.reads {
-            let Some(stream) = stream(&buckets, &streams, &query.route)
+            let Some(stream) = stream(&buckets, &streams, &resolved, &query.route)
                 .filter(|s| s.public_read && query.body.is_some())
             else {
                 continue;
@@ -392,6 +421,10 @@ async fn load(
         for query in &request.input.reads {
             let mut reply = read::Reply::new(read::Outcome::Ready);
             if let Some(bucket) = buckets.get(&query.route) {
+                if let Some(image) = images.get(&query.route) {
+                    reply.image(deployment, bucket.id, image, &request.input.cached)?;
+                }
+                reply.source_key = resolved.get(&query.route).cloned().unwrap_or_default();
                 reply.bucket = Some(reply.material(
                     deployment,
                     read::MaterialType::Bucket,
@@ -410,7 +443,7 @@ async fn load(
                 }
                 if bucket.state != "active" {
                     reply.outcome = read::Outcome::AccessDenied;
-                } else if let Some(stream) = stream(&buckets, &streams, &query.route) {
+                } else if let Some(stream) = stream(&buckets, &streams, &resolved, &query.route) {
                     if !stream.public_read {
                         reply.outcome = read::Outcome::AccessDenied;
                     } else {
@@ -505,8 +538,9 @@ async fn load(
 fn stream<'a>(
     buckets: &HashMap<ReadRoute, Bucket>,
     streams: &'a HashMap<(Uuid, String), StoredStream>,
+    resolved: &HashMap<ReadRoute, String>,
     route: &ReadRoute,
 ) -> Option<&'a StoredStream> {
     let bucket = buckets.get(route)?;
-    streams.get(&(bucket.id, route.key(bucket).to_owned()))
+    streams.get(&(bucket.id, resolved.get(route)?.clone()))
 }

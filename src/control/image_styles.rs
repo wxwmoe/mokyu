@@ -156,6 +156,7 @@ pub(super) async fn save(
     Json(input): Json<Update>,
 ) -> Result<Json<Settings>, HttpError> {
     app.writable()?;
+    let _cache = app.public_reads.changing();
     Ok(Json(
         app.image_styles
             .update(&actor.principal, bucket, &input, None, false)
@@ -335,6 +336,7 @@ pub(crate) async fn import_styles(
         edits.push(Edit::Put { style });
     }
     let apply = input.apply && !errors;
+    let _cache = apply.then(|| app.public_reads.changing());
     let revision = if !errors && !edits.is_empty() {
         app.image_styles
             .update(

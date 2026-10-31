@@ -8,7 +8,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 static ACTION_CONCURRENCY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 #[utoipa::path(
@@ -18,8 +18,8 @@ static ACTION_CONCURRENCY: tokio::sync::Semaphore = tokio::sync::Semaphore::cons
     params(),
     responses((status = 200, content_type = "application/json", body = Value))
 )]
-pub(super) async fn openapi(Extension(schema): Extension<Value>) -> Json<Value> {
-    Json(schema)
+pub(super) async fn openapi(Extension(schema): Extension<Arc<Value>>) -> Json<Value> {
+    Json(schema.as_ref().clone())
 }
 
 pub(super) async fn limit_object_actions(

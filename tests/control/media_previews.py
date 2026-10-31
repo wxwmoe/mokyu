@@ -49,7 +49,7 @@ s3 = boto3.client('s3', endpoint_url=os.environ['MOKYU_TEST_ENDPOINT'], region_n
 base = url + '/api/v1/buckets/' + bucket['id']
 files = []
 user = None
-cache_root = Path(os.environ['MOKYU_TEST_DATA']) / 'thumbnails'
+cache_root = Path(os.environ['MOKYU_TEST_DATA']) / 'cache' / 'images'
 mode = cache_root.stat().st_mode if cache_root.exists() else None
 
 
@@ -71,20 +71,22 @@ try:
     assert thumb.status_code == 200, thumb.text
     assert thumb.headers['content-type'] == 'image/png' and 'no-store' in thumb.headers['cache-control']
     assert struct.unpack('!II', thumb.content[16:24]) == (384, 192)
-    path = cache_root / f"v1-{q['version']}"
+    path = next(path / 'output' for path in cache_root.iterdir()
+                if path.is_dir() and (path / 'output').is_file() and (path / 'output').read_bytes() == thumb.content)
     assert path.is_file(), cache_root
     before = thumbnail_bytes()
     assert before >= len(thumb.content) + 32
     assert admin.get(base + '/object/thumbnail', params=q).content == thumb.content
     assert thumbnail_bytes() == before
-    path.write_bytes(b'damaged preview')
+    with path.open("r+b") as output: output.write(b"damaged preview")
     cache_root.chmod(0o555)
     fallback = admin.get(base + '/object/thumbnail', params=q)
-    assert fallback.status_code == 200 and fallback.content == thumb.content, fallback.text
+    assert fallback.status_code == 503, fallback.text
     assert thumbnail_bytes() == before
     cache_root.chmod(mode or 0o755)
     assert admin.get(base + '/object/thumbnail', params=q).content == thumb.content
-    assert len(path.read_bytes()) == len(thumb.content) + 32
+    assert path.read_bytes() == thumb.content
+    assert thumbnail_bytes() == before
     print('PASS bounded thumbnail, version cache, corruption fallback and retained failed-delete charge', flush=True)
 
     content = admin.get(base + '/object/content', params={**q, 'preview': 'true'}, headers={'Range': 'bytes=1-9'})

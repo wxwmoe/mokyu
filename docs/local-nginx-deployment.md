@@ -34,7 +34,7 @@ response_cache_size = "0B"
 write_memory_size = "0B"
 cache_size = "128MiB"
 upload_cache_size = "64MiB"
-thumbnail_cache_size = "64MiB"
+image_cache_size = "64MiB"
 ```
 
 创建 `compose.yaml`：

@@ -822,13 +822,21 @@ pub(super) async fn publish_in(
         queries::lock_writing_stream(id)
             .fetch_one(&mut **tx)
             .await?;
-    let (bucket_state, _, managed, _) = super::redundancy_queries::admission(bucket)
+    let (bucket_state, _, managed, _, image_policy) = super::redundancy_queries::admission(bucket)
         .fetch_one(&mut **tx)
         .await?;
     if bucket_state != "active" {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
-    super::redundancy_transactions::admitted(tx, bucket, &object_key, None, managed).await?;
+    super::redundancy_transactions::admitted(
+        tx,
+        bucket,
+        &object_key,
+        None,
+        managed,
+        image_policy.as_deref(),
+    )
+    .await?;
     super::redundancy_transactions::accept_origin(tx, bucket, marked).await?;
     let (old, epoch): (Option<Id>, Id) = queries::lock_object_version(bucket, &object_key)
         .fetch_one(&mut **tx)
@@ -1293,7 +1301,7 @@ impl StreamStore for Backend {
         route: &crate::model::ReadRoute,
         access: Option<&str>,
     ) -> Result<Option<crate::model::ReadSnapshot>> {
-        queries::read_snapshot(&self.pool, route, access).await
+        super::image_transactions::snapshot(self, route, access).await
     }
     async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<crate::model::CachedStream>> {
         queries::cached_stream(&self.pool, bucket, key).await
@@ -1585,9 +1593,10 @@ pub(super) async fn create_stream_in(
             .add(input.bucket, crate::authorization::Action::Acl);
     }
     input.authority.lock(tx).await?;
-    let (state, paused, managed, required) = super::redundancy_queries::admission(input.bucket)
-        .fetch_one(&mut **tx)
-        .await?;
+    let (state, paused, managed, required, image_policy) =
+        super::redundancy_queries::admission(input.bucket)
+            .fetch_one(&mut **tx)
+            .await?;
     if state != "active" {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
@@ -1604,6 +1613,7 @@ pub(super) async fn create_stream_in(
             &input.key,
             input.owner.map(|(id, _)| id),
             managed,
+            image_policy.as_deref(),
         )
         .await?;
     }
@@ -10089,7 +10099,7 @@ pub(super) async fn open_node_read(
     pool: &PgPool,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
-    input: crate::model::node_read::Query,
+    mut input: crate::model::node_read::Query,
 ) -> Result<crate::model::node_read::Reply> {
     use crate::model::{
         Error,
@@ -10135,20 +10145,35 @@ pub(super) async fn open_node_read(
         reply.outcome = Outcome::AccessDenied;
         return Ok(reply);
     }
-    let object_key = match &input.route {
-        crate::model::ReadRoute::Bucket { key, alias, .. } => alias
-            .as_ref()
-            .filter(|(name, _)| *name == bucket.name)
-            .map_or(key, |(_, key)| key),
-        crate::model::ReadRoute::Host { key, .. } => key,
+    let mut object_key = input.route.key(&bucket).to_owned();
+    let image = if let Some(request) = input
+        .route
+        .image()
+        .filter(|request| bucket.image_revision > 0 || request.explicit())
+    {
+        let image =
+            super::image_transactions::resolve(&mut tx, bucket.id, &object_key, request).await?;
+        reply.image(state.deployment_id, bucket.id, &image, &input.cached)?;
+        object_key = image.key.clone();
+        input.prepare_image(&image);
+        Some(image)
+    } else {
+        None
     };
-    let Some(stream) = locked_current_stream(&mut tx, bucket.id, object_key).await? else {
+    reply.source_key = object_key.clone();
+    let Some(stream) = locked_current_stream(&mut tx, bucket.id, &object_key).await? else {
         reply.outcome = Outcome::NoSuchKey;
         return Ok(reply);
     };
     if input.access.is_none() && !stream.public_read {
         reply.outcome = Outcome::AccessDenied;
         return Ok(reply);
+    }
+    if let Some(image) = image.filter(|image| image.rule.is_some()) {
+        ensure!(
+            stream.size > 0 && stream.size as u64 <= image.settings.policy.input_limit,
+            s3s::s3_error!(EntityTooLarge)
+        );
     }
     let object = read::Object::from_stream(&stream)?;
     reply.object = Some(reply.material(

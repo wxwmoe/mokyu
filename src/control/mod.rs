@@ -67,7 +67,7 @@ pub fn router(app: Arc<App>) -> Router {
         .merge(api)
         .fallback(assets::serve)
         .layer(DefaultBodyLimit::max(16 * 1024))
-        .layer(Extension(schema))
+        .layer(Extension(Arc::new(schema)))
         .layer(axum::middleware::from_fn_with_state(
             app.clone(),
             auth::access_gate,

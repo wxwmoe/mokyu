@@ -7,7 +7,7 @@ export function mediaUrl(bucket: string, item: MediaItem, action = 'content', pr
   return `/api/v1/buckets/${bucket}/object/${action}?` + params({ key: item.object_key, version: item.id, ...(action === 'content' ? { preview: String(preview) } : {}) })
 }
 export function hasThumbnail(item: MediaItem) {
-  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp'].includes(item.content_type.split(';')[0]!.trim().toLowerCase()) && BigInt(item.size) <= 32n * 1024n * 1024n
+  return ['image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/avif', 'image/jxl', 'image/heic', 'image/heif'].includes(item.content_type.split(';')[0]!.trim().toLowerCase()) && BigInt(item.size) <= 32n * 1024n * 1024n
 }
 
 let thumbnailQueue: Promise<unknown> = Promise.resolve()

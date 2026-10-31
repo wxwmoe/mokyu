@@ -83,7 +83,7 @@ impl Limits {
         })
     }
 }
-#[derive(Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Output {
     pub format: Format,
     pub bytes: u64,
@@ -147,21 +147,20 @@ async fn finish(mut child: tokio::process::Child, deadline: Instant) -> Result<(
     }
     Ok(())
 }
-async fn inspect(path: &Path, limits: Limits, deadline: Instant) -> Result<Source> {
+async fn check_input(path: &Path, limit: u64) -> Result<()> {
     let meta = tokio::fs::metadata(path).await?;
     ensure!(
-        meta.is_file() && meta.len() > 0 && meta.len() <= limits.input.bytes,
+        meta.is_file() && meta.len() > 0 && meta.len() <= limit,
         "image input exceeds its budget"
     );
-    let mut child = command(limits)
-        .arg("probe")
-        .arg(path)
-        .arg(limits.pixels.to_string())
-        .arg("-")
+    Ok(())
+}
+async fn report<T: serde::de::DeserializeOwned>(cmd: &mut Command, deadline: Instant) -> Result<T> {
+    let mut child = cmd
         .stdout(Stdio::piped())
         .spawn()
         .context("image processor unavailable")?;
-    let stdout = child.stdout.take().context("missing probe output")?;
+    let stdout = child.stdout.take().context("missing image report")?;
     let mut data = Vec::new();
     let mut reader = stdout.take(4097);
     let (_, ()) = tokio::try_join!(
@@ -173,20 +172,35 @@ async fn inspect(path: &Path, limits: Limits, deadline: Instant) -> Result<Sourc
         },
         finish(child, deadline)
     )?;
-    ensure!(data.len() <= 4096, "invalid image probe");
+    ensure!(data.len() <= 4096, "invalid image report");
     Ok(serde_json::from_slice(&data)?)
 }
 pub(crate) async fn probe(path: &Path, limits: Limits) -> Result<Source> {
-    inspect(path, limits, Instant::now() + limits.deadline).await
+    check_input(path, limits.input.bytes).await?;
+    report(
+        command(limits)
+            .arg("probe")
+            .arg(path)
+            .arg(limits.pixels.to_string())
+            .arg("-"),
+        Instant::now() + limits.deadline,
+    )
+    .await
+}
+pub(crate) struct Rendered {
+    pub source: Source,
+    pub image: Source,
+    pub output: Output,
 }
 pub(crate) async fn render(
     source: &Path,
     destination: &Path,
     pipeline: &Pipeline,
     limits: Limits,
-) -> Result<Output> {
+) -> Result<Rendered> {
     pipeline.validate()?;
     let deadline = Instant::now() + limits.deadline;
+    check_input(source, limits.input.bytes).await?;
     let dir = destination
         .parent()
         .context("image destination needs a directory")?
@@ -194,23 +208,12 @@ pub(crate) async fn render(
     tokio::fs::create_dir(&dir).await?;
     let work = Work(dir);
     let mut path = source.to_owned();
-    let mut actual = Format::Source;
-    let mut bytes = 0;
+    let mut rendered: Option<Rendered> = None;
     for (i, stage) in pipeline.stages.iter().enumerate() {
-        let stage_limits = if i == 0 {
-            limits
-        } else {
-            Limits {
-                input: InputLimits::new(limits.output),
-                ..limits
-            }
-        };
-        let info = inspect(&path, stage_limits, deadline).await?;
-        actual = match stage.format {
-            Format::Auto => bail!("resolve the output format before processing"),
-            Format::Source => info.format.parse()?,
-            f => f,
-        };
+        ensure!(
+            stage.format != Format::Auto,
+            "resolve the output format before processing"
+        );
         let page = stage.operations.iter().find_map(|op| {
             if let Operation::Frame { index } = op {
                 Some(*index)
@@ -218,19 +221,22 @@ pub(crate) async fn render(
                 None
             }
         });
-        ensure!(
-            info.frames == 1 || page.is_some(),
-            "animated image requires explicit frame selection"
-        );
-        let next = work.0.join(format!("{i}.{}", actual.word()));
-        let mut cmd = command(stage_limits);
+        let next = work.0.join(i.to_string());
+        let mut cmd = command(if i == 0 {
+            limits
+        } else {
+            Limits {
+                input: InputLimits::new(limits.input.bytes),
+                ..limits
+            }
+        });
         cmd.env("TMPDIR", &work.0)
             .arg("render")
             .arg(&path)
             .arg(limits.pixels.to_string())
             .arg(page.map_or_else(|| "-".into(), |v| v.to_string()))
             .arg(&next)
-            .arg(actual.word())
+            .arg(stage.format.word())
             .arg(stage.quality_mode.word())
             .arg(stage.quality.unwrap_or_default().to_string())
             .arg(if stage.progressive { "1" } else { "0" });
@@ -267,24 +273,29 @@ pub(crate) async fn render(
                 }
             }
         }
-        finish(
-            cmd.spawn().context("image processor unavailable")?,
-            deadline,
-        )
-        .await?;
-        bytes = tokio::fs::metadata(&next).await?.len();
+        let (input, image): (Source, Source) = report(&mut cmd, deadline).await?;
+        let format = image.format.parse()?;
+        let expected = if stage.format == Format::Source {
+            input.format.parse()?
+        } else {
+            stage.format
+        };
+        ensure!(expected == format, "unexpected encoded image format");
+        let bytes = tokio::fs::metadata(&next).await?.len();
         ensure!(
             bytes > 0 && bytes <= limits.output,
             "encoded image exceeds its budget"
         );
+        rendered = Some(Rendered {
+            source: rendered.map_or(input, |previous| previous.source),
+            image,
+            output: Output { format, bytes },
+        });
         if i > 0 {
             tokio::fs::remove_file(path).await?
         }
         path = next;
     }
     tokio::fs::rename(path, destination).await?;
-    Ok(Output {
-        format: actual,
-        bytes,
-    })
+    rendered.context("empty image pipeline")
 }

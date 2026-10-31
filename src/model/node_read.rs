@@ -33,6 +33,8 @@ pub(crate) enum MaterialType {
     Key,
     Credential,
     Policy,
+    ImagePolicy,
+    ImageStyle,
 }
 
 impl MaterialType {
@@ -45,6 +47,8 @@ impl MaterialType {
             Self::Key => "block-key",
             Self::Credential => "s3-credential",
             Self::Policy => "read-policy",
+            Self::ImagePolicy => "image-policy",
+            Self::ImageStyle => "image-style",
         }
     }
 }
@@ -112,8 +116,33 @@ pub(crate) struct CachedBody {
 }
 
 impl Query {
+    pub(crate) fn prepare_image(&mut self, image: &crate::processing::image::request::Selection) {
+        if image.rule.is_some() && self.body.as_ref().is_some_and(|body| !body.verified) {
+            self.body = None;
+        }
+        if self.mapping && (image.rule.is_some() || image.settings.policy.protect_original) {
+            self.head = false;
+            for name in [
+                "range",
+                "if-range",
+                "if-match",
+                "if-none-match",
+                "if-modified-since",
+                "if-unmodified-since",
+                "accept-encoding",
+                "x-amz-checksum-mode",
+            ] {
+                self.headers.remove(name);
+            }
+            self.headers.insert(
+                "accept-encoding",
+                axum::http::HeaderValue::from_static("identity"),
+            );
+        }
+    }
     pub(crate) fn digest(&self) -> Result<[u8; 32]> {
-        let route = match &self.route {
+        let route = match self.route.base() {
+            ReadRoute::Image { .. } => unreachable!(),
             ReadRoute::Bucket { name, key, alias } => {
                 serde_json::json!(["bucket", name, key, alias])
             }
@@ -135,6 +164,7 @@ impl Query {
             self.mapping,
             self.protection,
             self.policy,
+            self.route.image(),
             headers(&self.headers),
             headers(&self.overrides),
         ))?;
@@ -295,6 +325,9 @@ pub(crate) struct Reply {
     pub(crate) mapping: Option<Version>,
     pub(crate) credential: Option<Version>,
     pub(crate) policy: Option<Version>,
+    pub(crate) image_policy: Option<Version>,
+    pub(crate) image_style: Option<Version>,
+    pub(crate) source_key: String,
     pub(crate) grants: Vec<Grant>,
     pub(crate) next: Option<Cursor>,
     pub(crate) offset: u64,
@@ -306,6 +339,32 @@ pub(crate) struct Reply {
 }
 
 impl Reply {
+    pub(crate) fn image(
+        &mut self,
+        deployment: Uuid,
+        bucket: Uuid,
+        image: &crate::processing::image::request::Selection,
+        cached: &[Version],
+    ) -> Result<()> {
+        self.image_policy = Some(self.material(
+            deployment,
+            MaterialType::ImagePolicy,
+            bucket.to_string(),
+            &image.settings,
+            cached,
+        )?);
+        if let Some(style) = &image.style {
+            self.image_style = Some(self.material(
+                deployment,
+                MaterialType::ImageStyle,
+                format!("{bucket}:{}", style.name),
+                style,
+                cached,
+            )?);
+        }
+        self.source_key = image.key.clone();
+        Ok(())
+    }
     pub(crate) fn new(outcome: Outcome) -> Self {
         Self {
             outcome,
@@ -315,6 +374,9 @@ impl Reply {
             mapping: None,
             credential: None,
             policy: None,
+            image_policy: None,
+            image_style: None,
+            source_key: String::new(),
             grants: Vec::new(),
             next: None,
             offset: 0,

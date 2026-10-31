@@ -10,6 +10,69 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 type Tx<'a> = sqlx::Transaction<'a, q::Db>;
+pub(super) async fn writable(
+    t: &mut Tx<'_>,
+    bucket: Uuid,
+    key: &str,
+    policy: Option<&str>,
+) -> Result<()> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    let policy: Policy = serde_json::from_str(policy)?;
+    let request = crate::processing::image::request::Request::default();
+    let names: Vec<_> = request
+        .candidates(key, &policy)
+        .into_iter()
+        .map(|(_, name, _)| name)
+        .collect();
+    if names.is_empty() {
+        return Ok(());
+    }
+    let styles = named(t, bucket, &names).await?;
+    ensure!(
+        !styles.values().any(|s| s.enabled),
+        s3s::s3_error!(
+            InvalidArgument,
+            "object key conflicts with an image style route"
+        )
+    );
+    Ok(())
+}
+pub(super) async fn snapshot(
+    b: &Backend,
+    route: &crate::model::ReadRoute,
+    access: Option<&str>,
+) -> Result<Option<crate::model::ReadSnapshot>> {
+    let initial = super::queries::read_snapshot(q::pool(b), route, access).await?;
+    let Some(first) = initial.as_ref() else {
+        return Ok(None);
+    };
+    let Some(request) = route
+        .image()
+        .filter(|r| access.is_none() && (first.bucket.image_revision > 0 || r.explicit()))
+    else {
+        return Ok(initial);
+    };
+    let mut tx = q::read(b).await?;
+    let image = resolve(&mut tx, first.bucket.id, route.key(&first.bucket), request).await?;
+    let selected = crate::model::ReadRoute::Bucket {
+        name: first.bucket.name.clone(),
+        key: image.key.clone(),
+        alias: None,
+    };
+    let Some(mut snapshot) = super::queries::read_snapshot(&mut *tx, &selected, None).await? else {
+        return Ok(None);
+    };
+    ensure!(
+        snapshot.bucket.id == first.bucket.id
+            && snapshot.bucket.image_revision == image.settings.revision,
+        Error::OperationAborted
+    );
+    snapshot.image = Some(image);
+    tx.commit().await?;
+    Ok(Some(snapshot))
+}
 async fn permit(t: &mut Tx<'_>, principal: &Principal, bucket: Uuid) -> Result<()> {
     transactions::lock_permit(
         t,
@@ -181,6 +244,21 @@ async fn mapping_scan(
 }
 #[async_trait::async_trait]
 impl ImageStore for Backend {
+    async fn resolve(
+        &self,
+        bucket: Uuid,
+        key: &str,
+        request: &crate::processing::image::request::Request,
+    ) -> Result<crate::processing::image::request::Selection> {
+        let mut tx = q::read(self).await?;
+        let selected = resolve(&mut tx, bucket, key, request).await?;
+        ensure!(
+            settings(&mut tx, bucket, false).await?.0.revision == selected.settings.revision,
+            Error::OperationAborted
+        );
+        tx.commit().await?;
+        Ok(selected)
+    }
     async fn page(
         &self,
         principal: &Principal,
@@ -285,6 +363,13 @@ impl ImageStore for Backend {
         transactions::lock_bucket_settings(&mut tx, principal, bucket).await?;
         let (current, prior) = settings(&mut tx, bucket, true).await?;
         ensure!(current.revision == update.revision, Error::OperationAborted);
+        ensure!(
+            !q::collision(&mut tx, bucket, policy, &update.edits).await?,
+            s3s::s3_error!(
+                InvalidArgument,
+                "image style route conflicts with an existing object key"
+            )
+        );
         let mut families = mapped.unwrap_or(prior);
         let names: Vec<_> = update.edits.iter().map(|e| e.name().to_owned()).collect();
         let existing = named(&mut tx, bucket, &names).await?;
@@ -375,6 +460,13 @@ impl ImageStore for Backend {
                 q.build().execute(&mut *tx).await?.rows_affected() == 1,
                 Error::OperationAborted
             );
+            transactions::checkpoint_event(
+                &mut tx,
+                "bucket.images",
+                &bucket.to_string(),
+                serde_json::json!({"bucket_id":bucket,"revision":next}),
+            )
+            .await?;
             next
         } else {
             current.revision
@@ -385,4 +477,20 @@ impl ImageStore for Backend {
             policy: policy.clone(),
         })
     }
+}
+
+pub(super) async fn resolve(
+    t: &mut Tx<'_>,
+    bucket: Uuid,
+    key: &str,
+    request: &crate::processing::image::request::Request,
+) -> Result<crate::processing::image::request::Selection> {
+    let (settings, _) = settings(t, bucket, false).await?;
+    let names = request
+        .candidates(key, &settings.policy)
+        .into_iter()
+        .map(|(_, name, _)| name)
+        .collect::<Vec<_>>();
+    let styles = named(t, bucket, &names).await?;
+    request.select(key, settings, &styles)
 }

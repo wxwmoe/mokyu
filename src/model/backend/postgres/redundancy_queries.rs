@@ -117,8 +117,8 @@ pub(super) fn settled(id: Uuid) -> Statement<'static> {
         .bind(id)
 }
 
-pub(super) fn admission(bucket: Uuid) -> Rows<'static, (String, bool, i32, i32)> {
-    sqlx::query_as("SELECT b.state,b.uploads_paused,g.managed,g.required_targets FROM buckets b JOIN bucket_change_gates g ON g.bucket_id=b.id WHERE b.id=$1 FOR SHARE").bind(bucket)
+pub(super) fn admission(bucket: Uuid) -> Rows<'static, (String, bool, i32, i32, Option<String>)> {
+    sqlx::query_as("SELECT b.state,b.uploads_paused,g.managed,g.required_targets,b.image_policy FROM buckets b JOIN bucket_change_gates g ON g.bucket_id=b.id WHERE b.id=$1 FOR SHARE").bind(bucket)
 }
 
 pub(super) fn publication(id: Uuid, bucket: Uuid, key: &str, stream: Id) -> Statement<'_> {
@@ -142,9 +142,9 @@ pub(super) fn attach_publication(id: Uuid, stream: Id) -> Statement<'static> {
         .bind(stream)
 }
 
-pub(super) fn gate(bucket: Uuid) -> Rows<'static, (i32, i32)> {
+pub(super) fn gate(bucket: Uuid) -> Rows<'static, (i32, i32, Option<String>)> {
     sqlx::query_as(
-        "SELECT managed,required_targets FROM bucket_change_gates WHERE bucket_id=$1 FOR SHARE",
+        "SELECT g.managed,g.required_targets,b.image_policy FROM bucket_change_gates g JOIN buckets b ON b.id=g.bucket_id WHERE g.bucket_id=$1 FOR SHARE",
     )
     .bind(bucket)
 }

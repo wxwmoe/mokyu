@@ -1,5 +1,5 @@
 use super::cors_headers;
-use super::errors::{ErrorCode, HttpError, unauthorized};
+use super::errors::{HttpError, unauthorized};
 use super::s3::{ReadOptions, decode_path, respond};
 use crate::app::{App, Bucket};
 use anyhow::Result;
@@ -10,7 +10,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::sync::Arc;
 
 pub fn public_router(app: Arc<App>) -> Router {
@@ -112,18 +112,16 @@ async fn public(
         .map_err(|_| unauthorized())?
     };
     let cors_generation = app.cors_cache.generation();
-    let prepared = if request.method() == Method::HEAD
-        || (request.method() == Method::GET && !super::object::conditional(request.headers()))
-    {
-        app.prepare_read(
-            &crate::model::ReadRoute::Host {
-                host: host.clone(),
-                key: key.clone(),
-            },
-            None,
-            super::object::reuse_public(request.headers()),
-        )
-        .await?
+    let route = crate::model::ReadRoute::Image {
+        route: Box::new(crate::model::ReadRoute::Host {
+            host: host.clone(),
+            key: key.clone(),
+        }),
+        request: super::image::request(request.uri().query())?,
+    };
+    let prepared = if request.method() != Method::OPTIONS {
+        app.prepare_read(&route, None, super::object::reuse_public(request.headers()))
+            .await?
     } else {
         None
     };
@@ -170,18 +168,32 @@ async fn public(
         }
         return Ok(r);
     }
-    let result = crate::app::reads::scope(
-        prepared,
-        respond(
-            app.clone(),
-            bucket.id,
-            &key,
-            request.headers().clone(),
-            request.method().clone(),
-            ReadOptions::public(&bucket),
-        ),
-    )
+    let image = Box::pin(super::image::single(
+        app.clone(),
+        prepared.clone(),
+        request.uri().clone(),
+        request.headers().clone(),
+        request.method().clone(),
+    ))
     .await;
+    let result = match image {
+        Ok(Some(response)) => Ok(response),
+        Err(error) => Err(HttpError(error)),
+        Ok(None) => {
+            crate::app::reads::scope(
+                prepared,
+                respond(
+                    app.clone(),
+                    bucket.id,
+                    &key,
+                    request.headers().clone(),
+                    request.method().clone(),
+                    ReadOptions::public(&bucket),
+                ),
+            )
+            .await
+        }
+    };
     let result = match result {
         Err(e) if bucket.website_enabled && e.has_code(s3s::S3ErrorCode::NoSuchKey) => {
             website_response(
