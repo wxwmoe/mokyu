@@ -2553,7 +2553,7 @@ impl ChunkStore for Backend {
     }
     async fn read_extents(&self, stream: Id, from: i64, until: i64) -> Result<Vec<ReadExtent>> {
         let mut query = sqlx::QueryBuilder::new("SELECT e.*,");
-        query.push(CHUNK_COLUMNS).push(" FROM (SELECT * FROM extents WHERE stream_id=").push_bind(stream).push(" AND offset_bytes>=").push_bind(from).push(" AND offset_bytes<").push_bind(until).push(" ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' ORDER BY e.offset_bytes");
+        query.push(CHUNK_COLUMNS).push(",(SELECT p.location_id FROM packs p WHERE p.id=c.pack_id) AS demand_pack FROM (SELECT * FROM extents WHERE stream_id=").push_bind(stream).push(" AND offset_bytes>=").push_bind(from).push(" AND offset_bytes<").push_bind(until).push(" ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' ORDER BY e.offset_bytes");
         Ok(query.build_query_as().fetch_all(&self.read).await?)
     }
     async fn read_start(&self, stream: Id, position: i64) -> Result<Option<i64>> {
@@ -2834,6 +2834,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for Chunk {
 impl<'r> sqlx::FromRow<'r, SqliteRow> for ReadExtent {
     fn from_row(row: &'r SqliteRow) -> sqlx::Result<Self> {
         Ok(Self {
+            demand_pack: sqlx::Row::try_get(row, "demand_pack")?,
             extent: sqlx::FromRow::from_row(row)?,
             chunk: sqlx::FromRow::from_row(row)?,
         })
@@ -7913,6 +7914,16 @@ pub(super) async fn expire_access(
     retention: f64,
     batch: i64,
 ) -> Result<()> {
+    for sql in [
+        super::tier_queries::EXPIRE,
+        super::tier_queries::EXPIRE_TOTALS,
+    ] {
+        sqlx::query(sql)
+            .bind(retention as i64)
+            .bind(batch)
+            .execute(&mut *connection)
+            .await?;
+    }
     for (table, columns) in [
         ("chunk_access_windows", "chunk_id,window_start"),
         ("pack_access_windows", "pack_id,window_start"),

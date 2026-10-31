@@ -86,6 +86,13 @@ async fn check(
     placement: &Placement,
 ) -> Result<()> {
     placement.validate()?;
+    super::tier_transactions::check_link(
+        db,
+        source,
+        (!settings.target_external).then_some(settings.target_bucket),
+        placement,
+    )
+    .await?;
     let mut rows = q::candidates(source, settings, placement).fetch(&mut **db);
     while let Some(row) = rows.try_next().await? {
         placement.check(source, settings, &row)?;

@@ -393,8 +393,24 @@ impl Fifo {
     }
 }
 
-pub(crate) type FetchResult =
-    tokio::sync::OnceCell<Result<(Bytes, Option<Arc<LoadedPack>>, usize), Arc<anyhow::Error>>>;
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ReadTrace {
+    pub source: Option<crate::model::tiering::Source>,
+    pub origin: bool,
+}
+impl ReadTrace {
+    pub fn pack(pack: &LoadedPack, c: &Chunk, origin: bool) -> Self {
+        Self {
+            source: Some(crate::model::tiering::Source::Pack {
+                pack: pack.pack.location_id,
+                member: c.uuid,
+            }),
+            origin,
+        }
+    }
+}
+pub(crate) type Fetched = (Bytes, Option<Arc<LoadedPack>>, usize, ReadTrace);
+pub(crate) type FetchResult = tokio::sync::OnceCell<Result<Fetched, Arc<anyhow::Error>>>;
 pub(crate) struct PackFetch {
     pub(crate) result: tokio::sync::OnceCell<Result<Arc<LoadedPack>, Arc<anyhow::Error>>>,
     pub(crate) priority: Arc<AtomicUsize>,

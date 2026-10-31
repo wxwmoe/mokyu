@@ -100,6 +100,12 @@ pub(crate) struct Space {
     pub path: String,
 }
 
+impl Space {
+    pub(crate) fn independent(&self, domain: &[u8], path: &str) -> bool {
+        self.domain != domain && !overlaps(&self.path, path)
+    }
+}
+
 fn overlaps(a: &str, b: &str) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
@@ -122,8 +128,8 @@ pub(crate) struct Reservation {
 impl Placement {
     pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
-            self.source.domain != self.target.domain
-                && !overlaps(&self.source.path, &self.target.path),
+            self.source
+                .independent(&self.target.domain, &self.target.path),
             s3s::s3_error!(
                 InvalidArgument,
                 "redundancy requires independent storage backends"

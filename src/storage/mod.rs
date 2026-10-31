@@ -920,6 +920,38 @@ impl Storage {
         self.check_storage_inner(&target).await?;
         Ok(())
     }
+    pub(crate) async fn check_tier(&self, storage_id: Uuid, revision: i64) -> Result<()> {
+        use object_store::{GetOptions, GetRange};
+        let target = self.store_backend(storage_id)?;
+        ensure!(
+            target.revision == revision,
+            crate::model::Error::OperationAborted
+        );
+        self.check_storage(storage_id).await?;
+        let _permit = target.reads.acquire().await?;
+        let reply = target
+            .backend
+            .get_opts(
+                &Path::from("meta.json"),
+                GetOptions {
+                    range: Some(GetRange::Bounded(0..1)),
+                    ..Default::default()
+                },
+            )
+            .await?;
+        ensure!(
+            reply.range == (0..1),
+            "cold storage does not support direct range reads"
+        );
+        let mut size = 0;
+        let mut body = reply.into_stream();
+        while let Some(part) = body.try_next().await? {
+            size += part.len();
+            ensure!(size <= 1, "cold storage ignored the read range");
+        }
+        ensure!(size == 1, "cold storage returned an incomplete range");
+        Ok(())
+    }
     pub(crate) async fn initialize_store(&self, record: StoreRecord) -> Result<()> {
         let profile = self.profile_store.load(record.id).await?;
         self.initialize_store_with_profile(record, &profile).await
@@ -2038,6 +2070,13 @@ impl Storage {
         c: &Chunk,
         context: Option<&ReadContext>,
     ) -> Result<Bytes> {
+        Ok(self.get_with_trace(c, context).await?.0)
+    }
+    pub(crate) async fn get_with_trace(
+        self: &Arc<Self>,
+        c: &Chunk,
+        context: Option<&ReadContext>,
+    ) -> Result<(Bytes, cache::ReadTrace)> {
         let profile = if context.is_some_and(|context| context.observe) {
             Some(self.profile(c.storage_id.context("chunk has no store")?)?)
         } else {
@@ -2046,7 +2085,7 @@ impl Storage {
         let mode = profile
             .as_ref()
             .map_or("inline", |profile| profile.read_integrity.as_str());
-        let (raw, retained) = self.read_chunk(c, context, mode == "inline").await?;
+        let (raw, retained, trace) = self.read_chunk(c, context, mode == "inline").await?;
         if let Some(context) = context
             && let Some(checks) = &context.checks
         {
@@ -2061,14 +2100,14 @@ impl Storage {
                 capture.lock().unwrap().record_check(evidence);
             }
         }
-        Ok(raw)
+        Ok((raw, trace))
     }
     async fn read_chunk(
         self: &Arc<Self>,
         c: &Chunk,
         context: Option<&ReadContext>,
         verify: bool,
-    ) -> Result<(Bytes, usize)> {
+    ) -> Result<(Bytes, usize, cache::ReadTrace)> {
         self.cache_lookups.fetch_add(1, Ordering::Relaxed);
         if let Some(context) = context {
             let current = context.pack.lock().await;
@@ -2076,14 +2115,18 @@ impl Storage {
                 (!verify || p.verified) && p.data.members.iter().any(|m| m.id == c.uuid)
             }) {
                 loaded.touch(c, context.observe, context.range);
-                return Ok((loaded.data.chunk(c)?, c.raw_size as usize));
+                return Ok((
+                    loaded.data.chunk(c)?,
+                    c.raw_size as usize,
+                    cache::ReadTrace::pack(loaded, c, false),
+                ));
             }
         }
         if let Some(raw) = self.cached_read(c, verify).await? {
             if let Some(context) = context {
                 context.touch(c).await;
             }
-            return Ok(raw);
+            return Ok((raw.0, raw.1, cache::ReadTrace::default()));
         }
         let lock = {
             let mut map = self.misses.lock().unwrap();
@@ -2102,11 +2145,15 @@ impl Storage {
                 lock
             }
         };
+        let mut leader = false;
         match lock
-            .get_or_init(|| async { self.fetch(c, context, verify).await.map_err(Arc::new) })
+            .get_or_init(|| {
+                leader = true;
+                async { self.fetch(c, context, verify).await.map_err(Arc::new) }
+            })
             .await
         {
-            Ok((raw, loaded, retained)) => {
+            Ok((raw, loaded, retained, trace)) => {
                 if let (Some(context), Some(loaded)) = (context, loaded) {
                     loaded.touch(c, context.observe, context.range);
                     // Prefetch may be advancing to the next pack while waiting for this one's
@@ -2115,7 +2162,14 @@ impl Storage {
                         *current = Some(loaded.clone());
                     }
                 }
-                Ok((raw.clone(), *retained))
+                Ok((
+                    raw.clone(),
+                    *retained,
+                    cache::ReadTrace {
+                        origin: leader && trace.origin,
+                        ..*trace
+                    },
+                ))
             }
             Err(error) => Err(anyhow::anyhow!("chunk read failed: {error:#}")),
         }
@@ -2125,12 +2179,12 @@ impl Storage {
         c: &Chunk,
         context: Option<&ReadContext>,
         verify: bool,
-    ) -> Result<(Bytes, Option<Arc<LoadedPack>>, usize)> {
+    ) -> Result<cache::Fetched> {
         if let Some((raw, retained)) = self.cached_read(c, verify).await? {
             if let Some(context) = context {
                 context.touch(c).await;
             }
-            return Ok((raw, None, retained));
+            return Ok((raw, None, retained, cache::ReadTrace::default()));
         }
         match self
             .read_source(c, context.is_some_and(|context| context.observe))
@@ -2154,7 +2208,15 @@ impl Storage {
                         self.fill_read(c, raw.clone(), None);
                     }
                 }
-                Ok((raw, None, retained))
+                Ok((
+                    raw,
+                    None,
+                    retained,
+                    cache::ReadTrace {
+                        source: Some(crate::model::tiering::Source::Chunk(physical.location_id)),
+                        origin: true,
+                    },
+                ))
             }
             Source::Pack(pack, _pin) => {
                 if let Some(context) = context {
@@ -2168,6 +2230,7 @@ impl Storage {
                             loaded.data.chunk(c)?,
                             Some(loaded.clone()),
                             c.raw_size as usize,
+                            cache::ReadTrace::pack(loaded, c, false),
                         ));
                     }
                     *current = None;
@@ -2175,11 +2238,18 @@ impl Storage {
                     loaded.touch(c, context.observe, context.range);
                     let raw = loaded.data.chunk(c)?;
                     *current = Some(loaded.clone());
-                    Ok((raw, Some(loaded), c.raw_size as usize))
+                    let trace = cache::ReadTrace::pack(&loaded, c, true);
+                    Ok((raw, Some(loaded), c.raw_size as usize, trace))
                 } else {
                     let loaded = self.load_pack_read(pack, verify).await?;
                     loaded.touch(c, false, false);
-                    Ok((loaded.data.chunk(c)?, Some(loaded), c.raw_size as usize))
+                    let trace = cache::ReadTrace::pack(&loaded, c, true);
+                    Ok((
+                        loaded.data.chunk(c)?,
+                        Some(loaded),
+                        c.raw_size as usize,
+                        trace,
+                    ))
                 }
             }
         }

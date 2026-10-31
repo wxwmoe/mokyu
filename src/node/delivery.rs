@@ -243,11 +243,13 @@ pub(crate) async fn response(
             {
                 observe(object.size as u64, entry.bytes.len() as u64);
             }
+            let access = reads.node.access.clone();
+            let span = prepared.reply.offset as i64..end as i64;
             Box::pin(async_stream::try_stream! {
                 let _request = prepared;
-                let _entry = entry;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("response-cache-body").await;
+                entry.demand(&access,span);
                 yield bytes;
             })
         } else {

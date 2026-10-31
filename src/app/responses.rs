@@ -42,7 +42,13 @@ impl super::App {
                     return Ok(());
                 }
                 if let Some(mapping) = app.response_mapping(&stream).await? {
-                    received.publish(&app.response_cache, &stream, mapping.0, mapping.1);
+                    received.publish(
+                        &app.response_cache,
+                        &stream,
+                        mapping.0,
+                        mapping.1,
+                        mapping.2,
+                    );
                 }
                 Ok(())
             };
@@ -54,7 +60,7 @@ impl super::App {
     pub(crate) async fn response_mapping(
         &self,
         stream: &StoredStream,
-    ) -> anyhow::Result<Option<([u8; 32], Vec<Uuid>)>> {
+    ) -> anyhow::Result<Option<([u8; 32], Vec<Uuid>, Vec<DemandSpan>)>> {
         let mut mapping = Mapping::new(stream.size);
         if stream.payload_type == "raw" {
             let rows = if let Some(row) = super::reads::raw(stream.id, stream.payload_revision) {
@@ -76,7 +82,7 @@ impl super::App {
         }
         Ok(mapping
             .signature()
-            .map(|signature| (signature, mapping.storages)))
+            .map(|signature| (signature, mapping.storages, mapping.demand)))
     }
 }
 
@@ -110,6 +116,7 @@ pub(crate) struct Entry {
     pub etag: String,
     pub mapping: [u8; 32],
     storages: Vec<Uuid>,
+    footprint: Footprint,
     path: [u8; 32],
     ownership: Arc<Ownership>,
     checks: Vec<Arc<super::checks::Evidence>>,
@@ -118,7 +125,53 @@ pub(crate) struct Entry {
     node: Option<NodeBody>,
 }
 
+pub(crate) fn demand_spans(
+    spans: &[DemandSpan],
+    access: &crate::status::access::Access,
+    span: std::ops::Range<i64>,
+) {
+    if span.is_empty() || !access.collecting() {
+        return;
+    }
+    let mut read = crate::status::access::DemandRead::default();
+    let mut chunks = std::collections::BTreeMap::new();
+    let mut cursor = span.start;
+    for &(start, end, source) in spans {
+        let lo = start.max(span.start);
+        let hi = end.min(span.end);
+        if lo < hi {
+            if lo != cursor {
+                access.lost();
+                return;
+            }
+            match source {
+                crate::model::tiering::CachedSource::Chunk(id) => {
+                    *chunks.entry(id).or_default() += hi - lo
+                }
+                crate::model::tiering::CachedSource::Raw(id) => access.demand(
+                    &mut read,
+                    crate::model::tiering::Source::Raw(id),
+                    (hi - lo) as usize,
+                    false,
+                ),
+            }
+            cursor = hi;
+        }
+    }
+    if cursor != span.end {
+        access.lost();
+    } else {
+        access.cached(chunks);
+    }
+}
 impl Entry {
+    pub(crate) fn demand(
+        &self,
+        access: &crate::status::access::Access,
+        span: std::ops::Range<i64>,
+    ) {
+        demand_spans(self.footprint.spans(), access, span);
+    }
     pub(crate) fn usable(&self, epoch: u64) -> bool {
         self.checks.iter().all(|check| check.cacheable())
             && (self.checks.iter().all(|check| check.verified()) || self.read_epoch == epoch)
@@ -627,7 +680,17 @@ impl Upload {
 }
 
 impl Received {
-    fn publish(self, cache: &Cache, stream: &StoredStream, mapping: [u8; 32], storages: Vec<Uuid>) {
+    fn publish(
+        self,
+        cache: &Cache,
+        stream: &StoredStream,
+        mapping: [u8; 32],
+        storages: Vec<Uuid>,
+        demand: Vec<DemandSpan>,
+    ) {
+        let Some(footprint) = Footprint::new(cache, demand) else {
+            return;
+        };
         let key = Key {
             bucket: stream.bucket_id,
             stream: stream.id,
@@ -659,6 +722,7 @@ impl Received {
                 etag: stream.etag.clone(),
                 mapping,
                 storages,
+                footprint,
                 path,
                 ownership: self.ownership,
                 checks: Vec::new(),
@@ -691,6 +755,7 @@ impl Builder {
         self.mapping = Some(entry.mapping);
         let mut capture = self.capture.lock().unwrap();
         capture.storages = entry.storages.clone();
+        capture.demand = entry.footprint.spans().to_vec();
         capture.checks = entry.checks.clone();
         capture.read_epoch = entry.read_epoch;
         capture.finished = true;
@@ -760,7 +825,7 @@ impl Builder {
         let Some(cache) = self.cache.upgrade() else {
             return;
         };
-        let (mapping, checks, read_epoch, storages) = {
+        let (mapping, checks, read_epoch, storages, demand) = {
             let capture = self.capture.lock().unwrap();
             if !capture.valid {
                 return;
@@ -781,6 +846,7 @@ impl Builder {
                     .collect(),
                 capture.read_epoch,
                 capture.storages.clone(),
+                capture.demand.clone(),
             )
         };
         let Some(buffer) = self.buffer.take() else {
@@ -806,12 +872,16 @@ impl Builder {
         {
             return;
         }
+        let Some(footprint) = Footprint::new(&cache, demand) else {
+            return;
+        };
         let entry = Arc::new(Entry {
             bytes,
             raw_size: self.raw_size,
             etag: std::mem::take(&mut self.etag),
             mapping,
             storages,
+            footprint,
             checks,
             read_epoch,
             path: self.path,
@@ -855,9 +925,41 @@ impl Drop for Builder {
     }
 }
 
+pub(crate) type DemandSpan = (i64, i64, crate::model::tiering::CachedSource);
+enum Footprint {
+    Inline(Option<DemandSpan>),
+    Many {
+        spans: Vec<DemandSpan>,
+        _memory: OwnedSemaphorePermit,
+    },
+}
+impl Footprint {
+    fn spans(&self) -> &[DemandSpan] {
+        match self {
+            Self::Inline(span) => span.as_slice(),
+            Self::Many { spans, .. } => spans,
+        }
+    }
+    fn new(cache: &Cache, mut spans: Vec<DemandSpan>) -> Option<Self> {
+        if spans.len() <= 1 {
+            return Some(Self::Inline(spans.pop()));
+        }
+        let charge = (spans.capacity() * std::mem::size_of::<DemandSpan>()).div_ceil(MEMORY_UNIT);
+        Some(Self::Many {
+            spans,
+            _memory: cache
+                .memory
+                .clone()
+                .try_acquire_many_owned(charge as u32)
+                .ok()?,
+        })
+    }
+}
+
 pub(crate) struct Mapping {
     hash: blake3::Hasher,
     storages: Vec<Uuid>,
+    demand: Vec<DemandSpan>,
     size: i64,
     position: i64,
     count: usize,
@@ -871,6 +973,7 @@ impl Mapping {
         Self {
             hash: blake3::Hasher::new(),
             storages: Vec::new(),
+            demand: Vec::new(),
             size,
             position: 0,
             count: 0,
@@ -900,6 +1003,19 @@ impl Mapping {
     pub fn finish_source(&mut self) {
         self.finished = true;
     }
+    pub(crate) fn demand(
+        &mut self,
+        start: i64,
+        end: i64,
+        source: crate::model::tiering::CachedSource,
+    ) {
+        if self.demand.len() >= 64 || start != self.demand.last().map_or(0, |x| x.1) || end < start
+        {
+            self.valid = false;
+        } else if end > start {
+            self.demand.push((start, end, source));
+        }
+    }
     pub fn record_raw(&mut self, row: &crate::model::raw::RawRange, revision: i64) {
         // Only complete immutable files can be verified against their full-source digest.
         self.valid &= self.count == 0
@@ -912,6 +1028,11 @@ impl Mapping {
             return;
         }
         self.storages.push(row.source.storage_id);
+        self.demand(
+            0,
+            self.size,
+            crate::model::tiering::CachedSource::Raw(row.source.location_id),
+        );
         self.hash.update(b"raw");
         self.hash.update(row.source.location_id.as_bytes());
         self.hash.update(row.source.storage_id.as_bytes());
@@ -934,6 +1055,13 @@ impl Mapping {
         }
         if row.extent.chunk_id != Some(row.chunk.id) || row.chunk.state != "ready" {
             self.valid = false;
+        }
+        if !row.chunk.uuid.is_nil() {
+            self.demand(
+                row.extent.offset_bytes,
+                row.extent.offset_bytes + i64::from(row.extent.length),
+                crate::model::tiering::CachedSource::Chunk(row.chunk.uuid),
+            );
         }
         self.record_values(
             row.extent.offset_bytes,
@@ -1331,7 +1459,7 @@ mod tests {
         assert!(!late_builder.append(&vec![4; 8192]));
         cache.storage_policy(storage, false);
         stream.id = Uuid::new_v4().into();
-        received.publish(&cache, &stream, [1; 32], vec![storage]);
+        received.publish(&cache, &stream, [1; 32], vec![storage], Vec::new());
         assert!(
             cache
                 .get(Key {
@@ -1387,7 +1515,7 @@ mod tests {
         let received = upload.finish(&cache).unwrap();
         assert_eq!(received.bytes.as_ptr(), pointer);
         stream.id = Uuid::new_v4().into();
-        received.publish(&cache, &stream, [7; 32], Vec::new());
+        received.publish(&cache, &stream, [7; 32], Vec::new(), Vec::new());
         let next = Key {
             stream: stream.id,
             ..key
@@ -1485,6 +1613,7 @@ mod tests {
             policy: 1,
         };
         let row = ReadExtent {
+            demand_pack: None,
             extent: Extent {
                 stream_id: stream.id,
                 offset_bytes: 0,

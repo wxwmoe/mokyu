@@ -149,11 +149,31 @@ pub(super) async fn verify(
         .fetch_one(pool)
         .await?
     );
+    let before_gap: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT gap_since FROM node_access WHERE node_id=$1")
+            .bind(peer.node_id)
+            .fetch_one(pool)
+            .await?;
+    send(
+        backend,
+        peer,
+        key,
+        peer_run,
+        Access::new(2, AccessBatch::default()),
+    )
+    .await?;
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT gap_since>$2 FROM node_access WHERE node_id=$1")
+            .bind(peer.node_id)
+            .bind(before_gap)
+            .fetch_one(pool)
+            .await?
+    );
     let lost = AccessBatch {
         dropped: true,
         ..AccessBatch::default()
     };
-    send(backend, peer, key, peer_run, Access::new(2, lost)).await?;
+    send(backend, peer, key, peer_run, Access::new(3, lost)).await?;
     backend.flush_access(AccessBatch::default(), 120.0).await?;
     assert!(sqlx::query_scalar::<_, bool>("SELECT access_flushed_at >= now()-interval '120 seconds' AND access_coverage_since >= (SELECT gap_since FROM node_access WHERE node_id=$1) FROM mokyu_meta").bind(peer.node_id).fetch_one(pool).await?);
     let count: i64 = sqlx::query_scalar("SELECT reads FROM chunk_access_stats WHERE chunk_id=$1")

@@ -114,7 +114,21 @@ pub(crate) struct AccessBatch {
     pub(crate) chunks: HashMap<(Id, DateTime<Utc>), ChunkCounts>,
     pub(crate) packs: HashMap<(Id, DateTime<Utc>), PackCounts>,
     pub(crate) members: HashMap<(Id, Id, DateTime<Utc>), i64>,
+    pub(crate) demand: HashMap<(super::tiering::Unit, Uuid, DateTime<Utc>), super::tiering::Demand>,
+    pub(crate) cached: HashMap<super::tiering::CachedKey, super::tiering::CachedDemand>,
+    pub(crate) cached_slots: usize,
+    pub(crate) collecting: bool,
     pub(crate) dropped: bool,
+}
+
+impl AccessBatch {
+    pub(crate) fn len(&self) -> usize {
+        self.chunks.len()
+            + self.packs.len()
+            + self.members.len()
+            + self.demand.len()
+            + self.cached_slots
+    }
 }
 
 pub(crate) struct UsageSnapshot {

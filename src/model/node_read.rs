@@ -498,6 +498,28 @@ pub(crate) enum Source {
 }
 
 impl Source {
+    pub(crate) fn cached_source(&self) -> Option<super::tiering::CachedSource> {
+        use super::tiering::CachedSource;
+        match self {
+            Self::Chunk { chunk } | Self::Pack { chunk, .. } => {
+                Some(CachedSource::Chunk(chunk.uuid))
+            }
+            Self::Raw { source } => Some(CachedSource::Raw(source.location_id)),
+            _ => None,
+        }
+    }
+    pub(crate) fn demand(&self) -> Option<super::tiering::Source> {
+        use super::tiering::Source as Demand;
+        match self {
+            Self::Chunk { chunk } => Some(Demand::Chunk(chunk.location_id)),
+            Self::Pack { pack, chunk } => Some(Demand::Pack {
+                pack: pack.location_id,
+                member: chunk.uuid,
+            }),
+            Self::Raw { source } => Some(Demand::Raw(source.location_id)),
+            _ => None,
+        }
+    }
     pub(crate) fn pin(&self) -> Result<(&'static str, Uuid)> {
         Ok(match self {
             Self::Chunk { chunk } => ("chunk", chunk.location_id),

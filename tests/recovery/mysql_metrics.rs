@@ -246,6 +246,29 @@ async fn mysql_access_metrics_contract() -> Result<()> {
     );
     let windows:Vec<(i64,i64,i64,i64)>=sqlx::query_as("SELECT read_count,range_read_count,read_bytes,range_origin_reads FROM chunk_access_windows ORDER BY window_start").fetch_all(db).await?;
     assert_eq!(windows, vec![(3, 2, 70, 2), (2, 1, 50, 1)]);
+    let mut one = AccessBatch::default();
+    one.chunks.insert(
+        (chunk.id, hour),
+        ChunkCounts {
+            reads: 1,
+            ranges: 1,
+            bytes: 1,
+            origins: 0,
+        },
+    );
+    let mut repeated = db.begin().await?;
+    for _ in 0..3 {
+        super::queries::flush_chunk_access(&mut repeated, &one).await?;
+    }
+    let votes: i64 = sqlx::query_scalar(
+        "SELECT read_count FROM chunk_access_windows WHERE chunk_id=? AND window_start=?",
+    )
+    .bind(chunk.id)
+    .bind(hour)
+    .fetch_one(&mut *repeated)
+    .await?;
+    assert_eq!(votes, 5);
+    repeated.rollback().await?;
     assert_eq!(
         sqlx::query_scalar::<_, DateTime<Utc>>("SELECT coverage_since FROM access_state")
             .fetch_one(db)

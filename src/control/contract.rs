@@ -98,6 +98,9 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::redundancy::preview))
         .routes(routes!(super::redundancy::get))
         .routes(routes!(super::redundancy::command))
+        .routes(routes!(super::tiering::get, super::tiering::save))
+        .routes(routes!(super::tiering::preview))
+        .routes(routes!(super::tiering::units))
         .routes(routes!(
             super::external::start_test,
             super::external::latest_test

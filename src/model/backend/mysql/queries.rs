@@ -471,7 +471,7 @@ pub(super) async fn flush_chunk_access(
             .collect::<Vec<_>>(),
     );
     sqlx::query("INSERT INTO chunk_access_stats(chunk_id,read_count,range_read_count,read_bytes,last_read_at) SELECT * FROM (SELECT c.id AS chunk_id,SUM(j.read_count) AS read_count,SUM(j.range_count) AS range_count,SUM(j.bytes_count) AS bytes_count,CURRENT_TIMESTAMP(6) AS at FROM JSON_TABLE(?,'$[*]' COLUMNS(id BIGINT PATH '$[0]',read_count BIGINT PATH '$[2]',range_count BIGINT PATH '$[3]',bytes_count BIGINT PATH '$[4]')) j JOIN chunks c ON c.id=j.id GROUP BY c.id) incoming ORDER BY incoming.chunk_id ON DUPLICATE KEY UPDATE read_count=chunk_access_stats.read_count+incoming.read_count,range_read_count=chunk_access_stats.range_read_count+incoming.range_count,read_bytes=chunk_access_stats.read_bytes+incoming.bytes_count,last_read_at=incoming.at").bind(&data).execute(&mut *connection).await?;
-    sqlx::query("INSERT INTO chunk_access_windows(chunk_id,window_start,read_count,range_read_count,read_bytes,range_origin_reads) SELECT c.id,TIMESTAMPADD(MICROSECOND,j.at,'1970-01-01'),j.read_count,j.range_count,j.bytes_count,j.origin_count FROM JSON_TABLE(?,'$[*]' COLUMNS(id BIGINT PATH '$[0]',at BIGINT PATH '$[1]',read_count BIGINT PATH '$[2]',range_count BIGINT PATH '$[3]',bytes_count BIGINT PATH '$[4]',origin_count BIGINT PATH '$[5]')) j JOIN chunks c ON c.id=j.id ORDER BY c.id,j.at ON DUPLICATE KEY UPDATE read_count=chunk_access_windows.read_count+j.read_count,range_read_count=chunk_access_windows.range_read_count+j.range_count,read_bytes=chunk_access_windows.read_bytes+j.bytes_count,range_origin_reads=chunk_access_windows.range_origin_reads+j.origin_count").bind(data).execute(connection).await?;
+    sqlx::query("INSERT INTO chunk_access_windows(chunk_id,window_start,read_count,range_read_count,read_bytes,range_origin_reads) SELECT c.id,TIMESTAMPADD(MICROSECOND,j.at,'1970-01-01'),j.read_count,j.range_count,j.bytes_count,j.origin_count FROM JSON_TABLE(?,'$[*]' COLUMNS(id BIGINT PATH '$[0]',at BIGINT PATH '$[1]',read_count BIGINT PATH '$[2]',range_count BIGINT PATH '$[3]',bytes_count BIGINT PATH '$[4]',origin_count BIGINT PATH '$[5]')) j JOIN chunks c ON c.id=j.id ORDER BY c.id,j.at ON DUPLICATE KEY UPDATE read_count=chunk_access_windows.read_count+VALUES(read_count),range_read_count=chunk_access_windows.range_read_count+VALUES(range_read_count),read_bytes=chunk_access_windows.read_bytes+VALUES(read_bytes),range_origin_reads=chunk_access_windows.range_origin_reads+VALUES(range_origin_reads)").bind(data).execute(connection).await?;
     Ok(())
 }
 pub(super) async fn flush_pack_access(
@@ -526,6 +526,16 @@ pub(super) async fn expire_access(
     retention: f64,
     batch: i64,
 ) -> Result<()> {
+    for sql in [
+        super::tier_queries::EXPIRE,
+        super::tier_queries::EXPIRE_TOTALS,
+    ] {
+        sqlx::query(sql)
+            .bind(retention as i64)
+            .bind(batch)
+            .execute(&mut *connection)
+            .await?;
+    }
     for table in [
         "chunk_access_windows",
         "pack_access_windows",
@@ -5323,7 +5333,7 @@ impl ChunkStore for Backend {
     }
     async fn read_extents(&self, stream: Id, from: i64, until: i64) -> Result<Vec<ReadExtent>> {
         let mut query = sqlx::QueryBuilder::new("SELECT e.*,");
-        query.push(CHUNK_COLUMNS).push(" FROM (SELECT * FROM extents WHERE stream_id=").push_bind(stream).push(" AND offset_bytes>=").push_bind(from).push(" AND offset_bytes<").push_bind(until).push(" ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' ORDER BY e.offset_bytes");
+        query.push(CHUNK_COLUMNS).push(",(SELECT p.location_id FROM packs p WHERE p.id=c.pack_id) AS demand_pack FROM (SELECT * FROM extents WHERE stream_id=").push_bind(stream).push(" AND offset_bytes>=").push_bind(from).push(" AND offset_bytes<").push_bind(until).push(" ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' ORDER BY e.offset_bytes");
         Ok(query.build_query_as().fetch_all(&self.pool).await?)
     }
     async fn read_start(&self, stream: Id, position: i64) -> Result<Option<i64>> {
@@ -5597,6 +5607,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for Chunk {
 impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for ReadExtent {
     fn from_row(row: &'r sqlx::mysql::MySqlRow) -> sqlx::Result<Self> {
         Ok(Self {
+            demand_pack: sqlx::Row::try_get(row, "demand_pack")?,
             extent: sqlx::FromRow::from_row(row)?,
             chunk: sqlx::FromRow::from_row(row)?,
         })

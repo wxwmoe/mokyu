@@ -6095,6 +6095,7 @@ pub(super) async fn flush_access(pool: &PgPool, pending: AccessBatch, stale: f64
 }
 
 async fn persist_access(db: &mut PgConnection, pending: AccessBatch) -> Result<()> {
+    super::tier_read_queries::demand(db, &pending).await?;
     if pending.chunks.is_empty() && pending.packs.is_empty() && pending.members.is_empty() {
         return Ok(());
     }
@@ -9750,7 +9751,7 @@ async fn persist_node_access(
 ) -> Result<()> {
     let hash = blake3::hash(&serde_json::to_vec(&access)?);
     let previous = queries::node_access(node).fetch_optional(&mut *db).await?;
-    if let Some((old_boot, sequence, old_hash, _)) = &previous
+    if let Some((old_boot, sequence, old_hash, _, _, _)) = &previous
         && *old_boot == boot
         && *sequence >= access.sequence
     {
@@ -9760,21 +9761,35 @@ async fn persist_node_access(
         );
         return Ok(());
     }
-    let now = queries::node_clock().fetch_one(&mut *db).await?;
+    let (now, collecting) = queries::demand_clock().fetch_one(&mut *db).await?;
     let valid_hour = |at: &DateTime<Utc>| {
         *at >= now - chrono::Duration::hours(24) && *at <= now + chrono::Duration::hours(1)
     };
     ensure!(
         access.chunks.iter().all(|((_, at), _)| valid_hour(at))
             && access.packs.iter().all(|((_, at), _)| valid_hour(at))
-            && access.members.iter().all(|((_, _, at), _)| valid_hour(at)),
+            && access.members.iter().all(|((_, _, at), _)| valid_hour(at))
+            && access.demand.iter().all(|((_, _, at), _)| valid_hour(at))
+            && access.cached.iter().all(|((_, at), _)| valid_hour(at)),
         s3s::s3_error!(InvalidArgument)
     );
+    let stale = previous
+        .as_ref()
+        .map(|row| crate::config::seconds(&row.5))
+        .transpose()?
+        .unwrap_or(0)
+        .saturating_mul(2);
     let gap = previous
-        .filter(|(old_boot, sequence, _, _)| {
-            *old_boot == boot && *sequence == access.sequence - 1 && !access.dropped
+        .filter(|(old_boot, sequence, _, _, received, _)| {
+            *old_boot == boot
+                && *sequence == access.sequence - 1
+                && !access.dropped
+                && (!collecting || access.collecting)
+                && (now - *received)
+                    .to_std()
+                    .is_ok_and(|age| age <= std::time::Duration::from_secs(stale))
         })
-        .map_or(now, |(_, _, _, gap)| gap);
+        .map_or(now, |(_, _, _, gap, _, _)| gap);
     queries::node_access_saved(node, boot, access.sequence, hash.as_bytes(), now, gap)
         .execute(&mut *db)
         .await?;

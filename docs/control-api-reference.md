@@ -230,6 +230,19 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 创建和预览使用 `target_bucket`、`target_external`、`target_prefix`、`mode`、`permissions`、`propagate_deletes`、`max_pending_keys`。默认模式为 `asynchronous`；同一部署内的独立后端也可选 `synchronous`，外部目标不接受此模式。每条关系最多保留的不同待处理键默认 4096，可选 1–1000000。权限选项与数据复制相同，缺省时内部目标继承、外部目标不传递。删除传播仅适用于内部目标。解除完成前目标命名空间仍由关系占用；解除不会清理已发布副本。
 
+## 智能分层
+
+桶设置权限允许访问 `/api/v1/buckets/{bucket}/tiering`。热层是桶当前的内部后端，`policy.cold_storage` 指定另一个已启用、支持直接读取的内部后端。集群两端都需要共享 S3。冷端须与热端及有关联的冗余副本位置独立。
+
+| 方法与路径 | 作用 |
+| --- | --- |
+| `GET` | 返回热端、当前策略、状态和修订号；未配置时 `policy` 为 `null`，修订号为 0 |
+| `POST /preview` | 接受 `{revision,policy}`，校验位置和读取能力，不保存 |
+| `PUT` | 保存与预览相同的配置，修订号冲突返回 409 |
+| `GET /units` | 按 `unit=chunk\|pack\|raw`、UUID 游标 `after` 和 `limit`（1–128）查看物理单元、字节数、最近读取和降冷资格 |
+
+策略分别配置无读取时长 `cool_after_seconds`、升热观察窗口 `observation_seconds`、读取次数门槛 `promote_reads`、最短驻留时长 `residency_seconds`，以及并发数 `parallelism` 和每秒搬运预算 `bytes_per_second`。共享来源必须满足所有引用桶的策略；包成员随整包移动，读取某一成员不会增加其他成员的热度。
+
 ## 上传与传输中心
 
 | 方法与路径 | 用途 |

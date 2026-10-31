@@ -858,6 +858,7 @@ impl NodeControl for Service {
         .map_err(|_| Status::deadline_exceeded("observation transaction timed out"))??;
         Ok(Response::new(wire::ObservationReply {
             compression_written,
+            collect_demand: self.app.storage.access.collecting(),
         }))
     }
 

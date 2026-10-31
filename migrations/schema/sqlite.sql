@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 0053.
+-- Generated from the complete sqlite migration chain through 0054.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -53,6 +53,22 @@ CREATE TABLE bucket_domains (
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     CONSTRAINT bucket_domains_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE bucket_tiering (
+    bucket_id BLOB NOT NULL PRIMARY KEY,
+    hot_storage BLOB NOT NULL,
+    cold_storage BLOB NOT NULL,
+    cold_domain BLOB NOT NULL,
+    cold_space TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    revision BIGINT NOT NULL CHECK (revision > 0),
+    state VARCHAR(12) NOT NULL CHECK (state IN ('active','paused','draining')),
+    observed_since TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    FOREIGN KEY (bucket_id) REFERENCES buckets(id),
+    FOREIGN KEY (hot_storage) REFERENCES storages(id),
+    FOREIGN KEY (cold_storage) REFERENCES storages(id),
+    CHECK (hot_storage <> cold_storage)
+);
 
 CREATE TABLE buckets (
     id BLOB CHECK (id IS NULL OR length(id)=16) NOT NULL PRIMARY KEY,
@@ -507,6 +523,26 @@ CREATE TABLE pending_uploads (
     CONSTRAINT pending_offset CHECK (offset_bytes>=0),
     CONSTRAINT pending_attempts CHECK (attempts>=0)
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE physical_demand (
+    unit SMALLINT NOT NULL CHECK (unit BETWEEN 0 AND 3),
+    physical_id BLOB NOT NULL,
+    last_read BIGINT NOT NULL,
+    read_count BIGINT NOT NULL,
+    served_bytes BIGINT NOT NULL,
+    origin_reads BIGINT NOT NULL,
+    PRIMARY KEY (unit,physical_id)
+);
+
+CREATE TABLE physical_demand_windows (
+    unit SMALLINT NOT NULL CHECK (unit BETWEEN 0 AND 3),
+    physical_id BLOB NOT NULL,
+    hour_start BIGINT NOT NULL,
+    read_count BIGINT NOT NULL,
+    served_bytes BIGINT NOT NULL,
+    origin_reads BIGINT NOT NULL,
+    PRIMARY KEY (unit,physical_id,hour_start)
+);
 
 CREATE TABLE project_members (
     user_id BLOB CHECK (user_id IS NULL OR length(user_id)=16) NOT NULL,
@@ -1187,6 +1223,10 @@ CREATE INDEX audit_security ON audit_events(actor_id,action,outcome,created_at);
 
 CREATE INDEX bucket_domains_bucket_id_fk ON bucket_domains(bucket_id);
 
+CREATE INDEX bucket_tiering_cold ON bucket_tiering(cold_storage,bucket_id);
+
+CREATE INDEX bucket_tiering_hot ON bucket_tiering(hot_storage,bucket_id);
+
 CREATE INDEX buckets_project ON buckets(project_id);
 
 CREATE INDEX buckets_storage ON buckets(storage_id);
@@ -1326,6 +1366,10 @@ CREATE INDEX pending_due ON pending_uploads(owner_task,next_retry_at,chunk_id);
 CREATE INDEX pending_stream_offset ON pending_uploads(stream_id,offset_bytes);
 
 CREATE INDEX pending_uploads_source_pack_id_fk ON pending_uploads(source_pack_id);
+
+CREATE INDEX physical_demand_expiry ON physical_demand_windows(hour_start,unit,physical_id);
+
+CREATE INDEX physical_demand_recent ON physical_demand(last_read,unit,physical_id);
 
 CREATE INDEX project_members_project ON project_members(project_id);
 

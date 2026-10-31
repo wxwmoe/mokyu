@@ -486,7 +486,14 @@ pub(crate) async fn read(
                                 StatusCode::OK
                             },
                             headers,
-                            body: (!head).then(|| cached_body(bytes)),
+                            body: (!head).then(|| {
+                                cached_body(
+                                    bytes,
+                                    entry,
+                                    app.storage.access.clone(),
+                                    span.start as i64..span.end as i64,
+                                )
+                            }),
                             metadata,
                             checksums: stream.checksums,
                             partial: range.is_some(),
@@ -552,8 +559,10 @@ pub(crate) async fn read(
                     app.response_cache.validated();
                 }
                 drop(pin.take());
+                let access = app.storage.access.clone();
                 blob(Box::pin(async_stream::try_stream! {
                     let _permits = permits;
+                    entry.demand(&access,0..entry.raw_size);
                     yield entry.bytes.clone();
                 }))
             } else {
@@ -648,6 +657,9 @@ pub(crate) async fn identity_body(
             }
             return Ok(cached_body(
                 entry.bytes.slice(span.start as usize..span.end as usize),
+                entry,
+                app.storage.access.clone(),
+                span,
             ));
         }
         app.response_cache.remove(key, &entry);
@@ -693,17 +705,18 @@ pub(crate) fn collect(
     })
 }
 
-fn cached_body(bytes: bytes::Bytes) -> StreamingBlob {
-    #[cfg(feature = "fault-injection")]
-    {
-        blob(Box::pin(
-            async_stream::try_stream! { crate::faults::point("response-cache-body").await; yield bytes; },
-        ))
-    }
-    #[cfg(not(feature = "fault-injection"))]
-    {
-        StreamingBlob::from_bytes(bytes)
-    }
+fn cached_body(
+    bytes: bytes::Bytes,
+    entry: Arc<crate::app::responses::Entry>,
+    access: Arc<crate::status::access::Access>,
+    span: std::ops::Range<i64>,
+) -> StreamingBlob {
+    blob(Box::pin(async_stream::try_stream! {
+        #[cfg(feature="fault-injection")]
+        crate::faults::point("response-cache-body").await;
+        entry.demand(&access,span);
+        yield bytes;
+    }))
 }
 
 pub(crate) fn blob(stream: compression::ByteStream) -> StreamingBlob {

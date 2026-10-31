@@ -99,7 +99,7 @@ fn extents(stream: Id, from: i64, until: i64) -> Rows<'static, Extent> {
 
 fn read_extents(stream: Id, from: i64, until: i64) -> Rows<'static, ReadExtent> {
     // Page before joining; a missing ready chunk must fail row decoding.
-    sqlx::query_as("SELECT e.*,c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM (SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 AND offset_bytes<$3 ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' ORDER BY e.offset_bytes")
+    sqlx::query_as("SELECT e.*,c.pack_id AS demand_pack,c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at FROM (SELECT * FROM extents WHERE stream_id=$1 AND offset_bytes>=$2 AND offset_bytes<$3 ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' ORDER BY e.offset_bytes")
         .bind(stream)
         .bind(from)
         .bind(until)
@@ -6907,8 +6907,10 @@ pub(super) fn observation_limits() -> sqlx::RawSql {
     sqlx::raw_sql("SET LOCAL lock_timeout='100ms'; SET LOCAL statement_timeout='1s'")
 }
 
-pub(super) fn node_access(node: Uuid) -> Rows<'static, (Uuid, i64, Vec<u8>, DateTime<Utc>)> {
-    sqlx::query_as("SELECT boot_id,sequence,request_hash,gap_since FROM node_access WHERE node_id=$1 FOR UPDATE").bind(node)
+pub(super) fn node_access(
+    node: Uuid,
+) -> Rows<'static, (Uuid, i64, Vec<u8>, DateTime<Utc>, DateTime<Utc>, String)> {
+    sqlx::query_as("SELECT boot_id,sequence,request_hash,gap_since,received_at,COALESCE((SELECT value->>'access_flush_interval' FROM runtime_settings WHERE section='metrics'),'1m') FROM node_access WHERE node_id=$1 FOR UPDATE").bind(node)
 }
 
 pub(super) fn node_access_saved<'a>(
@@ -6929,6 +6931,8 @@ pub(super) fn access_coverage(dropped: bool, stale: f64) -> Statement<'static> {
 
 async fn expire_access(pool: &PgPool, retention: f64, batch: i64) -> Result<()> {
     for sql in [
+        super::tier_queries::EXPIRE,
+        super::tier_queries::EXPIRE_TOTALS,
         "DELETE FROM chunk_access_windows WHERE (window_start,chunk_id) IN (SELECT window_start,chunk_id FROM chunk_access_windows WHERE window_start<now()-$1*interval '1 second' ORDER BY window_start LIMIT $2)",
         "DELETE FROM pack_access_windows WHERE (window_start,pack_id) IN (SELECT window_start,pack_id FROM pack_access_windows WHERE window_start<now()-$1*interval '1 second' ORDER BY window_start LIMIT $2)",
         "DELETE FROM pack_member_access_windows WHERE (window_start,pack_id,chunk_id) IN (SELECT window_start,pack_id,chunk_id FROM pack_member_access_windows WHERE window_start<now()-$1*interval '1 second' ORDER BY window_start LIMIT $2)",
@@ -8877,6 +8881,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::model::chunk::ReadE
     fn from_row(row: &'r sqlx::postgres::PgRow) -> sqlx::Result<Self> {
         use sqlx::Row;
         Ok(Self {
+            demand_pack: sqlx::Row::try_get(row, "demand_pack")?,
             extent: sqlx::FromRow::from_row(row)?,
             chunk: sqlx::FromRow::from_row(row)?,
         })
@@ -10674,6 +10679,10 @@ pub(super) fn node_session(
         "SELECT credential_generation,boot_id,fence,epoch,connection_id,expires_at,sequence,draining FROM node_sessions WHERE node_id=$1 FOR SHARE"
     };
     sqlx::query_as(sql).bind(node)
+}
+
+pub(super) fn demand_clock() -> Rows<'static, (DateTime<Utc>, bool)> {
+    sqlx::query_as("SELECT clock_timestamp(),EXISTS(SELECT 1 FROM bucket_tiering)")
 }
 
 pub(super) fn node_clock() -> Scalar<'static, DateTime<Utc>> {

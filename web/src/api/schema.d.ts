@@ -528,6 +528,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/tiering": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["bucket_tiering"];
+        put: operations["bucket_tiering_save"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/tiering/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bucket_tiering_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/tiering/units": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["bucket_tiering_units"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/transfer": {
         parameters: {
             query?: never;
@@ -2102,6 +2150,16 @@ export interface components {
             /** Format: uuid */
             task_id: string;
         };
+        BucketTiering: {
+            /** Format: uuid */
+            bucket: string;
+            /** Format: uuid */
+            hot_storage: string;
+            policy?: components["schemas"]["TieringPolicy"] | null;
+            /** Format: int64 */
+            revision: number;
+            state: string;
+        };
         BucketView: {
             actions: components["schemas"]["Action"][];
             cors: unknown;
@@ -3563,6 +3621,39 @@ export interface components {
             text: string;
             truncated: boolean;
         };
+        /** @enum {string} */
+        TierUnit: "chunk" | "pack" | "raw" | "member";
+        TieringPolicy: {
+            /** Format: int64 */
+            bytes_per_second: number;
+            /** Format: uuid */
+            cold_storage: string;
+            /** Format: int32 */
+            cool_after_seconds: number;
+            /** Format: int32 */
+            observation_seconds: number;
+            /** Format: int32 */
+            parallelism: number;
+            /** Format: int32 */
+            promote_reads: number;
+            /** Format: int32 */
+            residency_seconds: number;
+        };
+        TieringUnit: {
+            /** Format: int64 */
+            bytes: number;
+            /** Format: uuid */
+            id: string;
+            /** Format: int64 */
+            last_read?: number | null;
+            reason: string;
+            unit: components["schemas"]["TierUnit"];
+        };
+        TieringUpdate: {
+            policy: components["schemas"]["TieringPolicy"];
+            /** Format: int64 */
+            revision: number;
+        };
         Toggle: {
             enabled: boolean;
         };
@@ -4723,6 +4814,102 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BucketSettings"];
+                };
+            };
+        };
+    };
+    bucket_tiering: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketTiering"];
+                };
+            };
+        };
+    };
+    bucket_tiering_save: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TieringUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketTiering"];
+                };
+            };
+        };
+    };
+    bucket_tiering_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TieringUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketTiering"];
+                };
+            };
+        };
+    };
+    bucket_tiering_units: {
+        parameters: {
+            query: {
+                unit: components["schemas"]["TierUnit"];
+                after?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TieringUnit"][];
                 };
             };
         };

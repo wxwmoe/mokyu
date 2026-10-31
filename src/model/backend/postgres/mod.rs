@@ -20,6 +20,11 @@ mod replication_queries;
 mod replication_remote_queries;
 mod replication_remote_transactions;
 mod replication_transactions;
+mod tier_queries;
+#[path = "../tier_read_queries.rs"]
+mod tier_read_queries;
+#[path = "../tier_transactions.rs"]
+mod tier_transactions;
 mod transactions;
 mod transfer_queries;
 mod transfer_transactions;
@@ -205,6 +210,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         external_buckets: backend.clone(),
         replications: backend.clone(),
         redundancy: backend.clone(),
+        tiering: backend.clone(),
         chunks: backend,
     }
 }

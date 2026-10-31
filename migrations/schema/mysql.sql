@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0052.
+-- Generated from the complete mysql migration chain through 0053.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -74,6 +74,27 @@ CREATE TABLE `bucket_domains` (
   PRIMARY KEY (`host`),
   KEY `bucket_domains_bucket` (`bucket_id`),
   CONSTRAINT `bucket_domains_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `bucket_tiering` (
+  `bucket_id` binary(16) NOT NULL,
+  `hot_storage` binary(16) NOT NULL,
+  `cold_storage` binary(16) NOT NULL,
+  `cold_domain` binary(32) NOT NULL,
+  `cold_space` text CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `policy` json NOT NULL,
+  `revision` bigint NOT NULL,
+  `state` varchar(12) COLLATE utf8mb4_bin NOT NULL,
+  `observed_since` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`bucket_id`),
+  KEY `bucket_tiering_cold` (`cold_storage`,`bucket_id`),
+  KEY `bucket_tiering_hot` (`hot_storage`,`bucket_id`),
+  CONSTRAINT `bucket_tiering_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `bucket_tiering_ibfk_2` FOREIGN KEY (`hot_storage`) REFERENCES `storages` (`id`),
+  CONSTRAINT `bucket_tiering_ibfk_3` FOREIGN KEY (`cold_storage`) REFERENCES `storages` (`id`),
+  CONSTRAINT `bucket_tiering_chk_1` CHECK ((`revision` > 0)),
+  CONSTRAINT `bucket_tiering_chk_2` CHECK ((`state` in (_utf8mb4'active',_utf8mb4'paused',_utf8mb4'draining'))),
+  CONSTRAINT `bucket_tiering_chk_3` CHECK ((`hot_storage` <> `cold_storage`))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `buckets` (
@@ -670,6 +691,30 @@ CREATE TABLE `pending_uploads` (
   CONSTRAINT `pending_offset` CHECK ((`offset_bytes` >= 0)),
   CONSTRAINT `pending_size` CHECK ((`staged_size` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
+
+CREATE TABLE `physical_demand` (
+  `unit` smallint NOT NULL,
+  `physical_id` binary(16) NOT NULL,
+  `last_read` bigint NOT NULL,
+  `read_count` bigint NOT NULL,
+  `served_bytes` bigint NOT NULL,
+  `origin_reads` bigint NOT NULL,
+  PRIMARY KEY (`unit`,`physical_id`),
+  KEY `physical_demand_recent` (`last_read`,`unit`,`physical_id`),
+  CONSTRAINT `physical_demand_unit` CHECK ((`unit` between 0 and 3))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `physical_demand_windows` (
+  `unit` smallint NOT NULL,
+  `physical_id` binary(16) NOT NULL,
+  `hour_start` bigint NOT NULL,
+  `read_count` bigint NOT NULL,
+  `served_bytes` bigint NOT NULL,
+  `origin_reads` bigint NOT NULL,
+  PRIMARY KEY (`unit`,`physical_id`,`hour_start`),
+  KEY `physical_demand_expiry` (`hour_start`,`unit`,`physical_id`),
+  CONSTRAINT `physical_demand_window_unit` CHECK ((`unit` between 0 and 3))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `project_members` (
   `user_id` binary(16) NOT NULL,

@@ -332,7 +332,18 @@ pub(super) async fn thumbnail(
     Query(q): Query<ObjectQuery>,
 ) -> Result<Response, HttpError> {
     let (stream, pin) = current(&app, &actor, bucket, &q, Action::Read).await?;
+    let original_size = stream.size;
+    let mut spans = None;
+    let mut deferred = None;
     let data = if let Some(data) = app.thumbnails.get(stream.id).await {
+        if app.storage.access.collecting() {
+            spans = app
+                .response_mapping(&stream)
+                .await
+                .ok()
+                .flatten()
+                .map(|mapped| mapped.2);
+        }
         data
     } else {
         let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
@@ -370,9 +381,11 @@ pub(super) async fn thumbnail(
         let body = Body::new(s3s::Body::from(
             app.body(stream, pin, 0..end, permits, false, None).await?,
         ));
+        let read = Arc::new(Mutex::new(crate::status::access::DerivedRead::default()));
+        deferred = Some(read.clone());
         let source = tokio::time::timeout(
             Duration::from_secs(15),
-            axum::body::to_bytes(body, source_limit),
+            crate::status::access::DERIVING.scope(read, axum::body::to_bytes(body, source_limit)),
         )
         .await
         .map_err(|_| problem(StatusCode::GATEWAY_TIMEOUT, "PreviewTimeout"))??;
@@ -404,7 +417,20 @@ pub(super) async fn thumbnail(
         .header("content-length", data.len())
         .header("cache-control", "private, no-store")
         .header("x-content-type-options", "nosniff")
-        .body(Body::from(data))?)
+        .body(Body::from_stream(futures_util::stream::once(async move {
+            if let Some(read) = deferred {
+                read.lock()
+                    .unwrap()
+                    .served(&app.storage.access, original_size);
+            } else {
+                crate::app::responses::demand_spans(
+                    spans.as_deref().unwrap_or_default(),
+                    &app.storage.access,
+                    0..original_size,
+                );
+            }
+            Ok::<_, std::convert::Infallible>(bytes::Bytes::from(data))
+        })))?)
 }
 fn make_thumbnail(source: &[u8], allowance: u64) -> Result<Vec<u8>> {
     let format = image::guess_format(source)?;

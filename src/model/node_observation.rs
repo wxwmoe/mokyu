@@ -15,9 +15,15 @@ pub(crate) const ACCESS_LIMIT: usize = 8192;
 #[serde(deny_unknown_fields)]
 pub(crate) struct Access {
     pub(crate) sequence: i64,
+    pub(crate) collecting: bool,
+    pub(crate) cached: Vec<(super::tiering::CachedKey, super::tiering::CachedDemand)>,
     pub(crate) chunks: Vec<((Id, DateTime<Utc>), ChunkCounts)>,
     pub(crate) packs: Vec<((Id, DateTime<Utc>), PackCounts)>,
     pub(crate) members: Vec<((Id, Id, DateTime<Utc>), i64)>,
+    pub(crate) demand: Vec<(
+        (super::tiering::Unit, uuid::Uuid, DateTime<Utc>),
+        super::tiering::Demand,
+    )>,
     pub(crate) dropped: bool,
 }
 
@@ -26,32 +32,49 @@ impl Access {
         let mut chunks: Vec<_> = pending.chunks.into_iter().collect();
         let mut packs: Vec<_> = pending.packs.into_iter().collect();
         let mut members: Vec<_> = pending.members.into_iter().collect();
+        let mut demand: Vec<_> = pending.demand.into_iter().collect();
+        let mut cached: Vec<_> = pending.cached.into_iter().collect();
+        cached.sort_by(|a, b| a.0.cmp(&b.0));
         chunks.sort_by_key(|row| row.0);
         packs.sort_by_key(|row| row.0);
         members.sort_by_key(|row| row.0);
+        demand.sort_by_key(|row| row.0);
         Self {
+            cached,
             sequence,
+            collecting: pending.collecting,
             chunks,
             packs,
             members,
+            demand,
             dropped: pending.dropped,
         }
     }
 
     pub(crate) fn pending(self) -> AccessBatch {
         AccessBatch {
+            cached_slots: self.cached.iter().map(|((ids, _), _)| ids.len() + 1).sum(),
+            cached: self.cached.into_iter().collect(),
+            collecting: self.collecting,
             chunks: self.chunks.into_iter().collect(),
             packs: self.packs.into_iter().collect(),
             members: self.members.into_iter().collect(),
+            demand: self.demand.into_iter().collect(),
             dropped: self.dropped,
         }
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
         let invalid = || s3s::s3_error!(InvalidArgument, "invalid access observation");
+        let cached_slots: usize = self.cached.iter().map(|((ids, _), _)| ids.len() + 1).sum();
         ensure!(
             self.sequence > 0
-                && self.chunks.len() + self.packs.len() + self.members.len() <= ACCESS_LIMIT,
+                && cached_slots
+                    + self.chunks.len()
+                    + self.packs.len()
+                    + self.members.len()
+                    + self.demand.len()
+                    <= ACCESS_LIMIT,
             invalid()
         );
         let id = |value: Id| matches!(value, Id::Uuid(id) if !id.is_nil());
@@ -60,7 +83,36 @@ impl Access {
         };
         let count = |value: i64| (0..=1_000_000_000).contains(&value);
         let bytes = |value: i64| (0..=1i64 << 50).contains(&value);
+        let mut shapes = HashSet::new();
+        for (key, group) in &self.cached {
+            let (ids, at) = key;
+            ensure!(
+                (1..=64).contains(&ids.len())
+                    && ids.len() == group.bytes.len()
+                    && shapes.insert(key)
+                    && hour(*at)
+                    && ids.iter().all(|id| !id.is_nil())
+                    && ids.windows(2).all(|i| i[0] < i[1])
+                    && group.reads > 0
+                    && count(group.reads)
+                    && group.bytes.iter().all(|n| *n >= group.reads && bytes(*n)),
+                invalid()
+            );
+        }
         let mut seen = HashSet::new();
+        let mut units = HashSet::new();
+        for (key, demand) in &self.demand {
+            ensure!(
+                !key.1.is_nil()
+                    && hour(key.2)
+                    && units.insert(*key)
+                    && count(demand.reads)
+                    && demand.bytes > 0
+                    && bytes(demand.bytes)
+                    && count(demand.origins),
+                invalid()
+            );
+        }
         for ((chunk, at), c) in &self.chunks {
             ensure!(
                 id(*chunk)

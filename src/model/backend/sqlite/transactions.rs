@@ -7240,6 +7240,7 @@ pub(super) async fn flush_access(
     queries::flush_chunk_access(&mut tx, &pending).await?;
     queries::flush_pack_access(&mut tx, &pending).await?;
     queries::flush_member_access(&mut tx, &pending).await?;
+    super::tier_read_queries::demand(&mut tx, &pending).await?;
     queries::access_coverage(pending.dropped, stale)
         .execute(&mut *tx)
         .await?;

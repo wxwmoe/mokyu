@@ -41,6 +41,7 @@ message ObservationRequest {
 
 message ObservationReply {
   repeated bool compression_written = 1;
+  bool collect_demand = 2;
 }
 
 // A separate service enforces the smaller stream message limit before decoding.

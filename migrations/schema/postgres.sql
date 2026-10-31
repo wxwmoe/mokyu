@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0099.
+-- Generated from the complete postgres migration chain through 0100.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -801,6 +801,21 @@ CREATE TABLE public.bucket_domains (
     bucket_id uuid CONSTRAINT domains_bucket_id_not_null NOT NULL
 );
 
+CREATE TABLE public.bucket_tiering (
+    bucket_id uuid NOT NULL,
+    hot_storage uuid NOT NULL,
+    cold_storage uuid NOT NULL,
+    cold_domain bytea NOT NULL,
+    cold_space text NOT NULL COLLATE pg_catalog."C",
+    policy jsonb NOT NULL,
+    revision bigint NOT NULL,
+    state text NOT NULL,
+    observed_since timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT bucket_tiering_check CHECK ((hot_storage <> cold_storage)),
+    CONSTRAINT bucket_tiering_revision_check CHECK ((revision > 0)),
+    CONSTRAINT bucket_tiering_state_check CHECK ((state = ANY (ARRAY['active'::text, 'paused'::text, 'draining'::text])))
+);
+
 CREATE TABLE public.buckets (
     id uuid DEFAULT uuidv7() NOT NULL,
     name text NOT NULL COLLATE pg_catalog."C",
@@ -1595,6 +1610,26 @@ CREATE TABLE public.pending_uploads (
     encoding_policy jsonb,
     CONSTRAINT pending_uploads_cache_size_check CHECK ((staged_size > 0)),
     CONSTRAINT pending_uploads_offset_bytes_check CHECK ((offset_bytes >= 0))
+);
+
+CREATE TABLE public.physical_demand (
+    unit smallint NOT NULL,
+    physical_id uuid NOT NULL,
+    last_read bigint NOT NULL,
+    read_count bigint NOT NULL,
+    served_bytes bigint NOT NULL,
+    origin_reads bigint NOT NULL,
+    CONSTRAINT physical_demand_unit_check CHECK (((unit >= 0) AND (unit <= 3)))
+);
+
+CREATE TABLE public.physical_demand_windows (
+    unit smallint NOT NULL,
+    physical_id uuid NOT NULL,
+    hour_start bigint NOT NULL,
+    read_count bigint NOT NULL,
+    served_bytes bigint NOT NULL,
+    origin_reads bigint NOT NULL,
+    CONSTRAINT physical_demand_windows_unit_check CHECK (((unit >= 0) AND (unit <= 3)))
 );
 
 CREATE TABLE public.project_members (
@@ -2451,6 +2486,9 @@ ALTER TABLE ONLY public.audit_events
 ALTER TABLE ONLY public.bucket_change_gates
     ADD CONSTRAINT bucket_change_gates_pkey PRIMARY KEY (bucket_id);
 
+ALTER TABLE ONLY public.bucket_tiering
+    ADD CONSTRAINT bucket_tiering_pkey PRIMARY KEY (bucket_id);
+
 ALTER TABLE ONLY public.buckets
     ADD CONSTRAINT buckets_id_project_id_key UNIQUE (id, project_id);
 
@@ -2700,6 +2738,12 @@ ALTER TABLE ONLY public.parts
 ALTER TABLE ONLY public.pending_uploads
     ADD CONSTRAINT pending_uploads_pkey PRIMARY KEY (chunk_id);
 
+ALTER TABLE ONLY public.physical_demand
+    ADD CONSTRAINT physical_demand_pkey PRIMARY KEY (unit, physical_id);
+
+ALTER TABLE ONLY public.physical_demand_windows
+    ADD CONSTRAINT physical_demand_windows_pkey PRIMARY KEY (unit, physical_id, hour_start);
+
 ALTER TABLE ONLY public.project_members
     ADD CONSTRAINT project_members_pkey PRIMARY KEY (user_id, project_id);
 
@@ -2886,6 +2930,10 @@ CREATE INDEX audit_events_project ON public.audit_events USING btree (project_id
 
 CREATE INDEX audit_events_request ON public.audit_events USING btree (request_id) WHERE (request_id IS NOT NULL);
 
+CREATE INDEX bucket_tiering_cold ON public.bucket_tiering USING btree (cold_storage, bucket_id);
+
+CREATE INDEX bucket_tiering_hot ON public.bucket_tiering USING btree (hot_storage, bucket_id);
+
 CREATE INDEX buckets_project ON public.buckets USING btree (project_id, name);
 
 CREATE INDEX buckets_store ON public.buckets USING btree (storage_id);
@@ -3037,6 +3085,10 @@ CREATE INDEX pending_uploads_source_pack_id ON public.pending_uploads USING btre
 CREATE INDEX pending_uploads_stream ON public.pending_uploads USING btree (stream_id, offset_bytes);
 
 CREATE INDEX pending_uploads_task ON public.pending_uploads USING btree (owner_task) WHERE (owner_task IS NOT NULL);
+
+CREATE INDEX physical_demand_expiry ON public.physical_demand_windows USING btree (hour_start, unit, physical_id);
+
+CREATE INDEX physical_demand_recent ON public.physical_demand USING btree (last_read, unit, physical_id);
 
 CREATE INDEX project_members_project ON public.project_members USING btree (project_id, user_id);
 
@@ -3293,6 +3345,15 @@ ALTER TABLE ONLY public.api_tokens
 
 ALTER TABLE ONLY public.bucket_change_gates
     ADD CONSTRAINT bucket_change_gates_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.bucket_tiering
+    ADD CONSTRAINT bucket_tiering_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);
+
+ALTER TABLE ONLY public.bucket_tiering
+    ADD CONSTRAINT bucket_tiering_cold_storage_fkey FOREIGN KEY (cold_storage) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.bucket_tiering
+    ADD CONSTRAINT bucket_tiering_hot_storage_fkey FOREIGN KEY (hot_storage) REFERENCES public.storages(id);
 
 ALTER TABLE ONLY public.buckets
     ADD CONSTRAINT buckets_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id);

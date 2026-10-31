@@ -52,6 +52,7 @@ pub(crate) mod source;
 pub(crate) mod storage;
 mod stream;
 pub(crate) mod task;
+pub(crate) mod tiering;
 pub(crate) mod transfer;
 
 use backend::postgres;
@@ -128,6 +129,7 @@ pub(crate) struct Stores {
     pub(crate) storage_records: Arc<dyn StorageRecordStore>,
     pub(crate) replications: Arc<dyn replication::ReplicationStore>,
     pub(crate) redundancy: Arc<dyn redundancy::RedundancyStore>,
+    pub(crate) tiering: Arc<dyn tiering::TieringStore>,
     pub(crate) external_buckets: Arc<dyn external::ExternalStore>,
     pub(crate) chunks: Arc<dyn ChunkStore>,
 }

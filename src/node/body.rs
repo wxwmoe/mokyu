@@ -267,7 +267,7 @@ impl Reader {
         source: &read::Source,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         loaded: &mut Option<Loaded>,
-    ) -> Result<Bytes> {
+    ) -> Result<(Bytes, bool)> {
         let mut memory = Some(
             prepared
                 .buffers
@@ -325,7 +325,7 @@ impl Reader {
                 .await?;
                 if let Ok(bytes) = decoded {
                     self.files.hit();
-                    return Ok(bytes);
+                    return Ok((bytes, false));
                 }
                 // Local cache damage must fall back before considering the authoritative source suspect.
                 self.files.reject(id).await;
@@ -395,7 +395,10 @@ impl Reader {
                 !self.background && !prepared.verify,
                 prepared.reply.http_status == 206,
             );
-            return Ok(owned(loaded.data.chunk(chunk)?, memory, &prepared));
+            return Ok((
+                owned(loaded.data.chunk(chunk)?, memory, &prepared),
+                !current,
+            ));
         }
         *loaded = None;
         let mut compressed = false;
@@ -450,7 +453,7 @@ impl Reader {
             } else {
                 codec::decode_read(&chunk, encoded, keys.as_ref(), 0, &pool, verify)?.0
             };
-            Ok(owned(bytes, memory, &prepared))
+            Ok((owned(bytes, memory, &prepared), !local))
         })
         .await?
     }
@@ -847,6 +850,7 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
         let mut current = Arc::new(prepared);
         let mut retired = None;
         let mut loaded = None;
+        let mut demand=crate::status::access::DemandRead::default();
         loop {
             current.check()?;
             let value = mapping(&current, object.id, object.revision, position, end)?;
@@ -856,6 +860,9 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                 Prefetch(tokio::spawn(async move { reads.window(current, cursor, retired).await }))
             });
             for (index, segment) in value.segments.into_iter().enumerate() {
+                if let Some(capture)=&current.capture && let Some(source)=segment.source.cached_source(){
+                    capture.lock().unwrap().demand(position as i64,position as i64+segment.length,source);
+                }
                 if let read::Source::Raw { source } = &segment.source {
                     loaded = None;
                     let result = current.guard(&reads.node, reads.reader.raw(&reads.node, &current, source, false)).await;
@@ -881,20 +888,26 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         remaining -= bytes.len();
                         if let Some(audit) = &mut audit { audit.feed(bytes.clone(), retained); }
                         if remaining == 0 && position + segment.length as u64 == end { current.finish_source(); }
+                        if !reads.reader.background && !current.verify {
+                            reads.node.access.demand(&mut demand,crate::model::tiering::Source::Raw(source.location_id),bytes.len(),matches!(&file,RawFile::Remote(_)));
+                        }
                         yield bytes;
                     }
                 } else {
                     let result = current.guard(&reads.node, async {
                         match &segment.source {
                             read::Source::Chunk { .. } | read::Source::Pack { .. } | read::Source::Local { .. } => reads.reader.chunk(&reads.node, current.clone(), &segment.source, keys.clone(), &mut loaded).await,
-                            _ => { loaded = None; reads.reader.fragment(&reads.node, current.clone(), &segment.source).await }
+                            _ => { loaded = None; reads.reader.fragment(&reads.node, current.clone(), &segment.source).await.map(|bytes|(bytes,false)) }
                         }
                     }).await;
                     if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
-                    let bytes = result?;
+                    let (bytes,origin) = result?;
                     reads.check_chunk(current.clone(), index, &segment.source, bytes.clone())?;
                     if position + segment.length as u64 == end { current.finish_source(); }
                     if !reads.reader.background && !current.verify {
+                        if let Some(source)=segment.source.demand(){
+                            reads.node.access.demand(&mut demand,source,segment.length as usize,origin);
+                        }
                         if let read::Source::Chunk { chunk } | read::Source::Pack { chunk, .. } | read::Source::Local { chunk, .. } = &segment.source {
                             reads.node.access.chunk(chunk.id, current.reply.http_status == 206, segment.length as usize, false);
                         }

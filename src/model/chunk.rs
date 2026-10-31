@@ -17,6 +17,20 @@ pub(crate) struct ChunkCreate {
 pub(crate) struct ReadExtent {
     pub(crate) extent: Extent,
     pub(crate) chunk: Chunk,
+    pub(crate) demand_pack: Option<Uuid>,
+}
+
+impl ReadExtent {
+    pub(crate) fn demand_source(&self) -> Option<super::tiering::Source> {
+        if !self.chunk.location_id.is_nil() {
+            Some(super::tiering::Source::Chunk(self.chunk.location_id))
+        } else {
+            self.demand_pack.map(|pack| super::tiering::Source::Pack {
+                pack,
+                member: self.chunk.uuid,
+            })
+        }
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

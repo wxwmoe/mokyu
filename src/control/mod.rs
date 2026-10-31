@@ -27,6 +27,7 @@ mod storage_catalog;
 pub(crate) mod storage_policy;
 pub(crate) mod system;
 pub(crate) mod tasks;
+mod tiering;
 pub(crate) mod tokens;
 mod uploads;
 pub(crate) mod users;

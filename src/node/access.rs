@@ -16,7 +16,8 @@ impl NodeContext {
             let pending = Access::new(sequence, self.access.take());
             let result = tokio::time::timeout(Duration::from_secs(2), async {
                 let snapshot = self.background_snapshot()?;
-                self.client
+                let reply = self
+                    .client
                     .report_observations(wire::ObservationRequest {
                         run: Some(snapshot.lease.run.clone()),
                         compression: Vec::new(),
@@ -24,6 +25,7 @@ impl NodeContext {
                         access_json: Some(serde_json::to_vec(&pending)?),
                     })
                     .await?;
+                self.access.collect(reply.collect_demand);
                 Ok::<_, anyhow::Error>(())
             })
             .await;

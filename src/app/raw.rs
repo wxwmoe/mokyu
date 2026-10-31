@@ -191,6 +191,7 @@ impl App {
             #[cfg(feature="fault-injection")]
             crate::faults::point("read-body").await;
             _pin.renew_read_lease().await?;
+            let mut demand=crate::status::access::DemandRead::default();
             for (row, mode) in ranges {
                 let start = span.start.max(row.offset_bytes);
                 let end = span.end.min(row.offset_bytes+row.length);
@@ -222,6 +223,7 @@ impl App {
                     let bytes = Bytes::from(buffer);
                     if let Some(check) = &mut check { check.feed(bytes.clone(), retained); }
                     if remaining == 0 && let Some(capture) = &capture { capture.lock().unwrap().finish_source(); }
+                    app.storage.access.demand(&mut demand,crate::model::tiering::Source::Raw(row.source.location_id),count,!row.source.pending_upload && matches!(&reader.file,crate::storage::raw::RawFile::Remote(_)|crate::storage::raw::RawFile::Local(_)));
                     yield bytes;
                 }
             }

@@ -468,6 +468,7 @@ impl App {
             _pin.renew_read_lease().await?;
             let mut cursor=if start==0 {Some(0)} else {app.chunks.read_start(stream.id,start).await?};
             let mut position=start;
+            let mut demand=crate::status::access::DemandRead::default();
             while position<end {
                 app.ensure_mode()?;
                 #[cfg(feature="fault-injection")]
@@ -481,15 +482,16 @@ impl App {
                 } else {app.chunks.read_extents(stream.id,from,end).await?};
                 (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
                 if let Some(capture)=&capture { let mut mapping=capture.lock().unwrap(); for row in &rows { mapping.record(row); } }
-                let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();let context=read_context.clone();async move{let data=app.storage.get_with(&row.chunk,Some(&context)).await?;let data=row.extent.slice(data)?;Ok::<_,anyhow::Error>((row.extent,data))}})).buffered(2);
+                let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {let app=app.clone();let context=read_context.clone();async move{let (data,trace)=app.storage.get_with_trace(&row.chunk,Some(&context)).await?;let source=trace.source.or_else(||row.demand_source());let data=row.extent.slice(data)?;Ok::<_,anyhow::Error>((row.extent,data,source,trace.origin))}})).buffered(2);
                 while let Some(result)=loaded.next().await {
                     _pin.renew_read_lease().await?;
-                    let (row,data)=result?;
+                    let (row,data,source,origin)=result?;
                     (row.offset_bytes<=position && row.offset_bytes+row.length as i64>position).then_some(()).context("object mapping has a gap")?;
                     let skip=(position-row.offset_bytes) as usize;let count=((end-position) as usize).min(data.len()-skip);
                     position+=count as i64;cursor=Some(row.offset_bytes+row.length as i64);
                     if position==end && let Some(capture)=&capture { capture.lock().unwrap().finish_source(); }
                     if let Some(id)=row.chunk_id {app.storage.access.chunk(id,range,count,false);}
+                    if let Some(source)=source { app.storage.access.demand(&mut demand,source,count,origin); }
                     yield data.slice(skip..skip+count);
                     if position==end {break;}
                 }
