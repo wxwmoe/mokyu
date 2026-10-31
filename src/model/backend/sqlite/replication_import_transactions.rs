@@ -422,7 +422,20 @@ pub(super) async fn complete(
     }
     r::save(item_id, &change.state).execute(&mut **db).await?;
     if let Some(finish) = &change.finish {
-        let output = if finish.status == "completed" {
+        let output = if finish.status == "completed" && item.candidate.is_none() {
+            let version = item.target_version.ok_or(Error::OperationAborted)?;
+            ensure!(
+                !change.state.changed
+                    && item
+                        .confirmation
+                        .as_ref()
+                        .is_some_and(|confirmation| confirmation
+                            .0
+                            .matches(version, &item.snapshot.0)),
+                Error::OperationAborted
+            );
+            Some(version)
+        } else if finish.status == "completed" {
             let candidate = item.candidate.ok_or(Error::OperationAborted)?;
             adopt(db, task, candidate).await?;
             super::transactions::publish_import_in(

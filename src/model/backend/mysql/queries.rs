@@ -575,7 +575,7 @@ pub(super) fn reset_startup_tasks(maintenance: bool) -> Statement<'static> {
     sqlx::query("UPDATE tasks SET state=IF(? AND task_type IN ('purge','pack','unpack','upload','cache_flush','storage_migration','rewrite'),'paused','queued'),execution_token=NULL,updated_at=CURRENT_TIMESTAMP(6) WHERE state='running' OR (? AND state='queued' AND task_type IN ('purge','pack','unpack','upload','cache_flush','storage_migration','rewrite'))").bind(maintenance).bind(maintenance)
 }
 fn stale_stream_filter(query: &mut sqlx::QueryBuilder<MySql>, retention: Option<f64>) {
-    query.push(" AND ((s.state IN ('retired','abandoned') AND (").push_bind(retention).push(" IS NULL OR s.touched_at<TIMESTAMPADD(MICROSECOND,-").push_bind(retention.map(|v|v*1_000_000.)).push(",CURRENT_TIMESTAMP(6)))) OR s.state='writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i WHERE i.part_stream=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.execution_token=s.owner_execution_token)");
+    query.push(" AND ((s.state IN ('retired','abandoned') AND (").push_bind(retention).push(" IS NULL OR s.touched_at<TIMESTAMPADD(MICROSECOND,-").push_bind(retention.map(|v|v*1_000_000.)).push(",CURRENT_TIMESTAMP(6)))) OR s.state='writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_changes p WHERE p.source_version=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i WHERE i.part_stream=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.execution_token=s.owner_execution_token)");
 }
 pub(super) fn stale_streams(
     active: &[Id],
@@ -5074,11 +5074,12 @@ impl StreamStore for Backend {
 }
 
 pub(super) fn fail_chunk_allocations(input: &ChunkCreate) -> Statement<'_> {
-    sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=CURRENT_TIMESTAMP(6),owner_stream=NULL WHERE storage_id=? AND hash=? AND raw_size=? AND state IN ('preparing','uploading') AND NOT EXISTS (SELECT 1 FROM streams s JOIN tasks t ON t.id=s.owner_task_id WHERE s.id=chunks.owner_stream AND s.state='writing' AND t.state='running' AND t.execution_token=s.owner_execution_token) AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=chunks.owner_stream)").bind(input.storage).bind(input.hash.as_slice()).bind(input.raw_size)
+    sqlx::query("UPDATE chunks SET state='failed',unreferenced_at=CURRENT_TIMESTAMP(6),owner_stream=NULL WHERE storage_id=? AND active_hash=? AND raw_size=? AND state IN ('preparing','uploading') AND NOT EXISTS (SELECT 1 FROM streams s JOIN tasks t ON t.id=s.owner_task_id WHERE s.id=chunks.owner_stream AND s.state='writing' AND t.state='running' AND t.execution_token=s.owner_execution_token) AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=chunks.owner_stream)").bind(input.storage).bind(input.hash.as_slice()).bind(input.raw_size)
 }
 
 pub(super) fn retire_failed_encodings(input: &ChunkCreate) -> Statement<'_> {
-    sqlx::query("UPDATE chunk_encodings e JOIN chunks c ON c.id=e.chunk_id SET e.state='retired',e.unreferenced_at=CURRENT_TIMESTAMP(6) WHERE c.storage_id=? AND c.hash=? AND c.raw_size=? AND c.state='failed' AND e.state='uploading'").bind(input.storage).bind(input.hash.as_slice()).bind(input.raw_size)
+    // Inspect failed chunks before locking any active encoding.
+    sqlx::query("UPDATE chunks c STRAIGHT_JOIN chunk_encodings e ON e.chunk_id=c.id SET e.state='retired',e.unreferenced_at=CURRENT_TIMESTAMP(6) WHERE c.storage_id=? AND c.hash=? AND c.raw_size=? AND c.state='failed' AND e.state='uploading'").bind(input.storage).bind(input.hash.as_slice()).bind(input.raw_size)
 }
 
 pub(super) async fn reusable_chunk(
@@ -5089,7 +5090,7 @@ pub(super) async fn reusable_chunk(
     query
         .push(" WHERE c.storage_id=")
         .push_bind(input.storage)
-        .push(" AND c.hash=")
+        .push(" AND c.active_hash=")
         .push_bind(input.hash.as_slice())
         .push(" AND c.raw_size=")
         .push_bind(input.raw_size)

@@ -1,4 +1,7 @@
-use super::{replication_queries as q, replication_remote_queries as r};
+use super::{
+    replication_change_queries as c, replication_change_transactions as changes,
+    replication_queries as q, replication_remote_queries as r,
+};
 use crate::model::{
     Error,
     replication::{
@@ -44,6 +47,32 @@ pub(super) async fn finished(
     result: &external::Finish,
     output: Option<crate::model::Id>,
 ) -> Result<()> {
+    if result.status == "completed" {
+        if let Some(output) = output {
+            let entry = r::entry(run.task_id, item).fetch_one(&mut **db).await?;
+            changes::confirm(db, &entry, run.options.0.target_bucket, output).await?;
+        } else if run.options.0.target_external {
+            let state = r::state(item).fetch_one(&mut **db).await?.0;
+            let public = (run.options.0.permissions
+                != crate::model::replication::Permissions::Ignore)
+                .then(|| {
+                    run.options
+                        .0
+                        .permissions
+                        .public(state.source_public.unwrap_or(false), state.target_public)
+                });
+            let output = state.output.ok_or(Error::OperationAborted)?;
+            c::confirm(
+                item,
+                &crate::model::replication::changes::Confirmation::External {
+                    object: output,
+                    public,
+                },
+            )
+            .execute(&mut **db)
+            .await?;
+        }
+    }
     super::replication_import_transactions::cleanup(db, run.task_id, item, output).await?;
     q::finish_item(item, &result.status, output, result.error.as_deref())
         .execute(&mut **db)
@@ -62,6 +91,9 @@ pub(super) async fn prepare(
     task: crate::model::task::Execution,
     run: &mut Run,
 ) -> Result<Option<Plan>> {
+    if run.phase == "cancel" && !changes::cancel(db, run).await? {
+        return Ok(None);
+    }
     let mut plan = Plan {
         task: run.task_id,
         generation: run.generation,
@@ -87,6 +119,9 @@ pub(super) async fn prepare(
         Error::OperationAborted
     );
     let Some(item) = r::pending(run.task_id).fetch_optional(&mut **db).await? else {
+        if run.phase != "cancel" && changes::advance(db, run).await? {
+            return Ok(None);
+        }
         if !super::transfer_transactions::cleanup(db, run.task_id).await? {
             return Ok(None);
         }
@@ -199,13 +234,19 @@ pub(super) async fn complete(
         return Err(Error::OperationAborted.into());
     };
     plan.listing(keys, next.as_deref())?;
-    let before = run.progress.0.discovered;
     for key in keys {
-        if r::lookup(run.task_id, key)
+        if let Some(id) = r::lookup(run.task_id, key)
             .fetch_optional(&mut **db)
             .await?
-            .is_some()
         {
+            if run.scanned {
+                let item = r::entry(run.task_id, id).fetch_one(&mut **db).await?;
+                changes::forget_result(run, &item.state);
+                c::reopen(id, None, None, &Snapshot::default(), "planning", None)
+                    .execute(&mut **db)
+                    .await?;
+                changes::reset_remote(db, &item).await?;
+            }
             continue;
         }
         let target = run.options.0.target(key)?;
@@ -228,13 +269,15 @@ pub(super) async fn complete(
         run.progress.0.discovered += 1;
     }
     ensure!(
-        next.is_none() || run.progress.0.discovered > before,
+        next.is_none() || !keys.is_empty() && *next != run.cursor_key,
         "external listing made no progress"
     );
     run.cursor_key = next.clone();
     if next.is_none() {
-        run.phase = "verify".into();
+        run.sealed = run.scanned;
+        run.scanned = true;
     }
+    run.phase = "verify".into();
     Ok(())
 }
 
@@ -252,6 +295,20 @@ pub(super) async fn native(
     } else {
         (run.options.0.source_bucket, &entry.source_key)
     };
+    if !run.options.0.source_external && run.frozen() {
+        let Some(version) = entry.source_pin else {
+            return Ok(None);
+        };
+        let source = c::frozen(version).fetch_optional(&mut **db).await?;
+        return match source {
+            Some(source)
+                if source.size == entry.snapshot.0.size && source.etag == entry.snapshot.0.etag =>
+            {
+                Ok(Some(external::Native::new(version, &entry.snapshot.0)?))
+            }
+            _ => Ok(None),
+        };
+    }
     let source = q::source(bucket, key).fetch_optional(&mut **db).await?;
     match source {
         Some(source)
@@ -264,9 +321,12 @@ pub(super) async fn native(
 }
 
 async fn scan_native(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
+    if run.scanned {
+        return changes::replay(db, run).await;
+    }
     let rows = super::replication_transactions::source_page(db, run).await?;
     if rows.is_empty() {
-        run.phase = "verify".into();
+        run.scanned = true;
         return Ok(());
     }
     for (key, source) in rows {
@@ -290,6 +350,7 @@ async fn scan_native(db: &mut Tx<'_>, run: &mut Run) -> Result<()> {
         run.cursor_key = Some(key);
         run.progress.0.discovered += 1;
     }
+    run.phase = "verify".into();
     Ok(())
 }
 

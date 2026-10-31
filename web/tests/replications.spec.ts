@@ -53,6 +53,7 @@ test('create, inspect and control durable replication tasks using the forms', as
   await page.getByLabel(en.replicationPrefix, { exact: true }).fill('photos/')
   await page.getByLabel(en.replicationDestination, { exact: true }).fill('backup/')
   await choice(en.replicationPermissions, en.replicationPermission_public_read)
+  await page.getByRole('checkbox', { name: en.replicationPropagateDeletes, exact: true }).check()
   await expect(page.locator('.mapping-preview')).toContainText('photos/*')
   await expect(page.locator('.mapping-preview')).toContainText('backup/*')
   const copied = await start()
@@ -63,10 +64,14 @@ test('create, inspect and control durable replication tasks using the forms', as
   const copiedOptions = (await (await request.get('/api/v1/replications/' + copied)).json()).options
   expect(copiedOptions.scope).toEqual({ selection: 'prefix', prefix: 'photos/' })
   expect(copiedOptions.permissions).toBe('public_read')
+  expect(copiedOptions.propagate_deletes).toBe(true)
+  expect(await (await request.get('/api/v1/replications/' + copied)).json()).toMatchObject({ captured: true, sealed: true })
   await details().locator('.dialog-footer').getByRole('button', { name: en.close, exact: true }).click()
 
   await form()
   await choice(en.replicationOperation, en.replicationMove)
+  await expect(page.getByRole('checkbox', { name: en.replicationPropagateDeletes, exact: true })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: en.replicationTransferProject, exact: true })).toHaveAttribute('href', '/buckets/' + fixture.source.id)
   await choice(en.replicationScope, en.replicationScope_objects)
   await page.getByLabel(en.replicationKeys).fill('photos/two.jpg')
   await page.getByLabel(en.replicationRename, { exact: true }).fill('renamed.jpg')

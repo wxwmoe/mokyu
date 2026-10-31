@@ -52,11 +52,11 @@ pub(super) fn forget(task: Uuid) -> Statement<'static> {
 }
 
 pub(super) fn entry(task: Uuid, item: Id) -> Rows<'static, super::replication_queries::Entry> {
-    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error FROM transfer_items WHERE task_id=? AND id=? FOR UPDATE").bind(task).bind(item)
+    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error,confirmation FROM transfer_items WHERE task_id=? AND id=? FOR UPDATE").bind(task).bind(item)
 }
 
 pub(super) fn stream(id: Id) -> Rows<'static, crate::app::StoredStream> {
-    sqlx::query_as("SELECT * FROM streams WHERE id=? AND state='ready'").bind(id)
+    sqlx::query_as("SELECT * FROM streams WHERE id=? AND state IN ('ready','retired')").bind(id)
 }
 
 pub(super) fn range(stream: Id, offset: i64) -> Rows<'static, crate::model::raw::RawRange> {

@@ -2343,7 +2343,7 @@ async fn selected_objects(
     Ok(input.target_version)
 }
 
-async fn remove_object_reference(
+pub(super) async fn remove_object_reference(
     connection: &mut MySqlConnection,
     bucket: Uuid,
     key: &str,
@@ -8159,6 +8159,7 @@ pub(super) async fn finish_conversion(
     queries::conversion_changed(job.stream)
         .execute(&mut *tx)
         .await?;
+    super::replication_change_transactions::capture(&mut tx, job.stream).await?;
     queries::conversion_unpin(candidate)
         .execute(&mut *tx)
         .await?;

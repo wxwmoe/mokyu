@@ -57,6 +57,10 @@ pub(crate) enum Phase {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct State {
+    #[serde(default)]
+    pub previous: Option<super::changes::Target>,
+    #[serde(default)]
+    pub cleanup_pending: bool,
     pub phase: Phase,
     pub source: Option<Object>,
     pub target: Option<Object>,
@@ -123,6 +127,7 @@ impl State {
             .iter()
             .chain(self.target.iter())
             .chain(self.output.iter())
+            .chain(self.previous.iter().map(|previous| &previous.object))
         {
             object.validate()?;
         }
@@ -133,7 +138,14 @@ impl State {
             "invalid transfer upload id"
         );
         if matches!(self.phase, Phase::Inspect) {
-            ensure!(self == &Self::default(), "invalid initial transfer state");
+            ensure!(
+                self == &Self {
+                    previous: self.previous.clone(),
+                    cleanup_pending: self.cleanup_pending,
+                    ..Self::default()
+                },
+                "invalid initial transfer state"
+            );
         } else if !matches!(self.phase, Phase::Cleanup | Phase::Done) {
             ensure!(
                 self.position <= self.parts()?,
@@ -192,7 +204,9 @@ impl State {
     pub(crate) fn cancel(&mut self) {
         self.finish(
             "cancelled",
-            (self.starts > 1 || self.phase == Phase::Start && self.starts > 0)
+            (self.cleanup_pending
+                || self.starts > 1
+                || self.phase == Phase::Start && self.starts > 0)
                 .then_some("upload_cleanup_pending"),
         );
     }
@@ -211,6 +225,13 @@ impl State {
     }
 
     fn conflict(&mut self, options: &Options) -> Result<()> {
+        if self
+            .previous
+            .as_ref()
+            .is_some_and(|previous| previous.matches(self.target.as_ref(), self.target_public))
+        {
+            return self.write(options);
+        }
         match options.conflict {
             Conflict::Skip => self.finish("skipped", None),
             Conflict::Report => self.finish("conflict", Some("target_exists")),
@@ -713,12 +734,16 @@ pub(crate) fn apply(plan: &Plan, outcome: &Outcome) -> Result<Change> {
                 state.finish("conflict", Some("source_delete_unfenced"));
             } else {
                 state.finish(
-                    if state.changed {
+                    if state.changed
+                        || state.previous.as_ref().is_some_and(|previous| {
+                            previous.matches(state.output.as_ref(), *public)
+                        })
+                    {
                         "completed"
                     } else {
                         "skipped"
                     },
-                    (state.starts > 1).then_some("upload_cleanup_pending"),
+                    (state.cleanup_pending || state.starts > 1).then_some("upload_cleanup_pending"),
                 );
             }
         }
@@ -803,6 +828,59 @@ impl Connection {
 mod tests {
     use super::*;
 
+    #[test]
+    fn confirmed_output_replacement_checks_identity_and_permissions() -> Result<()> {
+        let mut plan = pending(4)?;
+        let previous = plan.state.source.clone().unwrap();
+        plan.parts.clear();
+        plan.state = State {
+            previous: Some(super::super::changes::Target {
+                object: previous.clone(),
+                public: Some(false),
+            }),
+            ..State::default()
+        };
+        let source = Object {
+            size: 5,
+            etag: "\"next\"".into(),
+            ..previous.clone()
+        };
+        let inspect = |target: Object, public| Outcome::Inspected {
+            source: Some(source.clone()),
+            target: Some(target),
+            source_public: Some(false),
+            target_public: Some(public),
+        };
+        assert_eq!(
+            apply(&plan, &inspect(previous.clone(), false))?.state.phase,
+            Phase::Start
+        );
+        assert_eq!(
+            apply(&plan, &inspect(previous.clone(), true))?
+                .finish
+                .unwrap()
+                .status,
+            "conflict"
+        );
+        let other = Object {
+            etag: "\"independent\"".into(),
+            ..previous.clone()
+        };
+        assert_eq!(
+            apply(&plan, &inspect(other, false))?.finish.unwrap().status,
+            "conflict"
+        );
+        plan.state.previous = None;
+        assert_eq!(
+            apply(&plan, &inspect(previous, false))?
+                .finish
+                .unwrap()
+                .status,
+            "conflict"
+        );
+        Ok(())
+    }
+
     fn pending(size: u64) -> Result<Plan> {
         let source = Object {
             size,
@@ -850,6 +928,7 @@ mod tests {
                 target_key: Some("target".into()),
                 conflict: Conflict::Report,
                 permissions: Permissions::Ignore,
+                propagate_deletes: false,
             },
             state,
             parts,
@@ -1021,6 +1100,56 @@ mod tests {
         plan.validate()?;
         plan.parts[1].number = 1;
         assert!(plan.validate().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_confirmation_keeps_a_completed_output() -> Result<()> {
+        let mut plan = pending(0)?;
+        let object = plan.state.source.clone().unwrap();
+        plan.parts.clear();
+        for (owned, cleanup_pending) in [(true, false), (false, false), (true, true)] {
+            plan.state = State {
+                cleanup_pending,
+                previous: owned.then(|| super::super::changes::Target {
+                    object: object.clone(),
+                    public: None,
+                }),
+                ..State::default()
+            };
+            plan.state = apply(
+                &plan,
+                &Outcome::Inspected {
+                    source: Some(object.clone()),
+                    target: Some(object.clone()),
+                    source_public: None,
+                    target_public: None,
+                },
+            )?
+            .state;
+            let result = apply(
+                &plan,
+                &Outcome::Finalized {
+                    source: Some(object.clone()),
+                    target: Some(object.clone()),
+                    source_public: None,
+                    public: None,
+                },
+            )?;
+            let finish = result.finish.unwrap();
+            assert_eq!(
+                finish.error.as_deref(),
+                cleanup_pending.then_some("upload_cleanup_pending")
+            );
+            assert_eq!(finish.status, if owned { "completed" } else { "skipped" });
+            plan.state.cancel();
+            let finish = plan.state.finish.as_ref().unwrap();
+            assert_eq!(finish.status, "cancelled");
+            assert_eq!(
+                finish.error.as_deref(),
+                cleanup_pending.then_some("upload_cleanup_pending")
+            );
+        }
         Ok(())
     }
 

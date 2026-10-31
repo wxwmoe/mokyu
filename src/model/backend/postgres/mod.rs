@@ -7,6 +7,8 @@ mod migration;
 mod queries;
 mod read_sources;
 mod refresh;
+mod replication_change_queries;
+mod replication_change_transactions;
 mod replication_import_queries;
 mod replication_import_transactions;
 mod replication_queries;

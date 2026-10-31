@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
 import { ArrowRight, Pause, Play, Plus, RefreshCw, X } from 'lucide-vue-next'
-import { api, params, queries, write, uuid, type Bucket } from '../api/client'
+import { api, params, queries, write, uuid, session, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
 import { report } from '../app/feedback'
@@ -11,6 +11,7 @@ import ErrorNotice from '../components/ErrorNotice.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiListFooter from '../components/ui/UiListFooter.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
+import UiCheckbox from '../components/ui/UiCheckbox.vue'
 
 type Replication = components['schemas']['Replication']
 type Options = components['schemas']['ReplicationOptions']
@@ -18,6 +19,7 @@ const endpoint = '/api/v1/replications'
 let creationId = '', creationBody = ''
 const cursor = ref(''), selected = ref(''), itemCursor = ref(''), creating = ref(false), busy = ref(false), error = ref<unknown>(), cancelling = ref(false)
 const source = ref(''), target = ref(''), operation = ref('copy'), scope = ref('all'), prefix = ref(''), keys = ref(''), destination = ref(''), rename = ref(''), conflict = ref('report'), permissions = ref('inherit')
+const propagateDeletes = ref(false)
 const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/v1/buckets', { signal }) })
 const external = useInfiniteQuery({ queryKey: ['external-buckets', 'replication'], initialPageParam: '',
   queryFn: ({ signal, pageParam }) => api<components['schemas']['ExternalBucketPage']>('/api/v1/external-buckets?' + params({ after: pageParam || undefined, limit: '100' }), { signal }),
@@ -28,6 +30,7 @@ const resources = computed(() => [
 ])
 const sourceResource = computed(() => resources.value.find(row => row.value === source.value))
 const targetResource = computed(() => resources.value.find(row => row.value === target.value))
+const canPropagateDeletes = computed(() => operation.value === 'copy' && !!sourceResource.value && !sourceResource.value.external && !!targetResource.value && !targetResource.value.external && targetResource.value.actions.includes('object.delete'))
 const jobs = useQuery({ queryKey: ['replications', cursor], queryFn: ({ signal }) => api<components['schemas']['ReplicationPage']>(endpoint + '?' + params({ after: cursor.value || undefined }), { signal }), refetchInterval: 5000 })
 const job = useQuery({ queryKey: ['replication', selected], enabled: computed(() => !!selected.value), queryFn: ({ signal }) => api<Replication>(endpoint + '/' + selected.value, { signal }), refetchInterval: query => ['queued', 'running'].includes(query.state.data?.state || '') ? 2000 : false })
 const items = useQuery({ queryKey: ['replication-items', selected, itemCursor], enabled: computed(() => !!selected.value), queryFn: ({ signal }) => api<components['schemas']['ReplicationItems']>(endpoint + '/' + selected.value + '/items?' + params({ after: itemCursor.value || undefined }), { signal }), refetchInterval: computed(() => ['queued', 'running'].includes(job.data.value?.state || '') ? 3000 : false) })
@@ -42,6 +45,7 @@ const paths = computed(() => keys.value.split('\n').filter(key => key.length > 0
 const preview = computed(() => scope.value === 'objects' ? paths.value.slice(0, 5).map(key => [key, paths.value.length === 1 && rename.value ? rename.value : destination.value + key]) : [[scope.value === 'prefix' ? prefix.value + '*' : '*', destination.value + '*']])
 const active = computed(() => !!job.data.value && !['complete', 'cancelled'].includes(job.data.value.phase))
 watch(selected, () => { itemCursor.value = ''; error.value = undefined })
+watch(canPropagateDeletes, value => { if (!value) propagateDeletes.value = false })
 watch(() => job.data.value?.state, state => { if (state && !['queued', 'running'].includes(state)) void queries.invalidateQueries({ queryKey: ['replication-items', selected.value] }) })
 watch(sourceOptions, options => { if (!options.some(option => option.value === source.value)) source.value = options[0]?.value || '' })
 watch(targetOptions, options => { if (!options.some(option => option.value === target.value)) target.value = options[0]?.value || '' })
@@ -58,7 +62,7 @@ async function create() {
       scope: scope.value === 'all' ? { selection: 'all' } : scope.value === 'prefix' ? { selection: 'prefix', prefix: prefix.value } : { selection: 'objects', keys: paths.value },
       target_prefix: scope.value === 'objects' && paths.value.length === 1 && rename.value ? '' : destination.value,
       target_key: scope.value === 'objects' && paths.value.length === 1 && rename.value ? rename.value : null,
-      conflict: conflict.value as Options['conflict'], permissions: permissions.value as Options['permissions'] }
+      conflict: conflict.value as Options['conflict'], permissions: permissions.value as Options['permissions'], propagate_deletes: canPropagateDeletes.value && propagateDeletes.value }
     const encoded = JSON.stringify(request)
     if (encoded !== creationBody) { creationId = uuid(); creationBody = encoded }
     const result = await api<components['schemas']['TaskStarted']>(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': creationId }, body: encoded })
@@ -94,12 +98,14 @@ async function command(action: components['schemas']['ReplicationCommand']) {
         <button v-if="external.hasNextPage.value" type="button" :disabled="external.isFetchingNextPage.value" @click="external.fetchNextPage()">{{ t('replicationMoreExternal') }}</button>
         <div class="form-grid"><label>{{ t('replicationOperation') }}<UiSelect v-model="operation" :options="operations" :label="t('replicationOperation')" /></label><label>{{ t('replicationScope') }}<UiSelect v-model="scope" :options="selections" :label="t('replicationScope')" /></label></div>
         <p v-if="operation === 'move'" class="muted">{{ t('replicationMoveHint') }}</p>
+        <RouterLink v-if="operation === 'move' && session?.role === 'admin' && sourceResource && !sourceResource.external" :to="'/buckets/' + sourceResource.id">{{ t('replicationTransferProject') }}</RouterLink>
         <label v-if="scope === 'prefix'">{{ t('replicationPrefix') }}<input v-model="prefix" autocomplete="off" /></label>
         <label v-if="scope === 'objects'">{{ t('replicationKeys') }}<textarea v-model="keys" rows="5" required spellcheck="false" /><small>{{ t('replicationKeysHint') }}</small></label>
         <label>{{ t('replicationDestination') }}<input v-model="destination" :disabled="scope === 'objects' && paths.length === 1 && !!rename" autocomplete="off" /></label>
         <label v-if="scope === 'objects' && paths.length === 1">{{ t('replicationRename') }}<input v-model="rename" autocomplete="off" /></label>
         <div class="form-grid"><label>{{ t('replicationConflict') }}<UiSelect v-model="conflict" :options="conflicts" :label="t('replicationConflict')" /></label><label>{{ t('replicationPermissions') }}<UiSelect v-model="permissions" :options="permissionOptions" :label="t('replicationPermissions')" /></label></div>
         <small v-if="permissions === 'ignore'">{{ t('replicationIgnoreHint') }}</small>
+        <template v-if="canPropagateDeletes"><UiCheckbox v-model="propagateDeletes" :label="t('replicationDeletes')" :disabled="busy" /><small>{{ t('replicationDeletesHint') }}</small></template>
         <div class="mapping-preview"><strong>{{ t('replicationMapping') }}</strong><div v-for="[from, to] in preview" :key="from"><code>{{ from }}</code><ArrowRight :size="15" /><code>{{ to }}</code></div></div>
       </form>
       <template #footer><button :disabled="busy" @click="creating = false">{{ t('close') }}</button><button form="replication-form" type="submit" class="primary" :disabled="busy || !source || !target || scope === 'objects' && (!paths.length || paths.length > 1000)">{{ t('replicationStart') }}</button></template>
@@ -110,6 +116,7 @@ async function command(action: components['schemas']['ReplicationCommand']) {
         <div class="replication-summary"><strong>{{ bucketName(job.data.value.options.source_bucket, job.data.value.options.source_external) }} → {{ bucketName(job.data.value.options.target_bucket, job.data.value.options.target_external) }}</strong><span class="badge node-state" :data-tone="tone(job.data.value)">{{ status(job.data.value) }}</span></div>
         <p>{{ t('replicationPhase_' + job.data.value.phase) }} · {{ job.data.value.progress.completed }} / {{ job.data.value.progress.discovered }}</p>
         <p class="muted">{{ t('replicationCounts', { skipped: job.data.value.progress.skipped, conflicts: job.data.value.progress.conflicts, sources: job.data.value.progress.sources }) }}</p>
+        <p class="muted">{{ t(job.data.value.captured ? 'replicationCaptureHint' : 'replicationCompareHint') }}</p>
         <p v-if="job.data.value.error" role="alert">{{ reason(job.data.value.error) }}</p>
         <div class="table-scroll"><table><thead><tr><th>{{ t('replicationSource') }}</th><th>{{ t('replicationTarget') }}</th><th>{{ t('replicationStatus') }}</th></tr></thead><tbody><tr v-for="item in items.data.value?.items" :key="item.id"><td class="object-key">{{ item.source_key }}</td><td class="object-key">{{ item.target_key }}</td><td>{{ t('replicationItem_' + item.state) }}<small v-if="item.error">{{ reason(item.error) }}</small></td></tr></tbody></table></div>
         <UiListFooter :first="!!itemCursor" :next="!!items.data.value?.next_after" @first="itemCursor = ''" @next="itemCursor = items.data.value?.next_after || ''" />
@@ -124,7 +131,7 @@ async function command(action: components['schemas']['ReplicationCommand']) {
 .actions, .replication-summary { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .replication-summary { justify-content: space-between; }
 .replication-form { display: grid; gap: 18px; }
-.replication-form label { display: grid; gap: 8px; }
+.replication-form label:not(.check-field) { display: grid; gap: 8px; }
 .form-grid { display: grid; align-items: start; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .page, .table-scroll { min-width: 0; max-width: 100%; }
 .table-scroll { position: relative; }

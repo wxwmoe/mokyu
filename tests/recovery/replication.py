@@ -93,16 +93,16 @@ def run(restart):
         fixture.finished(fixture.cli('maintenance', 'run', 'gc'))
         assert protected <= set(fixture.keys()), 'paused source was collected'
         command(task, 'resume')
-        assert finish(task, 'failed')['progress']['conflicts'] == 1
-        fixture.read('changing', b'new source after scanning')
-        assert not client.list_objects_v2(Bucket=target['name'], Prefix='changing').get('Contents')
+        assert finish(task)['progress']['completed'] == 1
+        read('changing', b'new source after scanning')
+        assert not fixture.client.list_objects_v2(Bucket=fixture.name, Prefix='changing').get('Contents')
         for _ in range(2):
             time.sleep(1.2)
             fixture.finished(fixture.cli('maintenance', 'run', 'gc'))
         assert not protected.intersection(fixture.keys()), 'terminal source protection leaked'
     finally:
         marker.unlink(missing_ok=True)
-    checks.append('pause survives restart and GC; a changed source prevents Move and releases its terminal pin')
+    checks.append('pause survives restart and GC; Move catches a pre-seal replacement and releases its terminal pin')
 
     fixture.put('cancelled', b'cancel before publication')
     marker = fixture.arm('replication-batch')

@@ -238,14 +238,16 @@ def run(restart):
         else:
             source_client.put_object_acl(Bucket=source_bucket, Key=source_prefix + 'in/large', ACL='private')
         marker.unlink(missing_ok=True)
-        assert finish(task, True)['progress']['conflicts'] == 1
         if change == 'target':
+            assert finish(task, True)['progress']['conflicts'] == 1
             read(destination, b'concurrent target', False)
         else:
-            absent(destination)
+            assert finish(task)['progress']['completed'] == 1
+            read(destination, b'replaced source' if change == 'source' else data,
+                change == 'source' and not remote)
         assert not imports(task)
         put('in/large', data, public=True)
-    result.append('source replacement, target publication and inherited ACL changes reject stale publication')
+    result.append('repeated observation catches source replacement and inherited ACL changes; independent target publication remains a conflict')
 
     marker = fixture.arm('import-before-final-check')
     task = start('in/large', 'quota')

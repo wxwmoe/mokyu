@@ -3,7 +3,7 @@ use crate::{
     model::{
         Id,
         raw::RawSource,
-        replication::{Item, Options, Progress, Snapshot},
+        replication::{Item, Options, Progress, Snapshot, changes::Confirmation},
         task::Execution,
     },
 };
@@ -56,6 +56,7 @@ pub(super) struct Entry {
     pub position_bytes: i64,
     pub reuse_target: bool,
     pub error: Option<String>,
+    pub confirmation: Option<Json<Confirmation>>,
 }
 impl Entry {
     pub(super) fn view(self) -> Item {
@@ -72,7 +73,7 @@ impl Entry {
 }
 
 pub(super) fn run<'q>(id: Uuid) -> Rows<'q, Run> {
-    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,t.state,t.error,json_extract(t.detail,'$.execution_mode') AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=$1")
+    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,r.scanned,r.captured,r.sealed,r.scan_end,t.state,t.error,json_extract(t.detail,'$.execution_mode') AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE r.task_id=$1")
         .bind(id)
 }
 
@@ -93,7 +94,7 @@ pub(super) fn mode<'q>() -> Scalar<'q, String> {
 }
 
 pub(super) fn list<'q>(user: Option<Uuid>, after: Option<Uuid>, limit: i64) -> Rows<'q, Run> {
-    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,t.state,t.error,json_extract(t.detail,'$.execution_mode') AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE (r.created_by=$1 OR (r.created_by IS NULL AND $1 IS NULL)) AND ($2 IS NULL OR r.task_id>$2) ORDER BY r.task_id LIMIT $3")
+    sqlx::query_as("SELECT r.task_id,r.created_by,r.options,r.authority,r.storage_id,r.source_storage_id,r.profile_revision,r.phase,r.cursor_key,r.progress,r.generation,r.scanned,r.captured,r.sealed,r.scan_end,t.state,t.error,json_extract(t.detail,'$.execution_mode') AS mode FROM transfer_runs r JOIN tasks t ON t.id=r.task_id WHERE (r.created_by=$1 OR (r.created_by IS NULL AND $1 IS NULL)) AND ($2 IS NULL OR r.task_id>$2) ORDER BY r.task_id LIMIT $3")
         .bind(user)
         .bind(after)
         .bind(limit)
@@ -107,7 +108,7 @@ pub(super) fn create<'q>(
     revision: Option<i64>,
     source: Option<Uuid>,
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO transfer_runs(task_id,created_by,options,authority,storage_id,profile_revision,progress,source_storage_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)")
+    sqlx::query("INSERT INTO transfer_runs(task_id,created_by,options,authority,storage_id,profile_revision,progress,source_storage_id,captured) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)")
         .bind(id)
         .bind(actor.user_id())
         .bind(Json(options))
@@ -116,6 +117,7 @@ pub(super) fn create<'q>(
         .bind(revision)
         .bind(Json(Progress::default()))
         .bind(source)
+        .bind(!options.source_external)
 }
 
 pub(super) fn save<'q>(
@@ -123,12 +125,18 @@ pub(super) fn save<'q>(
     phase: &'q str,
     cursor: Option<&'q str>,
     progress: &'q Progress,
+    scanned: bool,
+    sealed: bool,
+    scan_end: Option<&'q str>,
 ) -> Statement<'q> {
-    sqlx::query("UPDATE transfer_runs SET phase=$2,cursor_key=$3,progress=$4 WHERE task_id=$1")
+    sqlx::query("UPDATE transfer_runs SET phase=$2,cursor_key=$3,progress=$4,scanned=$5,sealed=$6,scan_end=$7 WHERE task_id=$1")
         .bind(id)
         .bind(phase)
         .bind(cursor)
         .bind(Json(progress))
+        .bind(scanned)
+        .bind(sealed)
+        .bind(scan_end)
 }
 
 pub(super) fn task_progress<'q>(id: Uuid, detail: Value, completed: i64) -> Statement<'q> {
@@ -167,11 +175,17 @@ pub(super) fn source<'q>(bucket: Uuid, key: &'q str) -> Rows<'q, Source> {
         .bind(key.as_bytes())
 }
 
-pub(super) fn scan<'q>(bucket: Uuid, after: Option<&'q str>, prefix: &'q str) -> Rows<'q, Source> {
-    sqlx::query_as("SELECT s.id,CAST(o.object_key AS TEXT) AS object_key,s.metadata,s.checksums,s.public_read,s.size,s.etag,s.payload_type FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND ($2 IS NULL OR o.object_key>$2) AND o.object_key>=$3 AND substr(o.object_key,1,length($3))=$3 AND s.state='ready' ORDER BY o.object_key LIMIT 64")
+pub(super) fn scan<'q>(
+    bucket: Uuid,
+    after: Option<&'q str>,
+    prefix: &'q str,
+    end: &'q str,
+) -> Rows<'q, Source> {
+    sqlx::query_as("SELECT s.id,CAST(o.object_key AS TEXT) AS object_key,s.metadata,s.checksums,s.public_read,s.size,s.etag,s.payload_type FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND ($2 IS NULL OR o.object_key>$2) AND o.object_key>=$3 AND o.object_key<=$4 AND substr(o.object_key,1,length($3))=$3 AND s.state='ready' ORDER BY o.object_key LIMIT 64")
         .bind(bucket)
         .bind(after.map(str::as_bytes))
         .bind(prefix.as_bytes())
+        .bind(end.as_bytes())
 }
 
 pub(super) fn insert_item<'q>(
@@ -196,20 +210,20 @@ pub(super) fn insert_item<'q>(
 }
 
 pub(super) fn items<'q>(id: Uuid, after: Option<Id>, limit: i64) -> Rows<'q, Entry> {
-    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error FROM transfer_items WHERE task_id=$1 AND ($2 IS NULL OR id>$2) ORDER BY id LIMIT $3")
+    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error,confirmation FROM transfer_items WHERE task_id=$1 AND ($2 IS NULL OR id>$2) ORDER BY id LIMIT $3")
         .bind(id)
         .bind(after)
         .bind(limit)
 }
 
 pub(super) fn pending<'q>(id: Uuid, state: &'q str) -> Rows<'q, Entry> {
-    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error FROM transfer_items WHERE task_id=$1 AND state=$2 ORDER BY id LIMIT 1")
+    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error,confirmation FROM transfer_items WHERE task_id=$1 AND state=$2 ORDER BY id LIMIT 1")
         .bind(id)
         .bind(state)
 }
 
 pub(super) fn live<'q>(id: Uuid) -> Rows<'q, Entry> {
-    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error FROM transfer_items WHERE task_id=$1 AND (source_pin IS NOT NULL OR candidate IS NOT NULL) ORDER BY id LIMIT 32")
+    sqlx::query_as("SELECT id,source_key,target_key,source_version,source_pin,target_version,candidate,output_version,snapshot,state,position_bytes,reuse_target,error,confirmation FROM transfer_items WHERE task_id=$1 AND (source_pin IS NOT NULL OR candidate IS NOT NULL) ORDER BY id LIMIT 32")
         .bind(id)
 }
 

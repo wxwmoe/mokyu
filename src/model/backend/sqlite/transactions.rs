@@ -3806,7 +3806,7 @@ pub(super) async fn purge_batch(
     Ok(true)
 }
 
-async fn remove_object_reference(
+pub(super) async fn remove_object_reference(
     connection: &mut SqliteConnection,
     bucket: Uuid,
     key: &str,
