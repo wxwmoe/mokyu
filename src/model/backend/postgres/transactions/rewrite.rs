@@ -94,7 +94,7 @@ pub(super) async fn commit_rewrite_chunk_in(
 ) -> Result<()> {
     rewrite_lease(tx, task, token).await?;
     ensure!(
-        super::super::tier_read_queries::rewrite_source(
+        super::super::queries::tier::rewrite_source(
             &mut **tx,
             crate::model::tiering::Unit::Chunk,
             source.encoding_id,
@@ -164,7 +164,7 @@ pub(super) async fn commit_rewrite_pack_in(
 ) -> Result<()> {
     rewrite_lease(tx, task, token).await?;
     ensure!(
-        super::super::tier_read_queries::rewrite_source(
+        super::super::queries::tier::rewrite_source(
             &mut **tx,
             crate::model::tiering::Unit::Pack,
             old.id,

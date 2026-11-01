@@ -103,7 +103,7 @@ pub(super) use keys::*;
 mod multipart;
 pub(super) use multipart::*;
 mod physical;
-pub(super) use physical::*;
+use physical::*;
 mod cache;
 pub(super) use cache::*;
 mod packing;

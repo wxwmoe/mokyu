@@ -1,6 +1,5 @@
 use super::super::Backend;
 pub(in super::super) type Db = sqlx::Postgres;
-pub(in super::super) const LOCK: &str = " FOR UPDATE";
 pub(in super::super) async fn read(b: &Backend) -> anyhow::Result<sqlx::Transaction<'_, Db>> {
     Ok(b.pool.begin().await?)
 }
@@ -58,4 +57,79 @@ pub(in super::super) async fn collision(
         .push(" LIMIT 1");
     query.push(" FOR SHARE OF o");
     Ok(query.build().fetch_optional(&mut **t).await?.is_some())
+}
+
+pub(in super::super) const IMPORTED: &str =
+    "SELECT image_revision FROM buckets WHERE id=$1 AND image_import_token=$2";
+
+pub(in super::super) const DELETE: &str = "DELETE FROM image_styles WHERE bucket_id=$1 AND name=$2";
+
+pub(in super::super) const INSERT: &str =
+    "INSERT INTO image_styles(bucket_id,name,enabled,body) VALUES($1,$2,$3,$4)";
+
+pub(in super::super) const UPDATE: &str = "UPDATE buckets SET image_revision=$1,image_families=$2,image_policy=$3,image_import_token=$4 WHERE id=$5 AND image_revision=$6";
+
+type Tx<'a> = sqlx::Transaction<'a, Db>;
+type StyleRow = (String, bool, String);
+
+pub(in super::super) async fn settings(
+    db: &mut Tx<'_>,
+    bucket: uuid::Uuid,
+    lock: bool,
+) -> sqlx::Result<Option<(i64, Option<String>, i64)>> {
+    let statement = if lock {
+        "SELECT image_revision,image_policy,image_families FROM buckets WHERE id=$1 FOR UPDATE"
+    } else {
+        "SELECT image_revision,image_policy,image_families FROM buckets WHERE id=$1"
+    };
+    sqlx::query_as(statement)
+        .bind(bucket)
+        .fetch_optional(&mut **db)
+        .await
+}
+
+pub(in super::super) async fn named(
+    db: &mut Tx<'_>,
+    bucket: uuid::Uuid,
+    names: &[String],
+) -> sqlx::Result<Vec<StyleRow>> {
+    let mut query = sqlx::QueryBuilder::<Db>::new(
+        "SELECT name,enabled,body FROM image_styles WHERE bucket_id=",
+    );
+    query.push_bind(bucket).push(" AND name IN (");
+    let mut args = query.separated(",");
+    for name in names {
+        args.push_bind(name);
+    }
+    query
+        .push(") ORDER BY name")
+        .build_query_as()
+        .fetch_all(&mut **db)
+        .await
+}
+
+pub(in super::super) async fn page(
+    db: &mut Tx<'_>,
+    bucket: uuid::Uuid,
+    after: &str,
+    prefix: &str,
+    limit: u16,
+) -> sqlx::Result<Vec<StyleRow>> {
+    let mut query = sqlx::QueryBuilder::<Db>::new(
+        "SELECT name,enabled,body FROM image_styles WHERE bucket_id=",
+    );
+    query.push_bind(bucket).push(" AND name>").push_bind(after);
+    if !prefix.is_empty() {
+        query
+            .push(" AND name>=")
+            .push_bind(prefix)
+            .push(" AND name<")
+            .push_bind(format!("{prefix}\u{7f}"));
+    }
+    query
+        .push(" ORDER BY name LIMIT ")
+        .push_bind(i64::from(limit))
+        .build_query_as()
+        .fetch_all(&mut **db)
+        .await
 }

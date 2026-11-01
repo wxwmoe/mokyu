@@ -150,7 +150,7 @@ pub(in super::super) async fn commit_rewrite_chunk(
     let mut tx = pool.begin().await?;
     lock_execution(&mut tx, task).await?;
     ensure!(
-        super::super::tier_read_queries::rewrite_source(
+        super::super::queries::tier::rewrite_source(
             &mut *tx,
             crate::model::tiering::Unit::Chunk,
             source.encoding_id,
@@ -241,7 +241,7 @@ pub(in super::super) async fn commit_rewrite_pack(
     let mut tx = pool.begin().await?;
     lock_execution(&mut tx, task).await?;
     ensure!(
-        super::super::tier_read_queries::rewrite_source(
+        super::super::queries::tier::rewrite_source(
             &mut *tx,
             crate::model::tiering::Unit::Pack,
             old.id,

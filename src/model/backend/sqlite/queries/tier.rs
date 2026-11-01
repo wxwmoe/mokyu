@@ -106,3 +106,82 @@ pub(in super::super) async fn begin(backend: &Backend) -> Result<Tx<'_>> {
         .begin_with(super::super::queries::BEGIN_WRITE)
         .await?)
 }
+
+pub(in super::super) const SCAN_REVISION: &str =
+    "SELECT revision FROM tier_scans WHERE bucket_id=?";
+pub(in super::super) const DELETE_POLICY: &str =
+    "DELETE FROM bucket_tiering WHERE bucket_id=? AND revision=?";
+pub(in super::super) const SET_STATE: &str =
+    "UPDATE bucket_tiering SET state=?,revision=revision+1 WHERE bucket_id=? AND revision=?";
+
+pub(in super::super) async fn cold_dependencies(
+    db: &mut Tx<'_>,
+    bucket: uuid::Uuid,
+    home: uuid::Uuid,
+    cold: uuid::Uuid,
+) -> Result<bool> {
+    let mut moves =
+        sqlx::QueryBuilder::<Db>::new("SELECT EXISTS(SELECT 1 FROM tier_moves WHERE bucket_id=");
+    if moves
+        .push_bind(bucket)
+        .push(")")
+        .build_query_scalar::<bool>()
+        .fetch_one(&mut **db)
+        .await?
+    {
+        return Ok(true);
+    }
+    for (unit, refs) in [
+        (
+            Unit::Chunk,
+            "JOIN chunks c ON c.current_encoding_id=u.encoding_id JOIN extents e ON e.chunk_id=c.id",
+        ),
+        (
+            Unit::Pack,
+            "JOIN pack_members m ON m.pack_id=u.id JOIN chunks c ON c.id=m.chunk_id AND c.pack_id=u.id JOIN extents e ON e.chunk_id=c.id",
+        ),
+        (Unit::Raw, "JOIN raw_ranges e ON e.source_id=u.id"),
+    ] {
+        let (table, column) = physical(unit);
+        let mut query = sqlx::QueryBuilder::<Db>::new(format!(
+            "SELECT EXISTS(SELECT 1 FROM tier_locations h JOIN {table} u ON u.{column}=h.physical_id {refs} JOIN objects o ON o.stream_id=e.stream_id WHERE h.unit="
+        ));
+        if query
+            .push_bind(unit as i16)
+            .push(" AND h.home_storage=")
+            .push_bind(home)
+            .push(" AND h.storage_id=")
+            .push_bind(cold)
+            .push(" AND o.bucket_id=")
+            .push_bind(bucket)
+            .push(")")
+            .build_query_scalar::<bool>()
+            .fetch_one(&mut **db)
+            .await?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(in super::super) async fn stored_at(
+    db: &mut Tx<'_>,
+    unit: Unit,
+    id: uuid::Uuid,
+) -> Result<Option<i64>> {
+    let (table, column) = physical(unit);
+    let mut query = sqlx::QueryBuilder::<Db>::new(format!(
+        "SELECT CAST(u.stored_at/1000000 AS INTEGER) FROM {table} u WHERE u.{column}="
+    ));
+    Ok(query
+        .push_bind(id)
+        .build_query_scalar()
+        .fetch_one(&mut **db)
+        .await?)
+}
+
+pub(in super::super) use super::tier_reads::{
+    cached_locations, forget, gc_identity, identity, known_demand, pinned, references,
+    rewrite_source, usage_rows, write_demand,
+};

@@ -1,6 +1,6 @@
 use super::{
-    Backend, queries, redundancy_queries, replication_queries, tier_queries as q,
-    tier_read_queries as heat,
+    Backend, queries, queries::redundancy as redundancy_queries,
+    queries::replication as replication_queries, queries::tier as q,
 };
 use crate::model::{
     Error, PhysicalSource,
@@ -39,7 +39,7 @@ async fn snapshot(
     id: Uuid,
     home: Uuid,
 ) -> Result<Option<SourceSnapshot>> {
-    let Some(native) = heat::identity(db, unit, id, home).await? else {
+    let Some(native) = q::identity(db, unit, id, home).await? else {
         return Ok(None);
     };
     let scope = SourceScope {
@@ -219,8 +219,7 @@ pub(super) async fn schedule(backend: &Backend, stale: i64) -> Result<usize> {
     if state == "paused" {
         delay = 5;
     } else if slots > 0 && backlog < 16 * i64::from(policy.parallelism) {
-        let (ids, owners, clock) =
-            heat::references(&mut db, bucket, unit, cursor, 16, false).await?;
+        let (ids, owners, clock) = q::references(&mut db, bucket, unit, cursor, 16, false).await?;
         for id in ids.iter().copied() {
             cursor = id;
             if sqlx::query_scalar::<_, Uuid>(q::HAS_MOVEMENT)
@@ -391,7 +390,7 @@ pub(super) async fn step(
         if now < movement.retire_after
             || busy == Some(old.address())
             || q::protected(&mut **db, old.address()).await?
-            || movement.phase == "retiring" && heat::pinned(db, unit, movement.physical_id).await?
+            || movement.phase == "retiring" && q::pinned(db, unit, movement.physical_id).await?
         {
             if now >= movement.retire_after {
                 phase(db, task.id, &movement.phase, now + 5).await?;
@@ -433,7 +432,7 @@ pub(super) async fn step(
     };
     let wanted = if valid {
         let (_, refs, clock) =
-            heat::references(db, movement.bucket_id, unit, movement.physical_id, 1, true).await?;
+            q::references(db, movement.bucket_id, unit, movement.physical_id, 1, true).await?;
         let rows: Vec<_> = refs.iter().collect();
         let reason = candidate(
             unit,
@@ -529,15 +528,7 @@ pub(super) async fn step(
     } else if unit == Unit::Raw {
         now
     } else {
-        let (table, column) = q::physical(unit);
-        let epoch = q::CREATED.replace("u.created_at", "u.stored_at");
-        let mut query = sqlx::QueryBuilder::<q::Db>::new(format!(
-            "SELECT {epoch} FROM {table} u WHERE u.{column}="
-        ));
-        query
-            .push_bind(movement.physical_id)
-            .build_query_scalar::<Option<i64>>()
-            .fetch_one(&mut **db)
+        q::stored_at(db, unit, movement.physical_id)
             .await?
             .unwrap_or(now)
     };

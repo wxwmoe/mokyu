@@ -1,11 +1,8 @@
-use super::tier_queries as q;
-use crate::model::{
-    metrics::AccessBatch,
-    tiering::{Demand, Reference, Unit},
-};
+use super::super::tier_access::PlacementRow;
+use super::tier as q;
+use crate::model::tiering::{Reference, Unit};
 use anyhow::Result;
 use sqlx::QueryBuilder;
-use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 fn held(unit: Unit) -> &'static str {
@@ -23,7 +20,7 @@ fn held(unit: Unit) -> &'static str {
     }
 }
 
-pub(super) async fn pinned(db: &mut q::Tx<'_>, unit: Unit, id: Uuid) -> Result<bool> {
+pub(in super::super) async fn pinned(db: &mut q::Tx<'_>, unit: Unit, id: Uuid) -> Result<bool> {
     let (table, column) = q::physical(unit);
     let mut query = QueryBuilder::<q::Db>::new(format!(
         "SELECT EXISTS(SELECT 1 FROM {table} u WHERE ({}) AND u.{column}=",
@@ -37,7 +34,7 @@ pub(super) async fn pinned(db: &mut q::Tx<'_>, unit: Unit, id: Uuid) -> Result<b
         .await?)
 }
 
-pub(super) async fn references(
+pub(in super::super) async fn references(
     db: &mut q::Tx<'_>,
     bucket: Uuid,
     unit: Unit,
@@ -120,28 +117,13 @@ pub(super) async fn references(
     Ok((ids, rows, clock))
 }
 
-pub(super) async fn usage(
+pub(in super::super) async fn usage_rows(
     db: &mut q::Tx<'_>,
     bucket: Uuid,
-    hot: Uuid,
     unit: Unit,
     after: Uuid,
     limit: u16,
-) -> Result<Vec<crate::model::tiering::Usage>> {
-    use crate::model::tiering::{Progress, Usage};
-    #[derive(sqlx::FromRow)]
-    struct Copy {
-        id: Uuid,
-        storage_id: Option<Uuid>,
-        current_bytes: i64,
-        phase: Option<String>,
-        source_storage: Option<Uuid>,
-        source_bytes: Option<i64>,
-        target_storage: Option<Uuid>,
-        target_bytes: Option<i64>,
-        checkpoint: Option<sqlx::types::Json<Progress>>,
-    }
-    anyhow::ensure!((1..=256).contains(&limit), s3s::s3_error!(InvalidArgument));
+) -> Result<Vec<PlacementRow>> {
     let (table, column) = q::physical(unit);
     let (refs, size) = match unit {
         Unit::Chunk => (
@@ -168,58 +150,13 @@ pub(super) async fn usage(
         .push(" ORDER BY id LIMIT ").push_bind(i64::from(limit))
         .push(format!(") SELECT i.id,h.storage_id,CAST(COALESCE(h.stored_bytes,{size},m.source_bytes,0) AS {}) AS current_bytes,m.phase,m.source_storage,m.source_bytes,m.target_storage,m.target_bytes,m.checkpoint FROM chosen i LEFT JOIN {table} u ON u.{column}=i.id LEFT JOIN tier_locations h ON h.physical_id=i.id AND h.unit=",q::BIG_INT)).push_bind(unit as i16)
         .push(" LEFT JOIN tier_moves m ON m.physical_id=i.id AND m.unit=").push_bind(unit as i16).push(" ORDER BY i.id");
-    let rows = sql.build_query_as::<Copy>().fetch_all(&mut **db).await?;
-    rows.into_iter()
-        .map(|row| {
-            let current = row.storage_id.unwrap_or(hot);
-            let (mut hot_bytes, mut cold_bytes) = if current == hot {
-                (row.current_bytes, 0)
-            } else {
-                (0, row.current_bytes)
-            };
-            let mut duplicate_bytes = 0;
-            let mut retiring_bytes = 0;
-            let mut unconfirmed = false;
-            if let Some(phase) = row.phase.as_deref() {
-                let source = row.source_bytes.unwrap_or_default();
-                let (storage, bytes) = if phase == "retiring" {
-                    (row.source_storage, source)
-                } else {
-                    unconfirmed = row.target_bytes.is_none();
-                    let confirmed = if unit == Unit::Raw {
-                        let size = u64::try_from(source)?;
-                        let parts = row.checkpoint.as_ref().map_or(0, |p| u64::from(p.parts));
-                        i64::try_from(size.min(parts * Progress::raw_part_size(size)))?
-                    } else {
-                        0
-                    };
-                    (row.target_storage, row.target_bytes.unwrap_or(confirmed))
-                };
-                if storage == Some(hot) {
-                    hot_bytes += bytes
-                } else {
-                    cold_bytes += bytes
-                }
-                duplicate_bytes = bytes;
-                if matches!(phase, "retiring" | "discarding") {
-                    retiring_bytes = bytes;
-                }
-            }
-            Ok(Usage {
-                id: row.id,
-                unit,
-                phase: row.phase,
-                hot_bytes,
-                cold_bytes,
-                duplicate_bytes,
-                retiring_bytes,
-                unconfirmed,
-            })
-        })
-        .collect()
+    Ok(sql
+        .build_query_as::<PlacementRow>()
+        .fetch_all(&mut **db)
+        .await?)
 }
 
-pub(super) async fn identity(
+pub(in super::super) async fn identity(
     db: &mut q::Tx<'_>,
     unit: Unit,
     id: Uuid,
@@ -242,7 +179,7 @@ pub(super) async fn identity(
         .await?)
 }
 
-pub(super) async fn gc_identity(
+pub(in super::super) async fn gc_identity(
     db: &mut q::Connection,
     unit: Unit,
     id: crate::model::Id,
@@ -262,7 +199,7 @@ pub(super) async fn gc_identity(
         .await?)
 }
 
-pub(super) async fn forget(db: &mut q::Connection, unit: Unit, id: Uuid) -> Result<()> {
+pub(in super::super) async fn forget(db: &mut q::Connection, unit: Unit, id: Uuid) -> Result<()> {
     let mut query = QueryBuilder::<q::Db>::new("DELETE FROM tier_locations WHERE unit=");
     query
         .push_bind(unit as i16)
@@ -274,7 +211,7 @@ pub(super) async fn forget(db: &mut q::Connection, unit: Unit, id: Uuid) -> Resu
     Ok(())
 }
 
-pub(super) async fn rewrite_source(
+pub(in super::super) async fn rewrite_source(
     db: &mut q::Connection,
     unit: Unit,
     id: crate::model::Id,
@@ -306,130 +243,51 @@ pub(super) async fn rewrite_source(
         .fetch_one(&mut *db)
         .await?)
 }
-type DemandKey = (Unit, Uuid, chrono::DateTime<chrono::Utc>);
-
-async fn cached(
+pub(in super::super) async fn cached_locations(
     db: &mut q::Connection,
-    pending: &AccessBatch,
-) -> Result<BTreeMap<DemandKey, Demand>> {
-    let ids: BTreeSet<_> = pending
-        .cached
-        .keys()
-        .flat_map(|(ids, _)| ids.iter().copied())
-        .collect();
-    let ids: Vec<_> = ids.into_iter().collect();
+    page: &[Uuid],
+) -> Result<Vec<(Uuid, Option<Uuid>, Option<Uuid>)>> {
     let chunk = q::physical(Unit::Member).1;
     let encoding = q::physical(Unit::Chunk).1;
     let pack = q::physical(Unit::Pack).1;
-    let mut locations = BTreeMap::new();
-    for page in ids.chunks(128) {
-        let mut query=QueryBuilder::<q::Db>::new(format!("SELECT c.{chunk},e.{encoding},p.{pack} FROM chunks c
-            LEFT JOIN chunk_encodings e ON e.encoding_id=c.current_encoding_id AND e.state='ready' AND e.quarantine_code IS NULL
-            LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' AND p.quarantine_code IS NULL
-            WHERE c.{chunk} IN ("));
-        let mut list = query.separated(",");
-        for id in page {
-            list.push_bind(*id);
-        }
-        query.push(") AND EXISTS(SELECT 1 FROM bucket_tiering t WHERE t.hot_storage=c.storage_id)");
-        for (id, encoding, pack) in query
-            .build_query_as::<(Uuid, Option<Uuid>, Option<Uuid>)>()
-            .fetch_all(&mut *db)
-            .await?
-        {
-            locations.insert(id, (encoding, pack));
-        }
+    let mut query=QueryBuilder::<q::Db>::new(format!("SELECT c.{chunk},e.{encoding},p.{pack} FROM chunks c
+        LEFT JOIN chunk_encodings e ON e.encoding_id=c.current_encoding_id AND e.state='ready' AND e.quarantine_code IS NULL
+        LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' AND p.quarantine_code IS NULL
+        WHERE c.{chunk} IN ("));
+    let mut list = query.separated(",");
+    for id in page {
+        list.push_bind(*id);
     }
-    let mut result = BTreeMap::<DemandKey, Demand>::new();
-    for ((ids, at), group) in &pending.cached {
-        let mut visited = BTreeSet::new();
-        for (id, bytes) in ids.iter().zip(&group.bytes) {
-            let Some(&(encoding, pack)) = locations.get(id) else {
-                continue;
-            };
-            let units = match (encoding, pack) {
-                (Some(encoding), _) => [Some((Unit::Chunk, encoding)), None],
-                (_, Some(pack)) => [Some((Unit::Pack, pack)), Some((Unit::Member, *id))],
-                _ => [Some((Unit::Member, *id)), None],
-            };
-            for (unit, physical) in units.into_iter().flatten() {
-                let d = result.entry((unit, physical, *at)).or_default();
-                d.bytes += bytes;
-                if visited.insert((unit, physical)) {
-                    d.reads += group.reads;
-                }
-            }
-        }
-    }
-    Ok(result)
+    query.push(") AND EXISTS(SELECT 1 FROM bucket_tiering t WHERE t.hot_storage=c.storage_id)");
+    Ok(query.build_query_as().fetch_all(&mut *db).await?)
 }
 
-pub(super) async fn demand(db: &mut q::Connection, pending: &AccessBatch) -> Result<()> {
-    if pending.demand.is_empty() && pending.cached.is_empty() {
-        return Ok(());
+pub(in super::super) async fn known_demand(
+    db: &mut q::Connection,
+    unit: Unit,
+    page: &[Uuid],
+) -> Result<Vec<Uuid>> {
+    let (table, column) = q::physical(unit);
+    let mut query = QueryBuilder::<q::Db>::new(format!(
+        "SELECT p.{column} FROM {table} p WHERE p.{column} IN ("
+    ));
+    let mut list = query.separated(",");
+    for id in page {
+        list.push_bind(*id);
     }
-    let mut requested = BTreeMap::<Unit, BTreeSet<Uuid>>::new();
-    for &(unit, id, _) in pending.demand.keys() {
-        requested.entry(unit).or_default().insert(id);
-    }
-    let mut known = BTreeSet::new();
-    for (unit, ids) in requested {
-        let (table, column) = q::physical(unit);
-        let ids: Vec<_> = ids.into_iter().collect();
-        for page in ids.chunks(128) {
-            let mut query = QueryBuilder::<q::Db>::new(format!(
-                "SELECT p.{column} FROM {table} p WHERE p.{column} IN ("
-            ));
-            let mut list = query.separated(",");
-            for id in page {
-                list.push_bind(*id);
-            }
-            query.push(
-                ") AND EXISTS(SELECT 1 FROM bucket_tiering t WHERE t.hot_storage=p.storage_id)",
-            );
-            known.extend(
-                query
-                    .build_query_scalar::<Uuid>()
-                    .fetch_all(&mut *db)
-                    .await?
-                    .into_iter()
-                    .map(|id| (unit, id)),
-            );
-        }
-    }
-    let mut resolved = cached(db, pending).await?;
-    for (&(unit, id, at), d) in &pending.demand {
-        if known.contains(&(unit, id)) {
-            let entry = resolved.entry((unit, id, at)).or_default();
-            entry.reads += d.reads;
-            entry.bytes += d.bytes;
-            entry.origins += d.origins;
-        }
-    }
-    if resolved.is_empty() {
-        return Ok(());
-    }
-    let now = sqlx::query_scalar::<_, i64>(q::CLOCK)
-        .fetch_one(&mut *db)
-        .await?;
-    let mut totals = BTreeMap::<(Unit, Uuid), Demand>::new();
-    let mut windows = Vec::new();
-    for ((unit, id, at), d) in resolved {
-        let count = totals.entry((unit, id)).or_default();
-        count.reads += d.reads;
-        count.bytes += d.bytes;
-        count.origins += d.origins;
-        windows.push((unit, id, at.timestamp(), d.reads, d.bytes, d.origins));
-    }
-    windows.sort_unstable();
-    let totals: Vec<_> = totals
-        .into_iter()
-        .map(|((u, id), v)| (u, id, now, v.reads, v.bytes, v.origins))
-        .collect();
-    let pressure: Vec<_> = totals
-        .iter()
-        .filter(|r| r.5 > 0 && r.0 != Unit::Member)
-        .collect();
+    query.push(") AND EXISTS(SELECT 1 FROM bucket_tiering t WHERE t.hot_storage=p.storage_id)");
+    Ok(query.build_query_scalar().fetch_all(&mut *db).await?)
+}
+
+type DemandRow = (Unit, Uuid, i64, i64, i64, i64);
+
+pub(in super::super) async fn write_demand(
+    db: &mut q::Connection,
+    now: i64,
+    pressure: &[&DemandRow],
+    totals: &[DemandRow],
+    windows: &[DemandRow],
+) -> Result<()> {
     for page in pressure.chunks(64) {
         let mut query = QueryBuilder::<q::Db>::new(
             "UPDATE tier_locations SET origin_reads=(CASE WHEN pressure_since+pressure_seconds>",
@@ -467,12 +325,12 @@ pub(super) async fn demand(db: &mut q::Connection, pending: &AccessBatch) -> Res
     }
     for (rows, header, conflict) in [
         (
-            &totals,
+            totals,
             "INSERT INTO physical_demand(unit,physical_id,last_read,read_count,served_bytes,origin_reads) ",
             q::TOTALS,
         ),
         (
-            &windows,
+            windows,
             "INSERT INTO physical_demand_windows(unit,physical_id,hour_start,read_count,served_bytes,origin_reads) ",
             q::WINDOWS,
         ),

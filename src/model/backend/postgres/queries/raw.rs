@@ -558,7 +558,7 @@ impl RawStore for Backend {
     async fn removed(&self, source: Id) -> Result<()> {
         let mut tx = super::super::queries::tier::begin(self).await?;
         let unit = crate::model::tiering::Unit::Raw;
-        let address = super::super::tier_read_queries::gc_identity(&mut *tx, unit, source).await?;
+        let address = super::super::queries::tier::gc_identity(&mut *tx, unit, source).await?;
         let changed = raw_gc_finish(source)
             .execute(&mut *tx)
             .await?
@@ -566,7 +566,7 @@ impl RawStore for Backend {
         if changed == 1
             && let Some(address) = address
         {
-            super::super::tier_read_queries::forget(&mut *tx, unit, address).await?;
+            super::super::queries::tier::forget(&mut *tx, unit, address).await?;
         }
         tx.commit().await?;
         Ok(())

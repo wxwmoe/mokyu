@@ -596,7 +596,7 @@ async fn finish(
                                 crate::model::tiering::Unit::Chunk
                             };
                             if changed.rows_affected() == 1 {
-                                super::super::tier_read_queries::forget(&mut **db, unit, identity)
+                                super::super::queries::tier::forget(&mut **db, unit, identity)
                                     .await?;
                             }
                         }
@@ -605,7 +605,7 @@ async fn finish(
                                 .execute(&mut **db)
                                 .await?;
                             if changed.rows_affected() == 1 {
-                                super::super::tier_read_queries::forget(
+                                super::super::queries::tier::forget(
                                     &mut **db,
                                     crate::model::tiering::Unit::Raw,
                                     identity,

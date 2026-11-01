@@ -272,7 +272,7 @@ pub(in super::super) async fn flush_access(
 }
 
 pub(super) async fn persist_access(db: &mut PgConnection, pending: AccessBatch) -> Result<()> {
-    super::super::tier_read_queries::demand(db, &pending).await?;
+    super::super::tier_access::demand(db, &pending).await?;
     if pending.chunks.is_empty() && pending.packs.is_empty() && pending.members.is_empty() {
         return Ok(());
     }

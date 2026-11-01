@@ -1,11 +1,10 @@
-use super::{Backend, image_queries as q, transactions};
+use super::{Backend, queries::image as q, transactions};
 use crate::{
     authorization::{Action, Permit, Principal},
     model::{Error, image_styles::*},
     processing::image::{Format, Pipeline},
 };
 use anyhow::{Result, ensure};
-use sqlx::QueryBuilder;
 use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
@@ -81,16 +80,7 @@ async fn permit(t: &mut Tx<'_>, principal: &Principal, bucket: Uuid) -> Result<(
     .await
 }
 async fn settings(t: &mut Tx<'_>, bucket: Uuid, lock: bool) -> Result<(Settings, i64)> {
-    let mut query = QueryBuilder::<q::Db>::new(
-        "SELECT image_revision,image_policy,image_families FROM buckets WHERE id=",
-    );
-    query.push_bind(bucket);
-    if lock {
-        query.push(q::LOCK);
-    }
-    let (revision, body, families) = query
-        .build_query_as::<(i64, Option<String>, i64)>()
-        .fetch_optional(&mut **t)
+    let (revision, body, families) = q::settings(t, bucket, lock)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
     Ok((
@@ -114,16 +104,7 @@ fn style((name, enabled, body): (String, bool, String)) -> Result<Style> {
 async fn named(t: &mut Tx<'_>, bucket: Uuid, names: &[String]) -> Result<BTreeMap<String, Style>> {
     let mut rows = BTreeMap::new();
     for chunk in names.chunks(PAGE) {
-        let mut query = QueryBuilder::<q::Db>::new(
-            "SELECT name,enabled,body FROM image_styles WHERE bucket_id=",
-        );
-        query.push_bind(bucket).push(" AND name IN (");
-        let mut params = query.separated(",");
-        for n in chunk {
-            params.push_bind(n);
-        }
-        query.push(") ORDER BY name");
-        for row in query.build_query_as().fetch_all(&mut **t).await? {
+        for row in q::named(t, bucket, chunk).await? {
             let s = style(row)?;
             rows.insert(s.name.clone(), s);
         }
@@ -137,22 +118,7 @@ async fn page_rows(
     prefix: &str,
     limit: u16,
 ) -> Result<Vec<Style>> {
-    let mut query =
-        QueryBuilder::<q::Db>::new("SELECT name,enabled,body FROM image_styles WHERE bucket_id=");
-    query.push_bind(bucket).push(" AND name>").push_bind(after);
-    if !prefix.is_empty() {
-        query
-            .push(" AND name>=")
-            .push_bind(prefix)
-            .push(" AND name<")
-            .push_bind(format!("{prefix}\u{7f}"));
-    }
-    query
-        .push(" ORDER BY name LIMIT ")
-        .push_bind(i64::from(limit));
-    query
-        .build_query_as()
-        .fetch_all(&mut **t)
+    q::page(t, bucket, after, prefix, limit)
         .await?
         .into_iter()
         .map(style)
@@ -320,12 +286,9 @@ impl ImageStore for Backend {
     ) -> Result<Option<i64>> {
         let mut tx = q::read(self).await?;
         permit(&mut tx, principal, bucket).await?;
-        let mut q = QueryBuilder::<q::Db>::new("SELECT image_revision FROM buckets WHERE id=");
-        let rev = q
-            .push_bind(bucket)
-            .push(" AND image_import_token=")
-            .push_bind(digest)
-            .build_query_scalar()
+        let rev = sqlx::query_scalar(q::IMPORTED)
+            .bind(bucket)
+            .bind(digest)
             .fetch_optional(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -416,27 +379,18 @@ impl ImageStore for Backend {
                 continue;
             }
             if prev.is_some() {
-                let mut q = QueryBuilder::<q::Db>::new("DELETE FROM image_styles WHERE bucket_id=");
-                q.push_bind(bucket)
-                    .push(" AND name=")
-                    .push_bind(n)
-                    .build()
+                sqlx::query(q::DELETE)
+                    .bind(bucket)
+                    .bind(n)
                     .execute(&mut *tx)
                     .await?;
             }
             if let Edit::Put { style } = e {
-                let mut q = QueryBuilder::<q::Db>::new(
-                    "INSERT INTO image_styles(bucket_id,name,enabled,body) VALUES(",
-                );
-                q.push_bind(bucket)
-                    .push(",")
-                    .push_bind(n)
-                    .push(",")
-                    .push_bind(style.enabled)
-                    .push(",")
-                    .push_bind(style.rule.text())
-                    .push(")")
-                    .build()
+                sqlx::query(q::INSERT)
+                    .bind(bucket)
+                    .bind(n)
+                    .bind(style.enabled)
+                    .bind(style.rule.text())
                     .execute(&mut *tx)
                     .await?;
             }
@@ -444,22 +398,16 @@ impl ImageStore for Backend {
         }
         let revision = if modified && !preview {
             let next = old.revision.checked_add(1).ok_or(Error::OperationAborted)?;
-            let mut q = QueryBuilder::<q::Db>::new("UPDATE buckets SET image_revision=");
-            q.push_bind(next)
-                .push(",image_families=")
-                .push_bind(families)
-                .push(",image_policy=")
-                .push_bind(serde_json::to_string(policy)?)
-                .push(",image_import_token=")
-                .push_bind(import)
-                .push(" WHERE id=")
-                .push_bind(bucket)
-                .push(" AND image_revision=")
-                .push_bind(old.revision);
-            ensure!(
-                q.build().execute(&mut *tx).await?.rows_affected() == 1,
-                Error::OperationAborted
-            );
+            let updated = sqlx::query(q::UPDATE)
+                .bind(next)
+                .bind(families)
+                .bind(serde_json::to_string(policy)?)
+                .bind(import)
+                .bind(bucket)
+                .bind(old.revision)
+                .execute(&mut *tx)
+                .await?;
+            ensure!(updated.rows_affected() == 1, Error::OperationAborted);
             transactions::checkpoint_event(
                 &mut tx,
                 "bucket.images",

@@ -571,13 +571,13 @@ impl MaintenanceStore for Backend {
         } else {
             crate::model::tiering::Unit::Chunk
         };
-        let address = super::super::tier_read_queries::gc_identity(&mut *tx, unit, id).await?;
+        let address = super::super::queries::tier::gc_identity(&mut *tx, unit, id).await?;
         if !packed {
             let changed=sqlx::query("UPDATE chunk_encodings SET recovery_pending=recovery_pending AND (deleted_at IS NULL OR deleted_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)-?),state='deleted',unreferenced_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),deleted_at=COALESCE(deleted_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE encoding_id=? AND state='deleting'").bind((retention*1_000_000.) as i64).bind(id).execute(&mut *tx).await?.rows_affected();
             if changed == 1
                 && let Some(address) = address
             {
-                super::super::tier_read_queries::forget(&mut *tx, unit, address).await?;
+                super::super::queries::tier::forget(&mut *tx, unit, address).await?;
             }
             tx.commit().await?;
             return Ok(());
@@ -587,7 +587,7 @@ impl MaintenanceStore for Backend {
         if changed == 1
             && let Some(address) = address
         {
-            super::super::tier_read_queries::forget(&mut *tx, unit, address).await?;
+            super::super::queries::tier::forget(&mut *tx, unit, address).await?;
         }
         tx.commit().await?;
         Ok(())

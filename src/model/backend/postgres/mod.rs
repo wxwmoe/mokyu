@@ -1,24 +1,18 @@
 pub(crate) const USER_LOCK: i64 = 734922709851002;
 
 mod connection;
-use queries::image as image_queries;
-#[path = "../image_transactions.rs"]
+#[path = "../shared/image.rs"]
 mod image_transactions;
 mod migration;
 mod queries;
-use queries::redundancy as redundancy_queries;
-use transactions::redundancy as redundancy_transactions;
 mod refresh;
-use queries::replica as replica_queries;
-#[path = "../replica_transactions.rs"]
+#[path = "../shared/replica.rs"]
 mod replica_transactions;
-use queries::replication as replication_queries;
-#[path = "../tier_move_transactions.rs"]
+#[path = "../shared/tier_access.rs"]
+mod tier_access;
+#[path = "../shared/tier_moves.rs"]
 mod tier_move_transactions;
-use queries::tier as tier_queries;
-#[path = "../tier_read_queries.rs"]
-mod tier_read_queries;
-#[path = "../tier_transactions.rs"]
+#[path = "../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
 

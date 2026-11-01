@@ -693,7 +693,7 @@ impl MaintenanceStore for Backend {
         } else {
             crate::model::tiering::Unit::Chunk
         };
-        let address = super::super::tier_read_queries::gc_identity(&mut *tx, unit, id).await?;
+        let address = super::super::queries::tier::gc_identity(&mut *tx, unit, id).await?;
         let changed = finish_physical_gc(packed, id, retention)
             .execute(&mut *tx)
             .await?
@@ -701,7 +701,7 @@ impl MaintenanceStore for Backend {
         if changed == 1
             && let Some(address) = address
         {
-            super::super::tier_read_queries::forget(&mut *tx, unit, address).await?;
+            super::super::queries::tier::forget(&mut *tx, unit, address).await?;
         }
         tx.commit().await?;
         Ok(())

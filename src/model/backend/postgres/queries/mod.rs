@@ -162,4 +162,5 @@ pub(super) mod replication_import;
 pub(super) mod replication_remote;
 pub(super) mod sources;
 pub(super) mod tier;
+pub(super) mod tier_reads;
 pub(super) mod transfer;

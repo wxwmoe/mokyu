@@ -1,5 +1,8 @@
-use super::tier_queries as q;
-use super::{Backend, queries, redundancy_queries, replication_queries, transactions};
+use super::queries::tier as q;
+use super::{
+    Backend, queries, queries::redundancy as redundancy_queries,
+    queries::replication as replication_queries, transactions,
+};
 use crate::model::tiering::Unit;
 use crate::{
     authorization::{Action, Permit, Principal},
@@ -60,13 +63,10 @@ async fn view(db: &mut q::Tx<'_>, bucket: Uuid, hot_storage: Uuid) -> Result<Vie
     let (policy, revision, state) = if let Some((p, r, s)) = row {
         (Some(p.0), r, s)
     } else {
-        let mut query =
-            sqlx::QueryBuilder::<q::Db>::new("SELECT revision FROM tier_scans WHERE bucket_id=");
         (
             None,
-            query
-                .push_bind(bucket)
-                .build_query_scalar::<i64>()
+            sqlx::query_scalar::<_, i64>(q::SCAN_REVISION)
+                .bind(bucket)
                 .fetch_optional(&mut **db)
                 .await?
                 .unwrap_or_default(),
@@ -91,57 +91,6 @@ async fn independent(db: &mut q::Tx<'_>, bucket: Uuid, space: &Space) -> Result<
         );
     }
     Ok(())
-}
-
-async fn cold_dependencies(
-    db: &mut q::Tx<'_>,
-    bucket: Uuid,
-    home: Uuid,
-    cold: Uuid,
-) -> Result<bool> {
-    let mut moves =
-        sqlx::QueryBuilder::<q::Db>::new("SELECT EXISTS(SELECT 1 FROM tier_moves WHERE bucket_id=");
-    if moves
-        .push_bind(bucket)
-        .push(")")
-        .build_query_scalar::<bool>()
-        .fetch_one(&mut **db)
-        .await?
-    {
-        return Ok(true);
-    }
-    for (unit, refs) in [
-        (
-            Unit::Chunk,
-            "JOIN chunks c ON c.current_encoding_id=u.encoding_id JOIN extents e ON e.chunk_id=c.id",
-        ),
-        (
-            Unit::Pack,
-            "JOIN pack_members m ON m.pack_id=u.id JOIN chunks c ON c.id=m.chunk_id AND c.pack_id=u.id JOIN extents e ON e.chunk_id=c.id",
-        ),
-        (Unit::Raw, "JOIN raw_ranges e ON e.source_id=u.id"),
-    ] {
-        let (table, column) = q::physical(unit);
-        let mut query = sqlx::QueryBuilder::<q::Db>::new(format!(
-            "SELECT EXISTS(SELECT 1 FROM tier_locations h JOIN {table} u ON u.{column}=h.physical_id {refs} JOIN objects o ON o.stream_id=e.stream_id WHERE h.unit="
-        ));
-        if query
-            .push_bind(unit as i16)
-            .push(" AND h.home_storage=")
-            .push_bind(home)
-            .push(" AND h.storage_id=")
-            .push_bind(cold)
-            .push(" AND o.bucket_id=")
-            .push_bind(bucket)
-            .push(")")
-            .build_query_scalar::<bool>()
-            .fetch_one(&mut **db)
-            .await?
-        {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 pub(super) async fn check_link(
@@ -214,17 +163,13 @@ impl TieringStore for Backend {
                 .ok_or(Error::OperationAborted)?;
             if state == "disabled" {
                 ensure!(
-                    !cold_dependencies(&mut db, bucket, home, policy.cold_storage).await?,
+                    !q::cold_dependencies(&mut db, bucket, home, policy.cold_storage).await?,
                     s3s::s3_error!(InvalidArgument, "return cold data before disabling tiering")
                 );
-                let mut query =
-                    sqlx::QueryBuilder::<q::Db>::new("DELETE FROM bucket_tiering WHERE bucket_id=");
                 ensure!(
-                    query
-                        .push_bind(bucket)
-                        .push(" AND revision=")
-                        .push_bind(result.revision)
-                        .build()
+                    sqlx::query(q::DELETE_POLICY)
+                        .bind(bucket)
+                        .bind(result.revision)
                         .execute(&mut *db)
                         .await?
                         .rows_affected()
@@ -233,16 +178,11 @@ impl TieringStore for Backend {
                 );
                 result.policy = None;
             } else {
-                let mut query =
-                    sqlx::QueryBuilder::<q::Db>::new("UPDATE bucket_tiering SET state=");
                 ensure!(
-                    query
-                        .push_bind(state)
-                        .push(",revision=revision+1 WHERE bucket_id=")
-                        .push_bind(bucket)
-                        .push(" AND revision=")
-                        .push_bind(result.revision)
-                        .build()
+                    sqlx::query(q::SET_STATE)
+                        .bind(state)
+                        .bind(bucket)
+                        .bind(result.revision)
                         .execute(&mut *db)
                         .await?
                         .rows_affected()
@@ -301,8 +241,7 @@ impl TieringStore for Backend {
     ) -> Result<Vec<crate::model::tiering::Usage>> {
         let mut db = q::begin(self).await?;
         let home = hot(&mut db, principal, bucket).await?;
-        let rows =
-            super::tier_read_queries::usage(&mut db, bucket, home, unit, after, limit).await?;
+        let rows = super::tier_access::usage(&mut db, bucket, home, unit, after, limit).await?;
         db.commit().await?;
         Ok(rows)
     }
@@ -322,9 +261,7 @@ impl TieringStore for Backend {
         );
         let mut db = q::begin(self).await?;
         hot(&mut db, principal, bucket).await?;
-        let (ids, rows, clock) =
-            super::tier_read_queries::references(&mut db, bucket, unit, after, limit, false)
-                .await?;
+        let (ids, rows, clock) = q::references(&mut db, bucket, unit, after, limit, false).await?;
         let limited = rows.len() > 1024;
         let mut groups = BTreeMap::<Uuid, Vec<&Reference>>::new();
         for row in &rows {
@@ -393,7 +330,7 @@ impl TieringStore for Backend {
                 .is_some_and(|p| p.cold_storage != input.policy.cold_storage)
             {
                 ensure!(
-                    !cold_dependencies(
+                    !q::cold_dependencies(
                         &mut db,
                         bucket,
                         checked.hot.0,

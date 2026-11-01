@@ -1,6 +1,7 @@
 use super::{
-    redundancy_queries, redundancy_transactions, replica_queries as q,
-    replication_queries as transfer, transactions,
+    queries::redundancy as redundancy_queries, queries::replica as q,
+    queries::replication as transfer, transactions,
+    transactions::redundancy as redundancy_transactions,
 };
 use crate::{
     authorization::Principal,
