@@ -86,7 +86,7 @@ async fn rejects_unchanged(db: &mut SqliteConnection, message: &str) -> Result<(
 async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     let mut fresh = SqliteConnection::connect("sqlite::memory:").await?;
     let mut history = SqliteConnection::connect("sqlite::memory:").await?;
-    let migrations = sqlx::migrate!("./migrations/sqlite");
+    let migrations = sqlx::migrate!("./src/model/backend/sqlite/migrations");
     migrations.run(&mut history).await?;
     migration::run(&mut fresh).await?;
     same_structure(&mut fresh, &mut history).await?;

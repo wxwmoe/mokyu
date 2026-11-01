@@ -118,7 +118,7 @@ async fn postgres_schema_bootstrap_contract() -> Result<()> {
     queries::migration_identity("storage-registry")
         .execute(&mut history)
         .await?;
-    let migrations = sqlx::migrate!("./migrations");
+    let migrations = sqlx::migrate!("./src/model/backend/postgres/migrations");
     migrations.run(&mut history).await?;
 
     // Both cluster starters must decide empty/current while owning the migration lock.

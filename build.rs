@@ -5,11 +5,14 @@ use std::{
 };
 
 fn main() {
-    println!("cargo:rerun-if-changed=proto");
+    println!("cargo:rerun-if-changed=src/rpc/proto");
     tonic_prost_build::configure()
-        .compile_protos(&["proto/node.proto"], &["proto"])
+        .compile_protos(&["src/rpc/proto/node.proto"], &["src/rpc/proto"])
         .expect("compile node protocol");
-    println!("cargo:rerun-if-changed=migrations");
+    for backend in ["postgres", "mysql", "sqlite"] {
+        println!("cargo:rerun-if-changed=src/model/backend/{backend}/migrations");
+        println!("cargo:rerun-if-changed=src/model/backend/{backend}/schema.sql");
+    }
     println!("cargo:rerun-if-env-changed=MOKYU_WEB_DIR");
     if env::var_os("CARGO_FEATURE_WEB_UI").is_none() {
         return;

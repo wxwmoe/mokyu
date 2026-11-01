@@ -1070,7 +1070,7 @@ pub(super) fn fsync() -> Scalar<'static, String> {
     sqlx::query_scalar("SHOW fsync")
 }
 
-pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/postgres.sql");
+pub(super) const SCHEMA: &str = include_str!("schema.sql");
 
 pub(super) fn flush_time() -> Scalar<'static, DateTime<Utc>> {
     sqlx::query_scalar("SELECT clock_timestamp()")

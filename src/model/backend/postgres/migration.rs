@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, PgConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator = {
-    let mut migrator = sqlx::migrate!("./migrations");
+    let mut migrator = sqlx::migrate!("./src/model/backend/postgres/migrations");
     migrator.locking = false;
     migrator
 };

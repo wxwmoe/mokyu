@@ -11,13 +11,13 @@ FROM alpine:3.23 AS image-codecs
 RUN apk add --no-cache build-base ca-certificates cmake git ninja nasm pkgconf \
     brotli-dev libpng-dev libjpeg-turbo-dev lcms2-dev libheif-dev libwebp-dev vips-dev
 WORKDIR /build/image
-COPY native/image/dependencies.sh ./
+COPY src/processing/image/native/dependencies.sh ./
 RUN sh dependencies.sh
 FROM image-codecs AS image-tools
 RUN apk add --no-cache libjxl-dev libavif-dev
-COPY native/image/hdr.sh ./
+COPY src/processing/image/native/hdr.sh ./
 RUN sh hdr.sh
-COPY native/image/build.sh native/image/image.c native/image/source.h native/image/encode.h native/image/hdr.h native/image/io.h native/image/jpeg.cc ./
+COPY src/processing/image/native/build.sh src/processing/image/native/image.c src/processing/image/native/source.h src/processing/image/native/encode.h src/processing/image/native/hdr.h src/processing/image/native/io.h src/processing/image/native/jpeg.cc ./
 RUN sh build.sh
 
 FROM rust:1.96.0-alpine3.23 AS build
@@ -25,8 +25,6 @@ ARG WEB_UI=true
 RUN apk add --no-cache build-base cmake protobuf-dev
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
-COPY migrations ./migrations
-COPY proto ./proto
 COPY src ./src
 COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,id=mokyu-alpine-registry,target=/usr/local/cargo/registry \

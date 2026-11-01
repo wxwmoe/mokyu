@@ -1,6 +1,6 @@
 # 节点 RPC
 
-control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。协议定义为 [`proto/node.proto`](../proto/node.proto)，包名 `mokyu.node.v1`；节点 RPC 不经过管理 API 的 Cookie、JSON 或响应压缩中间件。反向代理必须保留 gRPC 路径、HTTP/2、请求元数据和响应 trailers，并禁止缓存。
+control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。协议定义为 [`src/rpc/proto/node.proto`](../src/rpc/proto/node.proto)，包名 `mokyu.node.v1`；节点 RPC 不经过管理 API 的 Cookie、JSON 或响应压缩中间件。反向代理必须保留 gRPC 路径、HTTP/2、请求元数据和响应 trailers，并禁止缓存。
 
 ## 身份与限制
 

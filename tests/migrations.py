@@ -20,7 +20,7 @@ data_path = Path(os.environ.get('MOKYU_TEST_DATA', '/data'))
 db = psycopg.connect(conninfo, autocommit=True)
 assert db.execute("SELECT to_regclass('gateway_meta'),to_regclass('mokyu_meta'),to_regclass('_sqlx_migrations')").fetchone() == (None, None, None)
 process = None
-migrations = Path(__file__).resolve().parents[1] / 'migrations'
+migrations = Path(__file__).resolve().parents[1] / 'src' / 'model' / 'backend' / 'postgres' / 'migrations'
 checksums = {int(path.stem.split('_')[0]): hashlib.sha384(path.read_bytes()).digest()
              for path in migrations.glob('*.sql')}
 latest = max(checksums)

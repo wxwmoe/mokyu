@@ -1,10 +1,10 @@
 # 数据库结构
 
-数据库保存对象目录、权限、存储映射、任务和运行状态；载荷位于 storage 或受保护的暂存目录。本文只列出当前公开语义，完整类型、约束、索引和触发器以 [`migrations/`](../migrations) 为准。
+数据库保存对象目录、权限、存储映射、任务和运行状态；载荷位于 storage 或受保护的暂存目录。本文只列出当前公开语义，完整类型、约束、索引和触发器以各后端的快照和迁移（[PostgreSQL](../src/model/backend/postgres)、[MySQL](../src/model/backend/mysql)、[SQLite](../src/model/backend/sqlite)）为准。
 
-数据库初始化使用 `migrations/schema/{postgres,mysql,sqlite}.sql` 的对应结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `migrations/*.sql`，MySQL 使用 `migrations/mysql/*.sql`，SQLite 使用 `migrations/sqlite/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集只有 control 连接 PostgreSQL，data/worker/node 通过 control API 访问业务数据；各进程保留独立 `instance.data_path` 和 `node.json`。
+数据库初始化使用 `src/model/backend/{postgres,mysql,sqlite}/schema.sql` 的对应结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `src/model/backend/postgres/migrations/*.sql`，MySQL 使用 `src/model/backend/mysql/migrations/*.sql`，SQLite 使用 `src/model/backend/sqlite/migrations/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集只有 control 连接 PostgreSQL，data/worker/node 通过 control API 访问业务数据；各进程保留独立 `instance.data_path` 和 `node.json`。
 
-下表描述共有数据含义，并列出 PostgreSQL 群集字段；原生类型和约束以各后端迁移为准。MySQL/MariaDB 共用 `migrations/mysql/`，使用二进制 UUID、自增 BIGINT 内容 ID、UTC `DATETIME(6)` 和二进制对象键。名称比较区分大小写和尾空格；MySQL 使用原生 JSON，MariaDB 使用带 JSON 有效性约束的文本表示。引用、配额和任务更新在同一事务中显式完成；容量 scope 的桶集合使用关联表。SQLite 使用 STRICT 表、16 字节 UUID、整数自增内容 ID、UTC 微秒整数时间、JSON 文本和二进制对象键；写事务使用 `BEGIN IMMEDIATE`，引用与配额同样在事务内显式维护。原生类型不影响对外 ID、分页、时间和字节数的接口语义。
+下表描述共有数据含义，并列出 PostgreSQL 群集字段；原生类型和约束以各后端迁移为准。MySQL/MariaDB 共用 `src/model/backend/mysql/migrations/`，使用二进制 UUID、自增 BIGINT 内容 ID、UTC `DATETIME(6)` 和二进制对象键。名称比较区分大小写和尾空格；MySQL 使用原生 JSON，MariaDB 使用带 JSON 有效性约束的文本表示。引用、配额和任务更新在同一事务中显式完成；容量 scope 的桶集合使用关联表。SQLite 使用 STRICT 表、16 字节 UUID、整数自增内容 ID、UTC 微秒整数时间、JSON 文本和二进制对象键；写事务使用 `BEGIN IMMEDIATE`，引用与配额同样在事务内显式维护。原生类型不影响对外 ID、分页、时间和字节数的接口语义。
 
 PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采用 `UUID` 主键，默认由 `uuidv7()` 生成，所有关联列使用同类型；自然键、复合键、偏移和计数保持原意。MySQL/MariaDB 和 SQLite 的对应主键、外键继续使用整数，仅 `chunks` 增加非空的 16 字节 `uuid`；物理编码和区块包复用既有 `location_id`，streams、raw_sources、fragments、quota_reservations 及其引用也使用原生整数；raw_sources.location_id 和 fragments.location_id 保存非空唯一的文件 UUID。multipart_files 与 Multipart UploadId 保留稳定 UUID，用于暂存文件和协议身份。PostgreSQL 的物理编码和区块包直接以主键作为文件 UUID，无单独 `location_id` 列。API 将身份作为不透明字符串，不要求各数据库部署的 ID 形态相同。
 
@@ -167,7 +167,7 @@ single 的用量采样不创建 usage 任务：在一次刷新超时预算内依
 
 ## 迁移和历史
 
-空库新安装执行 `migrations/schema/` 中对应数据库的最新结构；已初始化数据库按 `mokyu_meta.schema_version` 执行增量迁移。非空未知结构拒绝启动，已发布迁移不可改写。兼容条件和操作步骤见[部署与恢复](deployment-and-recovery.md#升级与数据库迁移)。当前结构以迁移执行后的结果为准，历史文件中的旧名称不代表当前字段。
+空库新安装执行对应数据库的 `schema.sql` 快照；已初始化数据库按 `mokyu_meta.schema_version` 执行增量迁移。非空未知结构拒绝启动，已发布迁移不可改写。兼容条件和操作步骤见[部署与恢复](deployment-and-recovery.md#升级与数据库迁移)。当前结构以迁移执行后的结果为准，历史文件中的旧名称不代表当前字段。
 
 PostgreSQL 群集的 `node_reports` 按 node_id 保存一份最新报告，boot_id 与 sequence 防止旧进程和乱序覆盖。metadata 保存脱敏加载配置与修订，status 保存有限的运行快照；两者分别限制为 64 KiB 和 32 KiB。只由有效注册身份更新，不使用公共读取从库。单容器不写节点报告，MySQL/SQLite 不创建对应表。正在执行的节点任务通过 tasks_node_running 部分索引查询。
 

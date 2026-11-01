@@ -90,7 +90,7 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
         .execute(&mut admin)
         .await?;
     // An interrupted empty-schema upgrade must roll back before it can be retried.
-    let migrations = sqlx::migrate!("./migrations/sqlite");
+    let migrations = sqlx::migrate!("./src/model/backend/sqlite/migrations");
     for migration in migrations.iter().take(5) {
         admin.apply("_sqlx_migrations", migration).await?;
     }

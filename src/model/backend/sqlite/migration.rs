@@ -2,7 +2,8 @@ use super::queries;
 use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 
-static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
+static MIGRATIONS: sqlx::migrate::Migrator =
+    sqlx::migrate!("./src/model/backend/sqlite/migrations");
 const SCHEMA_VERSION: i64 = 56;
 // Only the 0.0.6 format boundary requires an empty store.
 const EMPTY_UPGRADE_VERSION: i64 = 43;

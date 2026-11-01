@@ -29,7 +29,7 @@ type Statement<'q> = Query<'q, MySql, MySqlArguments>;
 type Scalar<'q, T> = QueryScalar<'q, MySql, T, MySqlArguments>;
 type Rows<'q, T> = sqlx::query::QueryAs<'q, MySql, T, MySqlArguments>;
 
-pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/mysql.sql");
+pub(super) const SCHEMA: &str = include_str!("schema.sql");
 
 pub(super) fn flush_time() -> Scalar<'static, DateTime<Utc>> {
     sqlx::query_scalar("SELECT CURRENT_TIMESTAMP(6)")

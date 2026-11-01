@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use sqlx::{Connection, MySqlConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator = {
-    let mut migrator = sqlx::migrate!("./migrations/mysql");
+    let mut migrator = sqlx::migrate!("./src/model/backend/mysql/migrations");
     migrator.locking = false;
     migrator
 };

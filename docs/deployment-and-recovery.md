@@ -14,7 +14,7 @@
 
 构建会安装并编译 Vue 静态资源，再嵌入 Rust 二进制；运行不需要 Node.js。`--api-only` 省略内嵌前端，标签为 `:api` / 版本号加 `-api`；与 `--alpine` 组合使用 `:alpine-api` / 版本号加 `-alpine-api`。仓库不包含构建后的镜像。
 
-Rust 构建还需要 `protoc`，由 `proto/node.proto` 生成 gRPC 类型。两个 Dockerfile 均在构建层安装；运行镜像不需要 Protocol Buffers 编译器。
+Rust 构建还需要 `protoc`，由 `src/rpc/proto/node.proto` 生成 gRPC 类型。两个 Dockerfile 均在构建层安装；运行镜像不需要 Protocol Buffers 编译器。
 
 可压缩的内嵌资源同时保存 gzip、Brotli 和 Zstandard 构建产物，按 `Accept-Encoding` 的 q 值选择，同权重时依次优先 zstd、br、gzip、identity。未提供或为空时返回原始表示；原始 ETag 为强标签，压缩变体使用同值弱标签，并发送 `Vary: Accept-Encoding`。公开 OpenAPI JSON 使用有界流式压缩，其余管理 API 保持原有响应与缓存策略。
 
@@ -174,7 +174,7 @@ SQLite 优先在停止 Mokyu 后备份整个数据库目录；若存在 `mokyu.d
 
 ## 升级与数据库迁移
 
-启动先取得初始化/迁移锁，再检查数据库。空库直接执行 `migrations/schema/{postgres,mysql,sqlite}.sql` 中的当前结构和初始数据，不执行历史迁移 SQL；MariaDB 使用 `mysql.sql`。完成后，在同一事务中写入 `mokyu_meta.schema_version` 和快照覆盖的原迁移版本、校验和。
+启动先取得初始化/迁移锁，再检查数据库。空库直接执行 `src/model/backend/{postgres,mysql,sqlite}/schema.sql` 中的当前结构和初始数据，不执行历史迁移 SQL；MariaDB 使用 MySQL 后端的快照。完成后，在同一事务中写入 `mokyu_meta.schema_version` 和快照覆盖的原迁移版本、校验和。
 
 非空库必须具有合法的 `mokyu_meta.schema_version` 和匹配的完整迁移历史。已有版本通过迁移前检查后执行后续编号迁移；当前版本只校验、不重复初始化。版本缺失、非法、超出支持范围或历史不匹配时终止启动。已有空表、只有 `_sqlx_migrations` 的库也属于非空库；程序不会据此猜测版本或自动重建。
 

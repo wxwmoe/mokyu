@@ -274,7 +274,7 @@ async fn mysql_schema_bootstrap_contract() -> Result<()> {
         .execute(&mut fresh)
         .await?;
     let mut history = database(&mut fresh, &options).await?;
-    let migrations = sqlx::migrate!("./migrations/mysql");
+    let migrations = sqlx::migrate!("./src/model/backend/mysql/migrations");
     migrations.run(&mut history).await?;
     migration::run(&mut fresh).await?;
     same_structure(&mut fresh, &mut history).await?;

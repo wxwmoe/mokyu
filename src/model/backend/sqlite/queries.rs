@@ -11,7 +11,7 @@ type Scalar<'q, T> = QueryScalar<'q, Sqlite, T, SqliteArguments>;
 type Rows<'q, T> = sqlx::query::QueryAs<'q, Sqlite, T, SqliteArguments>;
 
 pub(super) const BEGIN_WRITE: &str = "BEGIN IMMEDIATE";
-pub(super) const SCHEMA: &str = include_str!("../../../../migrations/schema/sqlite.sql");
+pub(super) const SCHEMA: &str = include_str!("schema.sql");
 
 pub(super) fn flush_time() -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)")

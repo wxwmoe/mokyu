@@ -14,13 +14,13 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
        libbrotli-dev libpng-dev libjpeg-dev liblcms2-dev libheif-dev libwebp-dev libvips-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build/image
-COPY native/image/dependencies.sh ./
+COPY src/processing/image/native/dependencies.sh ./
 RUN sh dependencies.sh
 FROM image-codecs AS image-tools
 RUN apt-get update && apt-get install -y --no-install-recommends libjxl-dev libavif-dev && rm -rf /var/lib/apt/lists/*
-COPY native/image/hdr.sh ./
+COPY src/processing/image/native/hdr.sh ./
 RUN sh hdr.sh
-COPY native/image/build.sh native/image/image.c native/image/source.h native/image/encode.h native/image/hdr.h native/image/io.h native/image/jpeg.cc ./
+COPY src/processing/image/native/build.sh src/processing/image/native/image.c src/processing/image/native/source.h src/processing/image/native/encode.h src/processing/image/native/hdr.h src/processing/image/native/io.h src/processing/image/native/jpeg.cc ./
 RUN sh build.sh
 
 FROM rust:1.96.0-bookworm AS build
@@ -30,8 +30,6 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
-COPY migrations ./migrations
-COPY proto ./proto
 COPY src ./src
 COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

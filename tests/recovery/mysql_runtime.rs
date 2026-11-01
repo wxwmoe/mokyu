@@ -18,7 +18,7 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     );
     let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
     let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
-    let migrations = sqlx::migrate!("./migrations/mysql");
+    let migrations = sqlx::migrate!("./src/model/backend/mysql/migrations");
     let latest = migrations.iter().last().unwrap().version;
     let admin_path = std::env::var("MOKYU_TEST_MYSQL_ADMIN_CONFIG")?;
     let (admin_config, admin_secrets, _) = Config::load(std::path::Path::new(&admin_path))?;
