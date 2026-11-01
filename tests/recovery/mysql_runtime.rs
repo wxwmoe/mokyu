@@ -20,6 +20,8 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
     let migrations = sqlx::migrate!("./src/model/backend/mysql/migrations");
     let latest = migrations.iter().last().unwrap().version;
+    let first = migrations.iter().next().unwrap().version;
+    let future = (latest / 10_000_000_000 + 1) * 10_000_000_000 + 101_000_000;
     let admin_path = std::env::var("MOKYU_TEST_MYSQL_ADMIN_CONFIG")?;
     let (admin_config, admin_secrets, _) = Config::load(std::path::Path::new(&admin_path))?;
     let options = MySqlConnectOptions::new()
@@ -41,7 +43,7 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     let backend = connection::open(&config, &secrets, &budget, "single").await?;
     backend.check_owner().await?;
     assert_eq!(
-        i64::from(queries::schema_version().fetch_one(&backend.pool).await?),
+        queries::schema_version().fetch_one(&backend.pool).await?,
         latest
     );
     let deployment: uuid::Uuid =
@@ -104,7 +106,8 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     );
     close(backend).await?;
 
-    sqlx::query("UPDATE _sqlx_migrations SET checksum=REPEAT(CHAR(0),48) WHERE version=1")
+    sqlx::query("UPDATE _sqlx_migrations SET checksum=REPEAT(CHAR(0),48) WHERE version=?")
+        .bind(first)
         .execute(&mut admin)
         .await?;
     assert!(
@@ -112,11 +115,13 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
             .await
             .is_err()
     );
-    sqlx::query("UPDATE _sqlx_migrations SET checksum=? WHERE version=1")
+    sqlx::query("UPDATE _sqlx_migrations SET checksum=? WHERE version=?")
         .bind(&history[0].2)
+        .bind(first)
         .execute(&mut admin)
         .await?;
-    sqlx::query("UPDATE mokyu_meta SET schema_version=999 WHERE id=1")
+    sqlx::query("UPDATE mokyu_meta SET schema_version=? WHERE id=1")
+        .bind(future)
         .execute(&mut admin)
         .await?;
     assert!(
@@ -128,7 +133,9 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
         .bind(latest)
         .execute(&mut admin)
         .await?;
-    sqlx::query("UPDATE _sqlx_migrations SET version=999 WHERE version=1")
+    sqlx::query("UPDATE _sqlx_migrations SET version=? WHERE version=?")
+        .bind(future)
+        .bind(first)
         .execute(&mut admin)
         .await?;
     assert!(
@@ -136,10 +143,13 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
             .await
             .is_err()
     );
-    sqlx::query("UPDATE _sqlx_migrations SET version=1 WHERE version=999")
+    sqlx::query("UPDATE _sqlx_migrations SET version=? WHERE version=?")
+        .bind(first)
+        .bind(future)
         .execute(&mut admin)
         .await?;
-    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=1")
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=?")
+        .bind(first)
         .execute(&mut admin)
         .await?;
     assert!(
@@ -147,7 +157,7 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
             .await
             .is_err()
     );
-    sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(1,'runtime',TRUE,?,0)")
+    sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(?,'runtime',TRUE,?,0)").bind(first)
         .bind(&history[0].2).execute(&mut admin).await?;
     sqlx::query("UPDATE mokyu_meta SET deployment_key_fingerprint=REPEAT(CHAR(0),32) WHERE id=1")
         .execute(&mut admin)

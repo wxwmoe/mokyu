@@ -35,36 +35,13 @@ pub(super) fn flush_time() -> Scalar<'static, DateTime<Utc>> {
     sqlx::query_scalar("SELECT CURRENT_TIMESTAMP(6)")
 }
 
-pub(super) fn upgrade_tables() -> Scalar<'static, String> {
-    sqlx::query_scalar(
-        "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE() AND TABLE_TYPE='BASE TABLE' AND TABLE_NAME NOT IN ('_sqlx_migrations','mokyu_meta','key_fingerprints','runtime_settings','maintenance_controls','access_state') ORDER BY TABLE_NAME",
-    )
-}
-
-pub(super) fn upgrade_has_data(table: &str) -> Scalar<'static, bool> {
-    // Initialization rows and configuration are not stored objects or user-created records.
-    let predicate = match table {
-        "projects" => "id<>X'00000000000000000000000000000001'",
-        "quota_scopes" => {
-            "scope<>'project' OR scope_id<>X'00000000000000000000000000000001' OR used_bytes<>0 OR reserved_bytes<>0 OR inflight_bytes<>0 OR object_count<>0 OR bucket_count<>0"
-        }
-        "catalog_build" => "scanned<>0 OR cursor_bucket IS NOT NULL OR cursor_key IS NOT NULL",
-        "usage_summary" => "id<>'global' OR as_of IS NOT NULL OR data IS NOT NULL",
-        _ => "TRUE",
-    };
-    let table = format!("`{}`", table.replace('`', "``"));
-    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate})"
-    )))
-}
-
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA=DATABASE()) AND NOT EXISTS(SELECT 1 FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA=DATABASE()) AND NOT EXISTS(SELECT 1 FROM information_schema.EVENTS WHERE EVENT_SCHEMA=DATABASE())",
     )
 }
 
-pub(super) fn initialize_meta(version: i32) -> Statement<'static> {
+pub(super) fn initialize_meta(version: i64) -> Statement<'static> {
     sqlx::query("INSERT INTO mokyu_meta(id,schema_version,deployment_id) VALUES(1,?,UNHEX(REPLACE(UUID(),'-','')))").bind(version)
 }
 
@@ -6650,8 +6627,8 @@ pub(super) fn migrations()
     sqlx::query_as("SELECT version,success,checksum FROM _sqlx_migrations ORDER BY version")
 }
 
-pub(super) fn schema_version() -> Scalar<'static, i32> {
-    sqlx::query_scalar("SELECT schema_version FROM mokyu_meta WHERE id=1")
+pub(super) fn schema_version() -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT CAST(schema_version AS SIGNED) FROM mokyu_meta WHERE id=1")
 }
 
 pub(super) fn fingerprint() -> Scalar<'static, Option<Vec<u8>>> {

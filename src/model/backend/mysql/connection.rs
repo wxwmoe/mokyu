@@ -209,7 +209,7 @@ pub(super) async fn open(
             Server::MariaDb => "MariaDB",
         },
         version,
-        schema_version: i64::from(queries::schema_version().fetch_one(&mut owner).await?),
+        schema_version: queries::schema_version().fetch_one(&mut owner).await?,
         observed_at: chrono::Utc::now(),
         journal_mode: None,
         synchronous: None,

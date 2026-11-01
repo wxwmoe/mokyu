@@ -71,7 +71,7 @@ impl Replica {
                     *observed.lock().unwrap() = Some(crate::model::runtime::DatabaseInfo {
                         program: "PostgreSQL",
                         version,
-                        schema_version: i64::from(expected.schema_version),
+                        schema_version: expected.schema_version,
                         observed_at: chrono::Utc::now(),
                         journal_mode: None,
                         synchronous: None,
@@ -347,7 +347,7 @@ pub async fn connect(
     let database_info = crate::model::runtime::DatabaseInfo {
         program: "PostgreSQL",
         version,
-        schema_version: i64::from(queries::schema_version().fetch_one(&mut owner).await?),
+        schema_version: queries::schema_version().fetch_one(&mut owner).await?,
         observed_at: chrono::Utc::now(),
         journal_mode: None,
         synchronous: None,

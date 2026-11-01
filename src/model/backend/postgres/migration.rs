@@ -7,9 +7,8 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 102;
-// Only the 0.0.6 format boundary requires an empty store.
-const EMPTY_UPGRADE_VERSION: i64 = 71;
+const BASELINE_VERSION: i64 = 20261102022127;
+const SCHEMA_VERSION: i64 = BASELINE_VERSION;
 
 pub(super) async fn run(owner: &mut PgConnection) -> Result<()> {
     sqlx::raw_sql(queries::MIGRATION_SETUP)
@@ -32,27 +31,42 @@ async fn run_locked(owner: &mut PgConnection) -> Result<()> {
     if queries::schema_empty().fetch_one(&mut *owner).await? {
         return initialize(owner, queries::SCHEMA).await;
     }
+    upgrade(owner, &MIGRATIONS).await
+}
+
+pub(super) async fn upgrade(
+    owner: &mut PgConnection,
+    migrations: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    let latest = migrations
+        .iter()
+        .last()
+        .context("empty migration chain")?
+        .version;
     let version = queries::schema_version().fetch_one(&mut *owner).await
         .context("nonempty database requires valid mokyu_meta.schema_version; initialization is incomplete or the database is unsupported")?;
     ensure!(
-        i64::from(version) <= SCHEMA_VERSION,
+        version <= latest,
         "database schema is newer than this binary; downgrade is unsupported"
     );
-    ensure!(version >= 33, "unsupported database schema version");
+    ensure!(
+        version >= BASELINE_VERSION,
+        "unsupported database schema version"
+    );
     ensure!(
         owner.dirty_version("_sqlx_migrations").await?.is_none(),
         "PostgreSQL migration history contains a failed transaction"
     );
     let applied = owner.list_applied_migrations("_sqlx_migrations").await?;
     ensure!(
-        applied.last().map(|m| m.version) == Some(i64::from(version)),
+        applied.last().map(|m| m.version) == Some(version),
         "schema version does not match the migration history"
     );
-    for (index, applied) in applied.iter().enumerate() {
-        let migration = MIGRATIONS
-            .iter()
-            .nth(index)
-            .context("applied PostgreSQL migration is missing from this binary")?;
+    ensure!(
+        applied.len() <= migrations.iter().len(),
+        "migration history exceeds this binary's migration chain"
+    );
+    for (applied, migration) in applied.iter().zip(migrations.iter()) {
         ensure!(
             applied.version == migration.version,
             "PostgreSQL migration history has a missing or unknown version"
@@ -62,27 +76,14 @@ async fn run_locked(owner: &mut PgConnection) -> Result<()> {
             "PostgreSQL migration checksum changed"
         );
     }
-    if i64::from(version) < SCHEMA_VERSION {
+    if version < latest {
         let mut tx = owner.begin().await?;
-        if i64::from(version) < EMPTY_UPGRADE_VERSION {
-            for table in queries::upgrade_tables().fetch_all(&mut *tx).await? {
-                queries::lock_upgrade_table(&table)
-                    .execute(&mut *tx)
-                    .await?;
-                ensure!(
-                    !queries::upgrade_has_data(&table)
-                        .fetch_one(&mut *tx)
-                        .await?,
-                    "database upgrade requires an empty store (table {table})"
-                );
-            }
-        }
-        MIGRATIONS
+        migrations
             .run(&mut *tx)
             .await
             .context("apply database migrations")?;
         ensure!(
-            i64::from(queries::schema_version().fetch_one(&mut *tx).await?) == SCHEMA_VERSION,
+            queries::schema_version().fetch_one(&mut *tx).await? == latest,
             "schema version does not match the migration history"
         );
         tx.commit().await?;
@@ -100,7 +101,7 @@ pub(super) async fn initialize(owner: &mut PgConnection, schema: &str) -> Result
     for migration in MIGRATIONS.iter() {
         tx.skip("_sqlx_migrations", migration).await?;
     }
-    queries::initialize_meta(SCHEMA_VERSION as i32)
+    queries::initialize_meta(SCHEMA_VERSION)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

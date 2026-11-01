@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 0102.
+-- Generated from the complete postgres migration chain through 20261102022127.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1099,7 +1099,7 @@ CREATE TABLE public.member_external_grants (
 
 CREATE TABLE public.mokyu_meta (
     singleton boolean DEFAULT true NOT NULL,
-    schema_version integer NOT NULL,
+    schema_version bigint NOT NULL,
     deployment_id uuid NOT NULL,
     gc_paused boolean DEFAULT false NOT NULL,
     maintenance boolean DEFAULT false NOT NULL,

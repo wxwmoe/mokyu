@@ -23,7 +23,8 @@ process = None
 migrations = Path(__file__).resolve().parents[1] / 'src' / 'model' / 'backend' / 'postgres' / 'migrations'
 checksums = {int(path.stem.split('_')[0]): hashlib.sha384(path.read_bytes()).digest()
              for path in migrations.glob('*.sql')}
-latest = max(checksums)
+first, latest = min(checksums), max(checksums)
+future = (latest // 10_000_000_000 + 1) * 10_000_000_000 + 101_000_000
 
 
 def cli(*args):
@@ -86,18 +87,15 @@ try:
     db.execute('DROP TABLE buckets')
     print('PASS unknown database refuses initialization without writing schema or history', flush=True)
 
-    # A populated old schema is rejected before any migration changes.
+    # Both empty and populated ordinal databases must remain unchanged.
     for version_limit in (33, 70):
         db.execute("CREATE TABLE _sqlx_migrations (version BIGINT PRIMARY KEY, description TEXT NOT NULL, installed_on TIMESTAMPTZ NOT NULL DEFAULT now(), success BOOLEAN NOT NULL, checksum BYTEA NOT NULL, execution_time BIGINT NOT NULL)")
         with db.transaction():
             db.execute("SELECT set_config('media_gateway.backend_identity','storage-registry',false)")
-            for path in sorted(migrations.glob('*.sql')):
-                version = int(path.stem.split('_')[0])
-                if version > version_limit:
-                    continue
+            for version, path in enumerate(sorted(migrations.glob('*.sql'))[:version_limit], 1):
                 db.execute(path.read_text())
                 db.execute('INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,%s,true,%s,0)',
-                           (version, path.stem.split('_', 1)[1].replace('_', ' '), checksums[version]))
+                           (version, path.stem.split('_', 1)[1].replace('_', ' '), hashlib.sha384(path.read_bytes()).digest()))
         prior_history = history()
         tables = db.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").fetchall()
         legacy_storage = '00000000-0000-0000-0000-000000000042'
@@ -105,7 +103,7 @@ try:
         db.execute("INSERT INTO buckets(id,name,storage_id) VALUES(gen_random_uuid(),'legacy-preserved',%s)", (legacy_storage,))
         buckets = db.execute('SELECT * FROM buckets').fetchall()
         start()
-        stopped_with('empty store')
+        stopped_with('unsupported database schema version')
         assert db.execute('SELECT * FROM buckets').fetchall() == buckets
         assert history() == prior_history
         assert db.execute("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename").fetchall() == tables
@@ -113,15 +111,13 @@ try:
         db.execute('DELETE FROM buckets')
         db.execute('DELETE FROM storages')
         start()
-        ready()
-        assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone() == (latest,)
-        assert history()[:len(prior_history)] == prior_history
-        stop()
-        reset_local_identity()
+        stopped_with('unsupported database schema version')
+        assert db.execute('SELECT schema_version FROM mokyu_meta').fetchone() == (version_limit,)
+        assert history() == prior_history
         with db.transaction():
             db.execute('DROP SCHEMA public CASCADE')
             db.execute('CREATE SCHEMA public')
-    print('PASS empty schemas upgrade and populated schemas remain unchanged', flush=True)
+    print('PASS ordinal databases remain unchanged with or without objects', flush=True)
 
     start()
     ready()
@@ -132,7 +128,7 @@ try:
     assert db.execute("SELECT count(*) FROM pg_constraint WHERE conrelid='mokyu_meta'::regclass AND starts_with(conname,'gateway_meta_')").fetchone()[0] == 0
     assert db.execute("SELECT to_regclass('mokyu_meta_pkey'),to_regclass('gateway_meta_pkey')").fetchone() == ('mokyu_meta_pkey', None)
     before = history()
-    expected = checksums[1]
+    expected = checksums[first]
     assert [row[0] for row in before] == sorted(checksums)
     assert all(row[2] and row[3] == checksums[row[0]] for row in before)
     preserved_storage = '00000000-0000-0000-0000-000000000043'
@@ -149,15 +145,15 @@ try:
     stop()
     print('PASS migrations initialize once; restart preserves data and migration history', flush=True)
 
-    db.execute("UPDATE _sqlx_migrations SET checksum=decode(repeat('00',48),'hex') WHERE version=1")
+    db.execute("UPDATE _sqlx_migrations SET checksum=decode(repeat('00',48),'hex') WHERE version=%s", (first,))
     start()
     stopped_with('PostgreSQL migration checksum changed')
-    db.execute('UPDATE _sqlx_migrations SET checksum=%s WHERE version=1', (expected,))
-    db.execute("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(999,'future',true,%s,0)", (expected,))
+    db.execute('UPDATE _sqlx_migrations SET checksum=%s WHERE version=%s', (expected, first))
+    db.execute("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(%s,'future',true,%s,0)", (future, expected))
     start()
     stopped_with('schema version does not match the migration history')
-    db.execute('DELETE FROM _sqlx_migrations WHERE version=999')
-    db.execute('UPDATE mokyu_meta SET schema_version=999')
+    db.execute('DELETE FROM _sqlx_migrations WHERE version=%s', (future,))
+    db.execute('UPDATE mokyu_meta SET schema_version=%s', (future,))
     start()
     stopped_with('database schema is newer')
     db.execute('UPDATE mokyu_meta SET schema_version=%s', (latest,))

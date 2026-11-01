@@ -108,7 +108,7 @@ fn read_extents(stream: Id, from: i64, until: i64) -> Rows<'static, ReadExtent> 
 #[derive(Clone, sqlx::FromRow)]
 pub(super) struct ReplicaIdentity {
     pub deployment_id: Uuid,
-    pub schema_version: i32,
+    pub schema_version: i64,
     pub deployment_key_fingerprint: Vec<u8>,
     pub deployment_mode: String,
 }
@@ -1076,45 +1076,13 @@ pub(super) fn flush_time() -> Scalar<'static, DateTime<Utc>> {
     sqlx::query_scalar("SELECT clock_timestamp()")
 }
 
-pub(super) fn upgrade_tables() -> Scalar<'static, String> {
-    sqlx::query_scalar(
-        "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename NOT IN ('_sqlx_migrations','mokyu_meta','key_fingerprints','runtime_settings','maintenance_controls','access_state') ORDER BY tablename",
-    )
-}
-
-pub(super) fn upgrade_has_data(table: &str) -> Scalar<'static, bool> {
-    // Initialization rows and configuration are not stored objects or user-created records.
-    let predicate = match table {
-        "projects" => "id<>'00000000-0000-0000-0000-000000000001'",
-        "quota_scopes" => {
-            "scope<>'project' OR scope_id<>'00000000-0000-0000-0000-000000000001' OR used_bytes<>0 OR reserved_bytes<>0 OR inflight_bytes<>0 OR object_count<>0 OR bucket_count<>0 OR cached_bytes<>0"
-        }
-        "catalog_build" => "scanned<>0 OR cursor_bucket IS NOT NULL OR cursor_key IS NOT NULL",
-        "usage_summary" => {
-            "id<>'global' OR as_of IS NOT NULL OR data IS NOT NULL OR bucket_ids IS NOT NULL"
-        }
-        _ => "TRUE",
-    };
-    let table = format!("public.\"{}\"", table.replace('"', "\"\""));
-    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate})"
-    )))
-}
-
-pub(super) fn lock_upgrade_table(table: &str) -> Statement<'static> {
-    let table = table.replace('"', "\"\"");
-    sqlx::query(sqlx::AssertSqlSafe(format!(
-        "LOCK TABLE public.\"{table}\" IN SHARE MODE"
-    )))
-}
-
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname NOT IN ('public','information_schema')) AND NOT EXISTS(SELECT 1 FROM pg_depend d JOIN pg_namespace n ON d.refclassid='pg_namespace'::regclass AND d.refobjid=n.oid WHERE n.nspname='public') AND NOT EXISTS(SELECT 1 FROM pg_extension WHERE extname<>'plpgsql') AND NOT EXISTS(SELECT 1 FROM pg_event_trigger)",
     )
 }
 
-pub(super) fn initialize_meta(version: i32) -> Statement<'static> {
+pub(super) fn initialize_meta(version: i64) -> Statement<'static> {
     sqlx::query("INSERT INTO mokyu_meta(schema_version,deployment_id) VALUES($1,gen_random_uuid())")
         .bind(version)
 }
@@ -1124,8 +1092,8 @@ pub(super) fn metadata_table() -> Scalar<'static, Option<String>> {
     sqlx::query_scalar("SELECT to_regclass('public.mokyu_meta')::text")
 }
 
-pub(super) fn schema_version() -> Scalar<'static, i32> {
-    sqlx::query_scalar("SELECT schema_version FROM mokyu_meta WHERE singleton")
+pub(super) fn schema_version() -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT schema_version::bigint FROM mokyu_meta WHERE singleton")
 }
 
 pub(super) fn claim_runtime(single: bool) -> Scalar<'static, bool> {

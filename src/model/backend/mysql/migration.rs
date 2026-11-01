@@ -7,9 +7,8 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator.locking = false;
     migrator
 };
-const SCHEMA_VERSION: i64 = 55;
-// Only the 0.0.6 format boundary requires an empty store.
-const EMPTY_UPGRADE_VERSION: i64 = 42;
+const BASELINE_VERSION: i64 = 20261102022127;
+const SCHEMA_VERSION: i64 = BASELINE_VERSION;
 
 pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
     ensure!(
@@ -19,23 +18,38 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
     if queries::schema_empty().fetch_one(&mut *owner).await? {
         return initialize(owner, queries::SCHEMA).await;
     }
-    let version = i64::from(queries::schema_version().fetch_one(&mut *owner).await
-        .context("nonempty database requires valid mokyu_meta.schema_version; initialization is incomplete or the database is unsupported")?);
+    upgrade(owner, &MIGRATIONS).await
+}
+
+pub(super) async fn upgrade(
+    owner: &mut MySqlConnection,
+    migrations: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    let latest = migrations
+        .iter()
+        .last()
+        .context("empty migration chain")?
+        .version;
+    let version = queries::schema_version().fetch_one(&mut *owner).await
+        .context("nonempty database requires valid mokyu_meta.schema_version; initialization is incomplete or the database is unsupported")?;
     ensure!(
-        version <= SCHEMA_VERSION,
+        version <= latest,
         "database schema is newer than this binary; downgrade is unsupported"
     );
-    ensure!(version >= 1, "unsupported database schema version");
+    ensure!(
+        version >= BASELINE_VERSION,
+        "unsupported database schema version"
+    );
     let applied = queries::migrations().fetch_all(&mut *owner).await?;
     ensure!(
         applied.last().map(|m| m.0) == Some(version),
         "schema version does not match the MySQL migration history"
     );
-    for (index, (version, success, checksum)) in applied.iter().enumerate() {
-        let migration = MIGRATIONS
-            .iter()
-            .nth(index)
-            .context("applied MySQL migration is missing from this binary")?;
+    ensure!(
+        applied.len() <= migrations.iter().len(),
+        "migration history exceeds this binary's migration chain"
+    );
+    for ((version, success, checksum), migration) in applied.iter().zip(migrations.iter()) {
         ensure!(
             *version == migration.version,
             "MySQL migration history has a missing or unknown version"
@@ -49,23 +63,13 @@ pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
             "MySQL migration history contains a failed transaction"
         );
     }
-    if version < SCHEMA_VERSION {
-        if version < EMPTY_UPGRADE_VERSION {
-            for table in queries::upgrade_tables().fetch_all(&mut *owner).await? {
-                ensure!(
-                    !queries::upgrade_has_data(&table)
-                        .fetch_one(&mut *owner)
-                        .await?,
-                    "database upgrade requires an empty store (table {table})"
-                );
-            }
-        }
-        MIGRATIONS
+    if version < latest {
+        migrations
             .run(&mut *owner)
             .await
             .context("apply database migrations")?;
         ensure!(
-            i64::from(queries::schema_version().fetch_one(&mut *owner).await?) == SCHEMA_VERSION,
+            queries::schema_version().fetch_one(&mut *owner).await? == latest,
             "schema version does not match the migration history"
         );
     }
@@ -83,7 +87,7 @@ pub(super) async fn initialize(owner: &mut MySqlConnection, schema: &str) -> Res
     for migration in MIGRATIONS.iter() {
         tx.skip("_sqlx_migrations", migration).await?;
     }
-    queries::initialize_meta(SCHEMA_VERSION as i32)
+    queries::initialize_meta(SCHEMA_VERSION)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

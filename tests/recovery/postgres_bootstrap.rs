@@ -103,6 +103,9 @@ async fn rejects_unchanged(db: &mut PgConnection, message: &str) -> Result<()> {
     Ok(())
 }
 
+type TestConnection = PgConnection;
+include!("migration_chain.rs");
+
 #[tokio::test]
 #[ignore = "requires an isolated PostgreSQL database and permission to create test databases"]
 async fn postgres_schema_bootstrap_contract() -> Result<()> {
@@ -153,64 +156,31 @@ async fn postgres_schema_bootstrap_contract() -> Result<()> {
         id
     );
 
-    // Validate history before upgrading an empty schema; preserve populated schemas unchanged.
-    for version in [33, 47, 50, 70].into_iter().chain(
-        migrations
-            .iter()
-            .map(|entry| entry.version)
-            .filter(|version| *version >= 71),
-    ) {
-        let mut old = database(&mut fresh, &options).await?;
-        old.ensure_migrations_table("_sqlx_migrations").await?;
-        queries::migration_identity("storage-registry")
-            .execute(&mut old)
-            .await?;
-        for entry in migrations
-            .iter()
-            .take_while(|entry| entry.version <= version)
-        {
-            old.apply("_sqlx_migrations", entry).await?;
-        }
-        let mut invalid_history = old.begin().await?;
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version=1")
-            .execute(&mut *invalid_history)
-            .await?;
-        rejects_unchanged(&mut invalid_history, "history").await?;
-        invalid_history.rollback().await?;
-        sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker) VALUES('00000000-0000-0000-0000-000000000001','preserved','local','/data/preserved','{}'); INSERT INTO buckets(id,name,storage_id,project_id) VALUES('00000000-0000-0000-0000-000000000001','preserved','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001');")
-            .execute(&mut old).await?;
-        if version >= 71 {
-            migration::run(&mut old).await?;
-            assert_eq!(
-                sqlx::query_scalar::<_, String>("SELECT name FROM buckets")
-                    .fetch_one(&mut old)
-                    .await?,
-                "preserved"
-            );
-            assert_eq!(
-                sqlx::query_scalar::<_, String>("SELECT name FROM storages")
-                    .fetch_one(&mut old)
-                    .await?,
-                "preserved"
-            );
-            migration::run(&mut old).await?;
-            continue;
-        }
-        rejects_unchanged(&mut old, "empty store").await?;
-        sqlx::raw_sql("DELETE FROM buckets; DELETE FROM storages;")
-            .execute(&mut old)
-            .await?;
-        sqlx::query("UPDATE quota_scopes SET used_bytes=1")
-            .execute(&mut old)
-            .await?;
-        rejects_unchanged(&mut old, "empty store").await?;
-        sqlx::query("UPDATE quota_scopes SET used_bytes=0")
-            .execute(&mut old)
-            .await?;
-        migration::run(&mut old).await?;
-        same_structure(&mut old, &mut fresh).await?;
-        assert_eq!(contents(&mut old).await?, contents(&mut fresh).await?);
+    let mut old = database(&mut fresh, &options).await?;
+    old.ensure_migrations_table("_sqlx_migrations").await?;
+    queries::migration_identity("storage-registry")
+        .execute(&mut old)
+        .await?;
+    for (offset, entry) in migrations.iter().take(70).enumerate() {
+        let mut ordinal = entry.clone();
+        ordinal.version = offset as i64 + 1;
+        old.apply("_sqlx_migrations", &ordinal).await?;
     }
+    rejects_unchanged(&mut old, "unsupported database schema version").await?;
+    sqlx::raw_sql("INSERT INTO storages(id,name,type,path,identity_marker) VALUES('00000000-0000-0000-0000-000000000001','preserved','local','/data/preserved','{}'); INSERT INTO buckets(id,name,storage_id,project_id) VALUES('00000000-0000-0000-0000-000000000001','preserved','00000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000000001');")
+        .execute(&mut old).await?;
+    rejects_unchanged(&mut old, "unsupported database schema version").await?;
+
+    let mut successor = database(&mut fresh, &options).await?;
+    verify_upgrade(
+        &mut successor,
+        &migrations,
+        Some((
+            "ALTER TABLE _sqlx_migrations ADD CONSTRAINT stop_upgrade CHECK(false) NOT VALID",
+            "ALTER TABLE _sqlx_migrations DROP CONSTRAINT stop_upgrade",
+        )),
+    )
+    .await?;
 
     for sql in [
         "CREATE TABLE unrelated(id INT)",
@@ -218,21 +188,25 @@ async fn postgres_schema_bootstrap_contract() -> Result<()> {
         "CREATE TYPE unrelated AS ENUM('value')",
         "CREATE TABLE mokyu_meta(singleton BOOLEAN,schema_version INT)",
         "CREATE TABLE mokyu_meta(singleton BOOLEAN,schema_version INT); INSERT INTO mokyu_meta VALUES(true,0)",
-        "CREATE TABLE mokyu_meta(singleton BOOLEAN,schema_version INT); INSERT INTO mokyu_meta VALUES(true,999)",
     ] {
         let mut invalid = database(&mut fresh, &options).await?;
         sqlx::raw_sql(sql).execute(&mut invalid).await?;
         rejects_unchanged(&mut invalid, "").await?;
     }
+    let first = migrations.iter().next().unwrap().version;
+    let future = migrations.iter().last().unwrap().version + 10_000_000_000;
     for sql in [
-        "UPDATE mokyu_meta SET schema_version=39",
-        "DELETE FROM _sqlx_migrations WHERE version=1",
-        "UPDATE _sqlx_migrations SET checksum='\\x00' WHERE version=1",
-        "UPDATE _sqlx_migrations SET success=false WHERE version=40",
-        "DELETE FROM mokyu_meta",
+        "UPDATE mokyu_meta SET schema_version=39".to_owned(),
+        format!("UPDATE mokyu_meta SET schema_version={future}"),
+        format!("DELETE FROM _sqlx_migrations WHERE version={first}"),
+        format!("UPDATE _sqlx_migrations SET checksum='\\x00' WHERE version={first}"),
+        format!("UPDATE _sqlx_migrations SET success=false WHERE version={first}"),
+        "DELETE FROM mokyu_meta".to_owned(),
     ] {
         let mut tx = fresh.begin().await?;
-        sqlx::raw_sql(sql).execute(&mut *tx).await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(&mut *tx)
+            .await?;
         rejects_unchanged(&mut tx, "").await?;
         tx.rollback().await?;
     }

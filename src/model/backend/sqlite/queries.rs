@@ -17,29 +17,6 @@ pub(super) fn flush_time() -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)")
 }
 
-pub(super) fn upgrade_tables() -> Scalar<'static, String> {
-    sqlx::query_scalar(
-        "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' AND name NOT IN ('_sqlx_migrations','mokyu_meta','key_fingerprints','runtime_settings','maintenance_controls','access_state') ORDER BY name",
-    )
-}
-
-pub(super) fn upgrade_has_data(table: &str) -> Scalar<'static, bool> {
-    // Initialization rows and configuration are not stored objects or user-created records.
-    let predicate = match table {
-        "projects" => "id<>X'00000000000000000000000000000001'",
-        "quota_scopes" => {
-            "scope<>'project' OR scope_id<>X'00000000000000000000000000000001' OR used_bytes<>0 OR reserved_bytes<>0 OR inflight_bytes<>0 OR object_count<>0 OR bucket_count<>0"
-        }
-        "catalog_build" => "scanned<>0 OR cursor_bucket IS NOT NULL OR cursor_key IS NOT NULL",
-        "usage_summary" => "id<>'global' OR as_of IS NOT NULL OR data IS NOT NULL",
-        _ => "TRUE",
-    };
-    let table = format!("\"{}\"", table.replace('"', "\"\""));
-    sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
-        "SELECT EXISTS(SELECT 1 FROM {table} WHERE {predicate})"
-    )))
-}
-
 pub(super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*')",

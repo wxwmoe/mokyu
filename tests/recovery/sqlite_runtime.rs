@@ -89,35 +89,10 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     sqlx::raw_sql("DROP TRIGGER test_migration")
         .execute(&mut admin)
         .await?;
-    // An interrupted empty-schema upgrade must roll back before it can be retried.
     let migrations = sqlx::migrate!("./src/model/backend/sqlite/migrations");
-    for migration in migrations.iter().take(5) {
-        admin.apply("_sqlx_migrations", migration).await?;
-    }
-    sqlx::raw_sql("CREATE TRIGGER test_migration BEFORE INSERT ON _sqlx_migrations WHEN NEW.version=6 BEGIN SELECT RAISE(ABORT,'isolated late interruption'); END").execute(&mut admin).await?;
-    assert!(
-        connection::open(&legacy, &secrets, &budget, "single")
-            .await
-            .is_err()
-    );
-    assert_eq!(queries::schema_version().fetch_one(&mut admin).await?, 5);
-    assert_eq!(queries::migrations().fetch_all(&mut admin).await?.len(), 5);
-    assert!(
-        !queries::tables()
-            .fetch_all(&mut admin)
-            .await?
-            .iter()
-            .any(|name| name == "tasks")
-    );
-    sqlx::raw_sql("DROP TRIGGER test_migration")
-        .execute(&mut admin)
-        .await?;
-    let upgraded = connection::open(&legacy, &secrets, &budget, "single").await?;
-    assert_eq!(
-        queries::schema_version().fetch_one(&upgraded.read).await?,
-        migrations.iter().last().unwrap().version
-    );
-    close(upgraded).await;
+    let first = migrations.iter().next().unwrap().version;
+    let latest = migrations.iter().last().unwrap().version;
+    let future = (latest / 10_000_000_000 + 1) * 10_000_000_000 + 101_000_000;
     admin.close().await?;
     let options = SqliteConnectOptions::new()
         .filename(&path)
@@ -387,9 +362,9 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
 
     let mut admin = SqliteConnection::connect_with(&options).await?;
     for change in [
-        "UPDATE _sqlx_migrations SET checksum=zeroblob(48) WHERE version=1",
-        "UPDATE _sqlx_migrations SET success=0 WHERE version=1",
-        "UPDATE _sqlx_migrations SET version=999 WHERE version=1",
+        format!("UPDATE _sqlx_migrations SET checksum=zeroblob(48) WHERE version={first}"),
+        format!("UPDATE _sqlx_migrations SET success=0 WHERE version={first}"),
+        format!("UPDATE _sqlx_migrations SET version={future} WHERE version={first}"),
     ] {
         sqlx::query(sqlx::AssertSqlSafe(change))
             .execute(&mut admin)
@@ -400,13 +375,16 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
                 .is_err()
         );
         sqlx::query(
-            "UPDATE _sqlx_migrations SET version=1,checksum=?,success=1 WHERE version IN (1,999)",
+            "UPDATE _sqlx_migrations SET version=?1,checksum=?2,success=1 WHERE version IN (?1,?3)",
         )
+        .bind(first)
         .bind(&history[0].2)
+        .bind(future)
         .execute(&mut admin)
         .await?;
     }
-    sqlx::query("UPDATE mokyu_meta SET schema_version=999")
+    sqlx::query("UPDATE mokyu_meta SET schema_version=?")
+        .bind(future)
         .execute(&mut admin)
         .await?;
     assert!(
@@ -417,7 +395,8 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
     sqlx::query("UPDATE mokyu_meta SET schema_version=(SELECT MAX(version) FROM _sqlx_migrations)")
         .execute(&mut admin)
         .await?;
-    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=1")
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version=?")
+        .bind(first)
         .execute(&mut admin)
         .await?;
     assert!(
@@ -425,7 +404,7 @@ async fn sqlite_runtime_and_migration_recovery() -> Result<()> {
             .await
             .is_err()
     );
-    sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(1,'runtime',1,?,0)").bind(&history[0].2).execute(&mut admin).await?;
+    sqlx::query("INSERT INTO _sqlx_migrations(version,description,success,checksum,execution_time) VALUES(?,'runtime',1,?,0)").bind(first).bind(&history[0].2).execute(&mut admin).await?;
     sqlx::query("UPDATE mokyu_meta SET deployment_key_fingerprint=zeroblob(32)")
         .execute(&mut admin)
         .await?;

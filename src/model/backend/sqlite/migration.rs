@@ -4,9 +4,8 @@ use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 
 static MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./src/model/backend/sqlite/migrations");
-const SCHEMA_VERSION: i64 = 56;
-// Only the 0.0.6 format boundary requires an empty store.
-const EMPTY_UPGRADE_VERSION: i64 = 43;
+const BASELINE_VERSION: i64 = 20261102022127;
+const SCHEMA_VERSION: i64 = BASELINE_VERSION;
 
 pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
     ensure!(
@@ -16,23 +15,38 @@ pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
     if queries::schema_empty().fetch_one(&mut *connection).await? {
         return initialize(connection, queries::SCHEMA).await;
     }
+    upgrade(connection, &MIGRATIONS).await
+}
+
+pub(super) async fn upgrade(
+    connection: &mut SqliteConnection,
+    migrations: &sqlx::migrate::Migrator,
+) -> Result<()> {
+    let latest = migrations
+        .iter()
+        .last()
+        .context("empty migration chain")?
+        .version;
     let version = queries::schema_version().fetch_one(&mut *connection).await
         .context("nonempty database requires valid mokyu_meta.schema_version; initialization is incomplete or the database is unsupported")?;
     ensure!(
-        version <= SCHEMA_VERSION,
+        version <= latest,
         "database schema is newer than this binary; downgrade is unsupported"
     );
-    ensure!(version >= 1, "unsupported database schema version");
+    ensure!(
+        version >= BASELINE_VERSION,
+        "unsupported database schema version"
+    );
     let applied = queries::migrations().fetch_all(&mut *connection).await?;
     ensure!(
         applied.last().map(|m| m.0) == Some(version),
         "schema version does not match the SQLite migration history"
     );
-    for (index, (version, success, checksum)) in applied.iter().enumerate() {
-        let migration = MIGRATIONS
-            .iter()
-            .nth(index)
-            .context("applied SQLite migration is missing from this binary")?;
+    ensure!(
+        applied.len() <= migrations.iter().len(),
+        "migration history exceeds this binary's migration chain"
+    );
+    for ((version, success, checksum), migration) in applied.iter().zip(migrations.iter()) {
         ensure!(
             *version == migration.version,
             "SQLite migration history has a missing or unknown version"
@@ -46,24 +60,14 @@ pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
             "SQLite migration checksum changed"
         );
     }
-    if version < SCHEMA_VERSION {
+    if version < latest {
         let mut tx = connection.begin_with(queries::BEGIN_WRITE).await?;
-        if version < EMPTY_UPGRADE_VERSION {
-            for table in queries::upgrade_tables().fetch_all(&mut *tx).await? {
-                ensure!(
-                    !queries::upgrade_has_data(&table)
-                        .fetch_one(&mut *tx)
-                        .await?,
-                    "database upgrade requires an empty store (table {table})"
-                );
-            }
-        }
-        MIGRATIONS
+        migrations
             .run(&mut *tx)
             .await
             .context("apply database migrations")?;
         ensure!(
-            queries::schema_version().fetch_one(&mut *tx).await? == SCHEMA_VERSION,
+            queries::schema_version().fetch_one(&mut *tx).await? == latest,
             "schema version does not match the migration history"
         );
         tx.commit().await?;

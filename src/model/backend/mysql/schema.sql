@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 0055.
+-- Generated from the complete mysql migration chain through 20261102022127.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -476,7 +476,7 @@ CREATE TABLE `member_external_grants` (
 
 CREATE TABLE `mokyu_meta` (
   `id` tinyint unsigned NOT NULL,
-  `schema_version` int NOT NULL,
+  `schema_version` bigint NOT NULL,
   `deployment_id` binary(16) NOT NULL,
   `deployment_key_fingerprint` binary(32) DEFAULT NULL,
   `gc_paused` tinyint(1) NOT NULL DEFAULT '0',
