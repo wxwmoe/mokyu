@@ -1,0 +1,64 @@
+# Storage tests
+
+[Test guide](../README.md) · Run commands from the repository root. Short test paths such as `fixtures/` are relative to `tests/`.
+
+## Raw, chunks, cache and physical copies
+
+- `storage/raw_objects.py`: raw PUT/HEAD/Range/conditions, multipart, Copy and switching to chunks. Set `MOKYU_TEST_STORAGE_TYPE=s3` for remote storage.
+- `storage/raw_lifecycle.py`: quarantine and recheck local raw corruption, multipart pending reuse, failed Complete, usage and reader/GC races.
+- `storage/raw_deduplication.py`: optional whole-file dedup on all four database products. Check concurrency, part boundaries, cross-bucket charging and exclusion of bad sources. Use the source-quarantine fixture; set `MOKYU_TEST_BACKEND` for remote raw.
+
+- `storage/pending_cache.py`: own a stopped initialized service with the `source_quarantine` fixture and S3. Check pending/cache paths, raw/chunk confirmation and inode handoff, final pack identity, disabled caches, pins, restart and accounting after interrupted link/delete. `MOKYU_TEST_CACHE_CROSS_DEVICE=1` requires different filesystems for cache and pending: skip handoff without copying.
+- `storage/raw_cache.py`: own a stopped initialized service; set 9 MiB file cache, disable response cache and use the `source_quarantine` S3 fixture. Check concurrent cold reads/ranges, corruption fallback, pin/eviction, generation changes, restart, overwrite and that successful PUTs never wait for optional chunk fills.
+- `storage/background_raw.py`: use the same exclusive fixture and fault-injection build. Fill complete raw files from the existing stream without an extra GET; check reuse, partial reads, disabled/oversize cases, slow disk, low space, cancellation, wrong digests and restart charging. Low-space tests also need the fsync injector.
+- `storage/background_cache.py`: use the exclusive S3 fixture for encoding, packing, full checks, rewrite/unpack, raw digests, CDC and migration. Verify actual cache fills, foreground L2 hits and backend read counts for metadata/head/full checks. For a combined-role test provide a stopped node's `MOKYU_TEST_NODE_CONFIG`; the management and database fixture must still target the running control.
+- `storage/cache_pressure.py`: set `instance.cache_size="8MiB"`, establish a hot entry then scan cold sources with concurrent reads. Check hot inode/hits, candidate limits and draining pending data under pressure. Elapsed times describe this fixture only.
+- `storage/local_cache.py`: own the stopped service and omit the S3 backend. For each single-container database, test local raw/chunks, checks, ranges and restart without redundant node L2 files. Verify the local cache configuration constraints.
+- `storage/raw_migration.py`: copy/move raw to encrypted chunks and raw to raw across storage backends; an isolated remote S3 backend is supported.
+- `storage/physical_copy_reads.py`: disable read caching on a single-container fault-injection service with the `source_quarantine` S3 fixture. Check backend reads, bytes and bodies for encrypted packs copied to chunks/raw. Corrupt the source between verification and replay; the original destination must survive and retry must work.
+- `storage/raw_streaming.py`: large raw parts, original ETags, full digest and cross-part ranges. `--part-mib`, `--repeat` and `--label` record UploadPart/Complete times and service RSS; `--order sequential|reverse` changes upload order. Remote mode needs `MOKYU_TEST_BACKEND`. For local mode specify `--local` and unset the backend. `MOKYU_TEST_PID_FILE` must belong to the same container. Compare only like builds and budgets.
+- `storage/raw_replay.py`: pause Copy/multipart after validation, alter the dedicated remote raw or local pending source, and check that failure preserves the destination and uploaded parts. Restore and retry with `MOKYU_TEST_BACKEND` and a fault-injection build.
+
+- `storage/single_lifecycle.py`: early local ACK, durable upload, pack/rewrite/unpack, checks, capacity and cleanup.
+
+## Quarantine
+
+`source_quarantine_contract` uses a fresh `MOKYU_TEST_CONFIG` and `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only` on all four products. Check reference/publication denial, execution tokens, access, quarantine generations, maintenance ABA and independent background audit. The pack publication contract also checks healthy alternatives.
+
+`postgres_source_validation_allows_references` uses a fresh PostgreSQL `MOKYU_TEST_DATABASE_URL_FILE`. A source qualification lock allows regular references but blocks physical quarantine and mapping changes; repeated references must not update an already-cleared survival time. Check fresh state after three lock waits in both scopes, transaction/lock retention after an unavailable result, empty/fragment sources, 4097 chunks and generic/custom plans.
+
+`postgres_pending_release_preserves_only_copy` protects the only referenced pending copy, covering EOF-reordered stream ranges, duplicate references and an existing task owner.
+
+`python -m tests.storage.source_quarantine` runs on a dedicated fault-injection service. Verify pre-reference/pre-publication quarantine, rejected Copy/UploadPartCopy/Complete, preserved destinations, cached bodies/ranges/304, CSRF, idempotence, paused recheck and recovery. Set `MOKYU_TEST_BINARY`, `MOKYU_TEST_CONFIG`, `MOKYU_TEST_ENDPOINT`, `MOKYU_TEST_WEB`, `MOKYU_TEST_FAULT_DIR` and `MOKYU_TEST_PASSWORD_FILE`; initialize admin tester and enable the response cache. For local storage provide dedicated `MOKYU_TEST_FSYNC_ROOT`. For simulated S3 supply `MOKYU_TEST_BACKEND` JSON with endpoint, bucket, region, access_key, secret_key and prefix. The test creates storage, buckets and credentials; never use a real bucket.
+
+In cluster mode set `MOKYU_TEST_SOURCE_FAULT_DIRS` to comma-separated data/worker fault directories and `MOKYU_TEST_SECOND_CONTROL` to the second control for concurrent execution of one preview. Match the configured Web origin to MOKYU_TEST_WEB. `python -m tests.storage.pack_quarantine` uses the same simulated S3 fixture for exact pack recheck, unchanged membership, maintenance recovery and ordinary member rejection. Both tests modify physical bytes in this disposable backend.
+In the same fixture `python -m tests.storage.quarantine_gc` removes the logical object and runs independent GC before the full recheck commits; verify exact physical protection and CAS rejection after retirement. `python -m tests.storage.quarantine_permissions` revokes the initiating administrator before commit; quarantine must remain in effect.
+
+`python -m tests.storage.quarantine_replica` needs a real PostgreSQL standby, a replica-enabled data node, and dedicated primary/standby admin DSN files `MOKYU_TEST_DATABASE_FILE` and `MOKYU_TEST_REPLICA_DATABASE_FILE`. It rewrites fixture extents to force pagination, pauses WAL replay, then quarantines the source. Stale snapshots cannot authorize Copy/cold fetch; in-flight streams must be correct and complete or fail truncated.
+
+`web/tests/source-quarantine.spec.ts` uses real management APIs and dedicated quarantined sources. Check the list, confirmation phrase and full recheck. The spec defines the fixture and environment.
+
+## Retransmission and repair
+
+`source_recovery_contract` takes a new `MOKYU_TEST_CONFIG` to check candidate ownership, metadata, concurrent winners, ABA, write generations, old references and unknown-candidate cleanup. PostgreSQL also checks credential isolation after re-registering an ID, draining and expired write leases. MySQL bootstrap tests inspect trigger structure, reject interrupted initialization and refuse failed history.
+
+The following Python modules reuse the source-quarantine fixture and create their own storage and buckets. Give them access to the same dedicated primary using `MOKYU_TEST_CONFIG`. Install psycopg for PostgreSQL or PyMySQL for MySQL/MariaDB. Run local and simulated S3 cases separately.
+
+- `tests.recovery.source_repair`: three encodings, full readback of bad candidates, overwrite/profile races, recovery of previous objects, UploadPart/Web, conditions, truncated bodies and bad checksums. Recovery writes an audit record; audit failure rolls back the transaction.
+- `tests.recovery.pack_repair`: repair individual members on simulated S3, preserve the original layout and reclaim the pack only after the final member releases it.
+- `tests.recovery.repair_cluster`: two real data nodes, `MOKYU_TEST_SECOND_DATA` and the first data node's `MOKYU_TEST_NODE_STATE`. Check no DB claim spans I/O, dual-candidate CAS, independent GC, revocation, expiry and drain. Dedicated PostgreSQL only.
+- `tests.recovery.repair_node`: run inside the first data node's process namespace. Kill/restart that node; check unexpired candidates survive for another data node and expired candidates are cleaned up. Set `MOKYU_TEST_NODE_CONFIG`, `MOKYU_TEST_DATA` and `MOKYU_TEST_GATEWAY_PID_FILE`. The CLI must reach control on a separately forwarded port, not local data. Restart data after the drain case before running this test.
+- `tests.recovery.repair_lifecycle`: single-container only. `MOKYU_TEST_DATA` and `MOKYU_TEST_GATEWAY_PID_FILE` identify the process to kill/restart. Check all recovery checkpoints and bounded late PUT after first deletion.
+- `tests.recovery.repair_fsync`: reuse `local_durability.py`'s LD_PRELOAD/fsync fixture; recovery must not acknowledge a failed file or directory sync.
+
+## Transfer and redundancy
+
+`tests/storage/replication_cross_store.py` uses the opted-in storage fixture to verify public cross-store raw/chunk copies, repeated version receipts, ACL-only reuse, moves and existing-target conflicts. `MOKYU_TEST_REPLICATION_MODE=raw|chunks` selects the source representation; `MOKYU_TEST_REPLICATION_TARGET=raw|chunks` can select a different target representation. Run against isolated buckets and each supported database; API-only node deployments need a live worker for physical transfer.
+
+`tests/storage/replication_external.py` exposes `run(restart)` to an isolated process-recovery harness. The callback must stop the current executor, call the supplied fault-marker cleanup, then start a replacement executor; cluster runs can use another worker or node and must wait for real lease expiry. It checks ordinary S3 object copies, metadata and public-read policies, existing-target conflicts, multipart receipt recovery, active external resource deletion protection and cancellation cleanup. It uses the opted-in storage fixture and `MOKYU_TEST_FAULT_DIR`; the default provider is its ordinary Mokyu S3 endpoint. `MOKYU_TEST_EXTERNAL_PROVIDER=backend` uses the independent S3 backend with permission propagation disabled and still requires correct repeated-part recovery. Provider capability failures are not successful recovery results.
+
+`MOKYU_TEST_EXPORT_MODE=raw|chunks|pack` selects an internal source for that fixture, with source replacement and ACL changes at upload boundaries. The raw case crosses unaligned native multipart ranges and checks proof cleanup; the pack case rewrites actual packs with encryption. `tests/storage/replication_export_reads.py` separately checks that uncached 16/64 MiB raw exports read each source twice (one complete integrity scan and one proof-checked replay). Run that counter-based check in an otherwise idle single-mode fixture with an independent S3 backend; it is not a throughput benchmark.
+
+`MOKYU_TEST_IMPORT_MODE=raw|chunks|pack` instead selects `tests/storage/replication_import.py`, using the same opted-in harness and `restart` callback. It verifies external-to-native metadata/ACL propagation, bounded durable parts, unsealed retry, sealed reuse, native quota and live authorization, source/target changes and cancellation. Run all native database products and API-only worker/node takeover; the pack case uses an encrypted native target. Provider ACL limitations must use the explicit ignore policy.
+
+In an opted-in disposable deployment, call `tests/recovery/redundancy.py` with the fixture restart callback to exercise one-to-many links, concurrent updates, access revocation, queue limits and recovery. `tests/storage/redundancy_external.py` also takes a dedicated external S3 connection and checks drift repair, metadata, permissions and loop prevention. Both require independent native storage roots and fault injection. With two independent local roots, call `tests.recovery.synchronous_redundancy.run(restart)` to hold a physical transfer receipt, recover an admitted multipart completion after process death and token expiry, and pause a link mid-write. It verifies both object versions and ACLs at acknowledgement.
