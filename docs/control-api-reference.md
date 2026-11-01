@@ -4,7 +4,7 @@
 
 ## 通用约定
 
-- 认证使用 `mokyu_session` Cookie 或 `Authorization: Bearer TOKEN`，不能混用，令牌不能放入 URL。Cookie 为 HttpOnly、SameSite=Strict，Secure 和固定寿命见[配置](configuration.md#监听与管理)。
+- 认证使用 `mokyu_session` Cookie 或 `Authorization: Bearer TOKEN`，不能混用，令牌不能放入 URL。Cookie 为 HttpOnly、SameSite=Strict，Secure 和固定寿命见[配置](configuration.md#runtime-设置)。
 - Cookie 写请求要求 `Origin` 精确匹配 `control.origin`，并提交 `X-CSRF-Token`；登录、安装引导要求 Origin。`GET /api/v1/auth/session` 返回 CSRF token。Bearer 不使用 CSRF，桶 CORS 不作用于管理接口。
 - 登录、首次安装状态、安装提交、info 和 OpenAPI 无需已有会话，其余入口默认拒绝未认证请求。账户与 Token 自助管理仅接受 Cookie；管理员明确签发的 system Token 可调用实例管理入口。
 - 敏感管理写操作要求最近五分钟验证密码；收到 `ReauthenticationRequired` 后调用 `/api/v1/account/reauth` 再重试。system Token 不使用交互式密码验证。
@@ -125,6 +125,20 @@ connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）
 
 删除、清桶和转移限管理员，执行时提交预览返回的 confirmation 与精确 confirm_name。空桶删除也要求没有残留流或上传历史。转移先暂停新上传并排空写入、multipart、额度预留，再检查目标额度、转移用量、清除旧桶授权，按目标项目范围重新计算权限；公共域名和桶限额保留，成功后恢复新上传。已开始的 multipart 在暂停期间仍可完成。
 
+### 图片处理
+
+以下路径相对 `/api/v1/buckets/{bucket}/image-processing`。表单与导入使用同一份规则验证，变更按桶修订号提交；同时编辑时应重新读取当前配置再应用修改。
+
+| 方法与路径 | 用途 |
+| --- | --- |
+| `GET /styles` | 读取设置及样式页；支持 `prefix`、`after`、`limit` |
+| `PUT` 根路径 | 提交当前修订号、策略和样式变更；不完整的自动映射或命名冲突不会部分生效 |
+| `POST /preview` | 在指定配置修订和对象版本上预览待保存的规则，结果按当前读取授权返回 |
+| `POST /styles/import` | 分析、预览或应用文本样式；返回行级错误和冲突 |
+| `GET /styles/export`、`POST /styles/export` | 根据名称或前缀导出可重导入的样式文本 |
+
+公开读取、短链接映射和 CDN 策略见[图片处理](image-processing.md)。
+
 ### 网站设置
 
 默认关闭，index_document 默认 `index.html`，为 1～255 字节文件名；error_document 默认 `404.html`，为最多 1024 字节的桶内路径，空值使用内置 404。页面必须已存在且 public-read，不改变 S3 路由。域名绑定不会抢占其他桶，public_base_url 只用于生成链接，不配置 DNS/TLS。
@@ -168,7 +182,7 @@ connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）
 | `/thumbnail` | PNG 缩略图，每次验证 object.read |
 | `/text` | 最多前 64 KiB 的安全文本，object.read |
 
-均用 key/version 绑定当前对象，覆盖后旧版本返回 412。图片、音频和视频按允许的 MIME 明确加载；HTML/SVG 不嵌入，XML 等按文本显示。下载带 nosniff、sandbox CSP 和 private/no-store；支持 Range 与条件读取。服务端缩略图受[格式、像素和内存限制](configuration.md#监听与管理)，失败保留类型卡片，不自动下载原图。
+均用 key/version 绑定当前对象，覆盖后旧版本返回 412。图片、音频和视频按允许的 MIME 明确加载；HTML/SVG 不嵌入，XML 等按文本显示。下载带 nosniff、sandbox CSP 和 private/no-store；支持 Range 与条件读取。服务端缩略图受[输入、像素和内存限制](image-processing.md#大图缓存与媒体库)，失败保留类型卡片，不自动下载原图。
 
 ## 对象操作
 

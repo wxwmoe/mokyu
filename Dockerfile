@@ -50,7 +50,7 @@ COPY --from=image-tools /opt/mokyu /opt/mokyu
 FROM image-runtime
 ENV MALLOC_MMAP_THRESHOLD_=131072
 COPY --from=build /mokyu /usr/local/bin/mokyu
-RUN mkdir -p /data/multipart /data/chunks /config \
+RUN mkdir -p /data /config \
     && chown -R 10001:10001 /data
 USER 10001:10001
 EXPOSE 9000 9001 9002

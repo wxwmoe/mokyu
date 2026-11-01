@@ -90,6 +90,10 @@ HEAD 和 304 只读取当前对象元数据，不读取区块、不占正文读�
 
 后续区块损坏可能使响应中止，已发出的前部区块仍经过校验；客户端须核对 Content-Length 和响应完整性。
 
+## 公共图片
+
+启用桶图片处理后，支持的匿名公开读取可返回样式产物；原图保护覆盖匿名 GET、HEAD、条件和范围请求。签名 S3 读取始终按原对象和原 ACL 处理。图片参数、格式协商的 302 及固定地址缓存见[桶图片处理](image-processing.md)。
+
 ## 公共响应压缩
 
 公共 Web 与通过匿名认证的 S3 GetObject/HeadObject 按 Accept-Encoding 的 q 值协商，同权重时优先 zstd、br、gzip、identity；未发送或空值返回原始表示。签名与预签名请求、checksum mode、已有 Content-Encoding 和请求或对象的 no-transform 均不追加编码。无可接受表示返回 406；禁止 identity 且编码工作内存不足时返回 503。

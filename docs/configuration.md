@@ -190,6 +190,8 @@ mokyu cli status      # 本机 control HTTP
 
 `mokyu cli` 访问 `127.0.0.1:instance.listen_control`。单容器使用部署密钥认证，群集 control 使用本机 `node.json` 凭据。worker/data/node 只提供 status。节点只有建立有效会话并完成配置同步后才启动数据入口或任务调度；连接中、恢复中、已隔离或停机排空状态可通过本机状态端口查询。数据库模式由单容器/control 的 `cluster mode single|cluster` 管理，成功切换后重启相应进程。
 
+图片处理属于桶设置，不依赖实例 TOML 开关。设置位置、默认输入上限、媒体库预览和独立的处理预算见[图片处理](image-processing.md)。
+
 ## 运行环境信息
 
 运行配置沿用现有字段列表，以“运行环境 / 读取值”展示数据库程序、连接初始化时的版本和结构版本，以及程序版本、平台、CPU 和内存识别结果。环境行只读；`effective.*` 仍是高级详情中的最终预算。MySQL 配置连接 MariaDB 时，程序名称显示 MariaDB。

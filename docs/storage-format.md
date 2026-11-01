@@ -122,6 +122,7 @@ S3 写缓存接收新块时先持久保存已校验的原始字节，不提前�
 <data_path>/node.json
 <data_path>/cache/chunks/<后两位>/<UUID>{.zst|.raw}
 <data_path>/cache/raw/<后两位>/<UUID>
+<data_path>/cache/images/<派生键>/{metadata,output}
 <data_path>/pending/chunks/<后两位>/<UUID>{.zst|.raw}
 <data_path>/pending/raw/<后两位>/<UUID>{|.partial}
 <data_path>/pending/multipart/fragment/<UUID>
@@ -153,3 +154,5 @@ background 模式的完整远端 raw 在发送正文时，将同一批字节交�
 所有写入先持久化文件或远端对象，再提交数据库映射；local 后端在确认成功前同步文件和父目录，同步失败不会发布新映射。对象发布要求 stream 连续、来源 ready、长度和哈希全部匹配。跨 storage 的复制/移动由异步 `storage_migration` 任务完成复制、校验、权限和发布一致性；部署管理员负责两端容量、凭据、网络和供应商策略。
 
 写入调度由每个后端的 `write_flush_interval`、`write_backlog_max_age` 和 `background_scheduling` 控制，取值及准入边界见[配置参考](configuration.md)。`cache status` 的 `write_backlog` 提供各后端最早待写时间与快照距今秒数，合并等待不改变已选择的确认级别或回收保护。
+
+公开样式与管理缩略图共用 `cache/images`。键由经过验证的来源标识、规范化后的固定处理规则和实现版本生成；不以对象路径或 ETag 单独作为身份。元数据和输出共同发布，读出时检查长度和摘要；损坏或淘汰后可从当前授权的来源重建。该目录不需要备份，不能替代 `pending` 中的唯一副本。

@@ -4,7 +4,7 @@
 
 默认读取 `/config/config.toml`，可用 `mokyu -c PATH cli ...` 或 `mokyu --config PATH cli ...` 指定配置。
 
-成功向 stdout 输出 JSON、退出 0；执行或连接失败向 stderr 输出错误并非零退出，参数错误退出 2。管理帧最多 1 MiB，RPC 等待 60 秒。任务创建成功表示已排队，后续结果通过 `task show` 查看。
+除样式文本导出外，成功向 stdout 输出 JSON、退出 0；执行或连接失败向 stderr 输出错误并非零退出，参数错误退出 2。管理帧最多 1 MiB，RPC 等待 60 秒。任务创建成功表示已排队，后续结果通过 `task show` 查看。
 
 离线命令 `mokyu tool openapi` 输出管理 API 的 OpenAPI JSON，不访问配置、数据库或服务；`mokyu tool keygen` 生成部署 key。
 
@@ -43,6 +43,19 @@ CORS 文件示例，字段规则见[CORS 设置](control-api-reference.md#cors-�
 ```sh
 docker exec mokyu mokyu cli bucket cors media /config/cors.json
 ```
+
+## 图片样式
+
+在线命令使用桶名。导入接受下列三种来源之一；文件和标准输入均为每行一条的样式文本。`--dry-run` 只校验、不保存，`--line 1,3` 可选择行，`--name-prefix` 在导入时加到样式名前。重名策略为 `error`（默认）、`skip` 或 `replace`。
+
+```sh
+mokyu cli styles import --bucket photos --text 'styleName: crop1, styleBody: imageMogr2/crop/400x400'
+mokyu cli styles import --bucket photos --file styles.txt --dry-run
+mokyu cli styles import --bucket photos --file - < styles.txt
+mokyu cli styles export --bucket photos --name-prefix q90. --output styles.txt
+```
+
+导出默认将样式文本写到 stdout，也可用一个或多个 `--name` 选择确切名称；名称列表和前缀不能同时指定。导出结果可原样再导入。样式编辑表单及公开 URL 见[图片处理](image-processing.md)。
 
 ## 存储
 
@@ -254,7 +267,7 @@ docker exec -it mokyu mokyu cli storage sweep --execute --preview PREVIEW_UUID
 | `head` | metadata，加存储对象存在性及编码长度 |
 | `full` | metadata，加远端下载、认证、解压、长度及 BLAKE3 校验 |
 
-巡检只报告，不修复或删除数据；远端检查绕过且不填充缓存，共享物理块每轮只检查一次。没有远端来源的 pending 块在所有模式下校验本地唯一副本。`completed` 仍可能有异常，应查看 `detail.issues`；网络、权限及超时使任务 `failed`，可恢复后继续。覆盖边界、异常代码和 JSONL 导出见[巡检 API](control-api-reference.md#完整性巡检)，并发和限速见[配置](configuration.md#完整性巡检)。
+巡检只报告，不修复或删除数据；远端检查绕过且不填充缓存，共享物理块每轮只检查一次。没有远端来源的 pending 块在所有模式下校验本地唯一副本。`completed` 仍可能有异常，应查看 `detail.issues`；网络、权限及超时使任务 `failed`，可恢复后继续。覆盖边界、异常代码和 JSONL 导出见[巡检 API](control-api-reference.md#完整性巡检)。
 
 ```sh
 docker exec mokyu mokyu cli integrity check --mode full --bucket media
