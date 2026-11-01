@@ -1,34 +1,23 @@
 mod connection;
-mod external_queries;
-mod external_transactions;
-mod image_queries;
+use queries::image as image_queries;
 #[path = "../image_transactions.rs"]
 mod image_transactions;
 mod migration;
 mod queries;
-mod redundancy_queries;
-mod redundancy_transactions;
-mod replica_queries;
+use queries::redundancy as redundancy_queries;
+use queries::replica as replica_queries;
+use transactions::redundancy as redundancy_transactions;
 #[path = "../replica_transactions.rs"]
 mod replica_transactions;
-mod replication_change_queries;
-mod replication_change_transactions;
-mod replication_import_queries;
-mod replication_import_transactions;
-mod replication_queries;
-mod replication_remote_queries;
-mod replication_remote_transactions;
-mod replication_transactions;
+use queries::replication as replication_queries;
 #[path = "../tier_move_transactions.rs"]
 mod tier_move_transactions;
-mod tier_queries;
+use queries::tier as tier_queries;
 #[path = "../tier_read_queries.rs"]
 mod tier_read_queries;
 #[path = "../tier_transactions.rs"]
 mod tier_transactions;
 mod transactions;
-mod transfer_queries;
-mod transfer_transactions;
 
 use sqlx::SqlitePool;
 use std::{fs::File, path::PathBuf};
