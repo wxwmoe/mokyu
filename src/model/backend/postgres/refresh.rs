@@ -1,4 +1,4 @@
-use super::{queries, read_sources::Sources, transactions};
+use super::{queries, queries::sources::Sources, transactions};
 use crate::{
     app::{Bucket, StoredStream},
     cluster::NodeState,
@@ -18,8 +18,7 @@ use std::{
 use tokio::sync::{Semaphore, oneshot};
 use uuid::Uuid;
 
-#[path = "refresh_queries.rs"]
-mod sql;
+use super::queries::refresh as sql;
 
 const GROUP_LIMIT: usize = 128;
 const MATERIAL_LIMIT: usize = 8 * 1024 * 1024;
