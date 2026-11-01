@@ -47,7 +47,7 @@ small { font-size: var(--caption-size, smaller); }
 @media (max-width: 720px) { .maintenance-tools, .service-metrics { grid-template-columns: 1fr; }.task-progress { display: none; }.task-row { gap: 9px; }.task-row .policy-icon { width: 34px; height: 34px; border-radius: 11px; }.task-row .badge { font-size: var(--caption-size, 10px); }.task-board, .config-board { padding: 16px; }.task-filters form { width: 100%; margin: 0; }.task-filters form input { flex: 1; width: 100%; }.recovery-card { padding: 20px; }.recovery-card > .section-heading { flex-wrap: wrap; }.config-fields article { grid-template-columns: 1fr; gap: 7px; }.managed-key-row { grid-template-columns: auto minmax(0, 1fr) auto; }.managed-key-state { grid-column: 2 / -1; }.managed-key-row .actions { grid-column: 2 / -1; justify-content: flex-start; }.store-form-grid { grid-template-columns: 1fr; }.store-form-wide { grid-column: auto; }.storage-detail-grid { grid-template-columns: 1fr; }.storage-maintenance .section-heading { align-items: flex-start; flex-direction: column; } }
 @media (max-width: 560px) { .policy-grid { grid-template-columns: 1fr; }.single-pack-form { flex-wrap: wrap; }.single-pack-form label { flex-basis: 100%; }.maintenance-section-title { flex-direction: column; align-items: flex-start; }.task-row .task-name { font-size: var(--small-size, 12px); } }
 button, input, textarea { font: inherit; }
-button, .button { border: 1px solid var(--line); border-radius: 11px; padding: 9px 15px; background: var(--surface); color: inherit; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: var(--ui-weight, 700); line-height: 1.5; transition: background .16s, border-color .16s, box-shadow .16s, transform .12s; }
+button, .button { border: 1px solid var(--line); border-radius: 11px; padding: 9px 15px; background: var(--surface); color: inherit; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px; font-weight: var(--ui-weight, 700); line-height: normal; transition: background .16s, border-color .16s, box-shadow .16s, transform .12s; }
 button:hover, .button:hover { background: var(--rose-soft); border-color: var(--rose-line); }
 button:active:not(:disabled):not(.ui-switch), .button:active { transform: translateY(1px); }
 /* Keep composite rows steady while compact controls give press feedback. */
@@ -477,7 +477,8 @@ details > summary { cursor: pointer; font-size: var(--small-size, 12px); color: 
 .cors-methods { display: flex; gap: 10px 20px; flex-wrap: wrap; }
 .form-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .lifecycle-card { margin-top: 24px; }
-.lifecycle-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 20px 0; border-top: 1px solid var(--line); }
+.lifecycle-row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 20px 0; }
+.lifecycle-row + .lifecycle-row { border-top: 1px solid var(--line); }
 .lifecycle-row strong { font-size: 14px; }.lifecycle-row p { font-size: var(--small-size, 12px); color: var(--muted); max-width: 520px; }
 .lifecycle-row > button, .lifecycle-row .actions { flex-shrink: 0; }
 .lifecycle-danger { margin-top: 8px; }.bucket-impact { margin-top: 24px; }.bucket-impact .info-callout { display: block; }

@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { test, expect, type Page } from '@playwright/test'
+import en from '../src/locales/i18n.en.js'
 import zh from '../src/locales/i18n.zh-CN.js'
 import ja from '../src/locales/i18n.ja.js'
 test.beforeEach(async ({ request }) => {
@@ -67,7 +68,7 @@ test('account locale, appearance, profile guard and avatar fallback', async ({ p
   await expect(page.getByRole('dialog', { name: 'Leave these changes behind?' })).toBeVisible()
   await page.getByRole('button', { name: 'Keep editing', exact: true }).click()
   await page.getByRole('button', { name: 'Save changes', exact: true }).click()
-  await expect(page.getByText('All tucked away', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText(en.profileSaved, { exact: true }).first()).toBeVisible()
   await page.getByRole('combobox', { name: 'Appearance', exact: true }).click()
   await page.getByRole('option', { name: 'Dark', exact: true }).click()
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark')

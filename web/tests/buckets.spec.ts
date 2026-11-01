@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs'
 import { test, expect } from '@playwright/test'
 import en from '../src/locales/i18n.en.js'
 
-test('bucket creation, settings conflicts, CORS, website, paused transfer and deletion', async ({ page, request }) => {
+test('bucket creation, settings conflicts, CORS, website, paused transfer and deletion', async ({ page, request }, info) => {
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
   const login = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
@@ -24,6 +24,11 @@ test('bucket creation, settings conflicts, CORS, website, paused transfer and de
     await page.getByRole('button', { name: en.createBucket, exact: true }).click()
     let dialog = page.getByRole('dialog', { name: en.createBucket, exact: true })
     await dialog.getByRole('textbox', { name: en.bucketName, exact: true }).fill(name)
+    const storage = dialog.getByRole('combobox', { name: en.storageTarget, exact: true })
+    if (await storage.count()) {
+      await storage.click()
+      await page.getByRole('option').first().click()
+    }
     await dialog.getByRole('button', { name: en.createBucket, exact: true }).click()
     await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
     id = page.url().split('/').pop()!
@@ -33,6 +38,9 @@ test('bucket creation, settings conflicts, CORS, website, paused transfer and de
     await page.getByRole('button', { name: en.save, exact: true }).click()
     await expect.poll(async () => (await (await request.get(path)).json()).domains.length).toBe(2)
     await page.getByRole('tab', { name: 'CORS', exact: true }).click()
+    const hint = await page.getByText(en.corsHint, { exact: true }).boundingBox()
+    const notice = await page.getByText(en.corsOff, { exact: true }).boundingBox()
+    expect(notice!.y - hint!.y - hint!.height).toBeGreaterThanOrEqual(12)
     await page.getByRole('button', { name: en.corsPreset, exact: true }).click()
     await page.getByRole('button', { name: en.save, exact: true }).click()
     await expect.poll(async () => (await (await request.get(path)).json()).bucket.cors.length).toBe(1)
@@ -61,7 +69,7 @@ test('bucket creation, settings conflicts, CORS, website, paused transfer and de
     await expect(dialog.getByRole('textbox')).toBeVisible()
     await dialog.getByRole('textbox').fill(name)
     await expect(dialog.getByRole('button', { name: en.confirmTransfer, exact: true })).toBeEnabled()
-    await page.screenshot({ path: '/results/step14-transfer.png' })
+    await page.screenshot({ path: info.outputPath('bucket-transfer.png') })
     await dialog.getByRole('button', { name: en.confirmTransfer, exact: true }).click()
     await expect.poll(async () => (await (await request.get(path)).json()).bucket.project_id).toBe(project.id)
     await expect(dialog).not.toBeVisible()

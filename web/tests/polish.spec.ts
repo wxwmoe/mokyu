@@ -239,6 +239,13 @@ test('list focus and footer rhythm stay consistent', async ({ page }) => {
   expect(users.iconBackground).not.toBe(users.background)
   expect(credentials.background).toBe('rgba(0, 0, 0, 0)')
 
+  // Exercise paginated footers independently of retained audit and task history.
+  await page.route(/\/api\/v1\/(audit|tasks)\?/, async route => {
+    const response = await route.fetch()
+    const result = await response.json()
+    expect(result.items.length).toBeGreaterThan(0)
+    await route.fulfill({ response, json: { ...result, next_cursor: result.items.at(-1).id } })
+  })
   const footerGap = async (path: string, selector: string) => {
     await page.goto('/' + path)
     const footer = page.locator(selector)
