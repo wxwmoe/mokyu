@@ -41,6 +41,7 @@ use std::sync::Arc;
 pub(crate) use connection::connect;
 
 pub(crate) struct Backend {
+    control_epoch: Option<(i64, i32)>,
     database_info: Option<crate::model::runtime::DatabaseInfo>,
     pool: PgPool,
     owner: tokio::sync::Mutex<PgConnection>,
@@ -52,6 +53,7 @@ pub(crate) struct Backend {
 impl Backend {
     pub(crate) fn new(pool: PgPool, owner: PgConnection, single: bool) -> Self {
         Self {
+            control_epoch: None,
             database_info: None,
             pool,
             owner: tokio::sync::Mutex::new(owner),

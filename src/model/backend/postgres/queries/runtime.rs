@@ -386,6 +386,26 @@ pub(in super::super) fn maintenance_state() -> Rows<'static, (Value, bool, DateT
     )
 }
 
+pub(in super::super) fn claim_control_epoch() -> Rows<'static, (i64, i32)> {
+    sqlx::query_as(
+        "UPDATE mokyu_meta SET control_epoch=control_epoch+1 WHERE singleton AND deployment_mode='single_control' RETURNING control_epoch,pg_backend_pid()",
+    )
+}
+
+impl Backend {
+    pub(in super::super) async fn fence_control(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<()> {
+        if let Some((epoch, pid)) = self.control_epoch {
+            let current: bool = sqlx::query_scalar("SELECT control_epoch=$1 AND deployment_mode='single_control' AND EXISTS(SELECT 1 FROM pg_locks WHERE pid=$2 AND locktype='advisory' AND classid=(734922709851001::bigint >> 32)::oid AND objid=(734922709851001::bigint & 4294967295)::oid AND objsubid=1 AND mode='ExclusiveLock' AND granted) FROM mokyu_meta WHERE singleton FOR SHARE")
+                .bind(epoch).bind(pid).fetch_one(&mut **tx).await?;
+            anyhow::ensure!(current, "control ownership was lost");
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl RuntimeStore for Backend {
     fn database_info(&self) -> Option<&crate::model::runtime::DatabaseInfo> {

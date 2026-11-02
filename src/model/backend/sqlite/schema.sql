@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102105753.
+-- Generated from the complete sqlite migration chain through 20261102175500.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -362,7 +362,9 @@ CREATE TABLE mokyu_meta (
     maintenance INTEGER NOT NULL DEFAULT 0 CHECK(maintenance IN (0,1)),
     project_management INTEGER NOT NULL DEFAULT 0 CHECK(project_management IN (0,1)),
     pack_creation_paused INTEGER NOT NULL DEFAULT 0 CHECK(pack_creation_paused IN (0,1))
-) STRICT;
+, deployment_mode TEXT NOT NULL DEFAULT 'single'
+    CHECK (deployment_mode IN ('single', 'single_control')), deployment_mode_revision INTEGER NOT NULL DEFAULT 1
+    CHECK (deployment_mode_revision > 0), control_epoch INTEGER NOT NULL DEFAULT 0 CHECK (control_epoch >= 0)) STRICT;
 
 CREATE TABLE multipart_files (
     id BLOB NOT NULL PRIMARY KEY CHECK (length(id)=16),

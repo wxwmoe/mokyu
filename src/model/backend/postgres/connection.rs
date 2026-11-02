@@ -393,7 +393,15 @@ pub async fn connect(
             .all(|id| secrets.key_for_id(Some(*id)).is_some()),
         "database is missing a historical chunk key"
     );
+    let control_epoch = if role == "single" {
+        queries::claim_control_epoch()
+            .fetch_optional(&mut owner)
+            .await?
+    } else {
+        None
+    };
     let mut backend = Backend::new(pool, owner, role == "single");
+    backend.control_epoch = control_epoch;
     backend.database_info = Some(database_info);
     if matches!(role, "control" | "data")
         && let Some(replica) = &c.replica_database

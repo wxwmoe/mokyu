@@ -16,6 +16,32 @@ pub(in super::super) fn initialize_meta(version: i64) -> Statement<'static> {
     sqlx::query("INSERT INTO mokyu_meta(id,schema_version,deployment_id) VALUES(1,?,UNHEX(REPLACE(UUID(),'-','')))").bind(version)
 }
 
+pub(in super::super) fn claim_control_epoch() -> Statement<'static> {
+    sqlx::query(
+        "UPDATE mokyu_meta SET control_epoch=control_epoch+1 WHERE id=1 AND deployment_mode='single_control'",
+    )
+}
+
+pub(in super::super) fn current_control_epoch() -> Rows<'static, (i64, i64)> {
+    sqlx::query_as(
+        "SELECT control_epoch,CAST(CONNECTION_ID() AS SIGNED) FROM mokyu_meta WHERE id=1",
+    )
+}
+
+impl Backend {
+    pub(in super::super) async fn fence_control(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    ) -> Result<()> {
+        if let Some((epoch, connection)) = self.control_epoch {
+            let current: bool = sqlx::query_scalar("SELECT control_epoch=? AND deployment_mode='single_control' AND COALESCE(IS_USED_LOCK(SHA2(CONCAT('mokyu:runtime:',DATABASE()),256))=?,FALSE) FROM mokyu_meta WHERE id=1 LOCK IN SHARE MODE")
+                .bind(epoch).bind(connection).fetch_one(&mut **tx).await?;
+            anyhow::ensure!(current, "control ownership was lost");
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl RuntimeStore for Backend {
     fn database_info(&self) -> Option<&crate::model::runtime::DatabaseInfo> {
@@ -30,8 +56,8 @@ impl RuntimeStore for Backend {
         self.state().await
     }
     async fn state(&self) -> Result<RuntimeState> {
-        let (gc_paused, maintenance, pack_creation_paused) = sqlx::query_as(
-            "SELECT gc_paused,maintenance,pack_creation_paused FROM mokyu_meta WHERE id=1",
+        let (gc_paused, maintenance, pack_creation_paused, mode, mode_revision) = sqlx::query_as(
+            "SELECT gc_paused,maintenance,pack_creation_paused,deployment_mode,deployment_mode_revision FROM mokyu_meta WHERE id=1",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -39,8 +65,8 @@ impl RuntimeStore for Backend {
             gc_paused,
             maintenance,
             pack_creation_paused,
-            mode: "single".into(),
-            mode_revision: 0,
+            mode,
+            mode_revision,
         })
     }
     async fn pending_uploads(&self) -> Result<bool> {

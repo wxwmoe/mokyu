@@ -511,12 +511,7 @@ impl App {
         Ok(())
     }
     pub(crate) fn ensure_mode(&self) -> Result<()> {
-        let expected = if self.role == "single" {
-            "single"
-        } else {
-            "cluster"
-        };
-        if self.started_mode != expected
+        if !crate::model::runtime::accepts_role(&self.started_mode, &self.role)
             || self
                 .restart_required
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -589,12 +584,8 @@ impl App {
     pub async fn status(&self) -> Result<Value> {
         let state = self.runtime.state().await?;
         let (pool_size, pool_idle) = self.runtime.pool();
-        let expected = if self.role == "single" {
-            "single"
-        } else {
-            "cluster"
-        };
-        let mismatch = state.mode != expected
+        let mismatch = self.started_mode != state.mode
+            || !crate::model::runtime::accepts_role(&state.mode, &self.role)
             || self
                 .restart_required
                 .load(std::sync::atomic::Ordering::Acquire);

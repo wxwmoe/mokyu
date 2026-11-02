@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102105753.
+-- Generated from the complete mysql migration chain through 20261102175500.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -483,7 +483,13 @@ CREATE TABLE `mokyu_meta` (
   `maintenance` tinyint(1) NOT NULL DEFAULT '0',
   `project_management` tinyint(1) NOT NULL DEFAULT '0',
   `pack_creation_paused` tinyint(1) NOT NULL DEFAULT '0',
+  `deployment_mode` varchar(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'single',
+  `deployment_mode_revision` bigint NOT NULL DEFAULT '1',
+  `control_epoch` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
+  CONSTRAINT `mokyu_meta_chk_1` CHECK ((`deployment_mode_revision` > 0)),
+  CONSTRAINT `mokyu_meta_chk_2` CHECK ((`control_epoch` >= 0)),
+  CONSTRAINT `mokyu_meta_mode` CHECK ((`deployment_mode` in (_utf8mb4'single',_utf8mb4'single_control'))),
   CONSTRAINT `mokyu_meta_singleton` CHECK ((`id` = 1))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 

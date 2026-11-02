@@ -674,7 +674,7 @@ pub(in super::super) fn insert_multipart_checkpoint(
     upload: Uuid,
     source: Id,
 ) -> Statement<'static> {
-    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id,source_id,state) SELECT r.id,$2,r.storage_id,r.id,'sealed' FROM raw_sources r WHERE r.id=$1 AND r.state='writing' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND deployment_mode='single') AND r.owner_stream IS NOT NULL ON CONFLICT(id) DO NOTHING").bind(source).bind(upload)
+    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id,source_id,state) SELECT r.id,$2,r.storage_id,r.id,'sealed' FROM raw_sources r WHERE r.id=$1 AND r.state='writing' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND deployment_mode IN ('single','single_control')) AND r.owner_stream IS NOT NULL ON CONFLICT(id) DO NOTHING").bind(source).bind(upload)
 }
 
 pub(in super::super) fn remap_multipart_range<'a>(
@@ -839,11 +839,8 @@ pub(in super::super) fn raw_upload_id(
 }
 
 pub(in super::super) fn raw_upload_mode(cluster: bool) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT deployment_mode=$1 FROM mokyu_meta FOR SHARE").bind(if cluster {
-        "cluster"
-    } else {
-        "single"
-    })
+    sqlx::query_scalar("SELECT deployment_mode IN ($1,'single_control') FROM mokyu_meta FOR SHARE")
+        .bind(if cluster { "cluster" } else { "single" })
 }
 
 pub(in super::super) fn raw_upload_abandon(source: Id) -> Statement<'static> {

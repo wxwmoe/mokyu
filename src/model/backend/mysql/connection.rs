@@ -219,6 +219,20 @@ pub(super) async fn open(
         blake3::hash(&secrets.credential_key.material).as_bytes(),
     )
     .await?;
+    let control_epoch = if queries::claim_control_epoch()
+        .execute(&mut owner)
+        .await?
+        .rows_affected()
+        == 1
+    {
+        Some(
+            queries::current_control_epoch()
+                .fetch_one(&mut owner)
+                .await?,
+        )
+    } else {
+        None
+    };
     let pool = MySqlPoolOptions::new()
         .min_connections(0)
         .max_connections(budget.database_connections)
@@ -241,6 +255,7 @@ pub(super) async fn open(
         .await
         .map_err(|_| anyhow::anyhow!("cannot open MySQL pool"))?;
     Ok(Backend {
+        control_epoch,
         database_info,
         pool,
         owner: tokio::sync::Mutex::new(owner),

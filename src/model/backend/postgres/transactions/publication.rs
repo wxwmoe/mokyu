@@ -29,6 +29,7 @@ impl PublishStore for Backend {
         completion: Option<(uuid::Uuid, String, Value, Uuid)>,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        self.fence_control(&mut tx).await?;
         let result = publish_in(&mut tx, id, if_match, if_none, completion).await;
         if matches!(&result, Ok(true))
             || result

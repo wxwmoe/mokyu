@@ -40,6 +40,7 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
 }
 
 pub(crate) struct Backend {
+    control_epoch: Option<(i64, i64)>,
     database_info: crate::model::runtime::DatabaseInfo,
     pool: MySqlPool,
     owner: tokio::sync::Mutex<MySqlConnection>,

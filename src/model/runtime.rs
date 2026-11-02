@@ -21,6 +21,34 @@ pub(crate) struct RuntimeState {
     pub(crate) mode_revision: i64,
 }
 
+pub(crate) fn accepts_role(mode: &str, role: &str) -> bool {
+    match mode {
+        "single" | "single_control" => role == "single",
+        "cluster" => role == "control",
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::accepts_role;
+
+    #[test]
+    fn database_runtimes_match_the_persisted_mode() {
+        for mode in ["single", "single_control", "cluster", "unknown"] {
+            for role in ["single", "control", "data", "worker", "node"] {
+                assert_eq!(
+                    accepts_role(mode, role),
+                    matches!(
+                        (mode, role),
+                        ("single" | "single_control", "single") | ("cluster", "control")
+                    )
+                );
+            }
+        }
+    }
+}
+
 #[async_trait]
 pub(crate) trait RuntimeStore: Send + Sync {
     fn database_info(&self) -> Option<&DatabaseInfo>;

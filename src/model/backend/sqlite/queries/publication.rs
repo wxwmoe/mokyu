@@ -109,6 +109,6 @@ impl PublishStore for Backend {
         if_none: Option<s3s::dto::ETagCondition>,
         completion: Option<(Uuid, String, Value, Uuid)>,
     ) -> Result<bool> {
-        transactions::publish(&self.write, stream, if_match, if_none, completion).await
+        transactions::publish(self, stream, if_match, if_none, completion).await
     }
 }

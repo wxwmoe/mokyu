@@ -42,9 +42,9 @@ pub(in super::super) async fn validate_identity(
         }
         crate::authorization::Principal::Local => {
             let query = if lock {
-                "SELECT deployment_mode='single' FROM mokyu_meta WHERE singleton FOR SHARE"
+                "SELECT deployment_mode IN ('single','single_control') FROM mokyu_meta WHERE singleton FOR SHARE"
             } else {
-                "SELECT deployment_mode='single' FROM mokyu_meta WHERE singleton"
+                "SELECT deployment_mode IN ('single','single_control') FROM mokyu_meta WHERE singleton"
             };
             if sqlx::query_scalar(query).fetch_one(connection).await? {
                 Ok(true)

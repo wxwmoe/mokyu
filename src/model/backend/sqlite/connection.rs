@@ -221,6 +221,7 @@ pub(super) async fn open(
         .await
         .context("cannot open SQLite database")?;
     let mut synchronous = SqliteSynchronous::Full;
+    let mut control_epoch = None;
     let initialized: Result<crate::model::runtime::DatabaseInfo> = async {
         let version = queries::version().fetch_one(&mut connection).await?;
         let numbers: Vec<u64> = version
@@ -246,6 +247,9 @@ pub(super) async fn open(
             blake3::hash(&secrets.credential_key.material).as_bytes(),
         )
         .await?;
+        control_epoch = queries::claim_control_epoch()
+            .fetch_optional(&mut connection)
+            .await?;
         let settings = queries::runtime_setting("io")
             .fetch_optional(&mut connection)
             .await?
@@ -310,6 +314,7 @@ pub(super) async fn open(
         .into(),
     );
     let backend = Backend {
+        control_epoch,
         database_info,
         authorization: Default::default(),
         previews: Default::default(),

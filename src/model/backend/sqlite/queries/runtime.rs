@@ -122,6 +122,27 @@ pub(in super::super) fn revoke_refreshes(session: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE session_refresh_tokens SET revoked_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE session_id=? AND revoked_at IS NULL").bind(session)
 }
 
+pub(in super::super) fn claim_control_epoch() -> Scalar<'static, i64> {
+    sqlx::query_scalar(
+        "UPDATE mokyu_meta SET control_epoch=control_epoch+1 WHERE id=1 AND deployment_mode='single_control' RETURNING control_epoch",
+    )
+}
+
+impl Backend {
+    pub(in super::super) async fn fence_control(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ) -> Result<()> {
+        if let Some(epoch) = self.control_epoch {
+            self.check_owner()?;
+            let current: bool = sqlx::query_scalar("SELECT control_epoch=? AND deployment_mode='single_control' FROM mokyu_meta WHERE id=1")
+                .bind(epoch).fetch_one(&mut **tx).await?;
+            anyhow::ensure!(current, "control ownership was lost");
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl RuntimeStore for Backend {
     fn database_info(&self) -> Option<&crate::model::runtime::DatabaseInfo> {
@@ -136,8 +157,8 @@ impl RuntimeStore for Backend {
         self.state().await
     }
     async fn state(&self) -> Result<RuntimeState> {
-        let (gc_paused, maintenance, pack_creation_paused) = sqlx::query_as(
-            "SELECT gc_paused,maintenance,pack_creation_paused FROM mokyu_meta WHERE id=1",
+        let (gc_paused, maintenance, pack_creation_paused, mode, mode_revision) = sqlx::query_as(
+            "SELECT gc_paused,maintenance,pack_creation_paused,deployment_mode,deployment_mode_revision FROM mokyu_meta WHERE id=1",
         )
         .fetch_one(&self.read)
         .await?;
@@ -145,8 +166,8 @@ impl RuntimeStore for Backend {
             gc_paused,
             maintenance,
             pack_creation_paused,
-            mode: "single".into(),
-            mode_revision: 0,
+            mode,
+            mode_revision,
         })
     }
     async fn pending_uploads(&self) -> Result<bool> {

@@ -1,13 +1,15 @@
 use super::*;
 
 pub(in super::super) async fn publish(
-    pool: &sqlx::SqlitePool,
+    backend: &super::super::Backend,
     id: Id,
     if_match: Option<s3s::dto::ETagCondition>,
     if_none: Option<s3s::dto::ETagCondition>,
     completion: Option<(uuid::Uuid, String, serde_json::Value, Uuid)>,
 ) -> Result<bool> {
+    let pool = &backend.write;
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    backend.fence_control(&mut tx).await?;
     let result = publish_in(&mut tx, id, if_match, if_none, completion).await;
     if matches!(&result, Ok(true))
         || result
