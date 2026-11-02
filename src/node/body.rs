@@ -589,17 +589,11 @@ impl Reader {
                 file.metadata().await?.len() == source.size as u64,
                 codec::IntegrityError::Length
             );
-            let mut file = RawFile::Local(file);
-            let _cpu = self.cpu.clone().acquire_owned().await?;
-            file.verify(source).await?;
-            file.rewind().await?;
-            return Ok((file, io));
+            return Ok((RawFile::Local(file), io));
         }
         ensure!(source.medium == "shared_s3", "invalid node raw medium");
         let backend = prepared.backend(source.storage_id)?;
-        let verify = verify_backend
-            || prepared.verify
-            || crate::storage::ReadContext::integrity(&backend.profile.read_integrity) == "inline";
+        let verify = verify_backend;
         let lock = self.files.raw_lock(source, &backend.profile);
         let _miss = match &lock {
             Some(lock) => Some(lock.lock().await),
@@ -912,34 +906,49 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                     capture.lock().unwrap().demand(position as i64,position as i64+segment.length,source);
                 }
                 if let read::Source::Raw { source } = &segment.source {
-                    let result = current.guard(&reads.node, reads.reader.raw(&reads.node, &current, source, false)).await;
-                    if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
-                    let (mut file, _io) = result?;
-                    current.guard(&reads.node, async { file.seek(std::io::SeekFrom::Start(segment.source_offset as u64)).await?; Ok(()) }).await?;
-                    let mut audit = reads.check_raw(current.clone(), index, source,
-                        segment.source_offset == 0 && segment.length == source.size, matches!(&file, RawFile::Remote(_)))?;
-                    let mut remaining = segment.length as usize;
-                    while remaining > 0 {
-                        let result = current.guard(&reads.node, async {
-                            let memory = current.buffers.clone().acquire_many_owned((RAW_BUFFER * 2 / UNIT) as u32).await?;
-                            let mut bytes = vec![0; remaining.min(RAW_BUFFER)];
-                            let count = file.read(&mut bytes).await?;
-                            ensure!(count > 0, codec::IntegrityError::Length);
-                            bytes.truncate(count);
-                            bytes.shrink_to_fit();
-                            let retained = bytes.capacity();
-                            Ok((owned(Bytes::from(bytes), memory, &current), retained))
-                        }).await;
-                        if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
-                        let (bytes, retained) = result?;
-                        remaining -= bytes.len();
-                        if let Some(audit) = &mut audit { audit.feed(bytes.clone(), retained); }
-                        if remaining == 0 && position + segment.length as u64 == end { current.finish_source(); }
+                    use crate::storage::raw_segments as segments;
+                    let strict=source.pending_upload || (!source.pending_upload && crate::storage::ReadContext::integrity(&current.backend(source.storage_id)?.profile.read_integrity)=="inline");
+                    let audit_whole=current.verify && !strict && !source.pending_upload;
+                    let opened=current.guard(&reads.node,reads.reader.raw(&reads.node,&current,source,audit_whole)).await;
+                    if let Err(error)=&opened {reads.report_error(current.clone(),index,&segment.source,error).await;}
+                    let (mut file,io)=opened?;
+                    let remote=file.remote_source();
+                    let _local_io=if remote.is_some() {drop(io);None} else {Some(io)};
+                    let start=segment.source_offset as u64;
+                    let span=start..start+segment.length as u64;
+                    let proof=if strict {
+                        Some(Arc::new(segments::Proof::new(&span,current.page_hashes(segment)?.ok_or(crate::model::Error::SourceUnavailable)?.to_vec(),reads.reader.cpu.clone())?))
+                    } else { None };
+                    let from_backend=remote.is_some();
+                    let mut audit=reads.check_raw(current.clone(),index,source,start==0 && segment.length==source.size,from_backend)?;
+                    let held=current.clone();
+                    let retain:segments::Retain=Arc::new(move |n|{
+                        let held=held.clone();Box::pin(async move{Ok(Box::new(held.reserve(n).await?) as segments::Permit)})
+                    });
+                    let mut output=if let Some(remote)=remote {
+                        let read=reads.clone();let held=current.clone();let id=source.storage_id;
+                        let acquire:segments::Acquire=Arc::new(move || {
+                            let read=read.clone();let held=held.clone();Box::pin(async move{
+                                Ok(Box::new(read.reader.io(&held,Some(id)).await?) as segments::Permit)
+                            })
+                        });
+                        let lanes=if current.backend(id)?.profile.read_concurrency.is_some() {
+                            current.grants.iter().filter(|g|g.storage==Some(id) && g.reference.r#type==wire::GrantType::StorageRead as i32).count()
+                        }else{read::LANES};
+                        remote.stream(span,proof,lanes,acquire,retain)
+                    }else{segments::local(&mut file,span,source.size as u64,proof,retain)};
+                    let mut received=0;
+                    while let Some(result)=current.guard(&reads.node,async {Ok(output.next().await)}).await? {
+                        if let Err(error)=&result {reads.report_error(current.clone(),index,&segment.source,error).await;}
+                        let bytes=result?;received+=bytes.len() as i64;
+                        if let Some(audit)=&mut audit {audit.feed(bytes.clone(),bytes.len());}
+                        if received==segment.length && position+received as u64==end {current.finish_source();}
                         if !reads.reader.background && !current.verify {
-                            reads.node.access.demand(&mut demand,crate::model::tiering::Source::Raw(source.location_id),bytes.len(),matches!(&file,RawFile::Remote(_)));
+                            reads.node.access.demand(&mut demand,crate::model::tiering::Source::Raw(source.location_id),bytes.len(),from_backend);
                         }
                         yield bytes;
                     }
+                    if received!=segment.length {Err(codec::IntegrityError::Length)?;}
                 } else {
                     if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
                     let (bytes,origin)=result.map_err(|e|Arc::try_unwrap(e).unwrap_or_else(|e|anyhow::anyhow!("{e:#}")))?;

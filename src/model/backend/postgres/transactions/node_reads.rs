@@ -116,10 +116,12 @@ async fn node_read_materials(
         let read::Source::Raw { source } = &segment.source else {
             continue;
         };
-        if !materials.iter().any(|s| {
-            s.connection.id == source.storage_id
-                && (s.profile.read_integrity == "inline" || s.profile.cache_enabled)
-        }) {
+        if !source.pending_upload
+            && !materials.iter().any(|s| {
+                s.connection.id == source.storage_id
+                    && (s.profile.read_integrity == "inline" || s.profile.cache_enabled)
+            })
+        {
             continue;
         }
         if remaining == 0 {

@@ -127,105 +127,124 @@ impl App {
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
         capture: Option<Arc<Mutex<super::responses::Mapping>>>,
     ) -> Result<s3s::dto::StreamingBlob> {
+        use crate::{
+            content::raw_pages::PAGE,
+            storage::{raw_segments as segments, read_buffer},
+        };
         let mut ranges = Vec::new();
-        let mut cursor = 0;
-        let mut first = None;
+        let mut cursor = span.start;
         let mut prefetched = super::reads::raw(stream.id, stream.payload_revision);
-        loop {
+        while cursor < span.end {
             let rows = if let Some(row) = prefetched.take() {
                 vec![row]
             } else {
-                self.raw.page(stream.id, cursor, stream.size).await?
+                self.raw.page(stream.id, cursor, span.end).await?
             };
-            ensure!(!rows.is_empty(), "raw mapping is incomplete");
-            let before = cursor;
+            let previous = cursor;
             for row in rows {
-                if row.offset_bytes + row.length <= cursor && stream.size != 0 {
+                row.validate()?;
+                let end = row
+                    .offset_bytes
+                    .checked_add(row.length)
+                    .context("raw mapping overflow")?;
+                if end <= cursor || row.offset_bytes >= span.end {
                     continue;
                 }
-                row.validate()?;
                 ensure!(
-                    row.offset_bytes == cursor,
-                    "raw mapping has gaps or overlaps"
-                );
-                ensure!(
-                    ranges.len() < 10000,
-                    "raw mapping exceeds the multipart limit"
+                    row.offset_bytes <= cursor && ranges.len() < 10000,
+                    "invalid raw extent sequence"
                 );
                 let mode = self
                     .storage
                     .profile(row.source.storage_id)?
                     .read_integrity
                     .clone();
-                let mode = crate::storage::ReadContext::integrity(&mode).to_owned();
-                let reader = pin
-                    .with_read_lease(self.storage.raw_reader(&row.source, mode == "inline"))
-                    .await?;
-                if row.offset_bytes == 0 && row.length == stream.size {
-                    first = Some(reader);
-                }
-                cursor += row.length;
-                ranges.push((row, mode));
+                cursor = end.min(span.end);
+                ranges.push((
+                    row,
+                    crate::storage::ReadContext::integrity(&mode).to_owned(),
+                ));
             }
-            if cursor == stream.size {
-                break;
-            }
-            ensure!(
-                cursor > before && cursor < stream.size,
-                "raw mapping length mismatch"
-            );
+            ensure!(cursor > previous, "raw mapping is incomplete");
         }
         let capture = capture.filter(|capture| {
             let mut mapping = capture.lock().unwrap();
             for (row, _) in &ranges {
                 mapping.record_raw(row, stream.payload_revision);
             }
-            mapping.signature().is_some() && span == (0..stream.size)
+            span == (0..stream.size) && mapping.signature().is_some()
         });
-        let app = self.clone();
         let idle = Duration::from_secs(crate::config::seconds(
             &self.config.requests.read_idle_timeout,
         )?);
+        let first = if let Some((first, _)) = ranges.first() {
+            Some(
+                pin.with_read_lease(self.storage.raw_reader(&first.source, false))
+                    .await?,
+            )
+        } else {
+            None
+        };
+        let app = self.clone();
         let body = async_stream::try_stream! {
-            let _pin = pin;
-            let _permits = permits;
+            let _pin=pin;let (_reader,slot)=permits;let spare=read_buffer::Spares::new(app.slots.clone());
+            let slot=Arc::new(slot);let primary=Arc::new(tokio::sync::Semaphore::new(read_buffer::UNITS));
+            let retain:segments::Retain=Arc::new(move |n| {
+                let primary=primary.clone();let slot=slot.clone();let spare=spare.clone();
+                Box::pin(async move {Ok(Box::new(read_buffer::reserve(&primary,&slot,Some(&spare),n).await?) as segments::Permit)})
+            });
+            let mut first=first;
             #[cfg(feature="fault-injection")]
             crate::faults::point("read-body").await;
-            _pin.renew_read_lease().await?;
             let mut demand=crate::status::access::DemandRead::default();
-            for (row, mode) in ranges {
-                let start = span.start.max(row.offset_bytes);
-                let end = span.end.min(row.offset_bytes+row.length);
-                if start>=end { continue; }
-                app.ensure_mode()?;
-                _pin.renew_read_lease().await?;
-                let mut reader = if let Some(reader)=first.take() {reader} else {app.storage.raw_reader(&row.source,false).await?};
-                reader.file.seek(std::io::SeekFrom::Start((row.source_offset+start-row.offset_bytes) as u64)).await?;
-                let mut remaining = end-start;
-                let complete = row.source_offset == 0 && start == row.offset_bytes && end-start == row.source.size;
-                let mut check = if mode == "background" && complete { Some(app.read_checks.raw(&row.source, matches!(&reader.file, crate::storage::raw::RawFile::Remote(_)))) } else { None };
-                if mode == "background" && !complete { app.read_checks.raw_source(row.source.clone()); }
-                let evidence = if mode == "off" { Some(app.read_checks.unchecked()) } else { check.as_ref().map(|check| check.evidence.clone()) };
-                if let Some(capture) = &capture && let Some(evidence) = evidence { capture.lock().unwrap().record_check(evidence); }
-                let mut digest = capture.as_ref().filter(|_| mode == "inline").map(|_| Md5::new());
-                while remaining>0 {
-                    let mut buffer = vec![0;remaining.min(256*1024) as usize];
-                    let count = tokio::time::timeout(idle,_pin.with_read_lease(reader.file.read(&mut buffer))).await??;
-                    (count>0).then_some(()).context("raw source was truncated")?;
-                    buffer.truncate(count);
-                    buffer.shrink_to_fit();
-                    remaining -= count as i64;
-                    reader.file.account_read(&app.storage, count as u64);
-                    if let Some(digest)=&mut digest { digest.update(&buffer); }
-                    if remaining==0 && let Some(digest)=digest.take() {
-                        (digest.finalize().as_slice()==row.source.digest.as_deref().unwrap()).then_some(()).context(crate::content::codec::IntegrityError::Hash)?;
+            for (row,mode) in ranges {
+                app.ensure_mode()?;_pin.renew_read_lease().await?;
+                let physical=(row.source_offset+span.start.max(row.offset_bytes)-row.offset_bytes) as u64
+                    ..(row.source_offset+span.end.min(row.offset_bytes+row.length)-row.offset_bytes) as u64;
+                let complete=physical==(0..row.source.size as u64);
+                let mut reader=if let Some(first)=first.take(){first}else{
+                    _pin.with_read_lease(app.storage.raw_reader(&row.source,false)).await?
+                };
+                let remote=reader.range_source();
+                let from_backend=remote.is_some() || (!row.source.pending_upload && matches!(&reader.file,crate::storage::raw::RawFile::Local(_)));
+                let mut check=if mode=="background" && complete {Some(app.read_checks.raw(&row.source,remote.is_some()))} else{None};
+                if let Some(capture)=&capture {
+                    let evidence=if mode=="off" || (mode=="background" && !complete) {Some(app.read_checks.unchecked())} else {check.as_ref().map(|v|v.evidence.clone())};
+                    if let Some(e)=evidence {capture.lock().unwrap().record_check(e);}
+                }
+                let mut digest=capture.as_ref().filter(|_|mode=="inline" && complete).map(|_|Md5::new());
+                let mut offset=physical.start;
+                while offset<physical.end {
+                    let end=if mode=="inline" && physical.end-offset > 128*1024*1024 {
+                        ((offset/(PAGE as u64))+128)*(PAGE as u64)
+                    }else{physical.end};
+                    let span=offset..end;
+                    let proof=if mode=="inline" {
+                        let first=(offset/PAGE as u64) as i64;
+                        let count=((end-1)/PAGE as u64-first as u64+1) as usize;
+                        let hashes=app.raw.page_hashes(row.source.id,row.source.size,first,count).await?.ok_or(crate::model::Error::SourceUnavailable)?;
+                        Some(Arc::new(segments::Proof::new(&span,hashes,app.storage.cpu.clone())?))
+                    }else{None};
+                    let mut output=if let Some(remote)=&remote {
+                        remote.clone().stream(span,proof,app.budget.storage_read_slots,app.storage.raw_range_io(row.source.storage_id),retain.clone())
+                    }else{
+                        segments::local(&mut reader.file,span,row.source.size as u64,proof,retain.clone())
+                    };
+                    while let Some(bytes)=tokio::time::timeout(idle,_pin.with_read_lease(async {Ok(output.next().await)})).await?? {
+                        let bytes=bytes?;let count=bytes.len();offset+=count as u64;
+                        if offset>end { Err(crate::content::codec::IntegrityError::Length)?; }
+                        if from_backend { app.storage.backend_read_bytes.fetch_add(count as u64,std::sync::atomic::Ordering::Relaxed); }
+                        else { app.storage.cache_hit_bytes.fetch_add(count as u64,std::sync::atomic::Ordering::Relaxed); }
+                        if let Some(digest)=&mut digest {digest.update(&bytes);}
+                        if offset==physical.end && let Some(digest)=digest.take() {
+                            if Some(digest.finalize().as_slice())!=row.source.digest.as_deref() { Err(crate::content::codec::IntegrityError::Hash)?; }
+                        }
+                        if let Some(check)=&mut check {check.feed(bytes.clone(),count);}
+                        if offset==physical.end && let Some(capture)=&capture {capture.lock().unwrap().finish_source();}
+                        app.storage.access.demand(&mut demand,crate::model::tiering::Source::Raw(row.source.location_id),count,from_backend);
+                        yield bytes;
                     }
-                    let retained = buffer.capacity();
-                    let bytes = Bytes::from(buffer);
-                    if let Some(check) = &mut check { check.feed(bytes.clone(), retained); }
-                    if remaining == 0 && let Some(capture) = &capture { capture.lock().unwrap().finish_source(); }
-                    app.storage.access.demand(&mut demand,crate::model::tiering::Source::Raw(row.source.location_id),count,!row.source.pending_upload && matches!(&reader.file,crate::storage::raw::RawFile::Remote(_)|crate::storage::raw::RawFile::Local(_)));
-                    yield bytes;
+                    if offset!=end { Err(crate::content::codec::IntegrityError::Length)?; }
                 }
             }
         };

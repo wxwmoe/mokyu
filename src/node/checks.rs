@@ -98,17 +98,7 @@ impl Reads {
                 Ok(Some(audit))
             }
             "background" => {
-                let (evidence, job) = self.checks.begin();
-                self.checks.finish(&evidence, SKIPPED);
-                prepared.record_check(evidence);
-                if let Some(job) = job {
-                    let reads = self.clone();
-                    tokio::spawn(async move {
-                        let _job = job;
-                        // A partial raw response has no full-source digest; verification belongs to a worker.
-                        reads.report(prepared, index).await;
-                    });
-                }
+                prepared.record_check(self.checks.unchecked());
                 Ok(None)
             }
             "off" => {

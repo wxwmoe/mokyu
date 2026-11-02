@@ -138,6 +138,30 @@ pub(crate) struct RawReader {
     _global: Option<resource_gate::Permit>,
 }
 
+impl RawReader {
+    pub(crate) fn range_source(&mut self) -> Option<super::raw_segments::Remote> {
+        let source = self.file.remote_source()?;
+        self._permit = None;
+        self._global = None;
+        Some(source)
+    }
+}
+
+impl Storage {
+    pub(crate) fn raw_range_io(self: &Arc<Self>, id: Uuid) -> super::raw_segments::Acquire {
+        let store = self.clone();
+        Arc::new(move || {
+            let store = store.clone();
+            Box::pin(async move {
+                let target = store.store_backend(id)?;
+                let global = store.reads.acquire().await?;
+                let permit = target.reads.acquire().await?;
+                Ok(Box::new((global, permit)) as super::raw_segments::Permit)
+            })
+        })
+    }
+}
+
 impl Storage {
     pub(crate) async fn sync_raw(self: &Arc<Self>, source: &RawSource, verify: bool) -> Result<()> {
         if let Some(data) = self.raw_memory(source.location_id) {
@@ -1335,6 +1359,7 @@ pub(crate) struct RemoteReader {
     key: ObjectPath,
     size: u64,
     etag: Option<String>,
+    version: Option<String>,
     offset: u64,
     body: Option<futures_util::stream::BoxStream<'static, object_store::Result<Bytes>>>,
     buffered: Bytes,
@@ -1363,12 +1388,28 @@ impl RawFile {
             key,
             size: meta.size,
             etag: meta.e_tag,
+            version: meta.version,
             offset: 0,
             body: None,
             buffered: Bytes::new(),
             gets,
             diagnostics,
         }))
+    }
+
+    pub(crate) fn remote_source(&self) -> Option<super::raw_segments::Remote> {
+        let Self::Remote(remote) = self else {
+            return None;
+        };
+        Some(super::raw_segments::Remote {
+            backend: remote.backend.clone(),
+            key: remote.key.clone(),
+            size: remote.size,
+            tag: remote.etag.clone(),
+            version: remote.version.clone(),
+            gets: remote.gets.clone(),
+            diagnostics: remote.diagnostics.clone(),
+        })
     }
 
     pub(crate) fn account_read(&self, storage: &Storage, size: u64) {
@@ -1438,6 +1479,7 @@ impl RawFile {
                     GetOptions {
                         range: Some(GetRange::Bounded(span.clone())),
                         if_match: reader.etag.clone(),
+                        version: reader.version.clone(),
                         ..Default::default()
                     },
                 )
@@ -1474,7 +1516,7 @@ impl RawFile {
     }
 }
 
-fn remote_error(error: object_store::Error) -> anyhow::Error {
+pub(super) fn remote_error(error: object_store::Error) -> anyhow::Error {
     if matches!(error, object_store::Error::NotFound { .. }) {
         anyhow::Error::new(error).context(IntegrityError::RemoteMissing)
     } else {
