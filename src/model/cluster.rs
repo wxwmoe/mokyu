@@ -104,7 +104,17 @@ pub(crate) trait NodeNotices: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait ClusterStore: NodeSessions + NodeWork + NodeNotices {
+pub(crate) trait NodeRequests: Send + Sync {
+    async fn prepare_request(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_request::Prepare,
+    ) -> Result<super::node_request::Reply>;
+}
+
+#[async_trait]
+pub(crate) trait ClusterStore: NodeSessions + NodeWork + NodeNotices + NodeRequests {
     async fn begin_report(
         &self,
         state: &NodeState,
@@ -241,12 +251,6 @@ pub(crate) trait ClusterStore: NodeSessions + NodeWork + NodeNotices {
         key: &Key,
         input: super::node_raw::Commit,
     ) -> Result<super::node_raw::Prepared>;
-    async fn prepare_request(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_request::Prepare,
-    ) -> Result<super::node_request::Reply>;
     async fn prepare_chunks(
         &self,
         node: &NodeState,

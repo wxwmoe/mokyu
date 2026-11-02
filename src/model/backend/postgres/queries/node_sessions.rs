@@ -95,7 +95,7 @@ pub(in super::super) fn node_clock() -> Scalar<'static, DateTime<Utc>> {
 
 pub(in super::super) fn node_read_admission() -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT NOT maintenance AND deployment_mode='cluster' FROM mokyu_meta WHERE singleton FOR SHARE",
+        "SELECT NOT maintenance AND deployment_mode IN ('cluster','single_control') FROM mokyu_meta WHERE singleton FOR SHARE",
     )
 }
 

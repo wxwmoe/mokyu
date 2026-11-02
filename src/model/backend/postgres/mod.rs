@@ -4,6 +4,8 @@ mod connection;
 #[path = "../shared/image.rs"]
 mod image_transactions;
 mod migration;
+#[path = "../shared/node_requests.rs"]
+mod node_requests;
 #[path = "../shared/notices.rs"]
 mod notices;
 mod queries;
@@ -183,6 +185,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         } else {
             backend.clone()
         },
+        node_requests: backend.clone(),
         node_work: backend.clone(),
         node_sessions: backend.clone(),
         cluster: Some(backend.clone()),

@@ -323,16 +323,6 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn prepare_request(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_request::Prepare,
-    ) -> Result<crate::model::node_request::Reply> {
-        super::super::transactions::prepare_node_request(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
     async fn prepare_chunks(
         &self,
         node: &crate::cluster::NodeState,

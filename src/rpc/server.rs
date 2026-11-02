@@ -839,7 +839,7 @@ impl NodeControl for Service {
         let node = data_identity(&request)?;
         let input =
             super::request::prepare(request.into_inner(), &self.app.config.requests.s3_region)?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.prepare_request(
+        let reply = bounded(self.app.node_requests.prepare_request(
             &node,
             &self.app.secrets.credential_key,
             input,

@@ -445,7 +445,7 @@ pub(in super::super) async fn open_node_read(
     if input.policy {
         include.push(MaterialType::Policy);
     }
-    let (mut reply, bucket) = node_request_materials(
+    let (mut reply, bucket) = super::super::node_requests::materials(
         &mut tx,
         state,
         key,
