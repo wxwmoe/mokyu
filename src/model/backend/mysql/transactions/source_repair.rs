@@ -142,7 +142,7 @@ pub(super) async fn record_source_inputs(
     Ok(())
 }
 
-pub(super) async fn check_source_inputs(
+pub(in super::super) async fn check_source_inputs(
     db: &mut sqlx::MySqlConnection,
     task: Uuid,
     chunks: &[Id],

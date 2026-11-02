@@ -87,6 +87,7 @@ mod maintenance;
 pub(super) use maintenance::*;
 mod integrity;
 pub(super) use integrity::*;
+pub(super) mod pack_work;
 mod packing;
 pub(super) use packing::*;
 mod cache;

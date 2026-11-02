@@ -25,6 +25,10 @@ impl Source {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Target {
     pub id: Id,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uuid: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<Id>,
     pub size: i32,
     pub hash: Vec<u8>,
     pub previous_size: Option<i32>,
@@ -36,6 +40,8 @@ pub(crate) struct Target {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Attempt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<Id>,
     pub start: usize,
     pub end: usize,
     pub location: Uuid,
@@ -53,16 +59,23 @@ pub(crate) struct Batch {
     pub packs: Vec<Attempt>,
 }
 
+impl Target {
+    pub(crate) fn physical_id(&self) -> Result<Uuid> {
+        Ok(match (self.uuid, self.id) {
+            (Some(id), Id::Integer(_)) if !id.is_nil() => id,
+            (None, Id::Uuid(id)) => id,
+            _ => anyhow::bail!("invalid pack member identity"),
+        })
+    }
+}
 impl Batch {
     pub(crate) fn chunk(&self, storage: Uuid, index: usize) -> Result<Chunk> {
         let item = &self.chunks[index];
-        let Id::Uuid(uuid) = item.id else {
-            anyhow::bail!("invalid pack member identity");
-        };
+        let uuid = item.physical_id()?;
         Ok(Chunk {
             id: item.id,
             uuid,
-            encoding_id: Id::Uuid(item.location),
+            encoding_id: item.encoding.unwrap_or(Id::Uuid(item.location)),
             address: None,
             location_id: item.location,
             storage_id: Some(storage),
@@ -86,7 +99,7 @@ impl Batch {
             "invalid pack range"
         );
         let pack = Pack {
-            id: Id::Uuid(item.location),
+            id: item.id.unwrap_or(Id::Uuid(item.location)),
             address: None,
             location_id: item.location,
             storage_id: Some(storage),

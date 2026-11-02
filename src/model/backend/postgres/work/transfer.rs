@@ -51,6 +51,8 @@ pub(super) async fn prepare(
     };
     for row in &rows {
         batch.chunks.push(wire::Target {
+            uuid: None,
+            encoding: None,
             id: row.chunk.id,
             size: row.chunk.raw_size,
             hash: row.chunk.hash.clone(),
@@ -78,6 +80,7 @@ pub(super) async fn prepare(
             for (start, end) in [(start, end), (start, middle), (middle, end)] {
                 if end - start > 1 {
                     batch.packs.push(wire::Attempt {
+                        id: None,
                         start,
                         end,
                         location: Uuid::now_v7(),

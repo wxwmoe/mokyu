@@ -119,6 +119,7 @@ mod tasks;
 pub(super) use tasks::*;
 mod cache;
 pub(super) use cache::*;
+pub(super) mod pack_work;
 mod packing;
 pub(super) use packing::*;
 mod integrity;

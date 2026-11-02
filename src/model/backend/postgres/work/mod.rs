@@ -11,6 +11,7 @@ mod sweep;
 
 mod rewrite;
 
+#[path = "../../shared/work_packing.rs"]
 mod packing;
 
 mod transfer;

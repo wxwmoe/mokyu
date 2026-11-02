@@ -454,26 +454,35 @@ pub(in super::super) async fn reserve_nonce(
             .await?;
     }
     let mut tx = connection.begin_with(queries::BEGIN_WRITE).await?;
+    let result = reserve_nonce_in(&mut tx, key, type_tag, units).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+pub(in super::super) async fn reserve_nonce_in(
+    db: &mut sqlx::SqliteConnection,
+    key: Uuid,
+    type_tag: u8,
+    units: u32,
+) -> Result<(i64, i64)> {
     ensure!(
-        !queries::nonce_sync_off().fetch_one(&mut *tx).await?,
+        !queries::nonce_sync_off().fetch_one(&mut *db).await?,
         s3s::s3_error!(
             InvalidRequest,
             "encryption requires SQLite FULL or NORMAL synchronization; change the saved OFF setting"
         )
     );
-    #[cfg(any(test, feature = "fault-injection"))]
     ensure!(
-        queries::synchronous().fetch_one(&mut *tx).await? == 2,
+        queries::synchronous().fetch_one(&mut *db).await? == 2,
         "nonce reservations require FULL synchronization"
     );
     let previous = queries::nonce_counter(key, type_tag)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *db)
         .await?
         .context("active encryption key nonce counter is missing")?;
     let range = crate::model::key::nonce_reservation(previous, units)?;
     ensure!(
         queries::advance_nonce(key, type_tag, previous, range.1)
-            .execute(&mut *tx)
+            .execute(&mut *db)
             .await?
             .rows_affected()
             == 1,
@@ -481,7 +490,7 @@ pub(in super::super) async fn reserve_nonce(
     );
     #[cfg(feature = "fault-injection")]
     crate::faults::point("nonce-before-commit").await;
-    tx.commit().await?;
+
     #[cfg(feature = "fault-injection")]
     crate::faults::point("nonce-after-commit").await;
     Ok(range)

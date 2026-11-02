@@ -458,3 +458,86 @@ pub(crate) async fn reference_boundaries(
         .collect();
     matching_references(db, &first, &second, &distances).await
 }
+
+pub(crate) type Connection = sqlx::PgConnection;
+pub(crate) type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+pub(in super::super) use super::{
+    node_read_encodings as encodings, rewrite_pack as source_pack, storage_key,
+};
+pub(in super::super) async fn physical_members(
+    db: &mut Connection,
+    pack: Id,
+) -> Result<Vec<crate::model::node_work::Member>> {
+    Ok(super::work::members(pack).fetch_all(db).await?)
+}
+pub(in super::super) async fn clock(db: &mut Connection) -> Result<DateTime<Utc>> {
+    Ok(super::node_clock().fetch_one(db).await?)
+}
+pub(in super::super) async fn advance_cursor(
+    db: &mut Connection,
+    task: crate::model::task::Execution,
+    next: Option<String>,
+    n: i64,
+) -> Result<()> {
+    if next.is_none() {
+        let mut detail = super::lock_task_detail(task).fetch_one(&mut *db).await?;
+        if detail["storages"].is_array() {
+            let done = super::super::transactions::advance_storage_scope(&mut detail)?;
+            super::advance_storage_task(task.id, detail, n, done)
+                .execute(&mut *db)
+                .await?;
+            return Ok(());
+        }
+    }
+    sqlx::query("UPDATE tasks SET cursor=$2,processed=processed+$3,state=CASE WHEN $2::text IS NULL THEN 'completed' ELSE state END,updated_at=clock_timestamp() WHERE id=$1 AND lease_token=$4 AND state='running'").bind(task.id).bind(next).bind(n).bind(task.token).execute(db).await?;
+    Ok(())
+}
+pub(in super::super) async fn live(db: &mut Connection, ids: &[Id]) -> Result<Vec<Id>> {
+    Ok(
+        sqlx::query_scalar("SELECT DISTINCT chunk_id FROM extents WHERE chunk_id=ANY($1)")
+            .bind(ids)
+            .fetch_all(db)
+            .await?,
+    )
+}
+pub(in super::super) async fn pack_counts(
+    db: &mut Connection,
+    ids: &[Id],
+) -> Result<Vec<(Id, i64)>> {
+    Ok(sqlx::query_as("SELECT pack_id,count(*) FROM chunks WHERE pack_id=ANY($1) AND state='ready' GROUP BY pack_id").bind(ids).fetch_all(db).await?)
+}
+pub(in super::super) async fn creation_allowed(db: &mut Connection) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar("SELECT NOT pack_creation_paused FROM mokyu_meta WHERE singleton")
+            .fetch_one(db)
+            .await?,
+    )
+}
+pub(in super::super) async fn cursor(db: &mut Connection, id: Uuid) -> Result<Option<String>> {
+    Ok(sqlx::query_scalar("SELECT cursor FROM tasks WHERE id=$1")
+        .bind(id)
+        .fetch_one(db)
+        .await?)
+}
+pub(in super::super) async fn save_snapshot(
+    db: &mut Connection,
+    task: crate::model::task::Execution,
+    value: &Value,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE tasks SET detail=jsonb_set(detail,'{node_pack}',$2) WHERE id=$1 AND lease_token=$3",
+    )
+    .bind(task.id)
+    .bind(value)
+    .bind(task.token)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+pub(in super::super) async fn clear_snapshot(db: &mut Connection, task: Uuid) -> Result<()> {
+    sqlx::query("UPDATE tasks SET detail=detail-'node_pack' WHERE id=$1")
+        .bind(task)
+        .execute(db)
+        .await?;
+    Ok(())
+}

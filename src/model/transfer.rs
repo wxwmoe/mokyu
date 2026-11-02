@@ -848,6 +848,8 @@ mod tests {
             .iter()
             .map(|member| wire::Target {
                 id: Id::Uuid(Uuid::now_v7()),
+                uuid: None,
+                encoding: None,
                 size: member.size as i32,
                 hash: member.hash.clone(),
                 previous_size: None,

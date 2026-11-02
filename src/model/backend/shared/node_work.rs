@@ -85,6 +85,43 @@ pub(super) async fn material(
     })
 }
 
+async fn reserve_io(
+    tx: &mut registry::Tx<'_>,
+    token: Uuid,
+    plan: &work::Plan,
+    secret: &[u8],
+) -> Result<()> {
+    if plan.storage().is_none() {
+        return Ok(());
+    }
+    let materials: work::Materials = serde_json::from_slice(secret)?;
+    let mut profiles = std::collections::BTreeMap::new();
+    for storage in std::iter::once(materials.storage).chain(materials.additional) {
+        profiles.insert(storage.profile.storage_id, storage.profile);
+    }
+    for (id, p) in profiles {
+        let direction = match plan {
+            work::Plan::UploadRaw { .. } => ("upload", p.upload_concurrency),
+            work::Plan::Inspect { .. } => ("integrity", Some(p.integrity_concurrency)),
+            work::Plan::Tier { .. }
+            | work::Plan::Migrate { .. }
+            | work::Plan::CopyTransfer { .. }
+            | work::Plan::RawTransfer { .. } => ("migration", p.migration_concurrency),
+            _ => ("maintenance", p.maintenance_concurrency),
+        };
+        for (scope, cap) in [("control", p.control_concurrency), direction] {
+            if let Some(cap) = cap {
+                queries::read_grants::lock_storage(&mut **tx, id, scope).await?;
+                ensure!(
+                    q::lane_count(id, scope).fetch_one(&mut **tx).await? < i64::from(cap),
+                    Error::NodeWriteBusy
+                );
+                q::lane(id, scope, token).execute(&mut **tx).await?;
+            }
+        }
+    }
+    Ok(())
+}
 async fn tier_plan(
     tx: &mut registry::Tx<'_>,
     task: Execution,
@@ -140,6 +177,7 @@ async fn finish(
     node: Uuid,
     run: Run,
     result: &work::Completion,
+    key: &Key,
 ) -> Result<()> {
     let hash = crate::model::node_chunk::hash(&result.outcomes)?;
     let offer = q::offer(node, result.operation)
@@ -167,6 +205,15 @@ async fn finish(
                 issue = Some("backend_io_failed");
             }
             super::work_conversion::finish(tx, task, outcome).await?
+        }
+        (Some(work::Plan::Pack { storage, batch, .. }), outcomes) => {
+            let (state, error) =
+                super::work_media::finish(tx, task, storage, *batch, outcomes, key).await?;
+            queries::release_task_inputs(task.id)
+                .execute(&mut **tx)
+                .await?;
+            issue = error;
+            state
         }
         (Some(work::Plan::UploadRaw { items, .. }), [outcome]) if items.len() == 1 => {
             let (next, error) =
@@ -237,6 +284,7 @@ async fn finish(
             == 1,
         Error::OperationAborted
     );
+    q::drop_lanes(task.token).execute(&mut **tx).await?;
     q::settle(node, result.operation, &hash)
         .execute(&mut **tx)
         .await?;
@@ -272,7 +320,8 @@ impl NodeWork for Backend {
                 && issued >= now - chrono::Duration::minutes(15),
             Error::NodeOperationExpired
         );
-        let mut tx = registry::begin(self).await?;
+        let mut tx =
+            q::begin_media(self, input.max_items > 0 && matches!(input.class, 1 | 2)).await?;
         let active = node_registry::require_work(self, &mut tx, node, key, input.run).await?;
         ensure!(
             matches!(node.role.as_str(), "data" | "worker" | "node"),
@@ -285,7 +334,7 @@ impl NodeWork for Backend {
             return known.reply(node, key, &input, &digest);
         }
         if let Some(result) = &input.completion {
-            finish(&mut tx, node.node_id, input.run, result).await?;
+            finish(&mut tx, node.node_id, input.run, result, key).await?;
         }
         let token = Uuid::new_v4();
         if active
@@ -309,7 +358,7 @@ impl NodeWork for Backend {
         let mut task_id = None;
         let mut plan = None;
         let mut encrypted = None;
-        if let Some((task, detail)) = next {
+        if let Some((task, task_type, detail)) = next {
             ensure!(
                 queries::claim_task(task, token)
                     .execute(&mut *tx)
@@ -319,6 +368,11 @@ impl NodeWork for Backend {
                 Error::OperationAborted
             );
             let task = Execution { id: task, token };
+            if input.class == 1 {
+                queries::release_task_inputs(task.id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
             let prepared = match detail["operation"].as_str() {
                 Some("cache") if detail.get("source_node").is_some() => {
                     super::node_files::offer(&mut tx, node, task, &detail, key).await?
@@ -341,6 +395,9 @@ impl NodeWork for Backend {
                 Some("cdc") => {
                     super::work_conversion::offer(&mut tx, node, input.run, task, &detail, key)
                         .await?
+                }
+                _ if matches!(task_type.as_str(), "pack" | "unpack") => {
+                    super::work_media::offer(&mut tx, task, &detail, key).await?
                 }
                 Some("tiering") => tier_plan(&mut tx, task, &detail, key).await?,
                 _ if detail.get("source_operation").is_some() => {
@@ -376,6 +433,7 @@ impl NodeWork for Backend {
                 _ => anyhow::bail!(Error::NodeOperationConflict),
             };
             if let Some((proposal, secret)) = prepared {
+                reserve_io(&mut tx, token, &proposal, &secret).await?;
                 encrypted = Some(codec::protect(&secret, key, token.as_bytes())?);
                 plan = Some(proposal);
                 task_id = Some(task.id);
@@ -392,6 +450,11 @@ impl NodeWork for Backend {
         )
         .execute(&mut *tx)
         .await?;
+        if task_id.is_some() {
+            q::align_lanes(node.node_id, token)
+                .execute(&mut *tx)
+                .await?;
+        }
         let offer = q::offer(node.node_id, input.operation)
             .fetch_one(&mut *tx)
             .await?;
@@ -416,6 +479,13 @@ pub(super) async fn grants(
                     .await?
                     .rows_affected()
                     == 1;
+                if held {
+                    if renew {
+                        q::align_lanes(node, grant.id).execute(&mut **tx).await?;
+                    } else {
+                        q::drop_lanes(grant.id).execute(&mut **tx).await?;
+                    }
+                }
                 held.then_some(90_000)
             } else if grant.r#type == GrantType::Native {
                 let held = queries::native::renew_native(node, run, grant.id, renew)

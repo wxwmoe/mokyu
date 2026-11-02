@@ -392,6 +392,9 @@ impl NodeSessions for Backend {
             !q::active_reads(row.id).fetch_one(&mut *tx).await?,
             Error::NodeConflict
         );
+        super::queries::work::drop_node_lanes(row.id)
+            .execute(&mut *tx)
+            .await?;
         super::queries::work::expire_node(row.id)
             .execute(&mut *tx)
             .await?;

@@ -77,7 +77,7 @@ struct Selected {
 }
 
 async fn advance(
-    db: &mut PgConnection,
+    db: &mut p::Connection,
     task: Execution,
     progress: &Progress,
     processed: usize,
@@ -124,13 +124,12 @@ async fn advance(
             return Ok(());
         }
     };
-    sqlx::query("UPDATE tasks SET cursor=$2,processed=processed+$3,state=CASE WHEN $2::text IS NULL THEN 'completed' ELSE state END,updated_at=clock_timestamp() WHERE id=$1 AND lease_token=$4 AND state='running'")
-        .bind(task.id).bind(next).bind(processed as i64).bind(task.token).execute(db).await?;
+    p::advance_cursor(db, task, next, processed as i64).await?;
     Ok(())
 }
 
 async fn split(
-    db: &mut PgConnection,
+    db: &mut p::Connection,
     id: Id,
     unpack: bool,
     settings: &pack::Config,
@@ -164,13 +163,7 @@ async fn split(
     ) as u64;
     let maximum = config::bytes(&settings.max_size)?;
     let ids: Vec<_> = selected.rows.iter().map(|r| r.chunk.id).collect();
-    let live: BTreeSet<Id> =
-        sqlx::query_scalar("SELECT DISTINCT chunk_id FROM extents WHERE chunk_id=ANY($1)")
-            .bind(&ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .collect();
+    let live: BTreeSet<Id> = p::live(&mut *db, &ids).await?.into_iter().collect();
     let alive: Vec<_> = selected
         .rows
         .iter()
@@ -227,7 +220,7 @@ async fn split(
 }
 
 async fn combine(
-    db: &mut PgConnection,
+    db: &mut p::Connection,
     stream: Id,
     from: i64,
     repack: bool,
@@ -306,8 +299,7 @@ async fn combine(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let counts: Vec<(Id,i64)> = sqlx::query_as("SELECT pack_id,count(*) FROM chunks WHERE pack_id=ANY($1) AND state='ready' GROUP BY pack_id")
-        .bind(&pack_ids).fetch_all(&mut *db).await?;
+    let counts = p::pack_counts(&mut *db, &pack_ids).await?;
     valid &= counts.len() == pack_ids.len()
         && counts.into_iter().all(|(id, count)| {
             count as usize == group.iter().filter(|r| r.pack_id == Some(id)).count()
@@ -332,7 +324,7 @@ async fn combine(
 }
 
 async fn range(
-    db: &mut PgConnection,
+    db: &mut p::Connection,
     id: Id,
     settings: &pack::Config,
     allow_pack: bool,
@@ -442,14 +434,14 @@ async fn range(
     Ok(selected)
 }
 
-async fn flush(db: &mut PgConnection) -> Result<f64> {
+async fn flush(db: &mut p::Connection) -> Result<f64> {
     let metrics: config::MetricsSettings =
         serde_json::from_value(queries::runtime_setting("metrics").fetch_one(db).await?)?;
     Ok((2 * config::seconds(&metrics.access_flush_interval)?) as f64)
 }
 
 pub(super) async fn reserve_outputs(
-    db: &mut PgConnection,
+    db: &mut p::Connection,
     task: Uuid,
     storage: Uuid,
     batch: &mut wire::Batch,
@@ -486,7 +478,7 @@ pub(super) async fn reserve_outputs(
 }
 
 pub(super) async fn prepare(
-    db: &mut Transaction<'_, Postgres>,
+    db: &mut p::Tx<'_>,
     task: Execution,
     detail: &Value,
     profile: &crate::storage::profile::StorageProfile,
@@ -503,10 +495,7 @@ pub(super) async fn prepare(
     );
     let unpack = policy == "unpack";
     let settings = profile.pack_config();
-    let allow: bool =
-        sqlx::query_scalar("SELECT NOT pack_creation_paused FROM mokyu_meta WHERE singleton")
-            .fetch_one(&mut **db)
-            .await?;
+    let allow: bool = p::creation_allowed(&mut **db).await?;
     if (matches!(policy, "pack" | "repack") && !settings.enabled)
         || (policy == "range" && !settings.range_optimization)
     {
@@ -528,10 +517,7 @@ pub(super) async fn prepare(
     let automatic = detail["automatic"] == true;
     let flush = flush(db).await?;
     for _ in 0..32 {
-        let cursor: Option<String> = sqlx::query_scalar("SELECT cursor FROM tasks WHERE id=$1")
-            .bind(task.id)
-            .fetch_one(&mut **db)
-            .await?;
+        let cursor: Option<String> = p::cursor(&mut **db, task.id).await?;
         let selected = if policy == "range" {
             if let Some(id) = p::next_range_pack(
                 &mut **db,
@@ -666,12 +652,10 @@ pub(super) async fn prepare(
             advance(db, task, &selected.progress, 0, &settings).await?;
             continue;
         }
-        let target = queries::storage_key(storage)
-            .fetch_optional(&mut **db)
-            .await?;
+        let target = p::storage_key(storage).fetch_optional(&mut **db).await?;
         let (algorithm, block_key) =
             target.map_or(("none".to_owned(), None), |k| (k.algorithm, Some(k.id)));
-        let created = queries::node_clock().fetch_one(&mut **db).await?;
+        let created = p::clock(&mut **db).await?;
         let mut batch = wire::Batch {
             algorithm,
             key: block_key,
@@ -691,7 +675,7 @@ pub(super) async fn prepare(
         let mut blocks = BTreeSet::new();
         blocks.extend(block_key);
         let mut sources = BTreeSet::new();
-        let mut encodings: BTreeMap<_, _> = queries::node_read_encodings(&ids)
+        let mut encodings: BTreeMap<_, _> = p::encodings(&ids)
             .fetch_all(&mut **db)
             .await?
             .into_iter()
@@ -703,8 +687,8 @@ pub(super) async fn prepare(
             for row in group {
                 if let Some(id) = row.pack_id {
                     if sources.insert((true, id)) {
-                        let pack = queries::rewrite_pack(id).fetch_one(&mut **db).await?;
-                        let members = q::members(id).fetch_all(&mut **db).await?;
+                        let pack = p::source_pack(id).fetch_one(&mut **db).await?;
+                        let members = p::physical_members(&mut **db, id).await?;
                         crate::model::source::manifest_digest(&pack, &members)?;
                         blocks.extend(pack.block_key_id);
                         batch.sources.push(wire::Source::Pack { pack, members });
@@ -737,6 +721,11 @@ pub(super) async fn prepare(
                     (Uuid::now_v7(), None, None)
                 };
                 batch.chunks.push(wire::Target {
+                    uuid: matches!(row.chunk.id, Id::Integer(_)).then_some(row.chunk.uuid),
+                    encoding: existing
+                        .as_ref()
+                        .filter(|_| matches!(row.chunk.id, Id::Integer(_)))
+                        .map(|c| c.encoding_id),
                     id: row.chunk.id,
                     size: row.chunk.raw_size,
                     hash: row.chunk.hash.clone(),
@@ -758,6 +747,7 @@ pub(super) async fn prepare(
                     }
                     let location = Uuid::now_v7();
                     batch.packs.push(wire::Attempt {
+                        id: None,
                         start,
                         end,
                         location,
@@ -774,7 +764,7 @@ pub(super) async fn prepare(
             progress: selected.progress,
             rule: selected.rule,
         };
-        sqlx::query("UPDATE tasks SET detail=jsonb_set(detail,'{node_pack}',$2) WHERE id=$1 AND lease_token=$3").bind(task.id).bind(serde_json::to_value(snapshot)?).bind(task.token).execute(&mut **db).await?;
+        p::save_snapshot(&mut **db, task, &serde_json::to_value(snapshot)?).await?;
         let keys = rewrite::keys(db, &blocks.into_iter().collect::<Vec<_>>(), key).await?;
         let plan = work::Plan::Pack {
             source_permits: Vec::new(),
@@ -791,7 +781,7 @@ pub(super) async fn prepare(
 }
 
 pub(super) async fn outputs(
-    db: &mut PgConnection,
+    db: &mut p::Connection,
     storage: Uuid,
     batch: &wire::Batch,
     result: &wire::Encoded,
@@ -880,7 +870,7 @@ pub(super) async fn outputs(
 }
 
 pub(super) async fn finish(
-    db: &mut Transaction<'_, Postgres>,
+    db: &mut p::Tx<'_>,
     task: Execution,
     storage: Uuid,
     batch: wire::Batch,
@@ -911,18 +901,13 @@ pub(super) async fn finish(
         return Ok(Some("pack_profile_changed"));
     }
     let settings = profile.pack_config();
-    let target = queries::storage_key(storage)
-        .fetch_optional(&mut **db)
-        .await?;
+    let target = p::storage_key(storage).fetch_optional(&mut **db).await?;
     if target.as_ref().map(|k| k.id) != batch.key
         || target.as_ref().map_or("none", |k| k.algorithm.as_str()) != batch.algorithm
     {
         return Ok(Some("pack_key_changed"));
     }
-    let allowed: bool =
-        sqlx::query_scalar("SELECT NOT pack_creation_paused FROM mokyu_meta WHERE singleton")
-            .fetch_one(&mut **db)
-            .await?;
+    let allowed: bool = p::creation_allowed(&mut **db).await?;
     if !allowed && !result.packs.is_empty() {
         return Ok(Some("pack_creation_stopped"));
     }
@@ -1006,9 +991,6 @@ pub(super) async fn finish(
         &settings,
     )
     .await?;
-    sqlx::query("UPDATE tasks SET detail=detail-'node_pack' WHERE id=$1")
-        .bind(task.id)
-        .execute(&mut **db)
-        .await?;
+    p::clear_snapshot(&mut **db, task.id).await?;
     Ok(None)
 }

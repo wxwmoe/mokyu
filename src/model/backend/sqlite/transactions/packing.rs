@@ -406,7 +406,7 @@ pub(in super::super) async fn advance_pack_storage(
     Ok(())
 }
 
-pub(super) fn advance_storage_scope(detail: &mut Value) -> Result<bool> {
+pub(in super::super) fn advance_storage_scope(detail: &mut Value) -> Result<bool> {
     let index = if detail["phase"] == "history" {
         detail["phase"] = serde_json::json!("storage");
         0
@@ -532,7 +532,11 @@ pub(in super::super) async fn pin_pack_inputs(
     Ok(())
 }
 
-pub(super) async fn pin_inputs(db: &mut SqliteConnection, task: Uuid, ids: &[Id]) -> Result<()> {
+pub(in super::super) async fn pin_inputs(
+    db: &mut SqliteConnection,
+    task: Uuid,
+    ids: &[Id],
+) -> Result<()> {
     let locked: Vec<(Id, Option<Id>, Uuid)> = queries::lock_pack_layout(ids)
         .build_query_as()
         .fetch_all(&mut *db)
@@ -763,6 +767,20 @@ pub(in super::super) async fn commit_pack_outputs(
     settings: &crate::content::pack::Config,
     flush_seconds: f64,
 ) -> Result<()> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    commit_pack_outputs_in(&mut tx, task, rows, outputs, split, settings, flush_seconds).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn commit_pack_outputs_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: Execution,
+    rows: &[Mapping],
+    outputs: &[PackOutput],
+    split: bool,
+    settings: &crate::content::pack::Config,
+    flush_seconds: f64,
+) -> Result<()> {
     let mut ids: Vec<_> = rows.iter().map(|r| r.chunk.id).collect();
     ids.sort_unstable();
     let mut retained: Vec<_> = outputs
@@ -777,11 +795,11 @@ pub(in super::super) async fn commit_pack_outputs(
             && retained.iter().all(|id| ids.binary_search(id).is_ok()),
         "invalid pack output members"
     );
-    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_execution(&mut tx, task).await?;
+
+    lock_execution(tx, task).await?;
     let current: Vec<(Id, Option<Id>, Uuid)> = queries::lock_pack_layout(&ids)
         .build_query_as()
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     ensure!(
         current.len() == rows.len()
@@ -794,23 +812,23 @@ pub(in super::super) async fn commit_pack_outputs(
     );
     let owners: Vec<Uuid> = queries::pack_input_owners(&ids)
         .build_query_scalar()
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     ensure!(
         owners.len() == ids.len() && owners.iter().all(|id| *id == task.id),
         "pack inputs are not owned by this task"
     );
-    check_source_inputs(&mut tx, task.id, &ids).await?;
+    check_source_inputs(tx, task.id, &ids).await?;
     let before: i64 = queries::pack_layout_bytes(&ids)
         .build_query_scalar()
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     let added = queries::pack_added_bytes(task.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     let after: i64 = outputs.iter().map(PackOutput::size).sum();
     let (upload, range) = queries::pack_task_policy(task.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     let cooldown = crate::config::seconds(&settings.repack_cooldown)? as f64;
     if !split && !upload {
@@ -822,13 +840,13 @@ pub(in super::super) async fn commit_pack_outputs(
                 flush_seconds
             )
             .build_query_scalar::<bool>()
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?,
             "pack references changed; retry maintenance"
         );
     }
     publish_pack_outputs_in(
-        &mut tx,
+        tx,
         task,
         rows,
         outputs,
@@ -847,28 +865,28 @@ pub(in super::super) async fn commit_pack_outputs(
         ensure!(
             !queries::pack_has_references(&dead)
                 .build_query_scalar::<bool>()
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?,
             "pack acquired a new reference; retry maintenance"
         );
         queries::fail_dead_pack_chunks(&dead)
             .build()
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     if split {
         queries::schedule_repacked_streams(&retained, cooldown)
             .build()
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     let old: Vec<_> = rows.iter().filter_map(|r| r.pack_id).collect();
     queries::retire_replaced_packs(&old)
         .build()
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    queries::record_pack_rewrite(task.id, serde_json::json!({"before_bytes":before,"output_bytes":after,"temporary_added_bytes":added,"transition_bytes":before+added})).execute(&mut *tx).await?;
-    tx.commit().await?;
+    queries::record_pack_rewrite(task.id, serde_json::json!({"before_bytes":before,"output_bytes":after,"temporary_added_bytes":added,"transition_bytes":before+added})).execute(&mut **tx).await?;
+
     Ok(())
 }
 

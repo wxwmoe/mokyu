@@ -186,7 +186,10 @@ impl Reader {
                     wire::Source::Chunk { chunk } => {
                         let (bytes, _) =
                             codec::decode_read(&chunk, bytes, keys.as_ref(), 0, &pool, true)?;
-                        data.push((chunk.id, (chunk.hash, Bytes::copy_from_slice(&bytes))));
+                        data.push((
+                            chunk.uuid.into(),
+                            (chunk.hash, Bytes::copy_from_slice(&bytes)),
+                        ));
                     }
                     wire::Source::Pack { pack, members } => {
                         let decoded = pack::decode(&pack, bytes, keys.as_ref(), &pool)?;
@@ -270,7 +273,12 @@ impl Reader {
         let storage = backend.profile.storage_id;
         let mut data = Vec::with_capacity(batch.chunks.len());
         for (index, target) in batch.chunks.iter().enumerate() {
-            let (hash, bytes) = raw.get(&target.id).context("pack member body is missing")?;
+            let source = if batch.sources.is_empty() {
+                target.id
+            } else {
+                target.physical_id()?.into()
+            };
+            let (hash, bytes) = raw.get(&source).context("pack member body is missing")?;
             ensure!(
                 hash == &target.hash && bytes.len() == target.size as usize,
                 "pack member identity differs"

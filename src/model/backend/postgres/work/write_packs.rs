@@ -41,6 +41,8 @@ pub(super) async fn prepare(
         bytes += item.chunk.raw_size as u64;
         batch.algorithm = item.chunk.algorithm.clone();
         batch.chunks.push(wire::Target {
+            uuid: None,
+            encoding: None,
             id: item.chunk.id,
             size: item.chunk.raw_size,
             hash: item.chunk.hash.clone(),
@@ -65,6 +67,7 @@ pub(super) async fn prepare(
             for (start, end) in [(start, end), (start, middle), (middle, end)] {
                 if end - start > 1 {
                     batch.packs.push(wire::Attempt {
+                        id: None,
                         start,
                         end,
                         location: Uuid::now_v7(),

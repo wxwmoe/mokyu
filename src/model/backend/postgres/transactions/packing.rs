@@ -178,7 +178,7 @@ pub(super) async fn enqueue_storage_task(
     Ok(id)
 }
 
-pub(super) fn advance_storage_scope(detail: &mut Value) -> Result<bool> {
+pub(in super::super) fn advance_storage_scope(detail: &mut Value) -> Result<bool> {
     let index = if detail["phase"] == "history" {
         detail["phase"] = json!("storage");
         0
