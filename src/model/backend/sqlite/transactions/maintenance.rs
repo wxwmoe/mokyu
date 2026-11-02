@@ -234,8 +234,24 @@ pub(in super::super) async fn finish_lifecycle_policy(
     report: Value,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let advanced = finish_lifecycle_policy_in(&mut tx, task, count, again, report).await?;
+    tx.commit().await?;
+    if advanced {
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("lifecycle-storage-advanced").await;
+    }
+    Ok(())
+}
+
+pub(in super::super) async fn finish_lifecycle_policy_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: Execution,
+    count: i64,
+    again: bool,
+    report: Value,
+) -> Result<bool> {
     let mut detail = queries::lock_task_detail(task)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
     if let Some(storage) = detail["storage_id"].as_str().map(str::to_owned) {
@@ -256,14 +272,10 @@ pub(in super::super) async fn finish_lifecycle_policy(
     }
     let done = !again && advance_storage_scope(&mut detail)?;
     queries::advance_storage_task(task.id, detail, count, done)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
-    if !again && !done {
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("lifecycle-storage-advanced").await;
-    }
-    Ok(())
+
+    Ok(!again && !done)
 }
 
 pub(in super::super) async fn create_maintenance_preview(

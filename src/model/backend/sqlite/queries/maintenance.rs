@@ -406,7 +406,7 @@ impl MaintenanceStore for Backend {
         grace: f64,
         batch: i64,
     ) -> Result<Vec<(Id, i32)>> {
-        Ok(sqlx::query_as("SELECT id,raw_size FROM chunks c WHERE storage_id=? AND state IN ('ready','failed','deleting') AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM transfer_members p WHERE p.source_chunk=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) ORDER BY unreferenced_at,id LIMIT ?").bind(storage).bind((grace*1_000_000.) as i64).bind(batch).fetch_all(&self.read).await?)
+        collect_chunks(&mut *self.read.acquire().await?, storage, grace, batch).await
     }
     async fn cleanup_history(
         &self,
@@ -444,7 +444,7 @@ impl MaintenanceStore for Backend {
         Ok(sqlx::query_scalar("SELECT DISTINCT p.upload_id FROM parts p JOIN extents e ON e.stream_id=p.stream_id WHERE e.fragment_id=?").bind(id).fetch_all(&self.read).await?)
     }
     async fn expired_uploads(&self, batch: i64, storage: Option<Uuid>) -> Result<Vec<Uuid>> {
-        Ok(sqlx::query_scalar("SELECT u.id FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE (? IS NULL OR b.storage_id=?) AND u.state='active' AND u.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-(CAST(substr(p.multipart_idle_timeout,1,length(p.multipart_idle_timeout)-1) AS INTEGER)*CASE substr(p.multipart_idle_timeout,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 ORDER BY u.touched_at,u.id LIMIT ?").bind(storage).bind(storage).bind(batch).fetch_all(&self.read).await?)
+        collect_uploads(&mut *self.read.acquire().await?, batch, storage).await
     }
 
     async fn stale_streams(
@@ -511,12 +511,10 @@ impl MaintenanceStore for Backend {
         transactions::retire_chunk(&self.write, id, storage, grace, active).await
     }
     async fn delete_chunk(&self, id: Id, storage: Uuid) -> Result<()> {
-        sqlx::query("UPDATE chunks SET state='deleted',deleted_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND storage_id=? AND state='deleting'").bind(id).bind(storage).execute(&self.write).await?;
-        Ok(())
+        finish_collect_chunk(&mut *self.write.acquire().await?, id, storage).await
     }
     async fn retire_packs(&self, storage: Uuid) -> Result<()> {
-        sqlx::query("UPDATE packs AS p SET state='retired',unreferenced_at=COALESCE(unreferenced_at,(SELECT MAX(c.unreferenced_at) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=p.id),CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready') AND p.storage_id=?").bind(storage).execute(&self.write).await?;
-        Ok(())
+        collect_empty_packs(&mut *self.write.acquire().await?, storage).await
     }
     async fn physical_candidates(
         &self,
@@ -526,82 +524,34 @@ impl MaintenanceStore for Backend {
         minimum: f64,
         storage: Uuid,
     ) -> Result<Vec<(Id, Uuid, bool)>> {
-        let tier_unit = i16::from(packed);
-        let state_guard = if packed {
-            "state IN ('retired','deleting')"
-        } else {
-            "(state IN ('retired','deleting') OR (state='deleted' AND recovery_pending)) AND owner_stream IS NULL"
-        };
-        let (table, id) = physical_table(packed);
-        let source = if packed {
-            "source_pack"
-        } else {
-            "source_encoding"
-        };
-        let unknown = if packed {
-            "stored_at IS NULL"
-        } else {
-            "stored_at IS NULL OR recovery_pending"
-        };
-        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {table}.{id},COALESCE(tl.address,{table}.location_id),(tl.address IS NULL AND ({unknown})) FROM {table} LEFT JOIN tier_locations tl ON tl.unit={tier_unit} AND tl.physical_id={table}.location_id WHERE {state_guard} AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.{source}={table}.{id}) AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND (?=0 OR stored_at IS NULL OR stored_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-?) AND COALESCE(tl.storage_id,{table}.storage_id)=? AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=COALESCE((SELECT a.address FROM tier_locations a WHERE a.unit={tier_unit} AND a.physical_id={table}.location_id),{table}.location_id) AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id={table}.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id={table}.location_id AND th.activated_at>unixepoch()-?) ORDER BY unreferenced_at,{id} LIMIT ?"))).bind((grace*1_000_000.) as i64).bind(minimum).bind((minimum*1_000_000.) as i64).bind(storage).bind(minimum as i64).bind(batch).fetch_all(&self.read).await?)
+        collect_physical(
+            &mut *self.read.acquire().await?,
+            packed,
+            grace,
+            batch,
+            minimum,
+            storage,
+        )
+        .await
     }
     async fn physical_age(&self, packed: bool, id: Id, stored: DateTime<Utc>) -> Result<()> {
-        if !packed {
-            sqlx::query("UPDATE chunk_encodings SET stored_at=CASE WHEN recovery_pending THEN ? ELSE COALESCE(stored_at,?) END WHERE encoding_id=?").bind(stored.timestamp_micros()).bind(stored.timestamp_micros()).bind(id).execute(&self.write).await?;
-            return Ok(());
-        }
-        let (table, column) = physical_table(packed);
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "UPDATE {table} SET stored_at=COALESCE(stored_at,?) WHERE {column}=?"
-        )))
-        .bind(stored.timestamp_micros())
-        .bind(id)
-        .execute(&self.write)
-        .await?;
-        Ok(())
+        collect_age(&mut *self.write.acquire().await?, packed, id, stored).await
     }
     async fn claim_physical(&self, packed: bool, id: Id, grace: f64, minimum: f64) -> Result<bool> {
-        let tier_unit = i16::from(packed);
-        let state_guard = if packed {
-            "state IN ('retired','deleting')"
-        } else {
-            "(state IN ('retired','deleting') OR (state='deleted' AND recovery_pending)) AND owner_stream IS NULL"
-        };
-        let (table, column) = physical_table(packed);
-        let source = if packed {
-            "source_pack"
-        } else {
-            "source_encoding"
-        };
-        Ok(sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleting' WHERE {column}=? AND {state_guard} AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.{source}={table}.{column}) AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND (?=0 OR stored_at IS NULL OR stored_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-?) AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=COALESCE((SELECT a.address FROM tier_locations a WHERE a.unit={tier_unit} AND a.physical_id={table}.location_id),{table}.location_id) AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id={table}.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id={table}.location_id AND th.activated_at>unixepoch()-?)"))).bind(id).bind((grace*1_000_000.) as i64).bind(minimum).bind((minimum*1_000_000.) as i64).bind(minimum as i64).execute(&self.write).await?.rows_affected()!=0)
+        claim_collect_physical(
+            &mut *self.write.acquire().await?,
+            packed,
+            id,
+            grace,
+            minimum,
+        )
+        .await
     }
     async fn delete_physical(&self, packed: bool, id: Id, retention: f64) -> Result<()> {
         let mut tx = super::super::queries::tier::begin(self).await?;
-        let unit = if packed {
-            crate::model::tiering::Unit::Pack
-        } else {
-            crate::model::tiering::Unit::Chunk
-        };
-        let address = super::super::queries::tier::gc_identity(&mut *tx, unit, id).await?;
-        if !packed {
-            let changed=sqlx::query("UPDATE chunk_encodings SET recovery_pending=recovery_pending AND (deleted_at IS NULL OR deleted_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)-?),state='deleted',unreferenced_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),deleted_at=COALESCE(deleted_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE encoding_id=? AND state='deleting'").bind((retention*1_000_000.) as i64).bind(id).execute(&mut *tx).await?.rows_affected();
-            if changed == 1
-                && let Some(address) = address
-            {
-                super::super::queries::tier::forget(&mut *tx, unit, address).await?;
-            }
-            tx.commit().await?;
-            return Ok(());
-        }
-        let (table, column) = physical_table(packed);
-        let changed=sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleted',deleted_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE {column}=? AND state='deleting'"))).bind(id).execute(&mut *tx).await?.rows_affected();
-        if changed == 1
-            && let Some(address) = address
-        {
-            super::super::queries::tier::forget(&mut *tx, unit, address).await?;
-        }
+        let value = finish_collect_physical(&mut tx, packed, id, retention).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(value)
     }
     async fn gc_status(&self) -> Result<(Vec<(String, i64)>, bool, bool)> {
         transactions::gc_status(&self.read).await
@@ -775,4 +725,142 @@ pub(in super::super) fn inventory_chunks() -> Scalar<'static, Value> {
     sqlx::query_scalar(
         "SELECT JSON_OBJECT('states',COALESCE(json_group_object(state,n),JSON_OBJECT())) FROM (SELECT state,COUNT(*) n FROM chunks GROUP BY state) c",
     )
+}
+
+pub(in super::super) async fn collect_uploads(
+    db: &mut sqlx::SqliteConnection,
+    batch: i64,
+    storage: Option<Uuid>,
+) -> Result<Vec<Uuid>> {
+    Ok(sqlx::query_scalar("SELECT u.id FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE (? IS NULL OR b.storage_id=?) AND u.state='active' AND u.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-(CAST(substr(p.multipart_idle_timeout,1,length(p.multipart_idle_timeout)-1) AS INTEGER)*CASE substr(p.multipart_idle_timeout,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 ORDER BY u.touched_at,u.id LIMIT ?").bind(storage).bind(storage).bind(batch).fetch_all(&mut *db).await?)
+}
+
+pub(in super::super) async fn collect_chunks(
+    db: &mut sqlx::SqliteConnection,
+    storage: Uuid,
+    grace: f64,
+    batch: i64,
+) -> Result<Vec<(Id, i32)>> {
+    Ok(sqlx::query_as("SELECT id,raw_size FROM chunks c WHERE storage_id=? AND state IN ('ready','failed','deleting') AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM transfer_members p WHERE p.source_chunk=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) ORDER BY unreferenced_at,id LIMIT ?").bind(storage).bind((grace*1_000_000.) as i64).bind(batch).fetch_all(&mut *db).await?)
+}
+
+pub(in super::super) async fn finish_collect_chunk(
+    db: &mut sqlx::SqliteConnection,
+    id: Id,
+    storage: Uuid,
+) -> Result<()> {
+    sqlx::query("UPDATE chunks SET state='deleted',deleted_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND storage_id=? AND state='deleting'").bind(id).bind(storage).execute(&mut *db).await?;
+    Ok(())
+}
+
+pub(in super::super) async fn collect_empty_packs(
+    db: &mut sqlx::SqliteConnection,
+    storage: Uuid,
+) -> Result<()> {
+    sqlx::query("UPDATE packs AS p SET state='retired',unreferenced_at=COALESCE(unreferenced_at,(SELECT MAX(c.unreferenced_at) FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=p.id),CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready') AND p.storage_id=?").bind(storage).execute(&mut *db).await?;
+    Ok(())
+}
+
+pub(in super::super) async fn collect_physical(
+    db: &mut sqlx::SqliteConnection,
+    packed: bool,
+    grace: f64,
+    batch: i64,
+    minimum: f64,
+    storage: Uuid,
+) -> Result<Vec<(Id, Uuid, bool)>> {
+    let tier_unit = i16::from(packed);
+    let state_guard = if packed {
+        "state IN ('retired','deleting')"
+    } else {
+        "(state IN ('retired','deleting') OR (state='deleted' AND recovery_pending)) AND owner_stream IS NULL"
+    };
+    let (table, id) = physical_table(packed);
+    let source = if packed {
+        "source_pack"
+    } else {
+        "source_encoding"
+    };
+    let unknown = if packed {
+        "stored_at IS NULL"
+    } else {
+        "stored_at IS NULL OR recovery_pending"
+    };
+    Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {table}.{id},COALESCE(tl.address,{table}.location_id),(tl.address IS NULL AND ({unknown})) FROM {table} LEFT JOIN tier_locations tl ON tl.unit={tier_unit} AND tl.physical_id={table}.location_id WHERE {state_guard} AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.{source}={table}.{id}) AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND (?=0 OR stored_at IS NULL OR stored_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-?) AND COALESCE(tl.storage_id,{table}.storage_id)=? AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=COALESCE((SELECT a.address FROM tier_locations a WHERE a.unit={tier_unit} AND a.physical_id={table}.location_id),{table}.location_id) AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id={table}.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id={table}.location_id AND th.activated_at>unixepoch()-?) ORDER BY unreferenced_at,{id} LIMIT ?"))).bind((grace*1_000_000.) as i64).bind(minimum).bind((minimum*1_000_000.) as i64).bind(storage).bind(minimum as i64).bind(batch).fetch_all(&mut *db).await?)
+}
+
+pub(in super::super) async fn collect_age(
+    db: &mut sqlx::SqliteConnection,
+    packed: bool,
+    id: Id,
+    stored: DateTime<Utc>,
+) -> Result<()> {
+    if !packed {
+        sqlx::query("UPDATE chunk_encodings SET stored_at=CASE WHEN recovery_pending THEN ? ELSE COALESCE(stored_at,?) END WHERE encoding_id=?").bind(stored.timestamp_micros()).bind(stored.timestamp_micros()).bind(id).execute(&mut *db).await?;
+        return Ok(());
+    }
+    let (table, column) = physical_table(packed);
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "UPDATE {table} SET stored_at=COALESCE(stored_at,?) WHERE {column}=?"
+    )))
+    .bind(stored.timestamp_micros())
+    .bind(id)
+    .execute(&mut *db)
+    .await?;
+    Ok(())
+}
+
+pub(in super::super) async fn claim_collect_physical(
+    db: &mut sqlx::SqliteConnection,
+    packed: bool,
+    id: Id,
+    grace: f64,
+    minimum: f64,
+) -> Result<bool> {
+    let tier_unit = i16::from(packed);
+    let state_guard = if packed {
+        "state IN ('retired','deleting')"
+    } else {
+        "(state IN ('retired','deleting') OR (state='deleted' AND recovery_pending)) AND owner_stream IS NULL"
+    };
+    let (table, column) = physical_table(packed);
+    let source = if packed {
+        "source_pack"
+    } else {
+        "source_encoding"
+    };
+    Ok(sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleting' WHERE {column}=? AND {state_guard} AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.{source}={table}.{column}) AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND (?=0 OR stored_at IS NULL OR stored_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-?) AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=COALESCE((SELECT a.address FROM tier_locations a WHERE a.unit={tier_unit} AND a.physical_id={table}.location_id),{table}.location_id) AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id={table}.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id={table}.location_id AND th.activated_at>unixepoch()-?)"))).bind(id).bind((grace*1_000_000.) as i64).bind(minimum).bind((minimum*1_000_000.) as i64).bind(minimum as i64).execute(&mut *db).await?.rows_affected()!=0)
+}
+
+pub(in super::super) async fn finish_collect_physical(
+    db: &mut sqlx::SqliteConnection,
+    packed: bool,
+    id: Id,
+    retention: f64,
+) -> Result<()> {
+    let unit = if packed {
+        crate::model::tiering::Unit::Pack
+    } else {
+        crate::model::tiering::Unit::Chunk
+    };
+    let address = super::super::queries::tier::gc_identity(&mut *db, unit, id).await?;
+    if !packed {
+        let changed=sqlx::query("UPDATE chunk_encodings SET recovery_pending=recovery_pending AND (deleted_at IS NULL OR deleted_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)-?),state='deleted',unreferenced_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),deleted_at=COALESCE(deleted_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE encoding_id=? AND state='deleting'").bind((retention*1_000_000.) as i64).bind(id).execute(&mut *db).await?.rows_affected();
+        if changed == 1
+            && let Some(address) = address
+        {
+            super::super::queries::tier::forget(&mut *db, unit, address).await?;
+        }
+
+        return Ok(());
+    }
+    let (table, column) = physical_table(packed);
+    let changed=sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleted',deleted_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE {column}=? AND state='deleting'"))).bind(id).execute(&mut *db).await?.rows_affected();
+    if changed == 1
+        && let Some(address) = address
+    {
+        super::super::queries::tier::forget(&mut *db, unit, address).await?;
+    }
+
+    Ok(())
 }

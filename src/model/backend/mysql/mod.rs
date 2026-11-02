@@ -42,6 +42,8 @@ mod tier_transactions;
 mod transactions;
 #[path = "../shared/work_audit.rs"]
 mod work_audit;
+#[path = "../shared/work_collect.rs"]
+mod work_collect;
 #[path = "../shared/work_conversion.rs"]
 mod work_conversion;
 #[path = "../shared/work_export.rs"]

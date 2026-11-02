@@ -227,6 +227,10 @@ impl App {
         }
         Ok(())
     }
+    pub(crate) async fn remote_worker_owns_tasks(&self) -> Result<bool> {
+        Ok(self.deployment_mode() == "single_control" && self.runtime.state().await?.remote_work)
+    }
+
     pub async fn cleanup(&self) -> Result<usize> {
         self.cleanup_inner(None, self.config.maintenance.batch_size as usize, None)
             .await
@@ -246,7 +250,10 @@ impl App {
             self.cluster()?.expire_stream_leases().await?;
         }
         self.reconcile_upload_pins(storage_id).await?;
-        self.storage.reconcile_staging(storage_id).await?;
+        let delegated = self.remote_worker_owns_tasks().await?;
+        if !delegated {
+            self.storage.reconcile_staging(storage_id).await?;
+        }
         let deadline = Instant::now()
             + Duration::from_secs(config::seconds(&self.config.maintenance.max_duration)?);
         let mut removed = 0;
@@ -332,7 +339,9 @@ impl App {
                 (Some(storage), Some(key)) => {
                     // The staging reservation survives a crash between the metadata and S3 deletes.
                     fragment.deletion.finish().await?;
-                    self.storage.delete_staged(storage, &key).await?;
+                    if !delegated {
+                        self.storage.delete_staged(storage, &key).await?;
+                    }
                 }
                 (None, None) => {
                     if fragment.file.is_none() {

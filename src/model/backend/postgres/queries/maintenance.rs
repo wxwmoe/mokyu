@@ -526,7 +526,13 @@ impl MaintenanceStore for Backend {
         transactions::change_maintenance_policy(&self.pool, policy, paused).await
     }
     async fn start_policy(&self, policy: &str, node: Option<Uuid>) -> Result<(Uuid, bool)> {
-        transactions::start_lifecycle_policy(&self.pool, self.single, policy, node).await
+        transactions::start_lifecycle_policy(
+            &self.pool,
+            self.single && self.control_epoch.is_none(),
+            policy,
+            node,
+        )
+        .await
     }
     async fn finish_policy(
         &self,
@@ -535,7 +541,7 @@ impl MaintenanceStore for Backend {
         again: bool,
         report: Value,
     ) -> Result<()> {
-        if self.single {
+        if self.single && self.control_epoch.is_none() {
             return transactions::finish_single_lifecycle(&self.pool, id, count, again, report)
                 .await;
         }

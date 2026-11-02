@@ -445,10 +445,11 @@ impl RuntimeStore for Backend {
     }
 
     async fn state(&self) -> Result<RuntimeState> {
-        let (gc_paused, maintenance, pack_creation_paused, mode, mode_revision) =
+        let (gc_paused, maintenance, pack_creation_paused, mode, mode_revision, remote_work) =
             runtime_state().fetch_one(&self.pool).await?;
         Ok(RuntimeState {
             gc_paused,
+            remote_work,
             maintenance,
             pack_creation_paused,
             mode,
@@ -481,9 +482,9 @@ pub(in super::super) fn health() -> Statement<'static> {
     sqlx::query("SELECT 1")
 }
 
-fn runtime_state() -> Rows<'static, (bool, bool, bool, String, i64)> {
+fn runtime_state() -> Rows<'static, (bool, bool, bool, String, i64, bool)> {
     sqlx::query_as(
-        "SELECT gc_paused,maintenance,pack_creation_paused,deployment_mode,deployment_mode_revision FROM mokyu_meta",
+        "SELECT gc_paused,maintenance,pack_creation_paused,deployment_mode,deployment_mode_revision,remote_work FROM mokyu_meta",
     )
 }
 

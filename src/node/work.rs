@@ -466,6 +466,8 @@ impl Worker {
                                 }
                                 match backend.store.backend.delete(&path).await {
                                     Ok(()) | Err(object_store::Error::NotFound { .. }) => {
+                                        #[cfg(feature = "fault-injection")]
+                                        crate::faults::point("node-reclaimed-storage").await;
                                         Ok(work::Outcome::Deleted { stored_at })
                                     }
                                     Err(error) => Err(error.into()),

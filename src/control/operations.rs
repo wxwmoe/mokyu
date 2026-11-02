@@ -687,6 +687,9 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             app.maintenance_change("gc", false).await?;
             app.gc_status().await
         }
+        Command::Gc(Gc::Run) if app.remote_worker_owns_tasks().await? => {
+            app.maintenance_start("gc").await
+        }
         Command::Gc(Gc::Run) => {
             let cleaned = app.cleanup().await?;
             let reclaimed = app.reclaim().await?;

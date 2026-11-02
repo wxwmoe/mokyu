@@ -196,13 +196,14 @@ impl RuntimeStore for Backend {
         self.state().await
     }
     async fn state(&self) -> Result<RuntimeState> {
-        let (gc_paused, maintenance, pack_creation_paused, mode, mode_revision) = sqlx::query_as(
-            "SELECT gc_paused,maintenance,pack_creation_paused,deployment_mode,deployment_mode_revision FROM mokyu_meta WHERE id=1",
+        let (gc_paused, maintenance, pack_creation_paused, mode, mode_revision, remote_work) = sqlx::query_as(
+            "SELECT gc_paused,maintenance,pack_creation_paused,deployment_mode,deployment_mode_revision,remote_work FROM mokyu_meta WHERE id=1",
         )
         .fetch_one(&self.read)
         .await?;
         Ok(RuntimeState {
             gc_paused,
+            remote_work,
             maintenance,
             pack_creation_paused,
             mode,

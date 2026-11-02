@@ -507,13 +507,7 @@ impl RawStore for Backend {
         Ok(())
     }
     async fn upload_id(&self, source: Id) -> Result<Option<String>> {
-        Ok(
-            sqlx::query_scalar("SELECT upload_id FROM raw_sources WHERE id=?")
-                .bind(source)
-                .fetch_optional(&self.read)
-                .await?
-                .flatten(),
-        )
+        collect_raw_upload(&mut *self.read.acquire().await?, source).await
     }
     async fn deduplicate(&self, stream: Id, source: Id, hash: &[u8]) -> Result<bool> {
         transactions::deduplicate_raw(&self.write, stream, source, hash).await
@@ -593,30 +587,30 @@ impl RawStore for Backend {
         minimum: i64,
         limit: i64,
     ) -> Result<Vec<RawSource>> {
-        anyhow::ensure!(
-            (1..=128).contains(&limit) && grace >= 0 && minimum >= 0,
-            "invalid raw cleanup bounds"
-        );
-        Ok(sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.location_id) AS tier_material,r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r LEFT JOIN tier_locations th ON th.unit=2 AND th.physical_id=r.location_id WHERE COALESCE(th.storage_id,r.storage_id)=? AND r.owner_stream IS NULL AND r.unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND r.created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=r.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM native_uploads nu JOIN uploads u ON u.id=nu.upload_id WHERE nu.raw_id=r.id AND u.state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit=2 AND mv.physical_id=r.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit=2 AND th.physical_id=r.location_id AND th.activated_at>unixepoch()-?) ORDER BY r.unreferenced_at,r.id LIMIT ?")
-            .bind(storage).bind(grace).bind(minimum).bind(minimum).bind(limit).fetch_all(&self.read).await?)
+        collect_raw_sources(
+            &mut *self.read.acquire().await?,
+            storage,
+            grace,
+            minimum,
+            limit,
+        )
+        .await
     }
     async fn claim(&self, source: Id, revision: i64, grace: i64, minimum: i64) -> Result<bool> {
-        Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=? AND revision=? AND owner_stream IS NULL AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=raw_sources.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM native_uploads nu JOIN uploads u ON u.id=nu.upload_id WHERE nu.raw_id=raw_sources.id AND u.state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=COALESCE((SELECT a.address FROM tier_locations a WHERE a.unit=2 AND a.physical_id=raw_sources.location_id),raw_sources.location_id) AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit=2 AND mv.physical_id=raw_sources.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit=2 AND th.physical_id=raw_sources.location_id AND th.activated_at>unixepoch()-?)")
-            .bind(source).bind(revision).bind(grace).bind(minimum).bind(minimum).execute(&self.write).await?.rows_affected()==1)
+        claim_collect_raw(
+            &mut *self.write.acquire().await?,
+            source,
+            revision,
+            grace,
+            minimum,
+        )
+        .await
     }
     async fn removed(&self, source: Id) -> Result<()> {
         let mut tx = super::super::queries::tier::begin(self).await?;
-        let unit = crate::model::tiering::Unit::Raw;
-        let address = super::super::queries::tier::gc_identity(&mut *tx, unit, source).await?;
-        let changed=sqlx::query("DELETE FROM raw_sources WHERE id=? AND state='deleting' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=raw_sources.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM native_uploads nu JOIN uploads u ON u.id=nu.upload_id WHERE nu.raw_id=raw_sources.id AND u.state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
-            .bind(source).execute(&mut *tx).await?.rows_affected();
-        if changed == 1
-            && let Some(address) = address
-        {
-            super::super::queries::tier::forget(&mut *tx, unit, address).await?;
-        }
+        let value = finish_collect_raw(&mut tx, source).await?;
         tx.commit().await?;
-        Ok(())
+        Ok(value)
     }
 }
 
@@ -1097,4 +1091,60 @@ pub(in super::super) fn release_memory_processing(boot: Uuid) -> Statement<'stat
 
 pub(in super::super) fn quarantine_memory_raw(boot: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE raw_sources SET pending_upload=FALSE,quarantine_code='remote_missing',quarantined_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),revision=revision+1 WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL AND medium='memory' AND boot_id<>? AND quarantine_code IS NULL").bind(boot)
+}
+
+pub(in super::super) async fn collect_raw_upload(
+    db: &mut sqlx::SqliteConnection,
+    source: Id,
+) -> Result<Option<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT upload_id FROM raw_sources WHERE id=?")
+            .bind(source)
+            .fetch_optional(&mut *db)
+            .await?
+            .flatten(),
+    )
+}
+
+pub(in super::super) async fn collect_raw_sources(
+    db: &mut sqlx::SqliteConnection,
+    storage: Uuid,
+    grace: i64,
+    minimum: i64,
+    limit: i64,
+) -> Result<Vec<RawSource>> {
+    anyhow::ensure!(
+        (1..=128).contains(&limit) && grace >= 0 && minimum >= 0,
+        "invalid raw cleanup bounds"
+    );
+    Ok(sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.location_id) AS tier_material,r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r LEFT JOIN tier_locations th ON th.unit=2 AND th.physical_id=r.location_id WHERE COALESCE(th.storage_id,r.storage_id)=? AND r.owner_stream IS NULL AND r.unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND r.created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=r.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM native_uploads nu JOIN uploads u ON u.id=nu.upload_id WHERE nu.raw_id=r.id AND u.state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit=2 AND mv.physical_id=r.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit=2 AND th.physical_id=r.location_id AND th.activated_at>unixepoch()-?) ORDER BY r.unreferenced_at,r.id LIMIT ?")
+            .bind(storage).bind(grace).bind(minimum).bind(minimum).bind(limit).fetch_all(&mut *db).await?)
+}
+
+pub(in super::super) async fn claim_collect_raw(
+    db: &mut sqlx::SqliteConnection,
+    source: Id,
+    revision: i64,
+    grace: i64,
+    minimum: i64,
+) -> Result<bool> {
+    Ok(sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=? AND revision=? AND owner_stream IS NULL AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-?*1000000 AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=raw_sources.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM native_uploads nu JOIN uploads u ON u.id=nu.upload_id WHERE nu.raw_id=raw_sources.id AND u.state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=COALESCE((SELECT a.address FROM tier_locations a WHERE a.unit=2 AND a.physical_id=raw_sources.location_id),raw_sources.location_id) AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit=2 AND mv.physical_id=raw_sources.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit=2 AND th.physical_id=raw_sources.location_id AND th.activated_at>unixepoch()-?)")
+            .bind(source).bind(revision).bind(grace).bind(minimum).bind(minimum).execute(&mut *db).await?.rows_affected()==1)
+}
+
+pub(in super::super) async fn finish_collect_raw(
+    db: &mut sqlx::SqliteConnection,
+    source: Id,
+) -> Result<()> {
+    let unit = crate::model::tiering::Unit::Raw;
+    let address = super::super::queries::tier::gc_identity(&mut *db, unit, source).await?;
+    let changed=sqlx::query("DELETE FROM raw_sources WHERE id=? AND state='deleting' AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=raw_sources.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM native_uploads nu JOIN uploads u ON u.id=nu.upload_id WHERE nu.raw_id=raw_sources.id AND u.state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id)")
+            .bind(source).execute(&mut *db).await?.rows_affected();
+    if changed == 1
+        && let Some(address) = address
+    {
+        super::super::queries::tier::forget(&mut *db, unit, address).await?;
+    }
+
+    Ok(())
 }

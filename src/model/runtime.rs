@@ -15,6 +15,7 @@ pub(crate) struct DatabaseInfo {
 
 pub(crate) struct RuntimeState {
     pub(crate) gc_paused: bool,
+    pub(crate) remote_work: bool,
     pub(crate) maintenance: bool,
     pub(crate) pack_creation_paused: bool,
     pub(crate) mode: String,

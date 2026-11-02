@@ -21,5 +21,5 @@ pub(in super::super) fn release<'a>(storage: Uuid, key: &'a str) -> Statement<'a
         .bind(key)
 }
 pub(in super::super) fn old(storage: Option<Uuid>) -> Rows<'static, (Uuid, String)> {
-    sqlx::query_as("SELECT s.storage_id,s.object_key FROM staging_objects s WHERE (? IS NULL OR s.storage_id=?) AND s.created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-300000000 AND NOT EXISTS(SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) ORDER BY s.created_at LIMIT 128").bind(storage).bind(storage)
+    sqlx::query_as("SELECT s.storage_id,s.object_key FROM staging_objects s WHERE (? IS NULL OR s.storage_id=?) AND s.created_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-300000000 AND NOT EXISTS(SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS(SELECT 1 FROM node_write_tails t JOIN node_writes w ON w.node_id=t.node_id AND w.operation_id=t.operation_id WHERE t.storage_id=s.storage_id AND t.object_key=s.object_key AND w.phase IN ('preparing','active') AND w.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) ORDER BY s.created_at,s.object_key LIMIT 128").bind(storage).bind(storage)
 }

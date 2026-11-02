@@ -255,6 +255,29 @@ async fn finish(
     }
     let mut issue = None;
     let state = match (Some(plan), result.outcomes.as_slice()) {
+        (
+            Some(work::Plan::Collect {
+                storage,
+                delete_before,
+                retention,
+                metadata_count,
+                items,
+            }),
+            outcomes,
+        ) => {
+            super::work_collect::finish(
+                tx,
+                task,
+                storage,
+                delete_before,
+                retention,
+                metadata_count,
+                &items,
+                outcomes,
+            )
+            .await?;
+            return settle(tx, node, task, result.operation, &hash).await;
+        }
         (Some(work::Plan::HashRaw { items, .. }), outcomes) => {
             super::work_raw::finish(tx, task, &items, outcomes).await?;
             "completed"
@@ -622,6 +645,17 @@ impl NodeWork for Backend {
                 Some("cdc") => {
                     super::work_conversion::offer(&mut tx, node, input.run, task, &detail, key)
                         .await?
+                }
+                _ if matches!(task_type.as_str(), "gc" | "cleanup") => {
+                    super::work_collect::offer(
+                        &mut tx,
+                        task,
+                        &detail,
+                        task_type == "gc",
+                        input.max_items,
+                        key,
+                    )
+                    .await?
                 }
                 _ if matches!(task_type.as_str(), "pack" | "unpack") => {
                     super::work_media::offer(&mut tx, task, &detail, key).await?
