@@ -144,8 +144,11 @@ pub(in super::super) fn release_handoff() -> Statement<'static> {
     )
 }
 
+pub(in super::super) fn pending_files(node: Uuid) -> Rows<'static, (i64, i64, i64, i64)> {
+    sqlx::query_as("SELECT (SELECT count(*) FROM pending_uploads WHERE node_id=?),(SELECT count(*) FROM raw_uploads WHERE node_id=?),(SELECT count(*) FROM native_parts p JOIN uploads u ON u.id=p.upload_id WHERE p.node_id=? AND u.state IN ('active','completing')),(SELECT count(*) FROM node_writes WHERE node_id=? AND (phase='preparing' OR phase='active' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)))").bind(node).bind(node).bind(node).bind(node)
+}
 pub(in super::super) fn active_reads(node: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_reads WHERE node_id=? AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) OR EXISTS(SELECT 1 FROM raw_uploads WHERE node_id=?) OR EXISTS(SELECT 1 FROM multipart_files WHERE node_id=? AND part_stream IS NOT NULL AND state<>'deleting') OR EXISTS(SELECT 1 FROM node_writes WHERE node_id=? AND (phase='preparing' OR phase='active' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)))").bind(node).bind(node).bind(node).bind(node)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_reads WHERE node_id=? AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(node)
 }
 pub(in super::super) fn active_grants() -> Scalar<'static, bool> {
     sqlx::query_scalar(

@@ -359,7 +359,7 @@ impl NodeWrites for Service {
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::local(write_request(request)?)?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.prepare_local_part(
+        let reply = bounded(self.app.node_writes.prepare_local_part(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1124,7 +1124,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::NativeFinishReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::pages(request.into_inner())?;
-        bounded(self.app.cluster().map_err(failure)?.stage_native_pages(
+        bounded(self.app.node_writes.stage_native_pages(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1138,7 +1138,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::adopt(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.adopt_native_complete(
+        let reply = bounded(self.app.node_writes.adopt_native_complete(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1152,12 +1152,11 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::NativeCompleteReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::complete(request.into_inner())?;
-        let reply = bounded(
-            self.app
-                .cluster()
-                .map_err(failure)?
-                .prepare_native_complete(&node, &self.app.secrets.credential_key, input),
-        )
+        let reply = bounded(self.app.node_writes.prepare_native_complete(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
         .await?;
         Ok(Response::new(super::native::prepared(reply)?))
     }
@@ -1167,7 +1166,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::FilesReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::inventory(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.check_local_files(
+        let reply = bounded(self.app.node_writes.check_local_files(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1184,11 +1183,11 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::NativeFinishReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::finish(request.into_inner())?;
-        bounded(self.app.cluster().map_err(failure)?.finish_native(
-            &node,
-            &self.app.secrets.credential_key,
-            input,
-        ))
+        bounded(
+            self.app
+                .node_writes
+                .finish_native(&node, &self.app.secrets.credential_key, input),
+        )
         .await?;
         Ok(Response::new(wire::NativeFinishReply {}))
     }
@@ -1198,7 +1197,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::NativeWorkReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::native::claim(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.claim_native(
+        let reply = bounded(self.app.node_writes.claim_native(
             &node,
             &self.app.secrets.credential_key,
             input,

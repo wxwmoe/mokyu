@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::cluster::NativeParts;
 use crate::{
     cluster::NodeState,
     model::{node_native::Inventory, session::Run},

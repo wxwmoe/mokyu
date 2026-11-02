@@ -60,13 +60,14 @@ pub(crate) async fn begin(
 }
 
 pub(crate) async fn prepare_local_part(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: native::LocalPart,
 ) -> Result<write::Reply> {
     let hash = input.hash()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     if let Some((previous, _)) = q::local_part(node.node_id, input.operation)
         .fetch_optional(&mut *tx)
@@ -193,13 +194,17 @@ async fn reply(
 }
 
 pub(crate) async fn claim(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: native::Claim,
 ) -> Result<native::Reply> {
+    if let Some(id) = input.stream {
+        id.validate(crate::config::DatabaseType::Postgres)?;
+    }
     let issued = write::operation_time(input.operation)?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authorize(&mut tx, node, key, input.run).await?;
     if let Some(row) = q::work(node.node_id, input.operation)
         .fetch_optional(&mut *tx)
@@ -276,7 +281,7 @@ pub(crate) async fn claim(
         Some(native::Work {
             upload: part.upload,
             action: native::Action::Part {
-                stream: file,
+                stream: part.stream.id,
                 file,
                 number,
                 size: part.stream.size,
@@ -346,13 +351,14 @@ pub(crate) async fn claim(
 }
 
 pub(crate) async fn finish(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: native::Finish,
 ) -> Result<()> {
     let hash = input.result.hash()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authorize(&mut tx, node, key, input.run).await?;
     let row = q::work(node.node_id, input.operation)
         .fetch_optional(&mut *tx)
@@ -442,7 +448,7 @@ pub(crate) async fn finish(
 }
 
 pub(crate) async fn inventory(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: native::Inventory,
@@ -453,7 +459,8 @@ pub(crate) async fn inventory(
             && input.files.iter().collect::<HashSet<_>>().len() == input.files.len(),
         Error::NodeReadLimit
     );
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authorize(&mut tx, node, key, input.run).await?;
     if input.recover {
         q::recover(node.node_id, &input.files)
@@ -492,12 +499,13 @@ pub(crate) async fn inventory(
 }
 
 pub(crate) async fn complete(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: native::Complete,
 ) -> Result<native::PreparedCompletion> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     require_node_write(&mut tx, &row).await?;
     let upload = row.completion_upload.ok_or(Error::NodeOperationConflict)?;
@@ -588,13 +596,14 @@ pub(crate) async fn complete(
 }
 
 pub(crate) async fn stage_pages(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: native::Pages,
 ) -> Result<()> {
     use crate::content::raw_pages::{self, GROUP, HASH};
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     require_node_write(&mut tx, &row).await?;
     let upload = row.completion_upload.ok_or(Error::NodeOperationConflict)?;
@@ -614,12 +623,13 @@ pub(crate) async fn stage_pages(
 }
 
 pub(crate) async fn adopt(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: native::Adopt,
 ) -> Result<write::Reply> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     let stream = require_node_write(&mut tx, &row).await?;
     let upload = row.completion_upload.ok_or(Error::NodeOperationConflict)?;

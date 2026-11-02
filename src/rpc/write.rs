@@ -259,6 +259,7 @@ pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
         operation_id: value.operation.to_string(),
         bucket_id: value.bucket.map_or_else(String::new, |id| id.to_string()),
         stream_id: value.stream.map_or_else(String::new, |id| id.to_string()),
+        local_file_id: value.local_file.map(|id| id.to_string()),
         phase: match value.phase {
             write::Phase::Active => wire::WritePhase::WriteActive,
             write::Phase::Busy => wire::WritePhase::WriteBusy,

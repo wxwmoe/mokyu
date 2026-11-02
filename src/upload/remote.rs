@@ -9,7 +9,6 @@ use crate::{
         Integrity,
         multipart::{Upload, completion_checksums},
     },
-    worker::raw::processor,
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -25,15 +24,15 @@ impl App {
         upload: Uuid,
         storage: Uuid,
     ) -> Result<Option<RemoteUpload>> {
-        if self.role == "single" {
+        if self.deployment_mode() == "single" {
             return Ok(None);
         }
-        let cluster = self.cluster()?;
+        let cluster = self.node_writes.as_ref();
         let mut remote = if let Some(remote) = cluster.remote_upload(upload).await? {
             remote
         } else if let Some(revision) = self.storage.raw_policy(storage)? {
             cluster
-                .begin_remote(upload, storage, revision, processor(self))
+                .begin_remote(upload, storage, revision, self.multipart_processor())
                 .await?
         } else {
             return Ok(None);
@@ -46,12 +45,20 @@ impl App {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(125);
         while remote.upstream.is_none() {
             let token = Uuid::new_v4();
-            if cluster.claim_remote(upload, token, processor(self)).await? {
+            if cluster
+                .claim_remote(upload, token, self.multipart_processor())
+                .await?
+            {
                 let created = self.storage.create_remote(&remote).await;
                 match created {
                     Ok(id) => {
                         if cluster
-                            .initialized_remote(upload, token, Some(&id), processor(self))
+                            .initialized_remote(
+                                upload,
+                                token,
+                                Some(&id),
+                                self.multipart_processor(),
+                            )
                             .await?
                         {
                             remote.upstream = Some(id)
@@ -62,7 +69,7 @@ impl App {
                     }
                     Err(error) => {
                         let _ = cluster
-                            .initialized_remote(upload, token, None, processor(self))
+                            .initialized_remote(upload, token, None, self.multipart_processor())
                             .await;
                         return Err(error);
                     }
@@ -83,18 +90,21 @@ impl App {
         Ok(Some(remote))
     }
     pub(crate) async fn transfer_remote_part(&self, stream: Option<Id>) -> Result<bool> {
-        if self.role == "single" {
+        if self.deployment_mode() == "single" {
             return Ok(false);
         }
         let Some(work) = self
-            .cluster()?
-            .claim_remote_part(Uuid::new_v4(), processor(self), stream)
+            .node_writes
+            .claim_remote_part(Uuid::new_v4(), self.multipart_processor(), stream)
             .await?
         else {
             return Ok(false);
         };
         let _upload = self.pin_upload(work.upload.upload);
-        let pin = self.pin_reader(work.stream.id, work.read_lease, 120);
+        let pin = match work.read_lease {
+            Some(lease) => self.pin_reader(work.stream.id, lease, 120),
+            None => self.pin(work.stream.id),
+        };
         let sending = async {
             let _slot = self.slots.clone().acquire_owned().await?;
             #[cfg(feature = "fault-injection")]
@@ -116,8 +126,8 @@ impl App {
             crate::faults::point("remote-part-before-ack").await;
             let _coord = self.coord.lock().await;
             ensure!(
-                self.cluster()?
-                    .finish_remote_part(&work, &etag, processor(self))
+                self.node_writes
+                    .finish_remote_part(&work, &etag, self.multipart_processor())
                     .await?,
                 crate::model::Error::OperationAborted
             );
@@ -129,8 +139,8 @@ impl App {
                 tokio::time::sleep(Duration::from_secs(30)).await;
                 self.ensure_mode()?;
                 ensure!(
-                    self.cluster()?
-                        .renew_remote_part(&work, processor(self))
+                    self.node_writes
+                        .renew_remote_part(&work, self.multipart_processor())
                         .await?,
                     crate::model::Error::OperationAborted
                 );
@@ -142,7 +152,7 @@ impl App {
             })
             .await;
         if let Err(error) = result {
-            self.cluster()?
+            self.node_writes
                 .retry_remote_part(&work, &error.to_string())
                 .await?;
             return Err(error);
@@ -152,7 +162,7 @@ impl App {
     pub(crate) async fn wait_remote_part(&self, upload: Uuid, stream: Id) -> Result<()> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
         loop {
-            let rows = self.cluster()?.remote_parts(upload, &[stream]).await?;
+            let rows = self.node_writes.remote_parts(upload, &[stream]).await?;
             ensure!(rows.len() == 1, crate::model::Error::OperationAborted);
             if rows[0].2.is_some() {
                 return Ok(());
@@ -167,7 +177,7 @@ impl App {
         }
     }
     pub(crate) async fn remote_housekeeping(&self) -> Result<()> {
-        if self.role == "single" {
+        if self.deployment_mode() == "single" {
             return Ok(());
         }
         {
@@ -182,14 +192,14 @@ impl App {
         .await?;
         let token = Uuid::new_v4();
         if let Some(upload) = self
-            .cluster()?
-            .claim_remote_cleanup(token, processor(self))
+            .node_writes
+            .claim_remote_cleanup(token, self.multipart_processor())
             .await?
         {
             if let Some(upstream) = &upload.upstream {
                 self.storage.abort_remote(&upload, upstream).await?;
             }
-            self.cluster()?.clean_remote(upload.upload, token).await?;
+            self.node_writes.clean_remote(upload.upload, token).await?;
         }
         Ok(())
     }
@@ -206,7 +216,7 @@ impl App {
         hash: &str,
         token: Uuid,
     ) -> Result<CompleteMultipartUploadOutput> {
-        let cluster = self.cluster()?;
+        let cluster = self.node_writes.as_ref();
         let remote = cluster.freeze_remote(u.id, token, hash).await?;
         let selected: Vec<_> = parts.iter().map(|part| part.id).collect();
         loop {
@@ -254,7 +264,8 @@ impl App {
         self.complete_quota(u.id, id, total).await?;
         let mut full = Integrity::new(&hyper::HeaderMap::new(), u.checksum_algorithm.as_deref())?;
         let mut content = blake3::Hasher::new();
-        let mut pages = crate::model::raw::PageWrite::new(remote.source.into());
+        let mut pages =
+            crate::model::raw::PageWrite::new(cluster.remote_source_id(u.id, id, token).await?);
         let mut body = self.storage.remote_body(&remote);
         let mut rest = Bytes::new();
         let mut renew = tokio::time::Instant::now();

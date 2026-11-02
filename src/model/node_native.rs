@@ -26,7 +26,7 @@ impl LocalPart {
 pub(crate) enum Action {
     Initialize,
     Part {
-        stream: Uuid,
+        stream: super::Id,
         file: Uuid,
         number: i32,
         size: i64,
@@ -45,7 +45,7 @@ pub(crate) struct Work {
 pub(crate) struct Claim {
     pub run: Run,
     pub operation: Uuid,
-    pub stream: Option<Uuid>,
+    pub stream: Option<super::Id>,
     pub cached: Vec<node_read::Version>,
 }
 

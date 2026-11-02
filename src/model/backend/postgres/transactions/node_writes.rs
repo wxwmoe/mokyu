@@ -131,6 +131,7 @@ pub(in super::super) async fn begin_node_write(
                 operation: input.operation,
                 bucket: Some(bucket.id),
                 stream: None,
+                local_file: None,
                 phase: if upload.state == "completed" {
                     write::Phase::Published
                 } else {
@@ -396,6 +397,10 @@ pub(in super::super) async fn node_write_reply(
             .stream_id
             .map(Into::into)
             .or_else(|| owned.result.as_ref()?.identity.map(|(_, stream)| stream)),
+        local_file: owned
+            .upload_id
+            .filter(|_| !owned.profile.cdc_enabled)
+            .and(owned.stream_id),
         phase,
         copy_references: owned
             .copy_source

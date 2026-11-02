@@ -1,6 +1,8 @@
 use super::*;
+use crate::model::cluster::NativeParts;
 use crate::model::cluster::NodeRequests;
 use crate::model::cluster::NodeWrites;
+use crate::model::cluster::RemoteParts;
 use crate::model::{
     node_complete as complete, node_native as native, node_read as read, node_write as write,
 };
@@ -125,7 +127,7 @@ pub(super) async fn check(
     let claim = |operation| native::Claim {
         run,
         operation,
-        stream: Some(stream),
+        stream: Some(stream.into()),
         cached: vec![],
     };
     let initialize = Uuid::now_v7();

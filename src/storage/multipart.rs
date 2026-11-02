@@ -36,7 +36,7 @@ impl Storage {
         self.remote_charges.lock().unwrap().remove(&stream);
     }
     pub(crate) async fn reconcile_remote_charges(&self) -> Result<()> {
-        let (Some(node), Some(cluster)) = (self.node_id.get(), &self.cluster) else {
+        let (Some(node), Some(cluster)) = (self.node_id.get(), &self.remote_parts) else {
             return Ok(());
         };
         let mut after = Id::default();

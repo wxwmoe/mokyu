@@ -23,25 +23,25 @@ use uuid::Uuid;
 
 #[derive(sqlx::FromRow)]
 pub(super) struct Write {
-    operation_id: Uuid,
-    lease_id: Uuid,
-    boot_id: Uuid,
-    fence: Uuid,
-    credential_generation: i64,
-    request_hash: Vec<u8>,
-    stream_id: Option<Id>,
-    bucket_id: Uuid,
-    storage_id: Uuid,
-    block_key_id: Option<Uuid>,
-    profile: Json<StorageProfile>,
-    intent: Json<write::Intent>,
-    copy_source: Option<Json<write::CopySource>>,
-    next_offset: i64,
-    next_batch: i64,
-    phase: String,
-    publish_hash: Option<Vec<u8>>,
-    published: Option<Json<write::Published>>,
-    remaining: i64,
+    pub(super) operation_id: Uuid,
+    pub(super) lease_id: Uuid,
+    pub(super) boot_id: Uuid,
+    pub(super) fence: Uuid,
+    pub(super) credential_generation: i64,
+    pub(super) request_hash: Vec<u8>,
+    pub(super) stream_id: Option<Id>,
+    pub(super) bucket_id: Uuid,
+    pub(super) storage_id: Uuid,
+    pub(super) block_key_id: Option<Uuid>,
+    pub(super) profile: Json<StorageProfile>,
+    pub(super) intent: Json<write::Intent>,
+    pub(super) copy_source: Option<Json<write::CopySource>>,
+    pub(super) next_offset: i64,
+    pub(super) next_batch: i64,
+    pub(super) phase: String,
+    pub(super) publish_hash: Option<Vec<u8>>,
+    pub(super) published: Option<Json<write::Published>>,
+    pub(super) remaining: i64,
 }
 #[derive(sqlx::FromRow)]
 pub(super) struct Tail {
@@ -55,7 +55,7 @@ pub(super) struct Tail {
     committed: bool,
 }
 impl Tail {
-    fn reply(&self) -> crate::model::node_tail::Prepared {
+    pub(super) fn reply(&self) -> crate::model::node_tail::Prepared {
         crate::model::node_tail::Prepared {
             fragment: self.location_id,
             object_key: self.object_key.clone(),
@@ -71,7 +71,7 @@ impl Tail {
 pub(super) struct Completion {
     manifest_hash: String,
     conditions: Json<complete::Conditions>,
-    summary: Json<complete::Summary>,
+    pub(super) summary: Json<complete::Summary>,
 }
 async fn completion(
     tx: &mut registry::Tx<'_>,
@@ -168,8 +168,13 @@ pub(super) struct Raw {
     content_hash: Option<Vec<u8>>,
     committed: bool,
 }
+impl Raw {
+    pub(super) fn matches(&self, hash: &[u8]) -> bool {
+        self.committed && self.request_hash == hash
+    }
+}
 impl Write {
-    fn owned(&self, node: &NodeState, run: Run) -> Result<()> {
+    pub(super) fn owned(&self, node: &NodeState, run: Run) -> Result<()> {
         ensure!(
             self.credential_generation == node.credential_generation
                 && self.boot_id == run.boot
@@ -178,7 +183,12 @@ impl Write {
         );
         Ok(())
     }
-    async fn active(&self, tx: &mut registry::Tx<'_>, node: &NodeState, run: Run) -> Result<Id> {
+    pub(super) async fn active(
+        &self,
+        tx: &mut registry::Tx<'_>,
+        node: &NodeState,
+        run: Run,
+    ) -> Result<Id> {
         self.owned(node, run)?;
         ensure!(
             self.phase == "active" && self.remaining > 0,
@@ -191,7 +201,7 @@ impl Write {
         transactions::lock_permit(tx, &authority).await?;
         Ok(stream)
     }
-    async fn reply(
+    pub(super) async fn reply(
         &self,
         tx: &mut registry::Tx<'_>,
         node: &NodeState,
@@ -212,6 +222,16 @@ impl Write {
             stream: self
                 .stream_id
                 .or_else(|| self.published.as_ref()?.identity.map(|(_, stream)| stream)),
+            local_file: if self.intent.part.is_some()
+                && !self.profile.cdc_enabled
+                && let Some(stream) = self.stream_id
+            {
+                super::queries::native::file(stream, node.node_id)
+                    .fetch_optional(&mut **tx)
+                    .await?
+            } else {
+                None
+            },
             phase,
             materials: vec![],
             storage: None,
@@ -264,7 +284,7 @@ impl Write {
         Ok(reply)
     }
 }
-async fn start<'a>(
+pub(super) async fn start<'a>(
     b: &'a Backend,
     node: &NodeState,
     key: &Key,
@@ -278,7 +298,7 @@ async fn start<'a>(
     node_registry::require_work(b, &mut tx, node, key, run).await?;
     Ok(tx)
 }
-async fn lookup(tx: &mut registry::Tx<'_>, node: Uuid, op: Uuid) -> Result<Write> {
+pub(super) async fn lookup(tx: &mut registry::Tx<'_>, node: Uuid, op: Uuid) -> Result<Write> {
     q::owned(node, op)
         .fetch_optional(&mut **tx)
         .await?
@@ -308,7 +328,7 @@ pub(super) async fn expire(tx: &mut registry::Tx<'_>) -> Result<()> {
     q::prune().execute(&mut **tx).await?;
     Ok(())
 }
-async fn permits(
+pub(super) async fn permits(
     tx: &mut registry::Tx<'_>,
     row: &Write,
     node: Uuid,
@@ -1274,6 +1294,7 @@ impl NodeWrites for Backend {
                     operation: input.operation,
                     bucket: Some(bucket.id),
                     stream: None,
+                    local_file: None,
                     phase: if upload.state == "completed" {
                         write::Phase::Published
                     } else {
@@ -1333,6 +1354,22 @@ impl NodeWrites for Backend {
         )
         .await?;
         let part = input.intent.part.as_ref().map(|p| (p.upload, p.number));
+        if let Some((upload, _)) = part
+            && !profile.cdc_enabled
+        {
+            super::native_parts::open(
+                &mut tx,
+                upload,
+                storage,
+                profile.revision,
+                stream,
+                node.node_id,
+                target.block_key_id,
+                &profile,
+            )
+            .await?;
+        }
+
         if let Some((upload, number)) = part {
             transactions::begin_upload_part_in(&mut tx, &authority, upload, number, stream).await?;
         }
@@ -1664,7 +1701,9 @@ impl NodeWrites for Backend {
             ensure!(
                 raw.committed
                     && raw.size == input.size
-                    && (row.copy_source.is_some() || hex::encode(&raw.digest) == input.etag),
+                    && (row.copy_source.is_some()
+                        || row.intent.completion.is_some()
+                        || hex::encode(&raw.digest) == input.etag),
                 s3s::s3_error!(IncompleteBody)
             );
         }
@@ -1721,10 +1760,7 @@ impl NodeWrites for Backend {
         let mut phase = "published";
         if let Some(part) = &row.intent.part {
             ensure!(
-                input.etag.len() == 32
-                    && input.if_match.is_none()
-                    && input.if_none.is_none()
-                    && row.profile.cdc_enabled,
+                input.etag.len() == 32 && input.if_match.is_none() && input.if_none.is_none(),
                 s3s::s3_error!(InvalidRequest)
             );
             if let Some(algorithm) = &part.algorithm {
@@ -1747,6 +1783,17 @@ impl NodeWrites for Backend {
                 stream,
             )
             .await?;
+            if !row.profile.cdc_enabled {
+                super::native_parts::publish_part(
+                    &mut tx,
+                    &row,
+                    node.node_id,
+                    part,
+                    stream,
+                    input.size,
+                )
+                .await?;
+            }
         } else {
             let condition = |s: Option<String>| {
                 s.as_deref()

@@ -83,7 +83,7 @@ pub struct Storage {
     pub access: Arc<crate::status::access::Access>,
     maintenance: Arc<std::sync::atomic::AtomicBool>,
     physical: Arc<dyn crate::model::PhysicalStore>,
-    cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+    remote_parts: Option<Arc<dyn crate::model::cluster::NodeWrites>>,
     staging: Option<Arc<dyn crate::model::cluster::StagingStore>>,
     shared_permits: Option<Arc<dyn crate::model::cluster::StoragePermits>>,
     profile_store: Arc<dyn crate::model::StorageProfileStore>,
@@ -338,7 +338,7 @@ impl Storage {
         secrets: Arc<Secrets>,
         budget: &Budget,
         physical: Arc<dyn crate::model::PhysicalStore>,
-        cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+        remote_parts: Option<Arc<dyn crate::model::cluster::NodeWrites>>,
         staging: Option<Arc<dyn crate::model::cluster::StagingStore>>,
         shared_permits: Option<Arc<dyn crate::model::cluster::StoragePermits>>,
         profile_store: Arc<dyn crate::model::StorageProfileStore>,
@@ -351,7 +351,6 @@ impl Storage {
         cluster_mode: bool,
         use_target: bool,
     ) -> Result<Self> {
-        let cluster = if cluster_mode { cluster } else { None };
         let pack_units = budget.pack_memory_units;
         let mut compression = crate::content::compression::Config::default();
         compression.context_idle_timeout = c.instance.compression_idle_timeout.clone();
@@ -439,7 +438,7 @@ impl Storage {
                 budget.cache_entries.clamp(128, 8192),
             )),
             physical: physical.clone(),
-            cluster,
+            remote_parts,
             staging,
             shared_permits,
             profile_store,

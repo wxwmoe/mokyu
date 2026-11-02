@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102223038.
+-- Generated from the complete mysql migration chain through 20261102225638.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -506,6 +506,7 @@ CREATE TABLE `multipart_files` (
   `state` varchar(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'open',
   `node_id` binary(16) DEFAULT NULL,
   `part_stream` bigint DEFAULT NULL,
+  `request_hash` binary(32) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `source_id` (`source_id`),
   UNIQUE KEY `multipart_files_part` (`part_stream`),
@@ -517,6 +518,51 @@ CREATE TABLE `multipart_files` (
   CONSTRAINT `multipart_files_ibfk_2` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
   CONSTRAINT `multipart_files_source` FOREIGN KEY (`source_id`) REFERENCES `raw_sources` (`id`),
   CONSTRAINT `multipart_files_chk_1` CHECK ((`state` in (_ascii'open',_ascii'sealed',_ascii'deleting')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `native_part_reads` (
+  `token` binary(16) NOT NULL,
+  `stream_id` bigint NOT NULL,
+  `expires_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`token`),
+  KEY `native_part_reads_stream` (`stream_id`,`expires_at`),
+  KEY `native_part_reads_expiry` (`expires_at`),
+  CONSTRAINT `native_part_reads_ibfk_1` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `native_parts` (
+  `upload_id` binary(16) NOT NULL,
+  `part_number` int NOT NULL,
+  `stream_id` bigint NOT NULL,
+  `file_id` binary(16) DEFAULT NULL,
+  `node_id` binary(16) NOT NULL,
+  `size` bigint NOT NULL,
+  `remote_etag` text COLLATE utf8mb4_bin,
+  `cached` tinyint(1) NOT NULL DEFAULT '0',
+  `token` binary(16) DEFAULT NULL,
+  `expires_at` datetime(6) DEFAULT NULL,
+  `retry_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `error` varchar(128) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`upload_id`,`part_number`),
+  KEY `native_parts_due` (`node_id`,`retry_at`,`expires_at`),
+  CONSTRAINT `native_parts_ibfk_1` FOREIGN KEY (`upload_id`) REFERENCES `native_uploads` (`upload_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `native_uploads` (
+  `upload_id` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `source_location` binary(16) NOT NULL,
+  `raw_id` bigint DEFAULT NULL,
+  `profile_revision` bigint NOT NULL,
+  `upstream` text COLLATE utf8mb4_bin,
+  `manifest_hash` varchar(128) COLLATE utf8mb4_bin DEFAULT NULL,
+  `token` binary(16) DEFAULT NULL,
+  `expires_at` datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`upload_id`),
+  UNIQUE KEY `source_location` (`source_location`),
+  KEY `raw_id` (`raw_id`),
+  CONSTRAINT `native_uploads_ibfk_1` FOREIGN KEY (`raw_id`) REFERENCES `raw_sources` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `native_uploads_ibfk_2` FOREIGN KEY (`upload_id`) REFERENCES `uploads` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `node_boots` (
@@ -546,6 +592,26 @@ CREATE TABLE `node_completions` (
   `summary` json NOT NULL,
   PRIMARY KEY (`upload_id`),
   CONSTRAINT `node_completions_ibfk_1` FOREIGN KEY (`upload_id`) REFERENCES `uploads` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_native_work` (
+  `node_id` binary(16) NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  `credential_generation` bigint NOT NULL,
+  `boot_id` binary(16) NOT NULL,
+  `fence` binary(16) NOT NULL,
+  `target_stream` bigint DEFAULT NULL,
+  `token` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `work` json NOT NULL,
+  `expires_at` datetime(6) NOT NULL,
+  `result_hash` binary(32) DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`node_id`,`operation_id`),
+  UNIQUE KEY `token` (`token`),
+  KEY `node_native_work_due` (`node_id`,`expires_at`),
+  KEY `node_native_work_expiry` (`expires_at`),
+  CONSTRAINT `node_native_work_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `node_notices` (

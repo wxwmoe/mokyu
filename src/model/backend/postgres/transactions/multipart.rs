@@ -96,7 +96,7 @@ pub(in super::super) async fn begin_upload_part(
 }
 
 pub(in super::super) async fn commit_upload_part(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     authority: &Permit,
     bucket: Uuid,
     upload: Uuid,
@@ -104,7 +104,8 @@ pub(in super::super) async fn commit_upload_part(
     stream: Id,
     remote: Option<&RemoteCommit<'_>>,
 ) -> Result<()> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     commit_upload_part_in(&mut tx, authority, bucket, upload, number, stream, remote).await?;
     tx.commit().await?;
     Ok(())

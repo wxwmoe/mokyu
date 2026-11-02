@@ -160,182 +160,6 @@ impl ClusterStore for Backend {
         transactions::work::checkpoint_transfer(&self.pool, node, key, run, operation, progress)
             .await
     }
-    async fn prepare_local_part(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_native::LocalPart,
-    ) -> Result<crate::model::node_write::Reply> {
-        transactions::native::prepare_local_part(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn claim_native(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_native::Claim,
-    ) -> Result<crate::model::node_native::Reply> {
-        transactions::native::claim(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn finish_native(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_native::Finish,
-    ) -> Result<()> {
-        transactions::native::finish(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn check_local_files(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_native::Inventory,
-    ) -> Result<Vec<crate::model::node_raw::File>> {
-        transactions::native::inventory(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-
-    async fn prepare_native_complete(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_native::Complete,
-    ) -> Result<crate::model::node_native::PreparedCompletion> {
-        transactions::native::complete(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn stage_native_pages(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_native::Pages,
-    ) -> Result<()> {
-        transactions::native::stage_pages(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn adopt_native_complete(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_native::Adopt,
-    ) -> Result<crate::model::node_write::Reply> {
-        transactions::native::adopt(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-
-    async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
-        Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
-    }
-    async fn begin_remote(
-        &self,
-        upload: Uuid,
-        storage: Uuid,
-        revision: i64,
-        node: crate::model::raw::Processor<'_>,
-    ) -> Result<RemoteUpload> {
-        transactions::begin_remote(&self.pool, upload, storage, revision, node).await
-    }
-    async fn claim_remote(
-        &self,
-        upload: Uuid,
-        token: Uuid,
-        node: crate::model::raw::Processor<'_>,
-    ) -> Result<bool> {
-        transactions::claim_remote(&self.pool, upload, token, node).await
-    }
-    async fn initialized_remote(
-        &self,
-        upload: Uuid,
-        token: Uuid,
-        upstream: Option<&str>,
-        node: crate::model::raw::Processor<'_>,
-    ) -> Result<bool> {
-        transactions::initialized_remote(&self.pool, upload, token, upstream, node).await
-    }
-    async fn commit_remote_part(&self, input: RemoteCommit<'_>) -> Result<()> {
-        transactions::commit_upload_part(
-            &self.pool,
-            input.authority,
-            input.bucket,
-            input.upload,
-            input.number,
-            input.stream,
-            Some(&input),
-        )
-        .await
-    }
-    async fn claim_remote_part(
-        &self,
-        token: Uuid,
-        node: crate::model::raw::Processor<'_>,
-        stream: Option<Id>,
-    ) -> Result<Option<RemotePart>> {
-        transactions::claim_remote_part(&self.pool, token, node, stream).await
-    }
-    async fn renew_remote_part(
-        &self,
-        work: &RemotePart,
-        node: crate::model::raw::Processor<'_>,
-    ) -> Result<bool> {
-        transactions::finish_remote_part(&self.pool, work, None, node).await
-    }
-    async fn finish_remote_part(
-        &self,
-        work: &RemotePart,
-        etag: &str,
-        node: crate::model::raw::Processor<'_>,
-    ) -> Result<bool> {
-        anyhow::ensure!(
-            !etag.is_empty() && etag.len() <= 1024,
-            "invalid remote part ETag"
-        );
-        transactions::finish_remote_part(&self.pool, work, Some(etag), node).await
-    }
-    async fn retry_remote_part(&self, work: &RemotePart, error: &str) -> Result<()> {
-        sqlx::query("UPDATE parts SET remote_token=NULL,remote_expires_at=NULL,remote_retry_at=clock_timestamp()+interval '2 seconds',remote_error=left($5,1024) WHERE upload_id=$1 AND part_number=$2 AND stream_id=$3 AND remote_token=$4")
-            .bind(work.upload.upload).bind(work.part_number).bind(work.stream.id).bind(work.remote_token).bind(error).execute(&self.pool).await?;
-        Ok(())
-    }
-    async fn remote_parts(
-        &self,
-        upload: Uuid,
-        streams: &[Id],
-    ) -> Result<Vec<(Id, i32, Option<String>)>> {
-        Ok(sqlx::query_as("SELECT stream_id,part_number,remote_etag FROM parts WHERE upload_id=$1 AND stream_id=ANY($2) ORDER BY part_number").bind(upload).bind(streams).fetch_all(&self.pool).await?)
-    }
-    async fn freeze_remote(&self, upload: Uuid, token: Uuid, hash: &str) -> Result<RemoteUpload> {
-        transactions::freeze_remote(&self.pool, upload, token, hash).await
-    }
-    async fn resend_remote(&self, upload: Uuid, token: Uuid, streams: &[Id]) -> Result<()> {
-        sqlx::query("UPDATE parts p SET remote_etag=NULL,remote_retry_at=clock_timestamp() FROM uploads u WHERE u.id=$1 AND u.state='completing' AND u.completion_token=$2 AND u.completion_expires_at>clock_timestamp() AND p.upload_id=u.id AND p.stream_id=ANY($3)").bind(upload).bind(token).bind(streams).execute(&self.pool).await?;
-        Ok(())
-    }
-    async fn adopt_remote(&self, input: RemoteOutput<'_>) -> Result<Uuid> {
-        transactions::adopt_remote(&self.pool, input).await
-    }
-    async fn remote_charges(&self, node: Uuid, after: Id) -> Result<Vec<(Id, Uuid, i64)>> {
-        Ok(sqlx::query_as("SELECT s.id,r.storage_id,s.size FROM parts p JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id JOIN raw_sources r ON r.id=u.raw_source_id WHERE p.remote_node_id=$1 AND p.remote_cached AND p.remote_etag IS NULL AND s.id>$2 AND u.state IN ('active','completing') ORDER BY s.id LIMIT 128").bind(node).bind(after).fetch_all(&self.pool).await?)
-    }
-    async fn claim_remote_cleanup(
-        &self,
-        token: Uuid,
-        node: crate::model::raw::Processor<'_>,
-    ) -> Result<Option<RemoteUpload>> {
-        transactions::claim_remote_cleanup(&self.pool, token, node).await
-    }
-    async fn clean_remote(&self, upload: Uuid, token: Uuid) -> Result<()> {
-        sqlx::query("UPDATE uploads SET raw_source_id=NULL,remote_token=NULL,remote_expires_at=NULL WHERE id=$1 AND remote_token=$2 AND remote_expires_at>clock_timestamp() AND state IN ('aborted','completed')").bind(upload).bind(token).execute(&self.pool).await?;
-        Ok(())
-    }
 
     async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool> {
         Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges rr JOIN raw_sources r ON r.id=rr.source_id JOIN raw_uploads u ON u.source_id=r.id WHERE rr.stream_id=ANY($1) AND r.pending_upload AND u.node_id IS DISTINCT FROM $2) OR EXISTS(SELECT 1 FROM extents e JOIN pending_uploads u ON u.chunk_id=e.chunk_id JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=ANY($1) AND u.node_id IS DISTINCT FROM $2 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=c.id AND l.state='ready'))").bind(streams).bind(node).fetch_one(&self.pool).await?)
@@ -888,5 +712,206 @@ impl crate::model::cluster::StagingStore for Backend {
 
     async fn claim_staging(&self, storage: Uuid, key: &str, bytes: u64, limit: u64) -> Result<()> {
         transactions::claim_staging(&self.pool, storage, key, bytes, limit).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::model::cluster::NativeParts for Backend {
+    async fn prepare_local_part(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::LocalPart,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::native::prepare_local_part(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn claim_native(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Claim,
+    ) -> Result<crate::model::node_native::Reply> {
+        transactions::native::claim(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn finish_native(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Finish,
+    ) -> Result<()> {
+        transactions::native::finish(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn check_local_files(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Inventory,
+    ) -> Result<Vec<crate::model::node_raw::File>> {
+        transactions::native::inventory(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn prepare_native_complete(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Complete,
+    ) -> Result<crate::model::node_native::PreparedCompletion> {
+        transactions::native::complete(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn stage_native_pages(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Pages,
+    ) -> Result<()> {
+        transactions::native::stage_pages(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn adopt_native_complete(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Adopt,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::native::adopt(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::model::cluster::RemoteParts for Backend {
+    async fn remote_source_id(&self, upload: Uuid, _stream: Id, token: Uuid) -> Result<Id> {
+        let mut tx = self.pool.begin().await?;
+        self.fence_control(&mut tx).await?;
+        let source = remote_output_lock(upload, token)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(crate::model::Error::OperationAborted)?;
+        tx.commit().await?;
+        Ok(source.into())
+    }
+    async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
+        Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
+    }
+    async fn begin_remote(
+        &self,
+        upload: Uuid,
+        storage: Uuid,
+        revision: i64,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<RemoteUpload> {
+        transactions::begin_remote(self, upload, storage, revision, node).await
+    }
+    async fn claim_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::claim_remote(self, upload, token, node).await
+    }
+    async fn initialized_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        upstream: Option<&str>,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::initialized_remote(self, upload, token, upstream, node).await
+    }
+    async fn commit_remote_part(&self, input: RemoteCommit<'_>) -> Result<()> {
+        transactions::commit_upload_part(
+            self,
+            input.authority,
+            input.bucket,
+            input.upload,
+            input.number,
+            input.stream,
+            Some(&input),
+        )
+        .await
+    }
+    async fn claim_remote_part(
+        &self,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+        stream: Option<Id>,
+    ) -> Result<Option<RemotePart>> {
+        transactions::claim_remote_part(self, token, node, stream).await
+    }
+    async fn renew_remote_part(
+        &self,
+        work: &RemotePart,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        transactions::finish_remote_part(self, work, None, node).await
+    }
+    async fn finish_remote_part(
+        &self,
+        work: &RemotePart,
+        etag: &str,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<bool> {
+        anyhow::ensure!(
+            !etag.is_empty() && etag.len() <= 1024,
+            "invalid remote part ETag"
+        );
+        transactions::finish_remote_part(self, work, Some(etag), node).await
+    }
+    async fn retry_remote_part(&self, work: &RemotePart, error: &str) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        self.fence_control(&mut tx).await?;
+        sqlx::query("UPDATE parts SET remote_token=NULL,remote_expires_at=NULL,remote_retry_at=clock_timestamp()+interval '2 seconds',remote_error=left($5,1024) WHERE upload_id=$1 AND part_number=$2 AND stream_id=$3 AND remote_token=$4")
+            .bind(work.upload.upload).bind(work.part_number).bind(work.stream.id).bind(work.remote_token).bind(error).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn remote_parts(
+        &self,
+        upload: Uuid,
+        streams: &[Id],
+    ) -> Result<Vec<(Id, i32, Option<String>)>> {
+        Ok(sqlx::query_as("SELECT stream_id,part_number,remote_etag FROM parts WHERE upload_id=$1 AND stream_id=ANY($2) ORDER BY part_number").bind(upload).bind(streams).fetch_all(&self.pool).await?)
+    }
+    async fn freeze_remote(&self, upload: Uuid, token: Uuid, hash: &str) -> Result<RemoteUpload> {
+        transactions::freeze_remote(self, upload, token, hash).await
+    }
+    async fn resend_remote(&self, upload: Uuid, token: Uuid, streams: &[Id]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        self.fence_control(&mut tx).await?;
+        sqlx::query("UPDATE parts p SET remote_etag=NULL,remote_retry_at=clock_timestamp() FROM uploads u WHERE u.id=$1 AND u.state='completing' AND u.completion_token=$2 AND u.completion_expires_at>clock_timestamp() AND p.upload_id=u.id AND p.stream_id=ANY($3)").bind(upload).bind(token).bind(streams).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn adopt_remote(&self, input: RemoteOutput<'_>) -> Result<Id> {
+        transactions::adopt_remote(self, input).await.map(Id::from)
+    }
+    async fn remote_charges(&self, node: Uuid, after: Id) -> Result<Vec<(Id, Uuid, i64)>> {
+        Ok(sqlx::query_as("SELECT s.id,r.storage_id,s.size FROM parts p JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id JOIN raw_sources r ON r.id=u.raw_source_id WHERE p.remote_node_id=$1 AND p.remote_cached AND p.remote_etag IS NULL AND s.id>$2 AND u.state IN ('active','completing') ORDER BY s.id LIMIT 128").bind(node).bind(after).fetch_all(&self.pool).await?)
+    }
+    async fn claim_remote_cleanup(
+        &self,
+        token: Uuid,
+        node: crate::model::raw::Processor<'_>,
+    ) -> Result<Option<RemoteUpload>> {
+        transactions::claim_remote_cleanup(self, token, node).await
+    }
+    async fn clean_remote(&self, upload: Uuid, token: Uuid) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        self.fence_control(&mut tx).await?;
+        sqlx::query("UPDATE uploads SET raw_source_id=NULL,remote_token=NULL,remote_expires_at=NULL WHERE id=$1 AND remote_token=$2 AND remote_expires_at>clock_timestamp() AND state IN ('aborted','completed')").bind(upload).bind(token).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
     }
 }

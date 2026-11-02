@@ -395,6 +395,35 @@ pub(super) async fn grants(
                     .rows_affected()
                     == 1;
                 held.then_some(90_000)
+            } else if grant.r#type == GrantType::Native {
+                let held = queries::native::renew_native(node, run, grant.id, renew)
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected()
+                    == 1;
+                if held {
+                    queries::native::touch_pin(grant.id, renew)
+                        .execute(&mut **tx)
+                        .await?;
+                    queries::native::charge_part(grant.id, renew)
+                        .execute(&mut **tx)
+                        .await?;
+                    queries::native::charge_upload(grant.id, renew)
+                        .execute(&mut **tx)
+                        .await?;
+                    queries::native::charge_storage(grant.id, renew)
+                        .execute(&mut **tx)
+                        .await?;
+                }
+                held.then_some(60_000)
+            } else if grant.r#type == GrantType::StorageRead
+                && queries::native::touch_read(node, run, grant.id, renew)
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected()
+                    > 0
+            {
+                Some(60_000)
             } else if grant.r#type == GrantType::Write || grant.r#type == GrantType::StorageWrite {
                 let statement = if grant.r#type == GrantType::Write {
                     queries::node_writes::touch(node, run, grant.id, renew)

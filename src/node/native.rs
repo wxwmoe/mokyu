@@ -325,8 +325,8 @@ impl Writes {
         };
         node.client.finish_native(report).await?;
         result?;
-        if let Action::Part { stream, .. } = &work.action {
-            self.reads.reader.files.release_part(*stream);
+        if let Action::Part { file, .. } = &work.action {
+            self.reads.reader.files.release_part(*file);
         }
         Ok(if target && matches!(work.action, Action::Part { .. }) {
             Progress::Ready
@@ -354,7 +354,11 @@ impl Writes {
             None
         };
         let disk = files.multipart().await?;
-        let id = Uuid::parse_str(&operation.stream)?;
+        let id = operation
+            .local_file
+            .or_else(|| Uuid::parse_str(&operation.stream).ok())
+            .filter(|id| !id.is_nil())
+            .context("native part file missing")?;
         let mut guard = files.local_lock(id).await;
         let path = disk.candidate_path(id);
         let file = tokio::fs::OpenOptions::new()

@@ -73,7 +73,7 @@ pub(crate) struct Work {
     pub credential_generation: i64,
     pub boot_id: Uuid,
     pub fence: Uuid,
-    pub target_stream: Option<Uuid>,
+    pub target_stream: Option<Id>,
     pub token: Uuid,
     pub storage_id: Uuid,
     pub read_lease: Option<Uuid>,
@@ -95,12 +95,12 @@ pub(crate) fn cleanup(node: Uuid) -> Statement<'static> {
     sqlx::query("DELETE FROM node_native_work WHERE node_id=$1 AND expires_at<clock_timestamp()-interval '24 hours'").bind(node)
 }
 
-pub(crate) fn part_ready(node: Uuid, stream: Uuid) -> Rows<'static, (bool, bool)> {
+pub(crate) fn part_ready(node: Uuid, stream: Id) -> Rows<'static, (bool, bool)> {
     sqlx::query_as("SELECT p.remote_etag IS NOT NULL,coalesce(p.remote_error IN ('local_source_missing','local_source_corrupt'),false) FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.stream_id=$2 AND p.remote_node_id=$1 AND u.state IN ('active','completing')")
         .bind(node).bind(stream)
 }
 
-pub(crate) fn initialize_due(node: Uuid, stream: Option<Uuid>) -> Scalar<'static, Uuid> {
+pub(crate) fn initialize_due(node: Uuid, stream: Option<Id>) -> Scalar<'static, Uuid> {
     sqlx::query_scalar("SELECT u.id FROM uploads u JOIN raw_sources r ON r.id=u.raw_source_id WHERE u.state IN ('active','completing') AND r.upload_id IS NULL AND r.state='writing' AND (u.remote_expires_at IS NULL OR u.remote_expires_at<=clock_timestamp()) AND EXISTS(SELECT 1 FROM parts p JOIN multipart_files m ON m.id=p.stream_id WHERE p.upload_id=u.id AND p.remote_node_id=$1 AND ($2::uuid IS NULL OR p.stream_id=$2) AND m.node_id=$1 AND m.state='sealed') ORDER BY u.touched_at LIMIT 1 FOR UPDATE OF u SKIP LOCKED")
         .bind(node).bind(stream)
 }

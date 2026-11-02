@@ -326,7 +326,7 @@ impl App {
                 secrets.clone(),
                 &budget,
                 stores.physical.clone(),
-                stores.cluster.clone(),
+                (state.mode != "single").then(|| stores.node_writes.clone()),
                 (state.mode != "single").then(|| stores.staging.clone()),
                 (state.mode != "single").then(|| stores.storage_permits.clone()),
                 stores.storage_profiles.clone(),
@@ -555,6 +555,11 @@ impl App {
         self.cluster.as_deref().ok_or_else(|| {
             s3_error!(NotImplemented, "cluster operations require PostgreSQL").into()
         })
+    }
+    pub(crate) fn multipart_processor(&self) -> crate::model::raw::Processor<'_> {
+        self.node
+            .get()
+            .map(|n| (n, n.role.as_str(), &self.secrets.credential_key))
     }
     pub(crate) fn processor_node(&self) -> Option<&crate::cluster::NodeState> {
         // The exclusive local runtime owns the existing pending files, including across a mode change.

@@ -1,7 +1,11 @@
 mod connection;
+#[path = "../shared/embedded_native.rs"]
+mod embedded_native;
 #[path = "../shared/image.rs"]
 mod image_transactions;
 mod migration;
+#[path = "../shared/native_parts.rs"]
+mod native_parts;
 #[path = "../shared/node_files.rs"]
 mod node_files;
 #[path = "../shared/node_mutations.rs"]

@@ -257,7 +257,7 @@ impl App {
             let _coord = self.coord.lock().await;
             self.writable()?;
             if remote.is_some() {
-                self.cluster()?
+                self.node_writes
                     .commit_remote_part(crate::model::multipart::RemoteCommit {
                         authority: &authority,
                         bucket: b.id,
@@ -265,7 +265,7 @@ impl App {
                         number: i.part_number,
                         stream: id,
                         cached,
-                        node: crate::worker::raw::processor(self),
+                        node: self.multipart_processor(),
                     })
                     .await?;
             } else {
@@ -718,7 +718,9 @@ impl App {
         hash: &str,
         token: Uuid,
     ) -> Result<CompleteMultipartUploadOutput> {
-        if self.role != "single" && self.cluster()?.remote_upload(u.id).await?.is_some() {
+        if self.deployment_mode() != "single"
+            && self.node_writes.remote_upload(u.id).await?.is_some()
+        {
             return self
                 .assemble_remote(authority, u, parts, i, headers, total, etag, hash, token)
                 .await;

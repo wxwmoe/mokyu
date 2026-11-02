@@ -320,7 +320,11 @@ pub(in super::super) async fn share_raw(
     Ok(reused)
 }
 
-pub(in super::super) async fn multipart_file(pool: &SqlitePool, upload: Uuid) -> Result<Uuid> {
+pub(in super::super) async fn multipart_file(
+    pool: &SqlitePool,
+    upload: Uuid,
+    node: Option<Uuid>,
+) -> Result<Uuid> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     ensure!(
         queries::lock_local_upload(upload)
@@ -330,7 +334,7 @@ pub(in super::super) async fn multipart_file(pool: &SqlitePool, upload: Uuid) ->
             == Some("active"),
         crate::model::Error::OperationAborted
     );
-    let id = if let Some(id) = queries::current_multipart_file(upload)
+    let id = if let Some(id) = queries::current_multipart_file(upload, node)
         .fetch_optional(&mut *tx)
         .await?
     {
@@ -338,7 +342,7 @@ pub(in super::super) async fn multipart_file(pool: &SqlitePool, upload: Uuid) ->
     } else {
         let id = Uuid::now_v7();
         ensure!(
-            queries::insert_multipart_file(id, upload)
+            queries::insert_multipart_file(id, upload, node)
                 .execute(&mut *tx)
                 .await?
                 .rows_affected()

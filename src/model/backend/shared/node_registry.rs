@@ -137,7 +137,11 @@ impl Node {
     }
 }
 
-async fn authenticated(tx: &mut q::Tx<'_>, state: &NodeState, key: &Key) -> Result<Node> {
+pub(super) async fn authenticated(
+    tx: &mut q::Tx<'_>,
+    state: &NodeState,
+    key: &Key,
+) -> Result<Node> {
     let row = q::node(state.node_id)
         .fetch_optional(&mut **tx)
         .await?
@@ -374,6 +378,16 @@ impl NodeSessions for Backend {
             .await?
             .ok_or(Error::NodeInactive)?;
         ensure!(row.enabled && row.role != "control", Error::NodeInactive);
+        let (chunks, raw, parts, writes) = q::pending_files(row.id).fetch_one(&mut *tx).await?;
+        ensure!(
+            chunks + raw + parts + writes == 0,
+            crate::model::node::PendingFiles {
+                chunks,
+                raw,
+                parts,
+                writes
+            }
+        );
         ensure!(
             !q::active_reads(row.id).fetch_one(&mut *tx).await?,
             Error::NodeConflict

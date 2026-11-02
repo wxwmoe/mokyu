@@ -182,7 +182,122 @@ pub(crate) trait StoragePermits: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait NodeWrites: Send + Sync {
+pub(crate) trait RemoteParts: Send + Sync {
+    async fn remote_source_id(&self, upload: Uuid, stream: Id, token: Uuid) -> Result<Id>;
+    async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
+    async fn begin_remote(
+        &self,
+        upload: Uuid,
+        storage: Uuid,
+        revision: i64,
+        node: super::raw::Processor<'_>,
+    ) -> Result<super::multipart::RemoteUpload>;
+    async fn claim_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        node: super::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn initialized_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        upstream: Option<&str>,
+        node: super::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn commit_remote_part(&self, input: super::multipart::RemoteCommit<'_>) -> Result<()>;
+    async fn claim_remote_part(
+        &self,
+        token: Uuid,
+        node: super::raw::Processor<'_>,
+        stream: Option<Id>,
+    ) -> Result<Option<super::multipart::RemotePart>>;
+    async fn renew_remote_part(
+        &self,
+        work: &super::multipart::RemotePart,
+        node: super::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn finish_remote_part(
+        &self,
+        work: &super::multipart::RemotePart,
+        etag: &str,
+        node: super::raw::Processor<'_>,
+    ) -> Result<bool>;
+    async fn retry_remote_part(
+        &self,
+        work: &super::multipart::RemotePart,
+        error: &str,
+    ) -> Result<()>;
+    async fn remote_parts(
+        &self,
+        upload: Uuid,
+        streams: &[Id],
+    ) -> Result<Vec<(Id, i32, Option<String>)>>;
+    async fn freeze_remote(
+        &self,
+        upload: Uuid,
+        token: Uuid,
+        hash: &str,
+    ) -> Result<super::multipart::RemoteUpload>;
+    async fn resend_remote(&self, upload: Uuid, token: Uuid, streams: &[Id]) -> Result<()>;
+    async fn adopt_remote(&self, input: super::multipart::RemoteOutput<'_>) -> Result<Id>;
+    async fn remote_charges(&self, node: Uuid, after: Id) -> Result<Vec<(Id, Uuid, i64)>>;
+    async fn claim_remote_cleanup(
+        &self,
+        token: Uuid,
+        node: super::raw::Processor<'_>,
+    ) -> Result<Option<super::multipart::RemoteUpload>>;
+    async fn clean_remote(&self, upload: Uuid, token: Uuid) -> Result<()>;
+}
+
+#[async_trait]
+pub(crate) trait NativeParts: Send + Sync {
+    async fn prepare_local_part(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::LocalPart,
+    ) -> Result<super::node_write::Reply>;
+    async fn claim_native(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Claim,
+    ) -> Result<super::node_native::Reply>;
+    async fn finish_native(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Finish,
+    ) -> Result<()>;
+    async fn check_local_files(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Inventory,
+    ) -> Result<Vec<super::node_raw::File>>;
+    async fn prepare_native_complete(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Complete,
+    ) -> Result<super::node_native::PreparedCompletion>;
+    async fn stage_native_pages(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Pages,
+    ) -> Result<()>;
+    async fn adopt_native_complete(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Adopt,
+    ) -> Result<super::node_write::Reply>;
+}
+
+#[async_trait]
+pub(crate) trait NodeWrites: NativeParts + RemoteParts + Send + Sync {
     async fn check_raw_files(
         &self,
         node: &NodeState,
@@ -314,112 +429,6 @@ pub(crate) trait ClusterStore:
         operation: Uuid,
         progress: &super::transfer::RawProgress,
     ) -> Result<()>;
-    async fn prepare_local_part(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_native::LocalPart,
-    ) -> Result<super::node_write::Reply>;
-    async fn claim_native(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_native::Claim,
-    ) -> Result<super::node_native::Reply>;
-    async fn finish_native(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_native::Finish,
-    ) -> Result<()>;
-    async fn check_local_files(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_native::Inventory,
-    ) -> Result<Vec<super::node_raw::File>>;
-    async fn prepare_native_complete(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_native::Complete,
-    ) -> Result<super::node_native::PreparedCompletion>;
-    async fn stage_native_pages(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_native::Pages,
-    ) -> Result<()>;
-    async fn adopt_native_complete(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_native::Adopt,
-    ) -> Result<super::node_write::Reply>;
-    async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
-    async fn begin_remote(
-        &self,
-        upload: Uuid,
-        storage: Uuid,
-        revision: i64,
-        node: super::raw::Processor<'_>,
-    ) -> Result<super::multipart::RemoteUpload>;
-    async fn claim_remote(
-        &self,
-        upload: Uuid,
-        token: Uuid,
-        node: super::raw::Processor<'_>,
-    ) -> Result<bool>;
-    async fn initialized_remote(
-        &self,
-        upload: Uuid,
-        token: Uuid,
-        upstream: Option<&str>,
-        node: super::raw::Processor<'_>,
-    ) -> Result<bool>;
-    async fn commit_remote_part(&self, input: super::multipart::RemoteCommit<'_>) -> Result<()>;
-    async fn claim_remote_part(
-        &self,
-        token: Uuid,
-        node: super::raw::Processor<'_>,
-        stream: Option<Id>,
-    ) -> Result<Option<super::multipart::RemotePart>>;
-    async fn renew_remote_part(
-        &self,
-        work: &super::multipart::RemotePart,
-        node: super::raw::Processor<'_>,
-    ) -> Result<bool>;
-    async fn finish_remote_part(
-        &self,
-        work: &super::multipart::RemotePart,
-        etag: &str,
-        node: super::raw::Processor<'_>,
-    ) -> Result<bool>;
-    async fn retry_remote_part(
-        &self,
-        work: &super::multipart::RemotePart,
-        error: &str,
-    ) -> Result<()>;
-    async fn remote_parts(
-        &self,
-        upload: Uuid,
-        streams: &[Id],
-    ) -> Result<Vec<(Id, i32, Option<String>)>>;
-    async fn freeze_remote(
-        &self,
-        upload: Uuid,
-        token: Uuid,
-        hash: &str,
-    ) -> Result<super::multipart::RemoteUpload>;
-    async fn resend_remote(&self, upload: Uuid, token: Uuid, streams: &[Id]) -> Result<()>;
-    async fn adopt_remote(&self, input: super::multipart::RemoteOutput<'_>) -> Result<Uuid>;
-    async fn remote_charges(&self, node: Uuid, after: Id) -> Result<Vec<(Id, Uuid, i64)>>;
-    async fn claim_remote_cleanup(
-        &self,
-        token: Uuid,
-        node: super::raw::Processor<'_>,
-    ) -> Result<Option<super::multipart::RemoteUpload>>;
-    async fn clean_remote(&self, upload: Uuid, token: Uuid) -> Result<()>;
     async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool>;
     async fn prioritize_uploads(&self, streams: &[Id]) -> Result<()>;
 

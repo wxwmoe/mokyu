@@ -667,7 +667,7 @@ pub(in super::super) fn insert_multipart_file(
     upload: Uuid,
     node: Option<Uuid>,
 ) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("INSERT INTO multipart_files(upload_id,storage_id,node_id) SELECT u.id,b.storage_id,$2 FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=$1 AND u.state='active' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND (deployment_mode='cluster')=($2::uuid IS NOT NULL)) RETURNING id").bind(upload).bind(node)
+    sqlx::query_scalar("INSERT INTO multipart_files(upload_id,storage_id,node_id) SELECT u.id,b.storage_id,$2 FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=$1 AND u.state='active' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE singleton AND (deployment_mode='cluster' AND $2::uuid IS NOT NULL OR deployment_mode='single' AND $2::uuid IS NULL OR deployment_mode='single_control')) RETURNING id").bind(upload).bind(node)
 }
 
 pub(in super::super) fn insert_multipart_checkpoint(

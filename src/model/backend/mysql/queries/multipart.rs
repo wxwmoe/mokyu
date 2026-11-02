@@ -309,11 +309,11 @@ impl MultipartStore for Backend {
     ) -> Result<()> {
         transactions::remap_multipart_file(&self.pool, upload, source, ranges).await
     }
-    async fn file(&self, upload: Uuid, _node: Option<Uuid>) -> Result<Uuid> {
-        transactions::multipart_file(&self.pool, upload).await
+    async fn file(&self, upload: Uuid, node: Option<Uuid>) -> Result<Uuid> {
+        transactions::multipart_file(&self.pool, upload, node).await
     }
     async fn seal_files(&self, upload: Uuid) -> Result<()> {
-        sqlx::query("UPDATE multipart_files SET state='sealed' WHERE upload_id=? AND state='open'")
+        sqlx::query("UPDATE multipart_files SET state='sealed' WHERE upload_id=? AND part_stream IS NULL AND state='open'")
             .bind(upload)
             .execute(&self.pool)
             .await?;
@@ -332,10 +332,10 @@ impl MultipartStore for Backend {
         _node: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
-        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE (? IS NULL OR storage_id=?) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT ?").bind(storage).bind(storage).bind(limit).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE f.part_stream IS NULL AND (? IS NULL OR storage_id=?) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT ?").bind(storage).bind(storage).bind(limit).fetch_all(&self.pool).await?)
     }
     async fn claim_file(&self, id: Uuid) -> Result<bool> {
-        Ok(sqlx::query("UPDATE multipart_files AS f SET state='deleting' WHERE id=? AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing')))").bind(id).execute(&self.pool).await?.rows_affected()>0)
+        Ok(sqlx::query("UPDATE multipart_files AS f SET state='deleting' WHERE id=? AND f.part_stream IS NULL AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing')))").bind(id).execute(&self.pool).await?.rows_affected()>0)
     }
     async fn remove_file(&self, id: Uuid) -> Result<()> {
         sqlx::query("DELETE FROM multipart_files WHERE id=? AND state='deleting'")

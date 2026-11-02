@@ -18,13 +18,14 @@ pub(in super::super) async fn renew_completion(
 }
 
 pub(in super::super) async fn begin_remote(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     upload: Uuid,
     storage: Uuid,
     revision: i64,
     node: crate::model::raw::Processor<'_>,
 ) -> Result<RemoteUpload> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     ensure!(node.is_some(), crate::model::Error::OperationAborted);
     raw_upload_processor(&mut tx, node).await?;
     let (state, source) = queries::remote_upload_lock(upload)
@@ -47,12 +48,13 @@ pub(in super::super) async fn begin_remote(
 }
 
 pub(in super::super) async fn claim_remote(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     upload: Uuid,
     token: Uuid,
     node: crate::model::raw::Processor<'_>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     raw_upload_processor(&mut tx, node).await?;
     let claimed = queries::claim_remote(upload, token)
         .execute(&mut *tx)
@@ -64,7 +66,7 @@ pub(in super::super) async fn claim_remote(
 }
 
 pub(in super::super) async fn initialized_remote(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     upload: Uuid,
     token: Uuid,
     upstream: Option<&str>,
@@ -74,7 +76,8 @@ pub(in super::super) async fn initialized_remote(
         upstream.is_none_or(|id| !id.is_empty() && id.len() <= 4096),
         "invalid remote upload identity"
     );
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     raw_upload_processor(&mut tx, node).await?;
     let changed = queries::remote_initialized(upload, token, upstream)
         .fetch_one(&mut *tx)
@@ -84,12 +87,13 @@ pub(in super::super) async fn initialized_remote(
 }
 
 pub(in super::super) async fn claim_remote_part(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     token: Uuid,
     node: crate::model::raw::Processor<'_>,
     stream: Option<Id>,
 ) -> Result<Option<RemotePart>> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     raw_upload_processor(&mut tx, node).await?;
     let node = node.context("native parts require a node")?.0.node_id;
     let Some((upload, number)) = queries::remote_part_due(node, stream)
@@ -102,18 +106,19 @@ pub(in super::super) async fn claim_remote_part(
         .execute(&mut *tx)
         .await?;
     let mut value = queries::remote_part(&mut tx, upload, number).await?;
-    value.read_lease = create_read_lease(&mut tx, value.stream.id, 120).await?;
+    value.read_lease = Some(create_read_lease(&mut tx, value.stream.id, 120).await?);
     tx.commit().await?;
     Ok(Some(value))
 }
 
 pub(in super::super) async fn finish_remote_part(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     work: &RemotePart,
     etag: Option<&str>,
     node: crate::model::raw::Processor<'_>,
 ) -> Result<bool> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     raw_upload_processor(&mut tx, node).await?;
     let changed = queries::remote_part_finish(
         work,
@@ -129,12 +134,13 @@ pub(in super::super) async fn finish_remote_part(
 }
 
 pub(in super::super) async fn freeze_remote(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     upload: Uuid,
     token: Uuid,
     hash: &str,
 ) -> Result<RemoteUpload> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     ensure!(
         queries::freeze_remote(upload, token, hash)
             .execute(&mut *tx)
@@ -148,12 +154,16 @@ pub(in super::super) async fn freeze_remote(
     Ok(value)
 }
 
-pub(in super::super) async fn adopt_remote(pool: &PgPool, input: RemoteOutput<'_>) -> Result<Uuid> {
+pub(in super::super) async fn adopt_remote(
+    backend: &super::super::Backend,
+    input: RemoteOutput<'_>,
+) -> Result<Uuid> {
     ensure!(
         input.size >= 0 && input.digest.len() == 16 && input.hash.len() == 32,
         "invalid completed remote source"
     );
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let source = queries::remote_output_lock(input.upload, input.token)
         .fetch_optional(&mut *tx)
         .await?
@@ -191,11 +201,12 @@ pub(in super::super) async fn adopt_remote(pool: &PgPool, input: RemoteOutput<'_
 }
 
 pub(in super::super) async fn claim_remote_cleanup(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     token: Uuid,
     node: crate::model::raw::Processor<'_>,
 ) -> Result<Option<RemoteUpload>> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     raw_upload_processor(&mut tx, node).await?;
     let Some(upload) = queries::remote_cleanup_due()
         .fetch_optional(&mut *tx)

@@ -179,6 +179,7 @@ pub(crate) struct Reply {
     pub operation: Uuid,
     pub bucket: Option<Uuid>,
     pub stream: Option<super::Id>,
+    pub local_file: Option<Uuid>,
     pub phase: Phase,
     pub materials: Vec<node_read::Material>,
     pub storage: Option<node_read::Version>,

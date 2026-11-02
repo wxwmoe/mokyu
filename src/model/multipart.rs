@@ -292,7 +292,7 @@ pub(crate) struct RemotePart {
     pub part_number: i32,
     pub remote_token: Uuid,
     #[sqlx(default)]
-    pub read_lease: Uuid,
+    pub read_lease: Option<Uuid>,
 }
 
 pub(crate) struct RemoteCommit<'a> {

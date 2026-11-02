@@ -55,6 +55,7 @@ pub(crate) use super::request::Request;
 struct Operation {
     id: String,
     stream: String,
+    local_file: Option<Uuid>,
     bucket: Uuid,
     key: Option<String>,
     request: Request,
@@ -277,6 +278,11 @@ impl Writes {
             bucket: Uuid::parse_str(&reply.bucket_id)?,
             id,
             stream: reply.stream_id,
+            local_file: reply
+                .local_file_id
+                .as_deref()
+                .map(Uuid::parse_str)
+                .transpose()?,
             key: None,
             request,
             grants,

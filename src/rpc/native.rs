@@ -28,7 +28,14 @@ pub(super) fn claim(input: wire::NativeClaimRequest) -> Result<native::Claim, St
     Ok(native::Claim {
         run: read::run(input.run)?,
         operation: super::uuid(&input.operation_id)?,
-        stream: input.stream_id.as_deref().map(super::uuid).transpose()?,
+        stream: input
+            .stream_id
+            .as_deref()
+            .map(|value| {
+                let id = value.parse::<crate::model::Id>().map_err(|_| invalid())?;
+                id.is_valid().then_some(id).ok_or_else(invalid)
+            })
+            .transpose()?,
         cached: read::cached(input.cached)?,
     })
 }

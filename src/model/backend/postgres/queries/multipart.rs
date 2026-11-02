@@ -495,10 +495,8 @@ impl MultipartStore for Backend {
         number: i32,
         stream: Id,
     ) -> Result<()> {
-        transactions::commit_upload_part(
-            &self.pool, authority, bucket, upload, number, stream, None,
-        )
-        .await
+        transactions::commit_upload_part(self, authority, bucket, upload, number, stream, None)
+            .await
     }
     async fn consume_seed(&self, input: SeedConsumption<'_>) -> Result<()> {
         transactions::consume_upload_seed(&self.pool, input).await

@@ -564,6 +564,7 @@ message WriteReply {
   bool copy_references = 9;
   optional string checksum_algorithm = 10;
   optional bytes completion_json = 11;
+  optional string local_file_id = 12;
 }
 
 // Suspicions request durable backend verification; they never prove corruption.
