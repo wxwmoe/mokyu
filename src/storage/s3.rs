@@ -5,7 +5,9 @@ use bytes::Bytes;
 use futures_util::{StreamExt, stream::BoxStream};
 use md5::Md5;
 use object_store::{
-    client::{HttpClient, HttpConnector},
+    client::{
+        HttpClient, HttpConnector, HttpError, HttpErrorKind, HttpRequest, HttpResponse, HttpService,
+    },
     multipart::PartId,
     path::Path,
     signer::{SignedUrlOptions, Signer},
@@ -21,7 +23,21 @@ pub(super) struct Connector(pub reqwest::Client);
 
 impl HttpConnector for Connector {
     fn connect(&self, _: &object_store::ClientOptions) -> object_store::Result<HttpClient> {
-        Ok(HttpClient::new(self.0.clone()))
+        Ok(HttpClient::new(self.clone()))
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpService for Connector {
+    async fn call(&self, request: HttpRequest) -> std::result::Result<HttpResponse, HttpError> {
+        if request.method() == axum::http::Method::GET
+            && let Ok(op) = super::read_retry::OP.try_with(Arc::clone)
+        {
+            op.before_wire()
+                .await
+                .map_err(|e| HttpError::new(HttpErrorKind::Unknown, e))?;
+        }
+        HttpService::call(&self.0, request).await
     }
 }
 

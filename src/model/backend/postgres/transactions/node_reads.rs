@@ -371,6 +371,7 @@ async fn node_read_permits(
             }
         }
         ensure!(!tokens.is_empty(), Error::NodeReadBusy);
+        tokens.sort_unstable_by_key(|pair| pair.0);
         let ids: Vec<_> = tokens.iter().map(|&(id, _)| id).collect();
         queries::own_read_permits(read, &ids)
             .execute(&mut *db)

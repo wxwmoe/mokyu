@@ -227,27 +227,27 @@ impl Reader {
         &self,
         prepared: &Prepared,
         storage: Option<Uuid>,
-    ) -> Result<Option<OwnedSemaphorePermit>> {
+    ) -> Result<Option<super::resources::LanePermit>> {
         let local = if let Some(id) = storage {
             let backend = prepared.backend(id)?;
             if backend.profile.read_concurrency.is_some() {
                 let grants: Vec<_> = prepared
                     .grants
                     .iter()
-                    .filter(|grant| grant.storage == Some(id))
+                    .filter(|grant| grant.storage == Some(id) && !grant.returned())
                     .collect();
                 ensure!(!grants.is_empty(), "storage read grant missing");
-                let acquire = |grant: &Arc<super::resources::Grant>| {
-                    let grant = grant.clone();
-                    async move {
-                        let permit = grant.io.clone().acquire_owned().await?;
-                        grant.check()?;
-                        Ok::<_, anyhow::Error>(permit)
-                    }
-                };
                 let mut waiting: futures_util::stream::FuturesUnordered<_> =
-                    grants.into_iter().map(acquire).collect();
-                Some(waiting.next().await.context("no storage read permit")??)
+                    grants.into_iter().map(|g| g.lane()).collect();
+                loop {
+                    if let Some(permit) = waiting
+                        .next()
+                        .await
+                        .context("storage read grant missing")??
+                    {
+                        break Some(permit);
+                    }
+                }
             } else {
                 None
             }
@@ -269,7 +269,13 @@ impl Reader {
         let backend = prepared.backend(storage)?;
         backend.store.ensure_verified().await?;
         self.gets.fetch_add(1, Ordering::Relaxed);
-        read_bounded(backend.store.backend.as_ref(), &path, bound).await
+        crate::storage::read_retry::bounded(
+            backend.store.backend.as_ref(),
+            &path,
+            bound,
+            Some(prepared.recovery.configured(backend.profile.max_retries)),
+        )
+        .await
     }
 
     async fn chunk(
@@ -659,7 +665,7 @@ impl Reader {
 
 struct Io {
     _global: OwnedSemaphorePermit,
-    _local: Option<OwnedSemaphorePermit>,
+    _local: Option<super::resources::LanePermit>,
 }
 struct Output {
     bytes: Bytes,
@@ -942,9 +948,10 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                             current.grants.iter().filter(|g|g.storage==Some(id) && g.reference.r#type==wire::GrantType::StorageRead as i32).count()
                         }else{read::LANES};
                         let profile=&current.backend(source.storage_id)?.profile;
+                        let recovery=current.recovery.configured(profile.max_retries);
                         if let Some(cache)=reads.reader.files.partial(source,profile).await {
-                            cache.stream(remote,span,strict,proof,lanes,acquire,retain)
-                        }else{remote.stream(span,if strict {proof}else{None},lanes,acquire,retain).map_ok(|v|(v,true)).boxed()}
+                            cache.stream(remote,span,strict,proof,lanes,acquire,retain,recovery)
+                        }else{remote.stream(span,if strict {proof}else{None},lanes,acquire,retain,recovery).map_ok(|v|(v,true)).boxed()}
                     }else{segments::local(&mut file,span,source.size as u64,if strict {proof}else{None},retain).map_ok(|v|(v,false)).boxed()};
                     while let Some(result)=current.guard(&reads.node,async {Ok(output.next().await)}).await? {
                         if let Err(error)=&result {

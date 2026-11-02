@@ -464,6 +464,9 @@ impl App {
         }
         let app = self.clone();
         let (start, end) = (span.start, span.end);
+        let recovery = crate::storage::read_retry::Recovery::new(std::time::Duration::from_secs(
+            config::seconds(&app.config.requests.read_idle_timeout)?,
+        ));
         let body = async_stream::try_stream! {
             let _pin=pin;let (_reader,slot)=permits;let slot=Arc::new(slot);let primary=Arc::new(tokio::sync::Semaphore::new(crate::storage::read_buffer::UNITS));let spare=crate::storage::read_buffer::Spares::new(app.slots.clone());let read_context=Arc::new(crate::storage::ReadContext::user(range, app.read_checks.clone(), capture.clone()));
             #[cfg(feature="fault-injection")]
@@ -494,12 +497,12 @@ impl App {
                             pack_readers.insert(pack,Arc::downgrade(&context));context
                         })
                     }else{read_context.clone()};
-                    let primary=primary.clone();let slot=slot.clone();let spare=spare.clone();
+                    let primary=primary.clone();let slot=slot.clone();let spare=spare.clone();let recovery=recovery.clone();
                     async move {
                         let raw=usize::try_from(row.chunk.raw_size)?;
                         ensure!((1..=crate::content::codec::MAX).contains(&raw),"invalid read chunk size");
                         let allocation=Arc::new(crate::storage::read_buffer::reserve(&primary,&slot,Some(&spare),3*raw+16).await?);
-                        let (data,trace)=crate::storage::read_buffer::WORK.scope(allocation.clone(),app.storage.get_with_trace(&row.chunk,Some(&context))).await?;
+                        let (data,trace)=crate::storage::read_buffer::WORK.scope(allocation.clone(),crate::storage::read_retry::REQUEST.scope(recovery,app.storage.get_with_trace(&row.chunk,Some(&context)))).await?;
                         let source=trace.source.or_else(||row.demand_source());
                         let data=row.extent.slice(allocation.hold_shared(data))?;
                         Ok::<_,anyhow::Error>((row.extent,data,source,trace.origin))

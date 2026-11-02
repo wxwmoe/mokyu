@@ -305,6 +305,7 @@ pub(crate) struct Prepared {
     pub(super) grants: Vec<Arc<Grant>>,
     pub(super) memory: Arc<OwnedSemaphorePermit>,
     pub(super) buffers: Arc<Semaphore>,
+    pub(super) recovery: Arc<crate::storage::read_retry::Recovery>,
     pub(super) spare: Option<Arc<crate::storage::read_buffer::Spares>>,
     limits: (u32, u32),
     pub(super) cached_body: Option<Arc<crate::app::responses::Entry>>,
@@ -422,6 +423,7 @@ impl Prepared {
             let deadline = self
                 .grants
                 .iter()
+                .filter(|grant| !grant.returned())
                 .map(|grant| grant.deadline())
                 .fold(self.run.deadline(), std::cmp::min);
             tokio::select! {
@@ -485,7 +487,9 @@ impl Prepared {
     pub(crate) fn check(&self) -> Result<()> {
         self.run.check()?;
         for grant in &self.grants {
-            grant.check()?;
+            if !grant.returned() {
+                grant.check()?;
+            }
         }
         Ok(())
     }
@@ -592,6 +596,9 @@ impl Reads {
             .context("node budget missing")?
             .storage_read_slots
             .min(read::LANES) as u32;
+        let recovery = crate::storage::read_retry::Recovery::new(std::time::Duration::from_secs(
+            crate::config::seconds(&snapshot.runtime().requests.read_idle_timeout)?,
+        ));
         let limits = (input.max_items, input.max_bytes);
         let started = Instant::now();
         let mut reply = self.node.client.read(input).await?;
@@ -599,6 +606,7 @@ impl Reads {
             .node
             .resources
             .adopt(&snapshot.lease, &reply.grants, started)?;
+        super::resources::Grant::classify(&grants, true);
         let (materials, public_generation) = {
             let _epoch = self.public_epoch.lock().unwrap();
             let current = self.public.generation() == generation;
@@ -628,6 +636,7 @@ impl Reads {
             memory,
             buffers: Arc::new(Semaphore::new(super::body::BUFFER_UNITS)),
             spare: Some(crate::storage::read_buffer::Spares::new(self.slots.clone())),
+            recovery,
             limits,
             cached_body,
             route,
@@ -651,6 +660,7 @@ impl Reads {
         buffers: Arc<Semaphore>,
     ) -> Result<Prepared> {
         let grants = self.node.resources.adopt(&run, &reply.grants, started)?;
+        super::resources::Grant::classify(&grants, false);
         let materials = {
             let _epoch = self.public_epoch.lock().unwrap();
             self.cache.apply(
@@ -666,6 +676,7 @@ impl Reads {
             grants,
             memory,
             buffers,
+            recovery: crate::storage::read_retry::Recovery::new(std::time::Duration::from_secs(30)),
             spare: None,
             limits: (256, read::TARGET_BYTES as u32),
             cached_body: None,
@@ -716,6 +727,7 @@ impl Reads {
                     self.node
                         .resources
                         .adopt(&previous.run, &reply.grants, started)?;
+                super::resources::Grant::classify(&grants, true);
                 grants.extend(
                     previous
                         .grants
@@ -753,6 +765,7 @@ impl Reads {
                     memory: previous.memory.clone(),
                     buffers: previous.buffers.clone(),
                     spare: previous.spare.clone(),
+                    recovery: previous.recovery.clone(),
                     limits: previous.limits,
                     cached_body: None,
                     route: previous.route,

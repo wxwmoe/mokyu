@@ -177,6 +177,7 @@ impl App {
         let idle = Duration::from_secs(crate::config::seconds(
             &self.config.requests.read_idle_timeout,
         )?);
+        let recovery = crate::storage::read_retry::Recovery::new(idle);
         let first = if let Some((first, _)) = ranges.first() {
             Some(
                 pin.with_read_lease(self.storage.raw_reader(&first.source, false))
@@ -202,6 +203,7 @@ impl App {
                 let physical=(row.source_offset+span.start.max(row.offset_bytes)-row.offset_bytes) as u64
                     ..(row.source_offset+span.end.min(row.offset_bytes+row.length)-row.offset_bytes) as u64;
                 let complete=physical==(0..row.source.size as u64);
+                let recovery=recovery.configured(app.storage.profile(row.source.storage_id)?.max_retries);
                 let mut reader=if let Some(first)=first.take(){first}else{
                     _pin.with_read_lease(app.storage.raw_reader(&row.source,false)).await?
                 };
@@ -229,8 +231,8 @@ impl App {
                     let cached=matches!(&reader.file,crate::storage::raw::RawFile::Cached{..});let mut rejected=false;
                     let mut output=if let Some(remote)=&remote {
                         let io=app.storage.raw_range_io(row.source.storage_id);
-                        if let Some(cache)=&partial {cache.clone().stream(remote.clone(),span,strict,proof,app.budget.storage_read_slots,io,retain.clone())}
-                        else {remote.clone().stream(span,proof,app.budget.storage_read_slots,io,retain.clone()).map_ok(|v|(v,true)).boxed()}
+                        if let Some(cache)=&partial {cache.clone().stream(remote.clone(),span,strict,proof,app.budget.storage_read_slots,io,retain.clone(),recovery.clone())}
+                        else {remote.clone().stream(span,proof,app.budget.storage_read_slots,io,retain.clone(),recovery.clone()).map_ok(|v|(v,true)).boxed()}
                     }else{
                         segments::local(&mut reader.file,span,row.source.size as u64,proof,retain.clone()).map_ok(move |v|(v,from_backend)).boxed()
                     };

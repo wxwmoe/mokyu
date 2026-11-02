@@ -413,6 +413,9 @@ impl Reads {
                             memory: memory.clone(),
                             buffers: Arc::new(Semaphore::new(super::super::body::BUFFER_UNITS)),
                             spare: None,
+                            recovery: crate::storage::read_retry::Recovery::new(
+                                std::time::Duration::from_secs(30),
+                            ),
                             limits: (0, 0),
                             route: super::super::cache::route(&request),
                             capture: None,
@@ -591,6 +594,7 @@ impl Reads {
             memory,
             buffers: Arc::new(Semaphore::new(super::super::body::BUFFER_UNITS)),
             spare: None,
+            recovery: crate::storage::read_retry::Recovery::new(std::time::Duration::from_secs(30)),
             limits: (input.max_items, input.max_bytes),
             cached_body: candidate.map(|(_, body)| body),
             route: super::super::cache::route(input),

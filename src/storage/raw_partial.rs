@@ -423,6 +423,7 @@ impl Partial {
         width: usize,
         acquire: Acquire,
         retain: Retain,
+        recovery: Arc<super::read_retry::Recovery>,
     ) -> BoxStream<'static, Result<(Bytes, bool)>> {
         Box::pin(async_stream::try_stream! {
             let page=PAGE as u64;let size=self.source.size as u64;
@@ -432,7 +433,7 @@ impl Partial {
             while pos<range.end {
                 let window_end=pos.saturating_add(16*raw_segments::SEGMENT).min(range.end);
                 if self.shelf.epoch()!=self.epoch {
-                    let mut direct=remote.clone().stream(pos.max(requested.start)..requested.end,if strict{proof.clone()}else{None},width,acquire.clone(),retain.clone());
+                    let mut direct=remote.clone().stream(pos.max(requested.start)..requested.end,if strict{proof.clone()}else{None},width,acquire.clone(),retain.clone(),recovery.clone());
                     while let Some(bytes)=direct.next().await {yield (bytes?,true);}
                     break;
                 }
@@ -486,7 +487,7 @@ impl Partial {
                         if !strict {until=end;}
                     }
                     if let Some((_,CacheFile::Raw))=self.shelf.files().pin(id).await {continue;}
-                    let mut input=remote.clone().stream(pos..until,if strict{proof.clone()}else{None},width,acquire.clone(),retain.clone());
+                    let mut input=remote.clone().stream(pos..until,if strict{proof.clone()}else{None},width,acquire.clone(),retain.clone(),recovery.clone());
                     while let Some(bytes)=input.next().await {
                         let data=bytes?;let end=pos+data.len() as u64;
                         let part=self.clone();let copy=data.clone();let current=pos;let authority=proof.clone();

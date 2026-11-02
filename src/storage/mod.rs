@@ -27,6 +27,7 @@ pub(crate) mod raw_request;
 pub(crate) mod raw_segments;
 pub(crate) mod raw_upload;
 pub(crate) mod read_buffer;
+pub(crate) mod read_retry;
 pub(crate) mod resource_gate;
 mod s3;
 mod sources;
@@ -2954,22 +2955,15 @@ impl Storage {
         let result: Result<Vec<u8>> = async {
             #[cfg(feature = "fault-injection")]
             crate::faults::point("storage-read-permitted").await;
-            let result = target.backend.get(path).await?;
-            ensure!(
-                result.meta.size <= bound as u64,
-                codec::IntegrityError::Length
-            );
-            let mut data = Vec::with_capacity(result.meta.size as usize);
-            let mut stream = result.into_stream();
-            while let Some(bytes) = stream.next().await {
-                let bytes = bytes?;
-                ensure!(
-                    data.len() + bytes.len() <= bound,
-                    codec::IntegrityError::Length
-                );
-                data.extend_from_slice(&bytes);
-            }
-            Ok(data)
+            read_retry::bounded(
+                target.backend.as_ref(),
+                path,
+                bound,
+                read_retry::REQUEST
+                    .try_with(|recovery| recovery.configured(target.profile.max_retries))
+                    .ok(),
+            )
+            .await
         }
         .await;
         let content_error = result

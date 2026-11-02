@@ -18,6 +18,31 @@ fn renew_at(now: Instant, expires: Instant) -> Instant {
     now + (expires.saturating_duration_since(now) / 3).min(Duration::from_secs(30))
 }
 
+const SPARE_IDLE: Duration = Duration::from_secs(2);
+
+enum Lane {
+    Unassigned,
+    Required,
+    Spare(Instant),
+    Returned,
+}
+
+pub(super) struct LanePermit {
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    grant: Arc<Grant>,
+}
+impl Drop for LanePermit {
+    fn drop(&mut self) {
+        drop(self.permit.take());
+        if let Lane::Spare(next) = &mut *self.grant.lane.lock().unwrap() {
+            *next = Instant::now() + SPARE_IDLE;
+            if let Some(resources) = self.grant.resources.upgrade() {
+                resources.changed.notify_one();
+            }
+        }
+    }
+}
+
 pub(crate) struct Grant {
     pub(crate) reference: wire::GrantRef,
     pub(crate) storage: Option<Uuid>,
@@ -25,9 +50,60 @@ pub(crate) struct Grant {
     expires: Mutex<Instant>,
     resources: Weak<Resources>,
     pub(crate) io: Arc<Semaphore>,
+    lane: Mutex<Lane>,
 }
 
 impl Grant {
+    pub(super) fn classify(grants: &[Arc<Self>], allow_spare: bool) {
+        let mut primary = std::collections::HashSet::new();
+        for grant in grants
+            .iter()
+            .filter(|g| g.reference.r#type == wire::GrantType::StorageRead as i32 && !g.returned())
+        {
+            let mut lane = grant.lane.lock().unwrap();
+            if !allow_spare || primary.insert(grant.storage) {
+                *lane = Lane::Required;
+            } else if matches!(*lane, Lane::Unassigned) {
+                *lane = Lane::Spare(Instant::now() + SPARE_IDLE);
+            }
+        }
+    }
+    pub(super) fn returned(&self) -> bool {
+        matches!(*self.lane.lock().unwrap(), Lane::Returned)
+    }
+    fn spare_due(&self) -> Option<Instant> {
+        if self.io.available_permits() != 0
+            && let Lane::Spare(next) = *self.lane.lock().unwrap()
+        {
+            Some(next)
+        } else {
+            None
+        }
+    }
+    fn take_idle(&self, now: Instant) -> bool {
+        let mut lane = self.lane.lock().unwrap();
+        if matches!(*lane,Lane::Spare(next) if next<=now)
+            && let Ok(_unused) = self.io.clone().try_acquire_owned()
+        {
+            *lane = Lane::Returned;
+            self.io.close();
+            return true;
+        }
+        false
+    }
+    pub(super) async fn lane(self: &Arc<Self>) -> Result<Option<LanePermit>, Status> {
+        match self.io.clone().acquire_owned().await {
+            Ok(permit) => {
+                self.check()?;
+                Ok(Some(LanePermit {
+                    permit: Some(permit),
+                    grant: self.clone(),
+                }))
+            }
+            Err(_) if self.returned() => Ok(None),
+            Err(_) => Err(Status::failed_precondition("storage read lane closed")),
+        }
+    }
     pub(crate) fn deadline(&self) -> Instant {
         *self.expires.lock().unwrap()
     }
@@ -161,11 +237,20 @@ impl Resources {
         let mut entries = self.entries.lock().unwrap();
         prune(&mut entries);
         let mut additional = 0;
+        let mut returned = std::collections::HashSet::new();
         for (id, grant, storage, _) in &parsed {
             if let Some(entry) = entries.get(id) {
                 let held = entry.held.upgrade().ok_or_else(|| {
                     Status::failed_precondition("node resource is being released")
                 })?;
+                if held.returned()
+                    && Arc::ptr_eq(&entry.run, run)
+                    && held.storage == *storage
+                    && entry.reference.r#type == grant.r#type
+                {
+                    returned.insert(*id);
+                    continue;
+                }
                 held.check()?;
                 if entry.released
                     || !Arc::ptr_eq(&entry.run, run)
@@ -181,6 +266,7 @@ impl Resources {
         if entries.len() + additional > LIMIT {
             return Err(Status::resource_exhausted("node resource registry is full"));
         }
+        parsed.retain(|(id, _, _, _)| !returned.contains(id));
         let now = Instant::now();
         let mut held = Vec::with_capacity(grants.len());
         for (id, grant, storage, deadline) in parsed {
@@ -204,6 +290,7 @@ impl Resources {
                     expires: Mutex::new(deadline),
                     resources: Arc::downgrade(self),
                     io: Arc::new(Semaphore::new(1)),
+                    lane: Mutex::new(Lane::Unassigned),
                 });
                 entries.insert(
                     id,
@@ -235,7 +322,15 @@ impl Resources {
                     && entry.held.strong_count() > 0
                     && Arc::ptr_eq(&entry.run, run)
             })
-            .map(|entry| entry.next.min(entry.expires))
+            .map(|entry| {
+                entry
+                    .held
+                    .upgrade()
+                    .and_then(|g| g.spare_due())
+                    .unwrap_or(entry.next)
+                    .min(entry.next)
+                    .min(entry.expires)
+            })
             .min()
             .unwrap_or_else(|| run.deadline())
     }
@@ -244,6 +339,14 @@ impl Resources {
         let mut entries = self.entries.lock().unwrap();
         prune(&mut entries);
         let now = Instant::now();
+        for entry in entries
+            .values_mut()
+            .filter(|e| !e.released && !e.retired && Arc::ptr_eq(&e.run, run))
+        {
+            if entry.held.upgrade().is_some_and(|g| g.take_idle(now)) {
+                entry.retired = true;
+            }
+        }
         let mut pending = entries
             .values()
             .filter_map(|entry| {

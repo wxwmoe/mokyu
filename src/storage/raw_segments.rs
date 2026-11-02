@@ -132,6 +132,7 @@ impl Remote {
         width: usize,
         acquire: Acquire,
         retain: Retain,
+        recovery: Arc<super::read_retry::Recovery>,
     ) -> BoxStream<'static, Result<Bytes>> {
         Box::pin(async_stream::try_stream! {
             ensure_range(&self, &requested)?;
@@ -139,6 +140,8 @@ impl Remote {
             let width = width.clamp(1,crate::model::node_read::LANES);
             let mut next = span.start;
             let mut jobs = VecDeque::new();
+            let (position,head)=tokio::sync::watch::channel(span.start);
+            let waiting=Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (first,mut turn)=tokio::sync::oneshot::channel();
             let _=first.send(());
             let remote = Arc::new(self);
@@ -151,6 +154,8 @@ impl Remote {
                     let (tx,incoming)=mpsc::channel(1);
                     let (admitted,after)=tokio::sync::oneshot::channel();
                     let before=std::mem::replace(&mut turn,after);
+                    let op=super::read_retry::Attempt::segment(recovery.clone(),head.clone(),range.start);
+                    let reader_waiting=waiting.clone();
                     let task=tokio::spawn(async move {
                         let result=async {
                             before.await?;
@@ -158,30 +163,30 @@ impl Remote {
                             let initial=retain(buffer_size).await?;
                             let io=acquire().await?;
                             let _=admitted.send(());
-                            remote.download(range,&requested,proof.as_ref(),&tx,io,retain,initial).await
+                            super::read_retry::OP.scope(op.clone(),remote.download(range,&requested,proof.as_ref(),&tx,io,acquire,retain,initial,op.clone(),reader_waiting)).await
                         }.await;
                         if let Err(error)=result { let _=tx.send(Err(error)).await; }
                     });
-                    jobs.push_back(Job { incoming,task });
+                    jobs.push_back((next,Job { incoming,task }));
                     next=end;
                 }
-                let mut head=jobs.pop_front().context("empty raw read window")?;
-                while let Some(bytes)=head.incoming.recv().await { yield bytes?; }
+                let (start,mut head)=jobs.pop_front().context("empty raw read window")?;
+                position.send_replace(start);
+                loop {
+                    waiting.store(true,Ordering::Release);
+                    let bytes=head.incoming.recv().await;
+                    waiting.store(false,Ordering::Release);
+                    let Some(bytes)=bytes else{break};yield bytes?;
+                }
                 (&mut head.task).await?;
             }
         })
     }
 
-    async fn download(
+    async fn open(
         &self,
         span: Range<u64>,
-        requested: &Range<u64>,
-        proof: Option<&Arc<Proof>>,
-        tx: &mpsc::Sender<Result<Bytes>>,
-        _io: Permit,
-        retain: Retain,
-        initial: Permit,
-    ) -> Result<()> {
+    ) -> Result<BoxStream<'static, object_store::Result<Bytes>>> {
         self.gets.fetch_add(1, Ordering::Relaxed);
         let reply = self
             .backend
@@ -210,12 +215,44 @@ impl Remote {
                     .is_none_or(|v| reply.meta.version.as_ref() == Some(v)),
             IntegrityError::Length
         );
-        let mut stream = reply.into_stream();
+        Ok(reply.into_stream())
+    }
+
+    async fn download(
+        &self,
+        span: Range<u64>,
+        requested: &Range<u64>,
+        proof: Option<&Arc<Proof>>,
+        tx: &mpsc::Sender<Result<Bytes>>,
+        io: Permit,
+        acquire: Acquire,
+        retain: Retain,
+        initial: Permit,
+        op: Arc<super::read_retry::Attempt>,
+        waiting: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<()> {
+        let mut io = Some(io);
+        let mut stream = None;
+        let mut cursor = span.start;
+        let mut restored = false;
         let mut initial = Some(initial);
         let mut leftover = Bytes::new();
         let mut pos = span.start;
         while pos < span.end {
-            let output = tx.reserve().await.context("raw reader closed")?;
+            let output = loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(2), tx.reserve()).await {
+                    Ok(permit) => break permit.context("raw reader closed")?,
+                    Err(_) if waiting.load(Ordering::Acquire) => continue,
+                    Err(_) => {
+                        stream = None;
+                        drop(io.take());
+                        let permit = tx.reserve().await.context("raw reader closed")?;
+                        io = Some(acquire().await?);
+                        op.continuation();
+                        break permit;
+                    }
+                }
+            };
             let n = (span.end - pos).min(if proof.is_some() {
                 PAGE as u64
             } else {
@@ -229,12 +266,42 @@ impl Remote {
             let mut page = BytesMut::with_capacity(n);
             while page.len() < n {
                 if leftover.is_empty() {
-                    leftover = stream
-                        .next()
-                        .await
-                        .context(IntegrityError::Length)?
-                        .inspect_err(|error| self.diagnostics.backend(error))
-                        .map_err(super::raw::remote_error)?;
+                    loop {
+                        let frame = op
+                            .progress(async {
+                                if stream.is_none() {
+                                    stream = Some(self.open(cursor..span.end).await?);
+                                }
+                                stream
+                                    .as_mut()
+                                    .unwrap()
+                                    .next()
+                                    .await
+                                    .transpose()
+                                    .inspect_err(|error| self.diagnostics.backend(error))
+                                    .map_err(super::raw::remote_error)?
+                                    .ok_or_else(|| {
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::UnexpectedEof,
+                                            "raw response truncated",
+                                        )
+                                        .into()
+                                    })
+                            })
+                            .await;
+                        match frame {
+                            Ok(data) => {
+                                leftover = data;
+                                cursor += leftover.len() as u64;
+                                break;
+                            }
+                            Err(error) if !restored && op.may_retry(&error) => {
+                                stream = None;
+                                restored = true;
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
                     ensure!(
                         leftover.len() as u64 <= span.end - pos - page.len() as u64,
                         IntegrityError::Length
