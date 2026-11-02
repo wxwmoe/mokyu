@@ -7,8 +7,7 @@ pub(in super::super) async fn protected(
     db: &mut Connection,
     address: uuid::Uuid,
 ) -> anyhow::Result<bool> {
-    let _ = (db, address);
-    Ok(false)
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=? AND nr.expires_at>UTC_TIMESTAMP(6))").bind(address).fetch_one(db).await?)
 }
 pub(in super::super) async fn changed(
     db: &mut Connection,

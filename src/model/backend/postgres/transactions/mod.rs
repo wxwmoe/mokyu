@@ -135,6 +135,7 @@ pub(super) use remote_uploads::*;
 mod node_sessions;
 pub(super) use node_sessions::*;
 mod node_reads;
+pub(super) use super::node_reads::protect_node_read;
 pub(super) use node_reads::*;
 mod node_multipart;
 pub(super) use node_multipart::*;

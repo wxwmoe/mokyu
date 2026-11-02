@@ -1,3 +1,4 @@
+use super::node_requests::Connection;
 use crate::{
     app::{Extent, StoredStream},
     model::{
@@ -6,9 +7,32 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, ensure};
-use sqlx::PgConnection;
 use std::collections::HashMap;
 use uuid::Uuid;
+
+use crate::{content::codec::Chunk, model::FragmentSource};
+
+#[derive(sqlx::FromRow)]
+pub(in super::super) struct NodeReadChunk {
+    #[sqlx(flatten)]
+    pub chunk: Chunk,
+    pub pack_id: Option<Id>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(in super::super) struct NodeReadFragment {
+    pub id: Id,
+    #[sqlx(flatten)]
+    pub source: FragmentSource,
+    pub node_id: Option<Uuid>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(in super::super) struct NodeReadRaw {
+    #[sqlx(flatten)]
+    pub range: crate::model::raw::RawRange,
+    pub node_id: Option<Uuid>,
+}
 
 #[derive(Default)]
 pub(in super::super) struct Sources {
@@ -18,12 +42,12 @@ pub(in super::super) struct Sources {
     encodings: HashMap<Id, crate::content::codec::Chunk>,
     packs: HashMap<Id, crate::content::pack::Pack>,
     pending: HashMap<Id, Option<Uuid>>,
-    fragments: HashMap<Uuid, super::NodeReadFragment>,
+    fragments: HashMap<Id, super::NodeReadFragment>,
 }
 
 impl Sources {
     pub(in super::super) async fn load(
-        db: &mut PgConnection,
+        db: &mut Connection,
         raw: Vec<(Id, super::NodeReadRaw)>,
         extents: Vec<Extent>,
     ) -> Result<Self> {
@@ -71,7 +95,7 @@ impl Sources {
             .fetch_all(&mut *db)
             .await?
             .into_iter()
-            .map(|row| (row.source.location_id, row))
+            .map(|row| (row.id, row))
             .collect();
 
         let mut by_stream: HashMap<Id, Vec<Extent>> = HashMap::new();
@@ -143,7 +167,7 @@ impl Sources {
                         return Err(Error::SourceUnavailable.into());
                     }
                 } else {
-                    let Some(Id::Uuid(id)) = row.fragment_id else {
+                    let Some(id) = row.fragment_id else {
                         return Err(Error::SourceUnavailable.into());
                     };
                     let fragment = self.fragments.get(&id).ok_or(Error::SourceUnavailable)?;
@@ -157,7 +181,7 @@ impl Sources {
                         &fragment.source.staging_object_key,
                     ) {
                         Source::Staged {
-                            fragment: id,
+                            fragment: fragment.source.location_id,
                             storage,
                             key: key.clone(),
                             size: i64::from(fragment.source.size),

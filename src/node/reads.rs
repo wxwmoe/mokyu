@@ -648,6 +648,10 @@ impl Reads {
             started: started.into_std(),
             verify: false,
         };
+        #[cfg(feature = "fault-injection")]
+        if !prepared.grants.is_empty() {
+            crate::faults::point("node-read-granted").await;
+        }
         prepared.check()?;
         Ok(prepared)
     }

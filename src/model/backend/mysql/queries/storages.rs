@@ -366,3 +366,9 @@ pub(in super::super) fn save_storage_profile(profile: &StorageProfile) -> Result
         .bind(&profile.migration_byte_budget)
         .bind(profile.storage_id).bind(profile.revision))
 }
+
+impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::storage::model::Record {
+    fn from_row(row: &'r sqlx::mysql::MySqlRow) -> sqlx::Result<Self> {
+        Ok((&StorageRow::from_row(row)?).into())
+    }
+}

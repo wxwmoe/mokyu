@@ -75,6 +75,12 @@ pub(in super::super) async fn change_mode(
     let (maintenance, tasks, uploads, sources) =
         queries::mode_blockers().fetch_one(&mut **tx).await?;
     crate::model::runtime::check_drain(maintenance, tasks, uploads, sources)?;
+    ensure!(
+        !queries::node_registry::active_grants()
+            .fetch_one(&mut **tx)
+            .await?,
+        ModeConflict("drain active node reads and storage permits before changing deployment mode")
+    );
     if mode == "single_control" {
         ensure!(
             !queries::local_storages().fetch_one(&mut **tx).await?,

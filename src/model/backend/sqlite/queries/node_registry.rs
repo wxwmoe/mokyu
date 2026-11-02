@@ -143,3 +143,12 @@ pub(in super::super) fn release_handoff() -> Statement<'static> {
         "UPDATE mokyu_meta SET remote_work=FALSE WHERE id=1 AND deployment_mode='single_control' AND remote_work AND NOT EXISTS(SELECT 1 FROM nodes WHERE enabled AND role IN ('worker','node'))",
     )
 }
+
+pub(in super::super) fn active_reads(node: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_reads WHERE node_id=? AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(node)
+}
+pub(in super::super) fn active_grants() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM node_reads WHERE expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) OR EXISTS(SELECT 1 FROM storage_permits WHERE expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))",
+    )
+}

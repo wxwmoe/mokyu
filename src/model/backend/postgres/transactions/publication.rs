@@ -612,7 +612,7 @@ impl StreamStore for Backend {
     }
 }
 
-pub(super) async fn locked_current_stream(
+pub(in super::super) async fn locked_current_stream(
     db: &mut PgConnection,
     bucket: Uuid,
     key: &str,

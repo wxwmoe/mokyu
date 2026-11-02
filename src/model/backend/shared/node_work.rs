@@ -233,6 +233,7 @@ impl NodeWork for Backend {
         let mut tx = registry::begin(self).await?;
         let count = q::requeue().execute(&mut *tx).await?.rows_affected();
         q::prune().execute(&mut *tx).await?;
+        super::queries::read_grants::expire(&mut tx).await?;
         tx.commit().await?;
         Ok(count)
     }
@@ -368,17 +369,18 @@ pub(super) async fn grants(
     let mut results = Vec::with_capacity(resources.renew.len() + resources.release.len());
     for (items, renew) in [(resources.renew, true), (resources.release, false)] {
         for grant in items {
-            let held = if grant.r#type == GrantType::Work {
-                q::touch(node, run, grant.id, renew)
+            let duration = if grant.r#type == GrantType::Work {
+                let held = q::touch(node, run, grant.id, renew)
                     .execute(&mut **tx)
                     .await?
                     .rows_affected()
-                    == 1
+                    == 1;
+                held.then_some(90_000)
             } else {
-                false
+                super::queries::read_grants::touch_read(tx, node, run, grant, renew).await?
             };
-            let accepted = !renew || held;
-            let valid_for_ms = if held && renew { 90_000 } else { 0 };
+            let accepted = !renew || duration.is_some();
+            let valid_for_ms = if renew { duration.unwrap_or(0) } else { 0 };
             results.push(GrantResult {
                 grant,
                 accepted,

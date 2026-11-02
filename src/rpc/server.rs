@@ -642,7 +642,7 @@ impl NodeReads for Service {
             ));
         }
         let input = super::read::report(request.into_inner())?;
-        let tasks = bounded(self.app.cluster().map_err(failure)?.report_read(
+        let tasks = bounded(self.app.node_reads.report_read(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -668,7 +668,7 @@ impl NodeReads for Service {
         }
         let input = super::read::query(request.into_inner())?;
         let limit = input.max_bytes;
-        let reply = bounded(self.app.cluster().map_err(failure)?.open_read(
+        let reply = bounded(self.app.node_reads.open_read(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -695,7 +695,7 @@ impl NodeReads for Service {
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
         let input = super::read::refresh(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.refresh_reads(
+        let reply = bounded(self.app.node_reads.refresh_reads(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -738,7 +738,7 @@ impl NodeReads for Service {
             .validate(self.app.config.database.backend)
             .map_err(|_| Status::invalid_argument("invalid stream identity"))?;
         let limit = input.max_bytes;
-        let reply = bounded(self.app.cluster().map_err(failure)?.read_window(
+        let reply = bounded(self.app.node_reads.read_window(
             &node,
             &self.app.secrets.credential_key,
             input,

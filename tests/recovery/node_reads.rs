@@ -4,7 +4,7 @@ use crate::{
     content::codec::{self, Key},
     model::{
         self, Id, RuntimeSettingsStore,
-        cluster::{ClusterStore, NodeSessions},
+        cluster::{ClusterStore, NodeReads, NodeSessions},
         node_read as read,
         session::{Open, Run},
     },
@@ -74,6 +74,7 @@ async fn active(pool: &PgPool) -> Result<(i64, i64, i64)> {
 }
 
 async fn publication_waits(
+    backend: &std::sync::Arc<Backend>,
     pool: &PgPool,
     node: &crate::cluster::NodeState,
     key: &Key,
@@ -106,6 +107,7 @@ async fn publication_waits(
                 .bind(streams[1])
                 .execute(&mut *writer)
                 .await?;
+            let service = backend.clone();
             let reader_pool = pool.clone();
             let reader_node = node.clone();
             let reader_key = key.clone();
@@ -119,13 +121,7 @@ async fn publication_waits(
                     };
                     input.head = true;
                     input.mapping = false;
-                    let reply = super::transactions::open_node_read(
-                        &reader_pool,
-                        &reader_node,
-                        &reader_key,
-                        input,
-                    )
-                    .await?;
+                    let reply = service.open_read(&reader_node, &reader_key, input).await?;
                     assert!(matches!(reply.outcome, read::Outcome::Ready));
                     Ok::<Id, anyhow::Error>(
                         material::<read::Object>(&reply, read::MaterialType::Object)?
@@ -182,11 +178,15 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     sqlx::query("UPDATE mokyu_meta SET deployment_mode='cluster'")
         .execute(&pool)
         .await?;
-    let backend = Backend::new(pool.clone(), pool.acquire().await?.detach(), false);
+    let backend = std::sync::Arc::new(Backend::new(
+        pool.clone(),
+        pool.acquire().await?.detach(),
+        false,
+    ));
     let key = Key::new("aes-256-gcm", [73; 32])?;
     let config =
         toml::from_str::<crate::config::FileConfig>("[database]\ntype='postgres'\n")?.into_config();
-    RuntimeSettingsStore::ensure(&backend, &model::runtime_defaults(&config)).await?;
+    RuntimeSettingsStore::ensure(backend.as_ref(), &model::runtime_defaults(&config)).await?;
     let control = backend
         .register(
             "control",
@@ -240,7 +240,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         .execute(&pool)
         .await?;
     sqlx::query("INSERT INTO s3_credential_grants(access_key,bucket_id,actions) VALUES('reader',$1,ARRAY['object.read'])").bind(bucket).execute(&pool).await?;
-    publication_waits(&pool, &node, &key, session.run, bucket).await?;
+    publication_waits(&backend, &pool, &node, &key, session.run, bucket).await?;
     let observed: Uuid = sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag) VALUES($1,'observed','object','ready',4096,'observed') RETURNING id")
         .bind(bucket).fetch_one(&pool).await?;
     let observations = || model::node_observation::Batch {
@@ -747,7 +747,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         .bind(stream)
         .execute(&pool)
         .await?;
-    assert!(!model::raw::RawStore::claim(&backend, Id::Uuid(raw), 1, 0, 0).await?);
+    assert!(!model::raw::RawStore::claim(backend.as_ref(), Id::Uuid(raw), 1, 0, 0).await?);
     backend
         .pulse_session(
             &node,
@@ -762,7 +762,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             },
         )
         .await?;
-    assert!(model::raw::RawStore::claim(&backend, Id::Uuid(raw), 1, 0, 0).await?);
+    assert!(model::raw::RawStore::claim(backend.as_ref(), Id::Uuid(raw), 1, 0, 0).await?);
     sqlx::query(
         "UPDATE raw_sources SET state='ready',medium='local',pending_upload=true WHERE id=$1",
     )

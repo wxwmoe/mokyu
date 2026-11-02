@@ -114,7 +114,51 @@ pub(crate) trait NodeRequests: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait ClusterStore: NodeSessions + NodeWork + NodeNotices + NodeRequests {
+pub(crate) trait NodeReads: Send + Sync {
+    async fn report_read(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_read::Report,
+    ) -> Result<Vec<Uuid>>;
+    async fn open_read(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_read::Query,
+    ) -> Result<super::node_read::Reply>;
+    async fn refresh_reads(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_refresh::Request,
+    ) -> Result<super::node_refresh::Reply>;
+    fn refresh_status(&self) -> serde_json::Value;
+    async fn read_window(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_read::Window,
+    ) -> Result<super::node_read::Reply>;
+}
+
+#[async_trait]
+pub(crate) trait StoragePermits: Send + Sync {
+    async fn acquire_storage_permit(
+        &self,
+        storage: Uuid,
+        direction: &str,
+        limit: i32,
+        holder: Uuid,
+    ) -> Result<Option<Uuid>>;
+    async fn renew_storage_permit(&self, token: Uuid) -> Result<bool>;
+    async fn release_storage_permit(&self, token: Uuid) -> Result<()>;
+}
+
+#[async_trait]
+pub(crate) trait ClusterStore:
+    NodeSessions + NodeWork + NodeNotices + NodeRequests + NodeReads
+{
     async fn begin_report(
         &self,
         state: &NodeState,
@@ -301,31 +345,6 @@ pub(crate) trait ClusterStore: NodeSessions + NodeWork + NodeNotices + NodeReque
         key: &Key,
         input: super::node_observation::Batch,
     ) -> Result<Vec<bool>>;
-    async fn report_read(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_read::Report,
-    ) -> Result<Vec<Uuid>>;
-    async fn open_read(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_read::Query,
-    ) -> Result<super::node_read::Reply>;
-    async fn refresh_reads(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_refresh::Request,
-    ) -> Result<super::node_refresh::Reply>;
-    fn refresh_status(&self) -> serde_json::Value;
-    async fn read_window(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_read::Window,
-    ) -> Result<super::node_read::Reply>;
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
     async fn begin_remote(
         &self,
@@ -412,15 +431,6 @@ pub(crate) trait ClusterStore: NodeSessions + NodeWork + NodeNotices + NodeReque
         storage: Uuid,
         rates: &[(&str, f64, f64)],
     ) -> Result<bool>;
-    async fn acquire_storage_permit(
-        &self,
-        storage: Uuid,
-        direction: &str,
-        limit: i32,
-        holder: Uuid,
-    ) -> Result<Option<Uuid>>;
-    async fn renew_storage_permit(&self, token: Uuid) -> Result<bool>;
-    async fn release_storage_permit(&self, token: Uuid) -> Result<()>;
     async fn current_stream(
         &self,
         bucket: Uuid,

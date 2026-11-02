@@ -189,6 +189,7 @@ impl Active {
     }
 }
 pub struct App {
+    pub(crate) node_reads: Arc<dyn crate::model::cluster::NodeReads>,
     pub(crate) node_requests: Arc<dyn crate::model::cluster::NodeRequests>,
     pub(crate) notices: Arc<dyn crate::model::cluster::NodeNotices>,
     pub(crate) node_work: Arc<dyn crate::model::cluster::NodeWork>,
@@ -325,6 +326,7 @@ impl App {
                 &budget,
                 stores.physical.clone(),
                 stores.cluster.clone(),
+                (state.mode != "single").then(|| stores.storage_permits.clone()),
                 stores.storage_profiles.clone(),
                 stores.raw.clone(),
                 stores.managed_keys.clone(),
@@ -378,6 +380,7 @@ impl App {
         let (public_reads, public_receiver) =
             public_reads::Cache::new(cors_cache.clone(), &response_cache);
         let app = Arc::new(Self {
+            node_reads: stores.node_reads,
             node_requests: stores.node_requests,
             notices: stores.notices,
             node_work: stores.node_work,
@@ -678,9 +681,7 @@ impl App {
         status["public_read_cache"] = self.public_reads.snapshot();
         if self.shared_storage_only() {
             status["notifications"] = self.notifications.snapshot();
-            if let Ok(cluster) = self.cluster() {
-                status["read_refresh"] = cluster.refresh_status();
-            }
+            status["read_refresh"] = self.node_reads.refresh_status();
         }
         status["read_replica"] = self.runtime.read_replica().unwrap_or_else(|| json!({"state":if self.config.replica_database.is_some() {"not_applicable"} else {"disabled"}}));
         status["cleanup"] = self.cleanup_status();

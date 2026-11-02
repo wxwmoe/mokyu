@@ -84,6 +84,7 @@ pub struct Storage {
     maintenance: Arc<std::sync::atomic::AtomicBool>,
     physical: Arc<dyn crate::model::PhysicalStore>,
     cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+    shared_permits: Option<Arc<dyn crate::model::cluster::StoragePermits>>,
     profile_store: Arc<dyn crate::model::StorageProfileStore>,
     raw_store: Arc<dyn crate::model::raw::RawStore>,
     reflink: Arc<Mutex<HashMap<(u64, u64), bool>>>,
@@ -151,7 +152,7 @@ pub struct Storage {
 async fn build_store(
     options: StoreOptions,
     secrets: &Secrets,
-    cluster: &Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+    shared_permits: &Option<Arc<dyn crate::model::cluster::StoragePermits>>,
     row: crate::model::StorageRecord,
     profile: &StorageProfile,
     compression_idle_timeout: &str,
@@ -226,7 +227,7 @@ async fn build_store(
         identity_ready: false.into(),
         identity_check: tokio::sync::Mutex::new(()),
         reads: StoreGate::new(
-            cluster,
+            shared_permits,
             id,
             "read",
             profile.read_concurrency.map_or(defaults.0, |n| n as usize),
@@ -235,7 +236,7 @@ async fn build_store(
             permit_holder,
         ),
         writes: StoreGate::new(
-            cluster,
+            shared_permits,
             id,
             "upload",
             profile
@@ -246,7 +247,7 @@ async fn build_store(
             permit_holder,
         ),
         controls: StoreGate::new(
-            cluster,
+            shared_permits,
             id,
             "control",
             profile
@@ -257,7 +258,7 @@ async fn build_store(
             permit_holder,
         ),
         pack: StoreGate::new(
-            cluster,
+            shared_permits,
             id,
             "pack",
             profile.pack_concurrency.max(1) as usize,
@@ -266,7 +267,7 @@ async fn build_store(
             permit_holder,
         ),
         integrity: StoreGate::new(
-            cluster,
+            shared_permits,
             id,
             "integrity",
             profile.integrity_concurrency.max(1) as usize,
@@ -275,7 +276,7 @@ async fn build_store(
             permit_holder,
         ),
         maintenance: StoreGate::new(
-            cluster,
+            shared_permits,
             id,
             "maintenance",
             profile
@@ -287,7 +288,7 @@ async fn build_store(
             permit_holder,
         ),
         migration: StoreGate::new(
-            cluster,
+            shared_permits,
             id,
             "migration",
             profile
@@ -337,6 +338,7 @@ impl Storage {
         budget: &Budget,
         physical: Arc<dyn crate::model::PhysicalStore>,
         cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+        shared_permits: Option<Arc<dyn crate::model::cluster::StoragePermits>>,
         profile_store: Arc<dyn crate::model::StorageProfileStore>,
         raw_store: Arc<dyn crate::model::raw::RawStore>,
         managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
@@ -415,7 +417,7 @@ impl Storage {
             let mut backend = build_store(
                 StoreOptions::from_profile(&profile)?,
                 &secrets,
-                &cluster,
+                &shared_permits,
                 row,
                 &profile,
                 &c.instance.compression_idle_timeout,
@@ -436,6 +438,7 @@ impl Storage {
             )),
             physical: physical.clone(),
             cluster,
+            shared_permits,
             profile_store,
             wake_sync: Default::default(),
             write_memory: memory::Pool::new(budget.write_memory_bytes),
@@ -769,7 +772,7 @@ impl Storage {
                 build_store(
                     StoreOptions::from_profile(&profile)?,
                     &self.secrets,
-                    &self.cluster,
+                    &self.shared_permits,
                     row,
                     &profile,
                     &self.compression_idle_timeout,
@@ -1017,7 +1020,8 @@ impl Storage {
         target.verify().await
     }
     async fn check_storage_inner(&self, target: &StoreBackend) -> Result<()> {
-        let _permit = target.reads.acquire().await?;
+        // A restarting control must verify the marker while data nodes still hold read permits.
+        let _permit = target.controls.acquire().await?;
         let result = target
             .backend
             .get(&Path::from("meta.json"))

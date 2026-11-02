@@ -45,6 +45,7 @@ pub(in super::super) fn reset_startup_tasks(maintenance: bool) -> Statement<'sta
 }
 
 fn stale_stream_filter(query: &mut sqlx::QueryBuilder<Sqlite>, retention: Option<f64>) {
+    query.push(" AND NOT EXISTS(SELECT 1 FROM node_reads nr WHERE nr.stream_id=s.id AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))");
     query.push(" AND ((s.state IN ('retired','abandoned') AND (").push_bind(retention).push(" IS NULL OR s.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-").push_bind(retention.map(|value|(value*1_000_000.) as i64))
         .push(")) OR s.state='writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_changes p WHERE p.source_version=s.id) AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=s.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=s.id AND rt.phase IN ('preparing','prepared')) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i WHERE i.part_stream=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.execution_token=s.owner_execution_token)");
 }
@@ -100,7 +101,7 @@ pub(in super::super) fn cleanup_stream_bucket(id: Id) -> Scalar<'static, Uuid> {
 }
 
 pub(in super::super) fn lock_cleanup_stream(id: Id) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT id FROM streams s WHERE id=? AND state='abandoned' AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing'))").bind(id)
+    sqlx::query_scalar("SELECT id FROM streams s WHERE id=? AND state='abandoned' AND NOT EXISTS(SELECT 1 FROM node_reads nr WHERE nr.stream_id=s.id AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing'))").bind(id)
 }
 
 pub(in super::super) async fn detach_stream_chunks(
@@ -172,7 +173,7 @@ pub(in super::super) fn stale_fragments(
 pub(in super::super) fn lock_cleanup_fragment(
     id: Id,
 ) -> Rows<'static, (Uuid, bool, Option<Id>, Option<Uuid>)> {
-    sqlx::query_as("SELECT location_id,sealed,owner_stream,file_id FROM fragments f WHERE id=? AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id)").bind(id)
+    sqlx::query_as("SELECT location_id,sealed,owner_stream,file_id FROM fragments f WHERE id=? AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=f.location_id AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(id)
 }
 
 pub(in super::super) fn remove_fragment_row(id: Id) -> Statement<'static> {
@@ -532,7 +533,7 @@ impl MaintenanceStore for Backend {
         } else {
             "stored_at IS NULL OR recovery_pending"
         };
-        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {table}.{id},COALESCE(tl.address,{table}.location_id),(tl.address IS NULL AND ({unknown})) FROM {table} LEFT JOIN tier_locations tl ON tl.unit={tier_unit} AND tl.physical_id={table}.location_id WHERE {state_guard} AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.{source}={table}.{id}) AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND (?=0 OR stored_at IS NULL OR stored_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-?) AND COALESCE(tl.storage_id,{table}.storage_id)=? AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id={table}.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id={table}.location_id AND th.activated_at>unixepoch()-?) ORDER BY unreferenced_at,{id} LIMIT ?"))).bind((grace*1_000_000.) as i64).bind(minimum).bind((minimum*1_000_000.) as i64).bind(storage).bind(minimum as i64).bind(batch).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!("SELECT {table}.{id},COALESCE(tl.address,{table}.location_id),(tl.address IS NULL AND ({unknown})) FROM {table} LEFT JOIN tier_locations tl ON tl.unit={tier_unit} AND tl.physical_id={table}.location_id WHERE {state_guard} AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.{source}={table}.{id}) AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND (?=0 OR stored_at IS NULL OR stored_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-?) AND COALESCE(tl.storage_id,{table}.storage_id)=? AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=COALESCE((SELECT a.address FROM tier_locations a WHERE a.unit={tier_unit} AND a.physical_id={table}.location_id),{table}.location_id) AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id={table}.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id={table}.location_id AND th.activated_at>unixepoch()-?) ORDER BY unreferenced_at,{id} LIMIT ?"))).bind((grace*1_000_000.) as i64).bind(minimum).bind((minimum*1_000_000.) as i64).bind(storage).bind(minimum as i64).bind(batch).fetch_all(&self.read).await?)
     }
     async fn physical_age(&self, packed: bool, id: Id, stored: DateTime<Utc>) -> Result<()> {
         if !packed {
@@ -562,7 +563,7 @@ impl MaintenanceStore for Backend {
         } else {
             "source_encoding"
         };
-        Ok(sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleting' WHERE {column}=? AND {state_guard} AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.{source}={table}.{column}) AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND (?=0 OR stored_at IS NULL OR stored_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-?) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id={table}.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id={table}.location_id AND th.activated_at>unixepoch()-?)"))).bind(id).bind((grace*1_000_000.) as i64).bind(minimum).bind((minimum*1_000_000.) as i64).bind(minimum as i64).execute(&self.write).await?.rows_affected()!=0)
+        Ok(sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE {table} SET state='deleting' WHERE {column}=? AND {state_guard} AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.{source}={table}.{column}) AND unreferenced_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AND (?=0 OR stored_at IS NULL OR stored_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-?) AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=COALESCE((SELECT a.address FROM tier_locations a WHERE a.unit={tier_unit} AND a.physical_id={table}.location_id),{table}.location_id) AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit={tier_unit} AND mv.physical_id={table}.location_id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit={tier_unit} AND th.physical_id={table}.location_id AND th.activated_at>unixepoch()-?)"))).bind(id).bind((grace*1_000_000.) as i64).bind(minimum).bind((minimum*1_000_000.) as i64).bind(minimum as i64).execute(&self.write).await?.rows_affected()!=0)
     }
     async fn delete_physical(&self, packed: bool, id: Id, retention: f64) -> Result<()> {
         let mut tx = super::super::queries::tier::begin(self).await?;

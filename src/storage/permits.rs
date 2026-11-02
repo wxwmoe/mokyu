@@ -8,7 +8,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub(crate) struct SharedStorePermit {
-    pub(crate) store: Arc<dyn crate::model::cluster::ClusterStore>,
+    pub(crate) store: Arc<dyn crate::model::cluster::StoragePermits>,
     pub(crate) token: Uuid,
     pub(crate) alive: Arc<AtomicBool>,
 }
@@ -34,7 +34,7 @@ pub(crate) struct StorePermit {
 
 pub(crate) struct StoreGate {
     pub(crate) local: Arc<crate::storage::resource_gate::Gate>,
-    pub(crate) store: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+    pub(crate) store: Option<Arc<dyn crate::model::cluster::StoragePermits>>,
     pub(crate) storage_id: Uuid,
     pub(crate) direction: &'static str,
     cluster_limit: AtomicI32,
@@ -45,7 +45,7 @@ pub(crate) type GateRegistry = HashMap<(Uuid, &'static str), Weak<StoreGate>>;
 
 impl StoreGate {
     pub(crate) fn new(
-        store: &Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+        store: &Option<Arc<dyn crate::model::cluster::StoragePermits>>,
         storage_id: Uuid,
         direction: &'static str,
         local_limit: usize,

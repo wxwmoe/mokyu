@@ -403,42 +403,6 @@ impl ClusterStore for Backend {
     ) -> Result<Vec<bool>> {
         transactions::report_node_observations(&self.pool, node, key, input).await
     }
-    async fn report_read(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_read::Report,
-    ) -> Result<Vec<Uuid>> {
-        transactions::report_node_read(&self.pool, node, key, input).await
-    }
-    async fn open_read(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_read::Query,
-    ) -> Result<crate::model::node_read::Reply> {
-        transactions::open_node_read(&self.pool, node, key, input).await
-    }
-    async fn refresh_reads(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_refresh::Request,
-    ) -> Result<crate::model::node_refresh::Reply> {
-        super::super::refresh::request(&self.pool, self.refresh.clone(), node, key, input).await
-    }
-    fn refresh_status(&self) -> serde_json::Value {
-        self.refresh.snapshot()
-    }
-    async fn read_window(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_read::Window,
-    ) -> Result<crate::model::node_read::Reply> {
-        transactions::node_read_window(&self.pool, self.replica.as_ref(), node, key, input).await
-    }
-
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
         Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
     }
@@ -612,24 +576,6 @@ impl ClusterStore for Backend {
         rates: &[(&str, f64, f64)],
     ) -> Result<bool> {
         transactions::acquire_integrity_rate(&self.pool, storage, rates).await
-    }
-    async fn acquire_storage_permit(
-        &self,
-        storage_id: uuid::Uuid,
-        direction: &str,
-        limit: i32,
-        holder: uuid::Uuid,
-    ) -> Result<Option<uuid::Uuid>> {
-        transactions::try_acquire_storage_permit(&self.pool, storage_id, direction, limit, holder)
-            .await
-    }
-
-    async fn renew_storage_permit(&self, token: uuid::Uuid) -> Result<bool> {
-        transactions::renew_storage_permit(&self.pool, token).await
-    }
-
-    async fn release_storage_permit(&self, token: uuid::Uuid) -> Result<()> {
-        transactions::release_storage_permit(&self.pool, token).await
     }
     async fn current_stream(
         &self,
@@ -924,6 +870,12 @@ impl crate::model::cluster::NodeSessions for Backend {
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWork for Backend {
     async fn recover_work(&self) -> Result<u64> {
+        if self.control_epoch.is_some() {
+            let mut tx = self.pool.begin().await?;
+            self.fence_control(&mut tx).await?;
+            expire_stream_leases().execute(&mut *tx).await?;
+            tx.commit().await?;
+        }
         transactions::recover_stale(&self.pool).await
     }
     async fn exchange_work(
@@ -933,5 +885,27 @@ impl crate::model::cluster::NodeWork for Backend {
         input: crate::model::node_work::Exchange,
     ) -> Result<crate::model::node_work::Reply> {
         transactions::work::exchange(self, node, key, input).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::model::cluster::StoragePermits for Backend {
+    async fn acquire_storage_permit(
+        &self,
+        storage_id: uuid::Uuid,
+        direction: &str,
+        limit: i32,
+        holder: uuid::Uuid,
+    ) -> Result<Option<uuid::Uuid>> {
+        transactions::try_acquire_storage_permit(&self.pool, storage_id, direction, limit, holder)
+            .await
+    }
+
+    async fn renew_storage_permit(&self, token: uuid::Uuid) -> Result<bool> {
+        transactions::renew_storage_permit(&self.pool, token).await
+    }
+
+    async fn release_storage_permit(&self, token: uuid::Uuid) -> Result<()> {
+        transactions::release_storage_permit(&self.pool, token).await
     }
 }

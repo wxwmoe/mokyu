@@ -129,10 +129,16 @@ mod metrics;
 pub(super) use metrics::*;
 mod source_repair;
 pub(super) use source_repair::*;
+#[path = "../../shared/read_sources.rs"]
+pub(super) mod sources;
+pub(super) use sources::{NodeReadChunk, NodeReadFragment, NodeReadRaw};
+mod read_sources;
+pub(in super::super) use read_sources::*;
 pub(super) mod node_requests;
 pub(super) mod notices;
 mod raw;
 pub(super) mod raw_pages;
+pub(super) mod read_grants;
 pub(super) use raw::*;
 pub(super) mod external;
 pub(super) mod image;

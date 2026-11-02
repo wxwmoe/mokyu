@@ -8,13 +8,13 @@ use uuid::Uuid;
 fn held(unit: Unit) -> &'static str {
     match unit {
         Unit::Chunk => {
-            "EXISTS(SELECT 1 FROM pack_inputs pi WHERE pi.chunk_id=u.chunk_id) OR EXISTS(SELECT 1 FROM transfer_sources f JOIN transfer_runs tr ON tr.task_id=f.task_id WHERE f.source_encoding=u.encoding_id AND tr.phase NOT IN ('complete','cancelled'))"
+            "EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads r ON r.read_id=w.read_id WHERE ns.source_type='chunk' AND (ns.location_id=u.location_id OR ns.location_id=(SELECT tl.address FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=u.location_id)) AND r.expires_at>UTC_TIMESTAMP(6)) OR EXISTS(SELECT 1 FROM pack_inputs pi WHERE pi.chunk_id=u.chunk_id) OR EXISTS(SELECT 1 FROM transfer_sources f JOIN transfer_runs tr ON tr.task_id=f.task_id WHERE f.source_encoding=u.encoding_id AND tr.phase NOT IN ('complete','cancelled'))"
         }
         Unit::Pack => {
-            "EXISTS(SELECT 1 FROM pack_members pm JOIN pack_inputs pi ON pi.chunk_id=pm.chunk_id WHERE pm.pack_id=u.id) OR EXISTS(SELECT 1 FROM transfer_sources f JOIN transfer_runs tr ON tr.task_id=f.task_id WHERE f.source_pack=u.id AND tr.phase NOT IN ('complete','cancelled'))"
+            "EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads r ON r.read_id=w.read_id WHERE ns.source_type='pack' AND (ns.location_id=u.location_id OR ns.location_id=(SELECT tl.address FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=u.location_id)) AND r.expires_at>UTC_TIMESTAMP(6)) OR EXISTS(SELECT 1 FROM pack_members pm JOIN pack_inputs pi ON pi.chunk_id=pm.chunk_id WHERE pm.pack_id=u.id) OR EXISTS(SELECT 1 FROM transfer_sources f JOIN transfer_runs tr ON tr.task_id=f.task_id WHERE f.source_pack=u.id AND tr.phase NOT IN ('complete','cancelled'))"
         }
         Unit::Raw => {
-            "EXISTS(SELECT 1 FROM transfer_sources f JOIN transfer_runs tr ON tr.task_id=f.task_id WHERE f.source_raw=u.id AND tr.phase NOT IN ('complete','cancelled'))"
+            "EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads r ON r.read_id=w.read_id WHERE ns.source_type='raw' AND (ns.location_id=u.location_id OR ns.location_id=(SELECT tl.address FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=u.location_id)) AND r.expires_at>UTC_TIMESTAMP(6)) OR EXISTS(SELECT 1 FROM transfer_sources f JOIN transfer_runs tr ON tr.task_id=f.task_id WHERE f.source_raw=u.id AND tr.phase NOT IN ('complete','cancelled'))"
         }
         Unit::Member => unreachable!(),
     }

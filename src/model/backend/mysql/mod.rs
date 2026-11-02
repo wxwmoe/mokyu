@@ -2,6 +2,8 @@ mod connection;
 #[path = "../shared/image.rs"]
 mod image_transactions;
 mod migration;
+#[path = "../shared/node_reads.rs"]
+mod node_reads;
 #[path = "../shared/node_registry.rs"]
 mod node_registry;
 #[path = "../shared/node_requests.rs"]
@@ -13,6 +15,10 @@ mod notices;
 mod queries;
 #[path = "../shared/raw_pages.rs"]
 mod raw_pages;
+#[path = "../shared/read_map.rs"]
+mod read_map;
+#[path = "../shared/read_reports.rs"]
+mod read_reports;
 #[path = "../shared/replica.rs"]
 mod replica_transactions;
 #[path = "../shared/tier_access.rs"]
@@ -50,6 +56,7 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
 }
 
 pub(crate) struct Backend {
+    read_reports: tokio::sync::Mutex<()>,
     integrity_rates: std::sync::Arc<crate::storage::rate::IntegrityRates>,
     control_epoch: Option<(i64, i64)>,
     database_info: crate::model::runtime::DatabaseInfo,

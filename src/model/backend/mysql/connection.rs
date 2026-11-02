@@ -37,6 +37,8 @@ pub(crate) async fn connect(
         runtime: backend.clone(),
         integrity_rates: backend.integrity_rates.clone(),
         notices: std::sync::Arc::new(super::notices::Single(backend.clone())),
+        storage_permits: backend.clone(),
+        node_reads: backend.clone(),
         node_requests: backend.clone(),
         node_work: backend.clone(),
         node_sessions: backend.clone(),
@@ -260,6 +262,7 @@ pub(super) async fn open(
         .await
         .map_err(|_| anyhow::anyhow!("cannot open MySQL pool"))?;
     Ok(Backend {
+        read_reports: Default::default(),
         integrity_rates: Default::default(),
         control_epoch,
         database_info,

@@ -78,6 +78,24 @@ fn require(row: Node, control: i64, run: Run) -> Result<Lease> {
     Ok(lease)
 }
 
+pub(super) async fn validate_run(tx: &mut q::Tx<'_>, state: &NodeState, run: Run) -> Result<()> {
+    let row = q::node(state.node_id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(Error::NodeExpired)?;
+    ensure!(
+        row.enabled
+            && row.credential_generation == state.credential_generation
+            && row.role == state.role,
+        Error::NodeExpired
+    );
+    let control = super::queries::read_grants::epoch()
+        .fetch_one(&mut **tx)
+        .await?;
+    require(row, control, run)?;
+    Ok(())
+}
+
 pub(super) async fn require_work(
     backend: &Backend,
     tx: &mut q::Tx<'_>,
@@ -270,6 +288,10 @@ impl NodeSessions for Backend {
             .await?
             .ok_or(Error::NodeInactive)?;
         ensure!(row.enabled && row.role != "control", Error::NodeInactive);
+        ensure!(
+            !q::active_reads(row.id).fetch_one(&mut *tx).await?,
+            Error::NodeConflict
+        );
         super::queries::work::expire_node(row.id)
             .execute(&mut *tx)
             .await?;

@@ -384,3 +384,9 @@ pub(in super::super) fn save_storage_profile(profile: &StorageProfile) -> Result
         .bind(&profile.migration_byte_budget)
         .bind(profile.storage_id).bind(profile.revision))
 }
+
+impl<'r> sqlx::FromRow<'r, sqlx::sqlite::SqliteRow> for crate::storage::model::Record {
+    fn from_row(row: &'r sqlx::sqlite::SqliteRow) -> sqlx::Result<Self> {
+        Ok((&StorageRow::from_row(row)?).into())
+    }
+}

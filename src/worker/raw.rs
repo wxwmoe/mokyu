@@ -68,8 +68,7 @@ async fn execute(app: &App, work: &RawProcessing) -> Result<bool> {
 }
 
 pub(crate) fn processor(app: &App) -> crate::model::raw::Processor<'_> {
-    app.node
-        .get()
+    app.processor_node()
         .map(|node| (node, app.role.as_str(), &app.secrets.credential_key))
 }
 

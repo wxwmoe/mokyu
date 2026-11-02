@@ -89,6 +89,7 @@ pub(super) mod node_requests;
 pub(super) mod notices;
 pub(super) mod notifications;
 pub(super) mod pack_work;
+pub(super) mod read_grants;
 pub(super) mod work;
 
 mod streams;
@@ -163,7 +164,9 @@ pub(super) mod replication;
 pub(super) mod replication_changes;
 pub(super) mod replication_import;
 pub(super) mod replication_remote;
+#[path = "../../shared/read_sources.rs"]
 pub(super) mod sources;
+pub(super) use sources::{NodeReadChunk, NodeReadFragment, NodeReadRaw};
 pub(super) mod tier;
 pub(super) mod tier_reads;
 pub(super) mod transfer;

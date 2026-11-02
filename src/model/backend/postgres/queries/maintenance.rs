@@ -600,12 +600,16 @@ impl MaintenanceStore for Backend {
         storage: Option<Uuid>,
         retention: Option<f64>,
     ) -> Result<Vec<Id>> {
-        Ok(
-            stale_streams(active, batch, storage, retention, self.single)
-                .build_query_scalar::<Id>()
-                .fetch_all(&self.pool)
-                .await?,
+        Ok(stale_streams(
+            active,
+            batch,
+            storage,
+            retention,
+            self.single && self.control_epoch.is_none(),
         )
+        .build_query_scalar::<Id>()
+        .fetch_all(&self.pool)
+        .await?)
     }
     async fn claim_stream(
         &self,
@@ -613,7 +617,14 @@ impl MaintenanceStore for Backend {
         storage: Option<Uuid>,
         retention: Option<f64>,
     ) -> Result<bool> {
-        transactions::claim_stale_stream(&self.pool, id, storage, retention, self.single).await
+        transactions::claim_stale_stream(
+            &self.pool,
+            id,
+            storage,
+            retention,
+            self.single && self.control_epoch.is_none(),
+        )
+        .await
     }
     async fn cleanup_stream(&self, id: Id, batch: i64) -> Result<usize> {
         transactions::cleanup_stream(&self.pool, id, batch).await
@@ -667,11 +678,16 @@ impl MaintenanceStore for Backend {
         minimum: f64,
         storage: Uuid,
     ) -> Result<Vec<(Id, Uuid, bool)>> {
-        Ok(
-            physical_gc_candidates(packed, grace, batch, minimum, storage, self.single)
-                .fetch_all(&self.pool)
-                .await?,
+        Ok(physical_gc_candidates(
+            packed,
+            grace,
+            batch,
+            minimum,
+            storage,
+            self.single && self.control_epoch.is_none(),
         )
+        .fetch_all(&self.pool)
+        .await?)
     }
     async fn physical_age(&self, packed: bool, id: Id, stored: DateTime<Utc>) -> Result<()> {
         physical_gc_age(packed, id, stored)

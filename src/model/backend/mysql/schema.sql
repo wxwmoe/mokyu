@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102201213.
+-- Generated from the complete mysql migration chain through 20261102203720.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -533,6 +533,57 @@ CREATE TABLE `node_notices` (
   CONSTRAINT `node_notices_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `notification_consumers` (`node_id`) ON DELETE CASCADE,
   CONSTRAINT `node_notices_chk_1` CHECK ((`slot` between 0 and 1023)),
   CONSTRAINT `node_notices_chk_2` CHECK ((`scope` in (_utf8mb4'object',_utf8mb4'bucket',_utf8mb4'storage',_utf8mb4'reset')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_read_permits` (
+  `token` binary(16) NOT NULL,
+  `read_id` binary(16) NOT NULL,
+  PRIMARY KEY (`token`,`read_id`),
+  KEY `node_read_permits_read` (`read_id`),
+  CONSTRAINT `node_read_permits_ibfk_1` FOREIGN KEY (`token`) REFERENCES `storage_permits` (`token`) ON DELETE CASCADE,
+  CONSTRAINT `node_read_permits_ibfk_2` FOREIGN KEY (`read_id`) REFERENCES `node_reads` (`read_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_read_sources` (
+  `window_id` binary(16) NOT NULL,
+  `source_type` varchar(12) COLLATE utf8mb4_bin NOT NULL,
+  `location_id` binary(16) NOT NULL,
+  PRIMARY KEY (`window_id`,`source_type`,`location_id`),
+  KEY `node_read_locations` (`source_type`,`location_id`),
+  CONSTRAINT `node_read_sources_ibfk_1` FOREIGN KEY (`window_id`) REFERENCES `node_read_windows` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_read_windows` (
+  `id` binary(16) NOT NULL,
+  `read_id` binary(16) NOT NULL,
+  `offset_bytes` bigint NOT NULL,
+  `mapping` json NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `read_id` (`read_id`,`offset_bytes`),
+  CONSTRAINT `node_read_windows_ibfk_1` FOREIGN KEY (`read_id`) REFERENCES `node_reads` (`read_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_reads` (
+  `read_id` binary(16) NOT NULL,
+  `node_id` binary(16) NOT NULL,
+  `boot_id` binary(16) NOT NULL,
+  `fence` binary(16) NOT NULL,
+  `credential_generation` bigint NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  `request_hash` binary(32) NOT NULL,
+  `stream_id` bigint NOT NULL,
+  `payload_revision` bigint NOT NULL,
+  `offset_bytes` bigint NOT NULL,
+  `end_bytes` bigint NOT NULL,
+  `expires_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`read_id`),
+  UNIQUE KEY `node_id` (`node_id`,`fence`,`operation_id`),
+  KEY `node_reads_expiry` (`expires_at`),
+  KEY `node_reads_stream` (`stream_id`,`expires_at`),
+  CONSTRAINT `node_reads_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`),
+  CONSTRAINT `node_reads_ibfk_2` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`),
+  CONSTRAINT `node_reads_generation` CHECK (((`credential_generation` > 0) and (`payload_revision` > 0))),
+  CONSTRAINT `node_reads_offsets` CHECK (((`offset_bytes` >= 0) and (`end_bytes` >= `offset_bytes`)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `node_work` (
@@ -1200,12 +1251,30 @@ CREATE TABLE `setup_tokens` (
   CONSTRAINT `setup_singleton` CHECK ((`id` = 1))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `storage_gates` (
+  `storage_id` binary(16) NOT NULL,
+  `direction` varchar(12) COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`storage_id`,`direction`),
+  CONSTRAINT `storage_gates_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `storage_maintenance` (
   `storage_id` binary(16) NOT NULL,
   `policy` varchar(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `last_scheduled_at` datetime(6) NOT NULL,
   PRIMARY KEY (`storage_id`,`policy`),
   CONSTRAINT `storage_maintenance_storage_fk` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_permits` (
+  `token` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `direction` varchar(12) COLLATE utf8mb4_bin NOT NULL,
+  `holder` binary(16) NOT NULL,
+  `expires_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`token`),
+  KEY `storage_permit_usage` (`storage_id`,`direction`,`expires_at`),
+  CONSTRAINT `storage_permits_ibfk_1` FOREIGN KEY (`storage_id`, `direction`) REFERENCES `storage_gates` (`storage_id`, `direction`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storage_profiles` (
