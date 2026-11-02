@@ -327,6 +327,7 @@ impl App {
                 stores.raw.clone(),
                 stores.managed_keys.clone(),
                 stores.storage_records.clone(),
+                stores.integrity_rates.clone(),
                 maintenance.clone(),
                 restart_required.clone(),
                 role != "single",

@@ -18,6 +18,8 @@ mod tier_move_transactions;
 #[path = "../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
+#[path = "../shared/work_sources.rs"]
+mod work_sources;
 
 use sqlx::SqlitePool;
 use std::{fs::File, path::PathBuf};
@@ -25,6 +27,7 @@ use std::{fs::File, path::PathBuf};
 pub(crate) use connection::connect;
 
 pub(crate) struct Backend {
+    integrity_rates: std::sync::Arc<crate::storage::rate::IntegrityRates>,
     control_epoch: Option<i64>,
     database_info: crate::model::runtime::DatabaseInfo,
     authorization: std::sync::Arc<tokio::sync::RwLock<()>>,

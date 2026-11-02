@@ -142,3 +142,31 @@ mod tests {
         ));
     }
 }
+
+#[derive(Default)]
+pub(crate) struct IntegrityRates(
+    std::sync::Mutex<std::collections::HashMap<uuid::Uuid, IntegrityRate>>,
+);
+
+impl IntegrityRates {
+    pub(crate) fn remove(&self, storage: uuid::Uuid) {
+        self.0.lock().unwrap().remove(&storage);
+    }
+
+    pub(crate) fn acquire(
+        &self,
+        storage: uuid::Uuid,
+        request_rate: Option<f64>,
+        byte_rate: Option<f64>,
+        requests: f64,
+        bytes: f64,
+    ) -> bool {
+        self.0.lock().unwrap().entry(storage).or_default().acquire(
+            request_rate,
+            byte_rate,
+            requests,
+            bytes,
+            Instant::now(),
+        )
+    }
+}

@@ -147,3 +147,5 @@ pub(super) mod transfer;
 pub(super) mod node_registry;
 
 pub(super) mod work;
+
+pub(super) mod work_sources;

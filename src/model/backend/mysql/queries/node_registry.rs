@@ -122,7 +122,7 @@ pub(in super::super) fn embedded() -> Scalar<'static, Uuid> {
 
 pub(in super::super) fn mode() -> Rows<'static, (bool, String, i64, bool)> {
     sqlx::query_as(
-        "SELECT maintenance,deployment_mode,deployment_mode_revision,(remote_work AND NOT maintenance AND EXISTS(SELECT 1 FROM tasks t WHERE t.state='queued' AND ((t.task_type='integrity' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test') OR (t.task_type='storage_migration' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='tiering')))) FROM mokyu_meta WHERE id=1",
+        "SELECT maintenance,deployment_mode,deployment_mode_revision,(remote_work AND NOT maintenance AND EXISTS(SELECT 1 FROM tasks t WHERE t.state='queued' AND ((t.task_type='integrity' AND (JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test' OR JSON_EXTRACT(t.detail,'$.source_operation') IS NOT NULL)) OR (t.task_type='storage_migration' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='tiering')))) FROM mokyu_meta WHERE id=1",
     )
 }
 

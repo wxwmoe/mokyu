@@ -147,19 +147,28 @@ pub(in super::super) async fn source_update(
     update: crate::model::source::SourceUpdate<'_>,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    source_update_in(&mut tx, update).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(in super::super) async fn source_update_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    update: crate::model::source::SourceUpdate<'_>,
+) -> Result<()> {
     let operation = update.operation;
     ensure!(
-        queries::validate_identity(&operation.principal, &mut tx).await?,
+        queries::validate_identity(&operation.principal, tx).await?,
         s3s::s3_error!(AccessDenied)
     );
     ensure!(
         queries::source_mode(&operation.mode)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?,
         crate::model::Error::OperationAborted
     );
-    lock_execution(&mut tx, update.execution).await?;
-    let snapshot = queries::source_snapshot(&mut tx, &operation.snapshot.scope, true).await?;
+    lock_execution(tx, update.execution).await?;
+    let snapshot = queries::source_snapshot(tx, &operation.snapshot.scope, true).await?;
     ensure!(
         snapshot.state == "ready" && snapshot.fingerprint()? == operation.snapshot.fingerprint()?,
         crate::model::Error::OperationAborted
@@ -178,7 +187,7 @@ pub(in super::super) async fn source_update(
     if update.apply {
         ensure!(
             queries::change_source(&snapshot, operation.code.as_deref())?
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected()
                 == 1,
@@ -191,10 +200,10 @@ pub(in super::super) async fn source_update(
         };
         let detail = serde_json::json!({"source":snapshot.summary()?,"revision":(snapshot.revision+1).to_string(),"code":operation.code,"requested_by":operation.principal.user_id(),"token_id":operation.principal.token_id(),"task_id":update.execution.id});
         queries::source_result(update.execution.id, serde_json::json!({"result":detail}))
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         queries::complete_task(update.execution.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         queries::source_audit(
             &operation.principal,
@@ -202,9 +211,8 @@ pub(in super::super) async fn source_update(
             &snapshot.location().to_string(),
             detail,
         )?
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }

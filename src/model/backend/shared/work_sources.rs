@@ -1,15 +1,22 @@
-use super::*;
+use super::{Backend, queries::work_sources as q};
 use crate::model::{
     PhysicalSource,
     source::{SourceOperation, SourceUpdate},
 };
+use crate::{
+    cluster::NodeState,
+    content::codec::Key,
+    model::{Error, node_read as read, node_work as work, task::Execution},
+};
+use anyhow::{Result, ensure};
+use serde_json::Value;
 
 async fn validate(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut q::Tx<'_>,
     execution: Execution,
     operation: &SourceOperation,
 ) -> Result<Option<&'static str>> {
-    match source_update_in(
+    match q::apply(
         tx,
         SourceUpdate {
             execution,
@@ -39,7 +46,8 @@ async fn validate(
 }
 
 pub(super) async fn prepare(
-    tx: &mut Transaction<'_, Postgres>,
+    backend: &Backend,
+    tx: &mut q::Tx<'_>,
     node: &NodeState,
     execution: Execution,
     detail: &Value,
@@ -52,9 +60,7 @@ pub(super) async fn prepare(
         Error::OperationAborted
     );
     if let Some(error) = validate(tx, execution, &operation).await? {
-        q::finish(execution.id, execution.token, 0, true, Some(error))
-            .execute(&mut **tx)
-            .await?;
+        q::fail(tx, execution, error).await?;
         return Ok(None);
     }
     let snapshot = operation.snapshot;
@@ -87,24 +93,18 @@ pub(super) async fn prepare(
         {
             rates.push(("integrity_bandwidth", rate as f64, bytes.max(0) as f64));
         }
-        if !integrity_rate_in(tx, profile.storage_id, &rates).await? {
+        if !q::rate(backend, tx, profile.storage_id, &rates).await? {
             return Ok(None);
         }
     }
     let members = if let PhysicalSource::Pack(pack) = &snapshot.physical {
-        let members = q::members(pack.id).fetch_all(&mut **tx).await?;
-        ensure!(
-            Some(crate::model::source::manifest_digest(pack, &members)?)
-                == snapshot.manifest_digest,
-            Error::OperationAborted
-        );
-        members
+        q::members(tx, pack, &snapshot).await?
     } else {
         vec![]
     };
     let mut keys = vec![];
     if inspect && let Some(id) = block {
-        let record = queries::node_read_keys(&[id]).fetch_one(&mut **tx).await?;
+        let record = q::block(tx, id).await?;
         keys.push(read::BlockKey::unprotect(record, key)?);
     }
     Ok(Some((
@@ -119,7 +119,7 @@ pub(super) async fn prepare(
 }
 
 pub(super) async fn finish(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut q::Tx<'_>,
     execution: Execution,
     detail: Value,
     snapshot: crate::model::source::SourceSnapshot,
@@ -156,7 +156,7 @@ pub(super) async fn finish(
     } else if code.is_some() {
         return Ok(Some("source_verification_failed"));
     }
-    source_update_in(
+    q::apply(
         tx,
         SourceUpdate {
             execution,

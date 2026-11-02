@@ -18,6 +18,8 @@ mod tier_move_transactions;
 #[path = "../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
+#[path = "../shared/work_sources.rs"]
+mod work_sources;
 
 use sqlx::{MySqlConnection, MySqlPool};
 
@@ -44,6 +46,7 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
 }
 
 pub(crate) struct Backend {
+    integrity_rates: std::sync::Arc<crate::storage::rate::IntegrityRates>,
     control_epoch: Option<(i64, i64)>,
     database_info: crate::model::runtime::DatabaseInfo,
     pool: MySqlPool,

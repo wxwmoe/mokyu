@@ -156,6 +156,7 @@ async fn finish(
         id: offer.task_id.ok_or(Error::NodeOperationConflict)?,
         token: offer.token,
     };
+    let mut issue = None;
     let state = match (offer.plan.map(|p| p.0), result.outcomes.as_slice()) {
         (Some(work::Plan::ExternalTest(plan)), [work::Outcome::ExternalTest(report)]) => {
             external::finish_test(tx, task, &plan, report).await?;
@@ -191,10 +192,29 @@ async fn finish(
                 .await?;
             "queued"
         }
+        (
+            Some(work::Plan::Inspect {
+                snapshot, inspect, ..
+            }),
+            outcomes,
+        ) => {
+            let row = queries::task_record(task.id).fetch_one(&mut **tx).await?;
+            ensure!(
+                row.state == "running" && row.execution_token == Some(task.token),
+                Error::OperationAborted
+            );
+            issue = super::work_sources::finish(tx, task, row.detail, *snapshot, inspect, outcomes)
+                .await?;
+            if issue.is_some() {
+                "failed"
+            } else {
+                "completed"
+            }
+        }
         _ => anyhow::bail!(Error::NodeOperationConflict),
     };
     ensure!(
-        queries::finish_task(task, state, None)
+        queries::finish_task(task, state, issue)
             .execute(&mut **tx)
             .await?
             .rows_affected()
@@ -281,6 +301,36 @@ impl NodeWork for Backend {
                     ))
                 }
                 Some("tiering") => tier_plan(&mut tx, task, &detail, key).await?,
+                _ if detail.get("source_operation").is_some() => {
+                    let store = serde_json::from_value(detail["storage_id"].clone())?;
+                    let storage = material(&mut tx, store, key).await?;
+                    match super::work_sources::prepare(
+                        self,
+                        &mut tx,
+                        node,
+                        task,
+                        &detail,
+                        &storage.profile,
+                        key,
+                    )
+                    .await?
+                    {
+                        Some((plan, keys)) => Some((
+                            plan,
+                            serde_json::to_vec(&work::Materials {
+                                storage,
+                                additional: Vec::new(),
+                                keys,
+                            })?,
+                        )),
+                        None => {
+                            queries::finish_task(task, "queued", None)
+                                .execute(&mut *tx)
+                                .await?;
+                            None
+                        }
+                    }
+                }
                 _ => anyhow::bail!(Error::NodeOperationConflict),
             };
             if let Some((proposal, secret)) = prepared {

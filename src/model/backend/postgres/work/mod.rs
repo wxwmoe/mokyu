@@ -3,7 +3,7 @@ use super::*;
 use crate::model::node_work as work;
 use queries::work as q;
 
-mod sources;
+use super::super::work_sources as sources;
 
 mod audit;
 
@@ -1454,6 +1454,7 @@ pub(crate) async fn exchange(
                     .await?
                 } else if policy == "integrity" {
                     sources::prepare(
+                        backend,
                         &mut tx,
                         node,
                         Execution { id: task, token },

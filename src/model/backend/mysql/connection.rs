@@ -35,6 +35,7 @@ pub(crate) async fn connect(
     );
     let stores = crate::model::Stores {
         runtime: backend.clone(),
+        integrity_rates: backend.integrity_rates.clone(),
         node_work: backend.clone(),
         node_sessions: backend.clone(),
         cluster: None,
@@ -257,6 +258,7 @@ pub(super) async fn open(
         .await
         .map_err(|_| anyhow::anyhow!("cannot open MySQL pool"))?;
     Ok(Backend {
+        integrity_rates: Default::default(),
         control_epoch,
         database_info,
         pool,

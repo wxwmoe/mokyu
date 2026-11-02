@@ -24,7 +24,7 @@ pub(in super::super) fn insert<'a>(
 }
 
 pub(in super::super) fn next_task(class: u32) -> Rows<'static, (Uuid, serde_json::Value)> {
-    sqlx::query_as("SELECT t.id,t.detail FROM tasks t WHERE t.state='queued' AND ((?=0 AND t.task_type='integrity' AND json_extract(t.detail,'$.operation')='external_test') OR (?=2 AND t.task_type='storage_migration' AND json_extract(t.detail,'$.operation')='tiering')) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND remote_work AND NOT maintenance) AND NOT EXISTS(SELECT 1 FROM maintenance_controls WHERE policy=t.task_type AND paused) ORDER BY t.updated_at,t.id LIMIT 1").bind(class as i64).bind(class as i64)
+    sqlx::query_as("SELECT t.id,t.detail FROM tasks t WHERE t.state='queued' AND ((?=0 AND t.task_type='integrity' AND (json_extract(t.detail,'$.operation')='external_test' OR json_type(t.detail,'$.source_operation')='object')) OR (?=2 AND t.task_type='storage_migration' AND json_extract(t.detail,'$.operation')='tiering')) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND remote_work AND NOT maintenance) AND NOT EXISTS(SELECT 1 FROM maintenance_controls WHERE policy=t.task_type AND paused) ORDER BY t.updated_at,t.id LIMIT 1").bind(class as i64).bind(class as i64)
 }
 
 pub(in super::super) fn settle(node: Uuid, operation: Uuid, hash: &[u8]) -> Statement<'_> {

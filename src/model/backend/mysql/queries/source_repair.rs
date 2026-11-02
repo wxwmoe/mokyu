@@ -168,7 +168,7 @@ pub(in super::super) fn change_source<'a>(
 }
 
 pub(in super::super) fn source_mode(mode: &str) -> Scalar<'_, bool> {
-    sqlx::query_scalar("SELECT ?='single'").bind(mode)
+    sqlx::query_scalar("SELECT deployment_mode=? FROM mokyu_meta WHERE id=1").bind(mode)
 }
 
 pub(in super::super) fn source_result(task: Uuid, result: Value) -> Statement<'static> {

@@ -17,6 +17,8 @@ mod tier_move_transactions;
 #[path = "../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
+#[path = "../shared/work_sources.rs"]
+mod work_sources;
 
 #[cfg(test)]
 #[path = "../../../../tests/recovery/postgres_compression.rs"]
@@ -173,6 +175,7 @@ mod node_runtime_tests;
 fn stores(backend: Arc<Backend>) -> crate::model::Stores {
     crate::model::Stores {
         runtime: backend.clone(),
+        integrity_rates: Default::default(),
         node_work: backend.clone(),
         node_sessions: backend.clone(),
         cluster: Some(backend.clone()),

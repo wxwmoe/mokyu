@@ -18,7 +18,7 @@ mod multipart;
 mod partial_map;
 pub(crate) mod permits;
 pub(crate) mod profile;
-mod rate;
+pub(crate) mod rate;
 pub(crate) mod raw;
 pub(crate) mod raw_cache;
 pub(crate) mod raw_manifest;
@@ -104,7 +104,7 @@ pub struct Storage {
     targets: RwLock<HashMap<Uuid, Arc<StoreBackend>>>,
     store_defaults: (usize, usize, usize),
     store_gates: Mutex<GateRegistry>,
-    integrity_rates: Mutex<HashMap<Uuid, rate::IntegrityRate>>,
+    integrity_rates: Arc<rate::IntegrityRates>,
     refresh: tokio::sync::Mutex<()>,
     permit_holder: Uuid,
     pub storage_id: Option<Uuid>,
@@ -341,6 +341,7 @@ impl Storage {
         raw_store: Arc<dyn crate::model::raw::RawStore>,
         managed_keys: Arc<dyn crate::model::ManagedKeyStore>,
         record_store: Arc<dyn crate::model::StorageRecordStore>,
+        integrity_rates: Arc<rate::IntegrityRates>,
         maintenance: Arc<std::sync::atomic::AtomicBool>,
         restart_required: Arc<std::sync::atomic::AtomicBool>,
         cluster_mode: bool,
@@ -467,7 +468,7 @@ impl Storage {
             targets: RwLock::new(targets),
             store_defaults: defaults,
             store_gates: Mutex::new(store_gates),
-            integrity_rates: Mutex::new(HashMap::new()),
+            integrity_rates,
             refresh: tokio::sync::Mutex::new(()),
             permit_holder,
             storage_id,
@@ -696,17 +697,7 @@ impl Storage {
         );
         Ok(self
             .integrity_rates
-            .lock()
-            .unwrap()
-            .entry(storage)
-            .or_default()
-            .acquire(
-                request_rate,
-                byte_rate,
-                requests,
-                bytes,
-                std::time::Instant::now(),
-            ))
+            .acquire(storage, request_rate, byte_rate, requests, bytes))
     }
     pub(crate) async fn pack_permit(
         &self,
@@ -809,7 +800,7 @@ impl Storage {
             targets.insert(storage_id, Arc::new(backend));
         } else {
             targets.remove(&storage_id);
-            self.integrity_rates.lock().unwrap().remove(&storage_id);
+            self.integrity_rates.remove(storage_id);
         }
         self.invalidate_reads();
         Ok(())

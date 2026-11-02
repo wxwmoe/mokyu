@@ -11,7 +11,7 @@ pub(in super::super) async fn acquire_integrity_rate(
     Ok(accepted)
 }
 
-pub(super) async fn integrity_rate_in(
+pub(in super::super) async fn integrity_rate_in(
     tx: &mut Transaction<'_, Postgres>,
     storage_id: Uuid,
     rates: &[(&str, f64, f64)],

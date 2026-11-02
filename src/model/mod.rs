@@ -102,6 +102,7 @@ pub(crate) use stream::{
 pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord};
 
 pub(crate) struct Stores {
+    pub(crate) integrity_rates: Arc<crate::storage::rate::IntegrityRates>,
     pub(crate) runtime: Arc<dyn runtime::RuntimeStore>,
     pub(crate) node_work: Arc<dyn cluster::NodeWork>,
     pub(crate) node_sessions: Arc<dyn cluster::NodeSessions>,

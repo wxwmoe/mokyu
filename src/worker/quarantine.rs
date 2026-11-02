@@ -124,12 +124,7 @@ impl App {
         };
         Ok(SourceOperation {
             principal: principal.clone(),
-            mode: if self.role == "single" {
-                "single"
-            } else {
-                "cluster"
-            }
-            .into(),
+            mode: self.deployment_mode().into(),
             snapshot,
             code,
             node: if local {

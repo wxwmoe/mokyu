@@ -62,7 +62,7 @@ pub(in super::super) async fn source_update(
     Ok(())
 }
 
-pub(super) async fn source_update_in(
+pub(in super::super) async fn source_update_in(
     tx: &mut Transaction<'_, Postgres>,
     update: crate::model::source::SourceUpdate<'_>,
 ) -> Result<()> {
