@@ -17,17 +17,17 @@
 | `database.ssl_mode` | `prefer` | PostgreSQL/MySQL 的连接 SSL 模式；MySQL 支持 `disable`、`prefer`、`require`、`verify-ca`、`verify-full`，SQLite 不使用 |
 | `database.path` | `instance.data_path/mokyu.db` | SQLite 数据库文件；其他类型不使用 |
 
-| 数据库 | 单容器 | 群集 |
-| --- | --- | --- |
-| PostgreSQL | 支持 | 支持 |
-| MySQL / MariaDB | 支持 | 不支持 |
-| SQLite | 支持 | 不支持 |
+| 数据库 | 单容器 | 单主控群集 | 多控制节点群集 |
+| --- | --- | --- | --- |
+| PostgreSQL | 支持 | 支持 | 支持 |
+| MySQL / MariaDB | 支持 | 支持 | — |
+| SQLite | 支持 | 支持 | — |
 
 最低支持 PostgreSQL 18、MySQL 8.0.19、MariaDB 10.6.3。MariaDB 使用 `type = "mysql"` 和相同连接字段，由程序自动识别。MySQL/MariaDB 使用 InnoDB，要求 `innodb_flush_log_at_trx_commit=1`。低于最低版本时，启动会在执行迁移前拒绝。SQLite 随程序编译，无需单独安装数据库服务。
 
 最低兼容版本不代表推荐部署版本。新部署建议选择仍在维护的稳定版或 LTS，并安装该系列最新补丁。
 
-群集模式下只有 control 连接 PostgreSQL。data/worker/node 通过 `instance.control_url` 调用 gRPC，数据库不必向这些节点开放。Mokyu 不执行 PostgreSQL 故障转移，数据库高可用由部署环境提供。
+单主控群集由主容器独占元数据库，SQLite 文件仅挂载到主容器。多控制节点群集由 control 连接 PostgreSQL。data/worker/node 通过 `instance.control_url` 调用 gRPC，数据库不必向这些节点开放。Mokyu 不执行 PostgreSQL 故障转移，数据库高可用由部署环境提供。
 
 SQLite 使用 WAL、外键和默认 FULL 同步，数据库及其 `-wal`、`-shm` 文件必须位于可写的本地持久文件系统，不支持网络共享盘。默认文件是 `/data/mokyu.db`；新建数据库和锁文件权限为 `0600`，新建父目录为 `0755`。一个数据库文件只允许一个 Mokyu 实例，符号链接按实际路径识别，数据库硬链接被拒绝。文件被替换或运行锁丢失时进程退出。
 
@@ -37,7 +37,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 
 ## replica_database
 
-可选的 PostgreSQL 物理从库，仅由 control 查询节点公共读取的后续映射页。省略整节时不创建从库池或探测；单容器、data/worker/node、MySQL、MariaDB、SQLite 拒绝此配置。
+可选的 PostgreSQL 物理从库，仅由 control 查询节点公共读取的后续映射页。省略整节时不创建从库池或探测；此项限 PostgreSQL 多控制节点群集的 control。
 
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -85,7 +85,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 
 每个 HTTP 监听器都在各自端口接受 HTTP/1.1 与明文 HTTP/2（h2c prior knowledge），不使用 HTTP/1.1 Upgrade。TLS 由反向代理终止。每连接 HTTP/2 并发流限制为本机数据槽位数的 2–32 范围，首请求须在 15 秒内完成头部；签名路径和查询串保持原样。
 
-省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 则限制每个 storage 的总并发，单容器使用进程内队列，群集由 control 在 PostgreSQL 维护共享许可，节点通过 RPC 取得并续租。profile 热更新保留正在执行和排队的操作；降低上限后等待现有操作排空，提高上限则放行等待者。显式修改 instance 预算需要重启。
+省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 则限制每个 storage 的总并发，单容器使用进程内队列，群集由控制面在元数据库中维护共享许可，节点通过 RPC 取得并续租。profile 热更新保留正在执行和排队的操作；降低上限后等待现有操作排空，提高上限则放行等待者。显式修改 instance 预算需要重启。
 
 对象响应缓存显式启用后，从原有 pack 内存与工作区预算中划出，不额外增加总预算；control/worker 不启用正文缓存。额度不能超过进程内存的四分之一，并保留流式读写及默认 pack 所需空间。启用或增大前需确认剩余 pack 额度可容纳现有最大 pack 及各 storage profile；历史 pack 可能大于当前创建策略，因此默认不自动缩减它们的读取预算。每个正文的原始与编码长度均不超过总额度的 1/16 或 8 MiB，构建峰值最多占总额度的四分之一；索引、历史与构建元数据从 1 MiB 起计费，条目增多时从同一总额度按需扩充。完整读取重复访问后才尝试准入；命中过的正文在淘汰时再保留一轮，持续未使用的条目仍会被回收，各编码表示独立计费。目标编码未命中时可复用符合当前校验策略的原始正文进行编码，不必重新读取来源；仍使用既有编码并发和内存额度。淘汰后仍被发送响应引用的正文继续占额度；填充只做有界淘汰，无法释放足够额度时放弃本次填充，继续正常读取。
 
@@ -95,7 +95,7 @@ CORS 策略在节点内按内容共享，额度在运行设置中配置，确认
 
 写入内存从同一总预算划出，最多占进程内存四分之一，并保留 stream、响应缓存及默认 pack 的额度。raw 在已知长度且能一次领取完整额度时进入 RAM，未知或过大的长度沿用有界文件暂存；chunks 按完整区块领取。待上传唯一副本不参与淘汰，最后一个读取者释放正文后才返还内存，空对象至少计 `4KiB`。local、群集和 durable/buffered 不使用 RAM 提前确认；写内存为 `0B` 不影响既有流式工作区。
 
-共享 staging 设置只对 PostgreSQL 提供；MySQL、SQLite 不接受这两个设置。PostgreSQL 的 single 可以预先配置供群集切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；仅未闭合的 CDC Multipart 尾块在保留前缀 `__mokyu/multipart/fragment/` 共享暂存；raw Multipart、raw/chunks 写缓存使用所属节点的 `instance.data_path`，最终载荷直接写目标 S3。单容器模式可使用 `/data/storage` 的 local storage。
+四种数据库均可在单容器模式预先配置共享 S3 暂存，供后续切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；仅未闭合的 CDC Multipart 尾块在保留前缀 `__mokyu/multipart/fragment/` 共享暂存；raw Multipart、raw/chunks 写缓存使用所属节点的 `instance.data_path`，最终载荷直接写目标 S3。单容器模式可使用 `/data/storage` 的 local storage。
 
 ## runtime 设置
 
@@ -190,7 +190,7 @@ mokyu data            # data
 mokyu cli status      # 本机 control HTTP
 ```
 
-`mokyu cli` 访问 `127.0.0.1:instance.listen_control`。单容器使用部署密钥认证，群集 control 使用本机 `node.json` 凭据。worker/data/node 只提供 status。节点只有建立有效会话并完成配置同步后才启动数据入口或任务调度；连接中、恢复中、已隔离或停机排空状态可通过本机状态端口查询。数据库模式由单容器/control 的 `cluster mode single|cluster` 管理，成功切换后重启相应进程。
+`mokyu cli` 访问 `127.0.0.1:instance.listen_control`。单容器和单主控的主容器使用部署密钥认证，多控制节点群集的 control 使用本机 `node.json` 凭据。worker/data/node 只提供 status。节点只有建立有效会话并完成配置同步后才启动数据入口或任务调度；连接中、恢复中、已隔离或停机排空状态可通过本机状态端口查询。数据库模式由单容器/control 的 `cluster mode single|cluster` 管理，成功切换后重启相应进程。
 
 图片处理属于桶设置，不依赖实例 TOML 开关。设置位置、默认输入上限、媒体库预览和独立的处理预算见[图片处理](image-processing.md)。
 

@@ -416,9 +416,7 @@ pub(crate) trait NodeWrites: NativeParts + RemoteParts + Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait ClusterStore:
-    NodeSessions + NodeWork + NodeNotices + NodeRequests + NodeReads + NodeWrites + StagingStore
-{
+pub(crate) trait NodeInventory: Send + Sync {
     async fn begin_report(
         &self,
         state: &NodeState,
@@ -427,6 +425,58 @@ pub(crate) trait ClusterStore:
         boot: Uuid,
         started: DateTime<Utc>,
     ) -> Result<()>;
+    async fn status(&self) -> Result<ClusterStatus>;
+    async fn nodes(
+        &self,
+        filter: &super::node::NodeFilter,
+        desired: &serde_json::Value,
+    ) -> Result<super::node::NodePage>;
+    async fn node(&self, id: Uuid, desired: &serde_json::Value) -> Result<Option<NodeView>>;
+    async fn node_counts(&self, desired: &serde_json::Value)
+    -> Result<Vec<super::node::NodeCount>>;
+    async fn setting_counts(
+        &self,
+        desired: &serde_json::Value,
+    ) -> Result<Vec<super::node::SettingCount>>;
+    async fn node_report(&self, id: Uuid) -> Result<Option<super::node::SavedReport>>;
+    async fn node_tasks(&self, id: Uuid) -> Result<Vec<super::metrics::WorkSummary>>;
+    async fn sample_node_runtime(
+        &self,
+        state: &NodeState,
+        role: &str,
+        key: &Key,
+        sample: &super::metrics::NodeSample,
+    ) -> Result<bool>;
+    async fn aggregate_runtime(&self, interval: u64, retention: u64) -> Result<()>;
+    async fn cluster_runtime(
+        &self,
+        query: &super::metrics::RuntimeQuery,
+    ) -> Result<Vec<super::metrics::ClusterRuntimePoint>>;
+    async fn node_runtime(
+        &self,
+        id: Uuid,
+        query: &super::metrics::RuntimeQuery,
+    ) -> Result<Vec<super::metrics::NodeRuntimePoint>>;
+    async fn report(
+        &self,
+        state: &NodeState,
+        role: &str,
+        key: &Key,
+        report: &super::node::NodeReport,
+    ) -> Result<bool>;
+}
+
+#[async_trait]
+pub(crate) trait ClusterStore:
+    NodeInventory
+    + NodeSessions
+    + NodeWork
+    + NodeNotices
+    + NodeRequests
+    + NodeReads
+    + NodeWrites
+    + StagingStore
+{
     async fn notification_changes(&self) -> Result<Box<dyn NotificationChanges>>;
     async fn task_targets(&self, tasks: &[Uuid]) -> Result<Vec<Option<Uuid>>>;
     async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool>;
@@ -467,45 +517,6 @@ pub(crate) trait ClusterStore:
     async fn renew_write(&self, stream: Id, ttl_seconds: i64) -> Result<()>;
     async fn expire_stream_leases(&self) -> Result<()>;
     async fn mode(&self) -> Result<String>;
-    async fn status(&self) -> Result<ClusterStatus>;
-    async fn nodes(
-        &self,
-        filter: &super::node::NodeFilter,
-        desired: &serde_json::Value,
-    ) -> Result<super::node::NodePage>;
-    async fn node(&self, id: Uuid, desired: &serde_json::Value) -> Result<Option<NodeView>>;
-    async fn node_counts(&self, desired: &serde_json::Value)
-    -> Result<Vec<super::node::NodeCount>>;
-    async fn setting_counts(
-        &self,
-        desired: &serde_json::Value,
-    ) -> Result<Vec<super::node::SettingCount>>;
-    async fn node_report(&self, id: Uuid) -> Result<Option<super::node::SavedReport>>;
-    async fn node_tasks(&self, id: Uuid) -> Result<Vec<super::metrics::WorkSummary>>;
-    async fn sample_node_runtime(
-        &self,
-        state: &NodeState,
-        role: &str,
-        key: &Key,
-        sample: &super::metrics::NodeSample,
-    ) -> Result<bool>;
-    async fn aggregate_runtime(&self, interval: u64, retention: u64) -> Result<()>;
-    async fn cluster_runtime(
-        &self,
-        query: &super::metrics::RuntimeQuery,
-    ) -> Result<Vec<super::metrics::ClusterRuntimePoint>>;
-    async fn node_runtime(
-        &self,
-        id: Uuid,
-        query: &super::metrics::RuntimeQuery,
-    ) -> Result<Vec<super::metrics::NodeRuntimePoint>>;
-    async fn report(
-        &self,
-        state: &NodeState,
-        role: &str,
-        key: &Key,
-        report: &super::node::NodeReport,
-    ) -> Result<bool>;
     async fn recover(&self, name: &str, role: &str) -> Result<()>;
     async fn credential(&self, id: Uuid) -> Result<Option<(String, Vec<u8>)>>;
     async fn leader(&self, key: i64) -> Result<Option<Box<dyn Leader>>>;
@@ -522,6 +533,11 @@ pub(crate) trait Leader: Send {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct ClusterStatus {
     pub(crate) mode: String,
+    pub(crate) mode_revision: i64,
+    pub(crate) remote_nodes: i64,
+    pub(crate) ready_data: i64,
+    pub(crate) ready_workers: i64,
+    pub(crate) remote_work: bool,
     pub(crate) enabled_nodes: i64,
     pub(crate) local_storages: i64,
 }

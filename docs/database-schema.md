@@ -2,7 +2,7 @@
 
 数据库保存对象目录、权限、存储映射、任务和运行状态；载荷位于 storage 或受保护的暂存目录。本文只列出当前公开语义，完整类型、约束、索引和触发器以各后端的快照和迁移（[PostgreSQL](../src/model/backend/postgres)、[MySQL](../src/model/backend/mysql)、[SQLite](../src/model/backend/sqlite)）为准。
 
-数据库初始化使用 `src/model/backend/{postgres,mysql,sqlite}/schema.sql` 的对应结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `src/model/backend/postgres/migrations/*.sql`，MySQL 使用 `src/model/backend/mysql/migrations/*.sql`，SQLite 使用 `src/model/backend/sqlite/migrations/*.sql`。已发布迁移不可修改。PostgreSQL 的单容器和群集使用同一套表；MySQL 和 SQLite 只有单容器表，不保存节点、lease、子任务或共享 staging。群集只有 control 连接 PostgreSQL，data/worker/node 通过 control API 访问业务数据；各进程保留独立 `instance.data_path` 和 `node.json`。
+数据库初始化使用 `src/model/backend/{postgres,mysql,sqlite}/schema.sql` 的对应结构；已初始化数据库执行所选后端的增量迁移：PostgreSQL 使用 `src/model/backend/postgres/migrations/*.sql`，MySQL 使用 `src/model/backend/mysql/migrations/*.sql`，SQLite 使用 `src/model/backend/sqlite/migrations/*.sql`。已发布迁移不可修改。各数据库的部署模式共用本后端的结构。单主控在元数据库保存节点会话、读取与写入保护、任务领取和投递进度。远端节点通过 control API 访问元数据，各自保管节点身份与持久目录。
 
 下表描述共有数据含义，并列出 PostgreSQL 群集字段；原生类型和约束以各后端迁移为准。MySQL/MariaDB 共用 `src/model/backend/mysql/migrations/`，使用二进制 UUID、自增 BIGINT 内容 ID、UTC `DATETIME(6)` 和二进制对象键。名称比较区分大小写和尾空格；MySQL 使用原生 JSON，MariaDB 使用带 JSON 有效性约束的文本表示。引用、配额和任务更新在同一事务中显式完成；容量 scope 的桶集合使用关联表。SQLite 使用 STRICT 表、16 字节 UUID、整数自增内容 ID、UTC 微秒整数时间、JSON 文本和二进制对象键；写事务使用 `BEGIN IMMEDIATE`，引用与配额同样在事务内显式维护。原生类型不影响对外 ID、分页、时间和字节数的接口语义。
 
@@ -22,7 +22,7 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 
 | 表 | 关键字段 | 用途 |
 | --- | --- | --- |
-| `mokyu_meta` | `schema_version`、`deployment_id`、`deployment_mode`、`deployment_mode_revision`、`deployment_key_fingerprint`、`gc_paused`、`maintenance`、`project_management`、`pack_creation_paused` | 部署身份、single/cluster 模式和持久开关；不保存 deployment key 明文 |
+| `mokyu_meta` | `schema_version`、`deployment_id`、`deployment_mode`、`deployment_mode_revision`、`deployment_key_fingerprint`、`gc_paused`、`maintenance`、`project_management`、`pack_creation_paused` | 部署身份、模式、修订和持久开关 |
 | `runtime_settings` | `section`、`value`、`revision`、`updated_at`、`updated_by_user_id` | 类型化的 `web`、`requests`、`uploads`、`metrics`、`maintenance` 分组；Web/CLI 按 revision 更新 |
 | `managed_keys` | `id`、`name`、`purpose`、`key_algorithm`、`secret_encrypted`、`fingerprint`、`created_at`、`revoked_at` | Mokyu 生成的 access/signing/block key；密文由 deployment key 保护，fingerprint 全局唯一并在吊销后保留；block 支持 AES-256-GCM、ChaCha20-Poly1305，存储也可关闭加密 |
 | `nonce_counters` | `block_key_id`、`type_tag`、`reserved_id` | `(block_key_id,type_tag)` 复合主键；引用托管密钥，类型标记为 0–31，当前 0 为独立区块编码、1 为区块包；非负 `BIGINT` 高水位默认 0，SQLite 为 `INTEGER`，提交后不回退 |
@@ -169,7 +169,7 @@ single 的用量采样不创建 usage 任务：在一次刷新超时预算内依
 
 迁移文件位于 `src/model/backend/{postgres,mysql,sqlite}/migrations/`，版本采用 UTC+8 的 `YYYYMMDDHHMMSS`，按 64 位整数存储。空库新安装执行对应数据库的 `schema.sql` 快照；已初始化数据库按 `mokyu_meta.schema_version` 执行增量迁移。非空未知结构拒绝启动，已发布迁移不可改写。兼容条件和操作步骤见[部署与恢复](deployment-and-recovery.md#升级与数据库迁移)。当前结构以迁移执行后的结果为准，历史文件中的旧名称不代表当前字段。
 
-PostgreSQL 群集的 `node_reports` 按 node_id 保存一份最新报告，boot_id 与 sequence 防止旧进程和乱序覆盖。metadata 保存脱敏加载配置与修订，status 保存有限的运行快照；两者分别限制为 64 KiB 和 32 KiB。只由有效注册身份更新，不使用公共读取从库。单容器不写节点报告，MySQL/SQLite 不创建对应表。正在执行的节点任务通过 tasks_node_running 部分索引查询。
+PostgreSQL 群集的 `node_reports` 按 node_id 保存一份最新报告，boot_id 与 sequence 防止旧进程和乱序覆盖。metadata 保存脱敏加载配置与修订，status 保存有限的运行快照；两者分别限制为 64 KiB 和 32 KiB。只由有效注册身份更新，不使用公共读取从库。普通单容器不写远端节点报告。MySQL、MariaDB 和 SQLite 的单主控将最新报告保存在节点记录中，采样历史另存。正在执行的节点任务通过 tasks_node_running 部分索引查询。
 
 群集历史保存在 `node_runtime_samples`，按 node_id、boot_id、sequence 去重，记录数据库接收时间、进程单调运行时间及最多 16 KiB 的指标。各节点独立采样；control 仅协调汇总与清理。带 `scope=cluster` 的汇总进入 `runtime_samples`，保留当时的预期、报告和有效差分节点数；旧无归属记录不混入群集曲线。按节点/时间与群集 scope 建立索引，过期历史按每批 1000 项清理。
 
@@ -186,3 +186,7 @@ PostgreSQL 的逻辑区块资格检查使用 `FOR KEY SHARE`，新增引用及 e
 候选登记与最终切换是两个短事务，中间的编码、写入和完整回读不持有新增来源行锁。最终事务比较来源快照并重新验证授权、写代次、模式、节点和存储策略，退休旧独立来源，发布新编码并建立当前写入的引用；pack 成员只解除逻辑 chunk 的当前 pack 绑定，不删除物理成员布局。并发胜者已提供合格来源时，退役本次候选并复用胜者。
 
 流回收先退休并解绑其候选。`recovery_pending=true` 的候选即使已标记 deleted，也继续参与重复物理回收，并阻止 encoding/chunk 历史记录被提前清理；至少经过删除保留窗口后再次成功删除才清除此标记。已验证发布或确认未使用的完整候选沿用正常物理回收规则。
+
+## 单主控运行状态
+
+单主控模式在元数据库保存模式修订、持有者代次、共享任务归属、远端运行记录及操作回执。已签发的读取来源、配额和写入候选保持事务保护。节点身份、运行报告、每节点与汇总采样分开保存。已释放节点的历史观察记录按保留期限清理。

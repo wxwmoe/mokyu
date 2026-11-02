@@ -237,7 +237,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 filter.cursor()?;
                 let desired = crate::model::node::desired(app).await?;
                 Ok(serde_json::to_value(
-                    app.cluster()?.nodes(&filter, &desired).await?,
+                    app.node_inventory.nodes(&filter, &desired).await?,
                 )?)
             }
             Cluster::Release { name, confirm } => {

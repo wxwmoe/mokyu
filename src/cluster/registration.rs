@@ -51,17 +51,16 @@ pub async fn initialize(app: &App, role: &str) -> Result<()> {
                 true,
             )
             .await?;
-    } else {
-        app.cluster()?
-            .begin_report(
-                &state,
-                role,
-                &app.secrets.credential_key,
-                boot,
-                serde_json::from_value(app.statistics.runtime()["started_at"].clone())?,
-            )
-            .await?;
     }
+    app.node_inventory
+        .begin_report(
+            &state,
+            role,
+            &app.secrets.credential_key,
+            boot,
+            serde_json::from_value(app.statistics.runtime()["started_at"].clone())?,
+        )
+        .await?;
     ensure!(
         app.node_boot.set(boot).is_ok(),
         "node boot was already initialized"

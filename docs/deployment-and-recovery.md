@@ -1,6 +1,6 @@
 # 部署、升级与恢复
 
-默认部署运行一个单容器模式实例，同时提供管理、S3 和公共读，独占一个数据库、data 目录和存储范围。需要拆分职责或多节点入口时，使用[群集部署](cluster-deployment.md)；群集只有 control 连接 PostgreSQL 并持有部署密钥，data/worker/node 通过 control 的 HTTPS API 通信，各进程使用独立 data 目录。以下单容器部署命令在源码根目录执行。
+默认部署运行一个单容器模式实例，同时提供管理、S3 和公共读，独占一个数据库、data 目录和存储范围。拆分职责或增加数据入口时，可按[群集部署](cluster-deployment.md)配置节点。单主控群集由主容器连接所选元数据库，多控制节点群集由各 control 连接 PostgreSQL。部署密钥由控制面持有，data/worker/node 通过 control 的 HTTPS API 通信，各进程使用独立 data 目录。以下单容器部署命令在源码根目录执行。
 
 单容器使用进程内任务调度、活动读写保护和存储并发限制，不创建群集节点或子任务，也不维护分布式租约或共享 staging。任务、配额、上传确认和恢复状态仍持久化在数据库中。
 
@@ -64,7 +64,7 @@ Compose 将配置只读挂载、数据目录可写挂载；PostgreSQL 在独立�
 
 设置 `[database]` 的 `type = "mysql"`，复用 `host`、`port`（默认 `3306`）、`name`、`user`、密码和 SSL 字段。自行准备 MySQL 8.0.19+ 或 MariaDB 10.6.3+ 空库与具备建表、索引和迁移权限的用户；程序自动识别服务器，数据表由 Mokyu 初始化。示例 Compose 使用 PostgreSQL 18，选择 MySQL/MariaDB 时替换数据库服务及其持久卷。`innodb_flush_log_at_trx_commit` 必须为 `1`。新部署建议使用仍在维护的稳定版或 LTS 的最新补丁。
 
-一个 MySQL/MariaDB 库只允许一个 single 实例，启动时取得连接级独占锁；锁连接丢失会触发退出。不能启动 control、worker、data 或 node，也不能切换为群集。库内不建立群集协调表，载荷存储仍可选 local 或 S3。
+一个 MySQL 或 MariaDB 库由一个主容器独占。主容器启动时取得连接级锁，锁连接丢失时退出。单容器可使用 local 或 S3。在单主控群集内使用共享 S3，远端 data、worker 和 node 通过 gRPC 接入。
 
 ### SQLite 单容器模式
 
@@ -76,7 +76,7 @@ type = "sqlite"
 # path = "/data/mokyu.db"
 ```
 
-保留 `[instance]` 的部署密钥、监听和资源设置，将 `/data` 挂载为可写的本地持久目录。无需数据库服务；使用示例 Compose 时删除 `postgres` 服务、网关对它的依赖及数据库专用密码挂载。运行命令仍为 `mokyu`，不可使用 control、worker、data 或 node。
+保留 `[instance]` 的部署密钥、监听和资源设置，将 `/data` 挂载为可写的本地持久目录。无需数据库服务；使用示例 Compose 时删除 `postgres` 服务、网关对它的依赖及数据库专用密码挂载。主容器以 `mokyu` 启动。切换到单主控群集后，远端节点使用自己的目录、独立配置和 `control_url`。SQLite 文件仅挂载到主容器。
 
 数据库及 WAL、本地暂存应纳入一致备份。不要在运行时移动、覆盖或删除数据库及锁文件，也不要让多个容器共用同一文件。载荷存储仍可使用 local 或 S3；选择 SQLite 不代表对象内容全部存入数据库。连接池、文件系统和权限要求见[配置参考](configuration.md#database)。
 
@@ -190,3 +190,7 @@ PostgreSQL 和 SQLite 的新装及各次迁移在事务中执行；失败或中�
 程序不自动降级数据库。回退需按恢复流程还原升级前的一致备份，并确认相关存储区块仍存在。实际 SQL 见[migrations](../migrations)。
 
 打包功能默认开启，维护改写期间新旧载荷并存，旧载荷满足 GC 宽限和最低存储期后删除；为临时空间和 S3 请求预留预算。停用时设置 `pack.enabled=false`，历史数据仍可读。需要消除历史包时，先运行 `maintenance pack-creation stop` 并等待准备中的包收尾，再执行 `pack unpack --all` 的预览与确认操作；Web 整理工作台提供相同流程。
+
+## 单主控群集的恢复
+
+保留主容器的数据库、部署密钥及持久目录。用同一个身份启动唯一主容器后，远端节点重新建立会话。检查旧任务的确认状态、活动读取及各节点 pending 的排空情况，再恢复业务流量。模式切换和退役顺序见[单主控群集](cluster-deployment.md#单主控群集)。

@@ -200,6 +200,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         node_requests: backend.clone(),
         node_work: backend.clone(),
         node_sessions: backend.clone(),
+        node_inventory: backend.clone(),
         cluster: Some(backend.clone()),
         metrics: backend.clone(),
         integrity: backend.clone(),

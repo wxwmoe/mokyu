@@ -2,6 +2,10 @@
 
 [Test guide](../README.md) · Run commands from the repository root. Short test paths such as `fixtures/` are relative to `tests/`.
 
+## Single control status
+
+Run `python -m tests.recovery.single_control_status single_control --counts 2 1 0 1` on an isolated primary with one ready data node and its registered worker offline after handoff. Counts are registered peers, ready data peers, ready worker peers and remote ownership (0 or 1). Supply `MOKYU_TEST_BINARY`, `MOKYU_TEST_CONFIG`, `MOKYU_TEST_WEB` and the tester account's `MOKYU_TEST_PASSWORD`. Check `single` after switching back. Repeat on each supported database.
+
 ## Bootstrap and native contracts
 
 Validate database changes on PostgreSQL 18, MySQL 8.0.19 and MariaDB 10.6.3 as well as supported maintenance releases. Run all MySQL contracts against MariaDB with `MOKYU_TEST_MYSQL_CONFIG`. `mysql_dialect_and_lock_scope_contract` checks JSON, case/trailing-space comparisons and claim lock scope. `migrations.py` checks refusal before writes on empty PostgreSQL 17 and bootstrap, restart and history validation on supported PostgreSQL.

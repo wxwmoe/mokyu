@@ -159,6 +159,7 @@ pub(super) mod tier;
 pub(super) mod tier_reads;
 pub(super) mod transfer;
 
+pub(super) mod node_inventory;
 pub(super) mod node_registry;
 
 pub(super) mod work;

@@ -2341,6 +2341,15 @@ export interface components {
             /** Format: int64 */
             local_storages: number;
             mode: string;
+            /** Format: int64 */
+            mode_revision: number;
+            /** Format: int64 */
+            ready_data: number;
+            /** Format: int64 */
+            ready_workers: number;
+            /** Format: int64 */
+            remote_nodes: number;
+            remote_work: boolean;
         };
         Completion: {
             parts: components["schemas"]["PartReceipt"][];
@@ -3561,6 +3570,8 @@ export interface components {
             counters: components["schemas"]["RuntimeCounter"][];
             current_node?: components["schemas"]["NodeContext"] | null;
             deployment_mode: string;
+            /** Format: int64 */
+            deployment_mode_revision: number;
             inventory_as_of?: string | null;
             inventory_error?: string | null;
             inventory_stale: boolean;
@@ -3570,6 +3581,10 @@ export interface components {
             recovery_required: boolean;
             restart_required: boolean;
             started_at: string;
+            started_mode: string;
+            /** Format: int64 */
+            started_mode_revision: number;
+            supported_modes: string[];
             version: string;
         };
         Session: {

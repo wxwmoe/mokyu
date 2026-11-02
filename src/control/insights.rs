@@ -159,7 +159,7 @@ pub(super) async fn runtime(
     let cluster = if app.role == "single" {
         None
     } else {
-        let mut history = app.cluster()?.cluster_runtime(&query).await?;
+        let mut history = app.node_inventory.cluster_runtime(&query).await?;
         let current = history.pop();
         let stale = current.as_ref().is_none_or(|p| p.stale_at(Utc::now()));
         Some(crate::model::metrics::ClusterRuntime {

@@ -15,9 +15,10 @@ function diagnostic() { void copy(JSON.stringify({ service: status.data.value },
 </script>
 
 <template>
+  <p v-if="status.data.value?.mode_mismatch" class="notice">{{ t('singleControlRestart', { revision: status.data.value.deployment_mode_revision }) }}</p>
   <ClusterService v-if="cluster" />
   <template v-else>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('serviceEyebrow') }}</p><h1>{{ t('service') }}</h1><p>{{ t('serviceHint') }}</p></div><div class="heading-actions"><button @click="diagnostic"><Copy :size="16" />{{ t('copyDiagnostics') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="status.refetch()"><RefreshCw :size="17" /></button></div></div>
+  <div class="page-heading"><div><p class="eyebrow">{{ t('serviceEyebrow') }}</p><h1>{{ t('service') }}</h1><p>{{ t('singleDeploymentLabel') }}<template v-if="status.data.value"> · {{ t('revisionLabel', { value: status.data.value.deployment_mode_revision }) }}</template></p></div><div class="heading-actions"><button @click="diagnostic"><Copy :size="16" />{{ t('copyDiagnostics') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="status.refetch()"><RefreshCw :size="17" /></button></div></div>
   <ErrorNotice v-if="status.error.value" :error="status.error.value" />
   <div>
       <div class="service-metrics"><section class="surface service-metric rose"><HeartPulse :size="25" /><span>{{ t('serviceMode') }}</span><strong>{{ status.data.value ? t(status.data.value.maintenance ? 'recoveryMode' : 'serviceOnline') : '—' }}</strong><small v-if="status.data.value">Mokyu {{ status.data.value.version }}</small></section><section class="surface service-metric lilac"><Cpu :size="25" /><span>{{ t('processMemory') }}</span><strong>{{ counter.rss_bytes && counter.rss_bytes !== 'null' ? bytes(Number(counter.rss_bytes)) : '—' }}</strong><small>{{ t('activeStreams', { count: counter.active_streams || '0' }) }}</small></section><section class="surface service-metric mint"><Database :size="25" /><span>{{ t('databasePool') }}</span><strong>{{ counter.db_pool_idle || '—' }} / {{ counter.db_pool_size || '—' }}</strong><small>{{ t('idleConnections') }}</small></section></div>

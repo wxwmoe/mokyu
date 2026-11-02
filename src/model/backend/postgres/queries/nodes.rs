@@ -103,16 +103,6 @@ impl crate::model::cluster::NodeNotices for Backend {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
-    async fn begin_report(
-        &self,
-        state: &crate::cluster::NodeState,
-        role: &str,
-        key: &crate::content::codec::Key,
-        boot: Uuid,
-        started: DateTime<Utc>,
-    ) -> Result<()> {
-        transactions::begin_report(&self.pool, state, role, key, boot, started).await
-    }
     async fn task_targets(&self, tasks: &[Uuid]) -> Result<Vec<Option<Uuid>>> {
         anyhow::ensure!(tasks.len() <= 256, "too many task hints");
         Ok(sqlx::query_scalar("SELECT DISTINCT CASE WHEN t.execution_scope='node' THEN t.target_node_id END FROM tasks t WHERE t.id=ANY($1) AND (t.execution_scope<>'node' OR t.target_node_id IS NOT NULL) AND NOT (t.task_type IN ('usage','purge') OR (t.task_type='cleanup' AND t.detail->>'storage_id' IS NULL) OR coalesce(t.task_type='integrity' AND NOT t.detail ? 'source_operation' AND (t.detail->>'mode'='metadata' OR t.detail->>'phase'='metadata'),false))").bind(tasks).fetch_all(&self.pool).await?)
@@ -208,150 +198,6 @@ impl ClusterStore for Backend {
     }
     async fn mode(&self) -> Result<String> {
         Ok(deployment_mode().fetch_one(&self.pool).await?)
-    }
-    async fn status(&self) -> Result<ClusterStatus> {
-        Ok(ClusterStatus {
-            mode: ClusterStore::mode(self).await?,
-            enabled_nodes: sqlx::query_scalar("SELECT count(*) FROM nodes WHERE enabled")
-                .fetch_one(&self.pool)
-                .await?,
-            local_storages: sqlx::query_scalar("SELECT count(*) FROM storages WHERE type='local'")
-                .fetch_one(&self.pool)
-                .await?,
-        })
-    }
-    async fn nodes(&self, filter: &NodeFilter, desired: &Value) -> Result<NodePage> {
-        let cursor = filter.cursor()?;
-        let mut items: Vec<NodeView> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT * FROM states WHERE ($3::text IS NULL OR role=$3) AND (($4::text IS NULL AND enabled) OR contact=$4) AND ($5::text IS NULL OR work=$5) AND ($6::text IS NULL OR CASE WHEN $7::text IS NULL THEN configuration ELSE settings->>$7 END=$6) AND ($8::uuid IS NULL OR id>$8) AND ($10::text IS NULL OR strpos(lower(name),lower($10))>0) ORDER BY id LIMIT $9")))
-            .bind(desired).bind(CONTACT_SECONDS).bind(&filter.role).bind(&filter.contact).bind(&filter.work)
-            .bind(&filter.configuration).bind(&filter.section).bind(cursor).bind(filter.limit+1).bind(&filter.name)
-            .fetch_all(&self.pool).await?;
-        let more = items.len() > filter.limit as usize;
-        items.truncate(filter.limit as usize);
-        let next_cursor = if more {
-            items.last().map(|node| filter.next(node.id)).transpose()?
-        } else {
-            None
-        };
-        Ok(NodePage { items, next_cursor })
-    }
-    async fn node(&self, id: Uuid, desired: &Value) -> Result<Option<NodeView>> {
-        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "{NODE_OBSERVATIONS} SELECT * FROM states WHERE id=$3"
-        )))
-        .bind(desired)
-        .bind(CONTACT_SECONDS)
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?)
-    }
-    async fn node_counts(&self, desired: &Value) -> Result<Vec<NodeCount>> {
-        let rows: Vec<(String,String,String,String,String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT role,contact,work,configuration,count(*)::text FROM states GROUP BY role,contact,work,configuration ORDER BY role,contact,work,configuration")))
-            .bind(desired).bind(CONTACT_SECONDS).fetch_all(&self.pool).await?;
-        Ok(rows
-            .into_iter()
-            .map(|(role, contact, work, configuration, count)| NodeCount {
-                role,
-                contact,
-                work,
-                configuration,
-                count,
-            })
-            .collect())
-    }
-    async fn setting_counts(&self, desired: &Value) -> Result<Vec<SettingCount>> {
-        let rows: Vec<(String,String,String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT s.key,s.value,count(*)::text FROM states CROSS JOIN LATERAL jsonb_each_text(settings) s WHERE enabled GROUP BY s.key,s.value ORDER BY s.key,s.value")))
-            .bind(desired).bind(CONTACT_SECONDS).fetch_all(&self.pool).await?;
-        Ok(rows
-            .into_iter()
-            .map(|(section, state, count)| SettingCount {
-                section,
-                state,
-                count,
-            })
-            .collect())
-    }
-    async fn node_report(&self, id: Uuid) -> Result<Option<SavedReport>> {
-        let row: Option<(Uuid, DateTime<Utc>, Value, Value)> = sqlx::query_as(
-            "SELECT boot_id,started_at,metadata,status FROM node_reports WHERE node_id=$1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(
-            row.map(|(boot_id, started_at, metadata, status)| SavedReport {
-                boot_id,
-                started_at,
-                metadata,
-                status,
-            }),
-        )
-    }
-    async fn sample_node_runtime(
-        &self,
-        state: &crate::cluster::NodeState,
-        role: &str,
-        key: &crate::content::codec::Key,
-        sample: &crate::model::metrics::NodeSample,
-    ) -> Result<bool> {
-        transactions::sample_node_runtime(&self.pool, state, role, key, sample)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn aggregate_runtime(&self, interval: u64, retention: u64) -> Result<()> {
-        transactions::aggregate_runtime(&self.pool, interval, retention)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn cluster_runtime(
-        &self,
-        query: &crate::model::metrics::RuntimeQuery,
-    ) -> Result<Vec<crate::model::metrics::ClusterRuntimePoint>> {
-        query.validate()?;
-        let mut tx = self.pool.begin().await?;
-        runtime_diagnostic_limits().execute(&mut *tx).await?;
-        let rows = cluster_runtime_history(query)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| normalize_error(e.into()))?;
-        tx.commit().await?;
-        Ok(rows.into_iter().map(|r| r.0).collect())
-    }
-    async fn node_runtime(
-        &self,
-        id: Uuid,
-        query: &crate::model::metrics::RuntimeQuery,
-    ) -> Result<Vec<crate::model::metrics::NodeRuntimePoint>> {
-        query.validate()?;
-        let mut tx = self.pool.begin().await?;
-        runtime_diagnostic_limits().execute(&mut *tx).await?;
-        let rows = node_runtime_history(id, query)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| normalize_error(e.into()))?;
-        tx.commit().await?;
-        Ok(rows
-            .into_iter()
-            .map(
-                |(node_id, received_at, sample)| crate::model::metrics::NodeRuntimePoint {
-                    node_id,
-                    received_at,
-                    sample: sample.0,
-                },
-            )
-            .collect())
-    }
-    async fn node_tasks(&self, id: Uuid) -> Result<Vec<crate::model::metrics::WorkSummary>> {
-        Ok(sqlx::query_as("SELECT id,task_type,state,processed::text,updated_at FROM tasks WHERE lease_node_id=$1 AND state='running' ORDER BY updated_at DESC,id LIMIT 21").bind(id).fetch_all(&self.pool).await?)
-    }
-    async fn report(
-        &self,
-        state: &crate::cluster::NodeState,
-        role: &str,
-        key: &crate::content::codec::Key,
-        report: &NodeReport,
-    ) -> Result<bool> {
-        transactions::report_node(&self.pool, state, role, key, report).await
     }
     async fn credential(&self, id: Uuid) -> Result<Option<(String, Vec<u8>)>> {
         Ok(sqlx::query_as("SELECT role,credential_encrypted FROM nodes WHERE id=$1 AND role='control' AND enabled AND credential_encrypted IS NOT NULL").bind(id).fetch_optional(&self.pool).await?)
@@ -912,5 +758,166 @@ impl crate::model::cluster::RemoteParts for Backend {
         sqlx::query("UPDATE uploads SET raw_source_id=NULL,remote_token=NULL,remote_expires_at=NULL WHERE id=$1 AND remote_token=$2 AND remote_expires_at>clock_timestamp() AND state IN ('aborted','completed')").bind(upload).bind(token).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::model::cluster::NodeInventory for Backend {
+    async fn begin_report(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+        boot: Uuid,
+        started: DateTime<Utc>,
+    ) -> Result<()> {
+        transactions::begin_report(&self.pool, state, role, key, boot, started).await
+    }
+    async fn status(&self) -> Result<ClusterStatus> {
+        let (mode, mode_revision,remote_work,local_storages):(String,i64,bool,i64)=sqlx::query_as("SELECT deployment_mode,deployment_mode_revision,remote_work,(SELECT count(*) FROM storages WHERE type='local') FROM mokyu_meta").fetch_one(&self.pool).await?;
+        let (enabled_nodes,remote_nodes,ready_data,ready_workers):(i64,i64,i64,i64)=sqlx::query_as("SELECT count(*),count(*) FILTER(WHERE n.role<>'control'),count(*) FILTER(WHERE n.role IN ('data','node') AND ss.expires_at>now() AND NOT ss.draining AND ss.boot_id=r.boot_id AND ss.credential_generation=n.credential_generation AND r.status->>'ready'='true' AND r.status->>'draining'='false' AND r.received_at>=now()-interval '30 seconds' AND n.last_seen_at>=now()-interval '30 seconds' AND r.status->>'deployment_mode_revision'=$1),count(*) FILTER(WHERE n.role IN ('worker','node') AND ss.expires_at>now() AND NOT ss.draining AND ss.boot_id=r.boot_id AND ss.credential_generation=n.credential_generation AND r.status->>'ready'='true' AND r.status->>'draining'='false' AND r.received_at>=now()-interval '30 seconds' AND n.last_seen_at>=now()-interval '30 seconds' AND r.status->>'deployment_mode_revision'=$1) FROM nodes n LEFT JOIN node_reports r ON r.node_id=n.id LEFT JOIN node_sessions ss ON ss.node_id=n.id WHERE n.enabled").bind(mode_revision.to_string()).fetch_one(&self.pool).await?;
+        Ok(ClusterStatus {
+            mode,
+            mode_revision,
+            enabled_nodes,
+            remote_nodes,
+            ready_data,
+            ready_workers,
+            remote_work,
+            local_storages,
+        })
+    }
+    async fn nodes(&self, filter: &NodeFilter, desired: &Value) -> Result<NodePage> {
+        let cursor = filter.cursor()?;
+        let mut items: Vec<NodeView> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT * FROM states WHERE ($3::text IS NULL OR role=$3) AND (($4::text IS NULL AND enabled) OR contact=$4) AND ($5::text IS NULL OR work=$5) AND ($6::text IS NULL OR CASE WHEN $7::text IS NULL THEN configuration ELSE settings->>$7 END=$6) AND ($8::uuid IS NULL OR id>$8) AND ($10::text IS NULL OR strpos(lower(name),lower($10))>0) ORDER BY id LIMIT $9")))
+            .bind(desired).bind(CONTACT_SECONDS).bind(&filter.role).bind(&filter.contact).bind(&filter.work)
+            .bind(&filter.configuration).bind(&filter.section).bind(cursor).bind(filter.limit+1).bind(&filter.name)
+            .fetch_all(&self.pool).await?;
+        let more = items.len() > filter.limit as usize;
+        items.truncate(filter.limit as usize);
+        let next_cursor = if more {
+            items.last().map(|node| filter.next(node.id)).transpose()?
+        } else {
+            None
+        };
+        Ok(NodePage { items, next_cursor })
+    }
+    async fn node(&self, id: Uuid, desired: &Value) -> Result<Option<NodeView>> {
+        Ok(sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "{NODE_OBSERVATIONS} SELECT * FROM states WHERE id=$3"
+        )))
+        .bind(desired)
+        .bind(CONTACT_SECONDS)
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+    async fn node_counts(&self, desired: &Value) -> Result<Vec<NodeCount>> {
+        let rows: Vec<(String,String,String,String,String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT role,contact,work,configuration,count(*)::text FROM states GROUP BY role,contact,work,configuration ORDER BY role,contact,work,configuration")))
+            .bind(desired).bind(CONTACT_SECONDS).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(role, contact, work, configuration, count)| NodeCount {
+                role,
+                contact,
+                work,
+                configuration,
+                count,
+            })
+            .collect())
+    }
+    async fn setting_counts(&self, desired: &Value) -> Result<Vec<SettingCount>> {
+        let rows: Vec<(String,String,String)> = sqlx::query_as(sqlx::AssertSqlSafe(format!("{NODE_OBSERVATIONS} SELECT s.key,s.value,count(*)::text FROM states CROSS JOIN LATERAL jsonb_each_text(settings) s WHERE enabled GROUP BY s.key,s.value ORDER BY s.key,s.value")))
+            .bind(desired).bind(CONTACT_SECONDS).fetch_all(&self.pool).await?;
+        Ok(rows
+            .into_iter()
+            .map(|(section, state, count)| SettingCount {
+                section,
+                state,
+                count,
+            })
+            .collect())
+    }
+    async fn node_report(&self, id: Uuid) -> Result<Option<SavedReport>> {
+        let row: Option<(Uuid, DateTime<Utc>, Value, Value)> = sqlx::query_as(
+            "SELECT boot_id,started_at,metadata,status FROM node_reports WHERE node_id=$1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(
+            row.map(|(boot_id, started_at, metadata, status)| SavedReport {
+                boot_id,
+                started_at,
+                metadata,
+                status,
+            }),
+        )
+    }
+    async fn node_tasks(&self, id: Uuid) -> Result<Vec<crate::model::metrics::WorkSummary>> {
+        Ok(sqlx::query_as("SELECT id,task_type,state,processed::text,updated_at FROM tasks WHERE lease_node_id=$1 AND state='running' ORDER BY updated_at DESC,id LIMIT 21").bind(id).fetch_all(&self.pool).await?)
+    }
+    async fn sample_node_runtime(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+        sample: &crate::model::metrics::NodeSample,
+    ) -> Result<bool> {
+        transactions::sample_node_runtime(&self.pool, state, role, key, sample)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn aggregate_runtime(&self, interval: u64, retention: u64) -> Result<()> {
+        transactions::aggregate_runtime(&self.pool, interval, retention)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn cluster_runtime(
+        &self,
+        query: &crate::model::metrics::RuntimeQuery,
+    ) -> Result<Vec<crate::model::metrics::ClusterRuntimePoint>> {
+        query.validate()?;
+        let mut tx = self.pool.begin().await?;
+        runtime_diagnostic_limits().execute(&mut *tx).await?;
+        let rows = cluster_runtime_history(query)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| normalize_error(e.into()))?;
+        tx.commit().await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
+    async fn node_runtime(
+        &self,
+        id: Uuid,
+        query: &crate::model::metrics::RuntimeQuery,
+    ) -> Result<Vec<crate::model::metrics::NodeRuntimePoint>> {
+        query.validate()?;
+        let mut tx = self.pool.begin().await?;
+        runtime_diagnostic_limits().execute(&mut *tx).await?;
+        let rows = node_runtime_history(id, query)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| normalize_error(e.into()))?;
+        tx.commit().await?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(node_id, received_at, sample)| crate::model::metrics::NodeRuntimePoint {
+                    node_id,
+                    received_at,
+                    sample: sample.0,
+                },
+            )
+            .collect())
+    }
+    async fn report(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+        report: &NodeReport,
+    ) -> Result<bool> {
+        transactions::report_node(&self.pool, state, role, key, report).await
     }
 }

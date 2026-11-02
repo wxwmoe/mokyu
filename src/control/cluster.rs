@@ -54,7 +54,7 @@ async fn read_admin(actor: &Identity, app: &App) -> Result<(), HttpError> {
 
 pub(crate) async fn overview(app: &App) -> Result<ClusterOverview> {
     let desired = crate::model::node::desired(app).await?;
-    let cluster = app.cluster()?;
+    let cluster = &app.node_inventory;
     Ok(ClusterOverview {
         deployment: cluster.status().await?,
         nodes: cluster.node_counts(&desired).await?,
@@ -93,7 +93,7 @@ pub(crate) async fn nodes(
         .cursor()
         .map_err(|_| s3s::s3_error!(InvalidArgument))?;
     let desired = crate::model::node::desired(&app).await?;
-    Ok(Json(app.cluster()?.nodes(&filter, &desired).await?))
+    Ok(Json(app.node_inventory.nodes(&filter, &desired).await?))
 }
 
 #[derive(serde::Serialize, ToSchema)]
@@ -113,8 +113,8 @@ pub(crate) async fn settings(
         .map_err(|_| s3s::s3_error!(InvalidArgument))?;
     let desired = crate::model::node::desired(&app).await?;
     Ok(Json(ClusterSettings {
-        sections: app.cluster()?.setting_counts(&desired).await?,
-        nodes: app.cluster()?.nodes(&filter, &desired).await?,
+        sections: app.node_inventory.setting_counts(&desired).await?,
+        nodes: app.node_inventory.nodes(&filter, &desired).await?,
     }))
 }
 #[utoipa::path(get, operation_id = "cluster_node_status", path = "/api/v1/cluster/nodes/{id}/status", params(("id"=Uuid,Path)), responses((status=200,body=NodeStatus)))]
@@ -125,7 +125,7 @@ pub(crate) async fn node_status(
 ) -> Result<Json<NodeStatus>, HttpError> {
     read_admin(&actor, &app).await?;
     let desired = crate::model::node::desired(&app).await?;
-    let cluster = app.cluster()?;
+    let cluster = &app.node_inventory;
     let node = cluster
         .node(id, &desired)
         .await?
@@ -158,7 +158,7 @@ pub(crate) async fn node_config(
 ) -> Result<Json<NodeConfig>, HttpError> {
     read_admin(&actor, &app).await?;
     let desired = crate::model::node::desired(&app).await?;
-    let cluster = app.cluster()?;
+    let cluster = &app.node_inventory;
     let node = cluster
         .node(id, &desired)
         .await?
@@ -190,7 +190,7 @@ pub(crate) async fn node_runtime(
     query
         .validate()
         .map_err(|_| s3s::s3_error!(InvalidArgument))?;
-    let cluster = app.cluster()?;
+    let cluster = &app.node_inventory;
     if cluster
         .node(id, &crate::model::node::desired(&app).await?)
         .await?
@@ -242,7 +242,7 @@ pub(crate) async fn recover(
         .ok_or_else(|| crate::http::unauthorized())?;
     crate::cluster::verify_deployment_key(&app, key).map_err(HttpError::from)?;
     crate::cluster::recover(&app).await?;
-    Ok(Json(app.cluster()?.status().await?))
+    Ok(Json(app.node_inventory.status().await?))
 }
 
 #[derive(Deserialize, ToSchema)]

@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102225638.
+-- Generated from the complete mysql migration chain through 20261103033436.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -257,6 +257,12 @@ CREATE TABLE `chunks` (
   CONSTRAINT `chunks_raw_size` CHECK ((`raw_size` between 1 and 4194304)),
   CONSTRAINT `chunks_state` CHECK ((`state` in (_ascii'preparing',_ascii'uploading',_ascii'ready',_ascii'failed',_ascii'deleting',_ascii'deleted'))),
   CONSTRAINT `chunks_stored_size` CHECK (((`standalone_size` is null) or (`standalone_size` between 1 and 4194320)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `cluster_runtime_samples` (
+  `captured_at` datetime(6) NOT NULL,
+  `sample` json NOT NULL,
+  PRIMARY KEY (`captured_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `extents` (
@@ -694,6 +700,15 @@ CREATE TABLE `node_receipts` (
   CONSTRAINT `node_receipts_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `node_runtime_samples` (
+  `node_id` binary(16) NOT NULL,
+  `received_at` datetime(6) NOT NULL,
+  `sample` json NOT NULL,
+  PRIMARY KEY (`node_id`,`received_at`),
+  KEY `node_runtime_sample_time` (`received_at`),
+  CONSTRAINT `node_runtime_samples_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `node_work` (
   `node_id` binary(16) NOT NULL,
   `operation_id` binary(16) NOT NULL,
@@ -809,10 +824,11 @@ CREATE TABLE `nodes` (
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `last_seen_at` datetime(6) DEFAULT NULL,
   `control_slot` tinyint GENERATED ALWAYS AS (if((`role` = _ascii'control'),1,NULL)) STORED,
+  `reported_at` datetime(6) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`),
   UNIQUE KEY `control_slot` (`control_slot`),
-  CONSTRAINT `nodes_chk_1` CHECK ((`role` in (_utf8mb4'control',_utf8mb4'data',_utf8mb4'worker',_utf8mb4'node'))),
+  CONSTRAINT `nodes_chk_1` CHECK ((`role` in (_ascii'control',_ascii'data',_ascii'worker',_ascii'node'))),
   CONSTRAINT `nodes_chk_2` CHECK ((`credential_generation` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 

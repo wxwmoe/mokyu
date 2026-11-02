@@ -112,6 +112,7 @@ pub(crate) struct Stores {
     pub(crate) notices: Arc<dyn cluster::NodeNotices>,
     pub(crate) node_work: Arc<dyn cluster::NodeWork>,
     pub(crate) node_sessions: Arc<dyn cluster::NodeSessions>,
+    pub(crate) node_inventory: Arc<dyn cluster::NodeInventory>,
     pub(crate) cluster: Option<Arc<dyn cluster::ClusterStore>>,
     pub(crate) metrics: Arc<dyn metrics::MetricsStore>,
     pub(crate) integrity: Arc<dyn integrity::IntegrityStore>,

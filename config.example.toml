@@ -1,4 +1,4 @@
-# For the single-container process or `mokyu control`.
+# For the primary in single or single_control mode, or for `mokyu control`.
 # Data and worker use config.node.example.toml.
 [database]
 type = "postgres" # postgres | mysql | sqlite

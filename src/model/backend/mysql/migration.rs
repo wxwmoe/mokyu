@@ -8,7 +8,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator
 };
 const BASELINE_VERSION: i64 = 20261102022127;
-const SCHEMA_VERSION: i64 = 20261102225638;
+const SCHEMA_VERSION: i64 = 20261103033436;
 
 pub(super) async fn run(owner: &mut MySqlConnection) -> Result<()> {
     ensure!(

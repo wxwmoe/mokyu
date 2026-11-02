@@ -283,7 +283,7 @@ pub(crate) async fn desired(app: &crate::app::App) -> Result<Value> {
         for (section, value, revision, _) in &sections {
             values.insert(
                 section.clone(),
-                json!({"revision": revision, "value": applicable(role, section, value.clone())}),
+                json!({"revision": revision, "value": if role=="control" && app.deployment_mode()=="single_control" {value.clone()} else {applicable(role, section, value.clone())}}),
             );
         }
         roles.insert(role.into(), Value::Object(values));

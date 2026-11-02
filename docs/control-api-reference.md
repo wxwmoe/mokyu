@@ -24,7 +24,7 @@
 
 ## 会话
 
-`GET /api/v1/system/status` 保留本机状态语义，另返回权威 `deployment_mode`。仅群集包含 `current_node`（可空的注册 id、配置名称及角色）；单容器为 null。`GET /api/v1/system/config` 的环境行使用 `origin=environment`、`value_mode=read`，只读且不要求重启；缺失值以 `value_state=unavailable/not_read/not_applicable/unlimited` 区分，`value` 为空。数值零不属于缺失值。从库继承的非秘密配置使用 `value_mode=inherited`；环境观察不触发实时数据库探测。
+`GET /api/v1/system/status` 保留本机状态语义，另返回持久模式 `deployment_mode`、修订 `deployment_mode_revision`、启动模式和修订 `started_mode`、`started_mode_revision`、数据库支持的 `supported_modes`。仅群集包含 `current_node`（可空的注册 id、配置名称及角色）；单容器为 null。`GET /api/v1/system/config` 的环境行使用 `origin=environment`、`value_mode=read`，只读且不要求重启；缺失值以 `value_state=unavailable/not_read/not_applicable/unlimited` 区分，`value` 为空。数值零不属于缺失值。从库继承的非秘密配置使用 `value_mode=inherited`；环境观察不触发实时数据库探测。
 
 | 方法与路径 | 用途 |
 | --- | --- |
@@ -355,7 +355,7 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 | `POST /api/v1/cluster/nodes/{name}/release` | 释放节点、撤销凭据并重新排队其任务 |
 | `POST /api/v1/cluster/recover` | 使用 deployment key 确认恢复模式并释放待恢复节点；仅 control 可调用 |
 
-群集接口仅 PostgreSQL 可用；其他后端返回 `501 NotImplemented`，CLI 同样拒绝。`uploads.staging_storage_id` 和 `staging_bytes_limit` 仅 PostgreSQL 返回和接受，单容器的 PostgreSQL 可预先设置供模式切换使用。
+单主控群集与多控制节点群集均提供部署和节点只读查询。`remote_nodes` 排除主控和已释放身份，`ready_data`、`ready_workers` 统计就绪的远端能力，单主控的 `remote_work` 记录是否已交出共享任务。单主控的模式切换、节点登记、轮换及释放使用本机 CLI。所有受支持的数据库均可预先配置共享 S3 暂存。
 
 节点丢失 `node.json` 时先释放旧节点，再重启对应角色完成本机注册。节点凭据不会出现在 URL、列表或普通 API 响应中。
 

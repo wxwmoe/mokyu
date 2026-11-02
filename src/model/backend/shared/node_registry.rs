@@ -488,7 +488,14 @@ impl NodeSessions for Backend {
             closed: false,
             report_sequence,
         };
-        q::save(state.node_id, &lease).execute(&mut *tx).await?;
+        if previous.as_ref().is_none_or(|old| old.boot != input.boot) {
+            let starting = serde_json::json!({"boot_id":input.boot,"sequence":0,"started_at":now,"status":{"work":"starting"},"metadata":{}});
+            q::save_report(state.node_id, &lease, &starting)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            q::save(state.node_id, &lease).execute(&mut *tx).await?;
+        }
         let consumer = crate::model::notification::Consumer {
             node: state.node_id,
             generation: input.connection,
@@ -538,7 +545,7 @@ impl NodeSessions for Backend {
         key: &Key,
         run: Run,
         report: &NodeReport,
-        _interval: u64,
+        interval: u64,
     ) -> Result<bool> {
         report.validate()?;
         ensure!(report.boot_id == run.boot, Error::NodeConflict);
@@ -553,16 +560,23 @@ impl NodeSessions for Backend {
         }
         lease.report_sequence = report.sequence;
 
-        let mut value = serde_json::to_value(report)?;
-        if report.metadata.is_none()
-            && let Some(previous) = q::report(state.node_id).fetch_one(&mut *tx).await?
-            && let Some(metadata) = previous.get("metadata")
-        {
-            value["metadata"] = metadata.clone();
-        }
+        let previous = q::report(state.node_id).fetch_one(&mut *tx).await?;
+        let value = super::node_inventory::merge(
+            report,
+            previous,
+            super::queries::pack_work::clock(&mut tx).await?,
+        )?;
         q::save_report(state.node_id, &lease, &value)
             .execute(&mut *tx)
             .await?;
+        if interval > 0 && report.status.get("runtime").is_some() {
+            super::node_inventory::record_sample(
+                &mut tx,
+                state.node_id,
+                &crate::model::metrics::NodeSample::from_report(report, interval)?,
+            )
+            .await?;
+        }
         tx.commit().await?;
         Ok(true)
     }

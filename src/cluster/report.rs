@@ -73,8 +73,8 @@ pub(crate) async fn run(app: Arc<App>, restricted: bool) -> Result<()> {
             };
             report.validate()?;
             if app
-                .cluster()?
-                .report(state, &app.role, &app.secrets.credential_key, &report)
+                .node_inventory
+                .report(state, &state.role, &app.secrets.credential_key, &report)
                 .await?
             {
                 sent_metadata = metadata;
@@ -84,8 +84,13 @@ pub(crate) async fn run(app: Arc<App>, restricted: bool) -> Result<()> {
                         sample_interval.as_secs(),
                     )?;
                     if app
-                        .cluster()?
-                        .sample_node_runtime(state, &app.role, &app.secrets.credential_key, &sample)
+                        .node_inventory
+                        .sample_node_runtime(
+                            state,
+                            &state.role,
+                            &app.secrets.credential_key,
+                            &sample,
+                        )
                         .await?
                     {
                         sampled = Some(std::time::Instant::now());
@@ -110,7 +115,7 @@ pub(crate) async fn aggregate(app: Arc<App>) -> Result<()> {
     loop {
         match tokio::time::timeout(
             Duration::from_secs(5),
-            app.cluster()?.aggregate_runtime(interval, retention),
+            app.node_inventory.aggregate_runtime(interval, retention),
         )
         .await
         {

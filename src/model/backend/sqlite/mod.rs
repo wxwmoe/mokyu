@@ -8,6 +8,8 @@ mod migration;
 mod native_parts;
 #[path = "../shared/node_files.rs"]
 mod node_files;
+#[path = "../shared/node_inventory.rs"]
+mod node_inventory;
 #[path = "../shared/node_mutations.rs"]
 mod node_mutations;
 #[path = "../shared/node_reads.rs"]

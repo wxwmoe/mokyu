@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102225638.
+-- Generated from the complete sqlite migration chain through 20261103033436.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -185,6 +185,11 @@ CREATE TABLE chunks (
     CONSTRAINT chunks_state CHECK (state IN ('preparing','uploading','ready','failed','deleting','deleted')),
     CONSTRAINT chunks_encoding CHECK (current_encoding_id>0 OR state='preparing')
 ) STRICT;
+
+CREATE TABLE cluster_runtime_samples (
+    captured_at INTEGER PRIMARY KEY,
+    sample TEXT NOT NULL
+);
 
 CREATE TABLE extents (
     stream_id INTEGER NOT NULL,
@@ -526,6 +531,13 @@ CREATE TABLE node_receipts (
     FOREIGN KEY (node_id) REFERENCES nodes(id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE node_runtime_samples (
+    node_id BLOB NOT NULL REFERENCES nodes(id),
+    received_at INTEGER NOT NULL,
+    sample TEXT NOT NULL,
+    PRIMARY KEY (node_id, received_at)
+);
+
 CREATE TABLE node_work (
     node_id BLOB NOT NULL REFERENCES nodes(id),
     operation_id BLOB NOT NULL CHECK(length(operation_id)=16),
@@ -629,7 +641,7 @@ CREATE TABLE nodes (
     report TEXT CHECK (report IS NULL OR json_valid(report)),
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     last_seen_at INTEGER
-) STRICT, WITHOUT ROWID;
+, reported_at INTEGER) STRICT, WITHOUT ROWID;
 
 CREATE TABLE nonce_counters (
     block_key_id BLOB NOT NULL REFERENCES managed_keys(id),
@@ -1731,6 +1743,8 @@ CREATE INDEX node_reads_expiry ON node_reads(expires_at);
 CREATE INDEX node_reads_stream ON node_reads(stream_id,expires_at);
 
 CREATE INDEX node_receipts_expiry ON node_receipts(created_at);
+
+CREATE INDEX node_runtime_sample_time ON node_runtime_samples(received_at);
 
 CREATE INDEX node_work_expiry ON node_work(expires_at);
 

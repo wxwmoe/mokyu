@@ -195,6 +195,7 @@ pub struct App {
     pub(crate) notices: Arc<dyn crate::model::cluster::NodeNotices>,
     pub(crate) node_work: Arc<dyn crate::model::cluster::NodeWork>,
     pub(crate) node_sessions: Arc<dyn crate::model::cluster::NodeSessions>,
+    pub(crate) node_inventory: Arc<dyn crate::model::cluster::NodeInventory>,
     cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
     pub(crate) metrics: Arc<dyn crate::model::metrics::MetricsStore>,
     pub(crate) integrity_store: Arc<dyn crate::model::integrity::IntegrityStore>,
@@ -262,6 +263,7 @@ pub struct App {
     pub pack_creation_paused: std::sync::atomic::AtomicBool,
     pub gc_running: std::sync::atomic::AtomicBool,
     started_mode: String,
+    started_mode_revision: i64,
     pub(crate) restart_required: Arc<std::sync::atomic::AtomicBool>,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: Arc<tokio::sync::Notify>,
@@ -388,6 +390,7 @@ impl App {
             notices: stores.notices,
             node_work: stores.node_work,
             node_sessions: stores.node_sessions,
+            node_inventory: stores.node_inventory,
             cluster: stores.cluster,
             role: role.to_owned(),
             recovery_required: std::sync::atomic::AtomicBool::new(false),
@@ -454,6 +457,7 @@ impl App {
             pack_creation_paused: pack_creation_paused.into(),
             gc_running: false.into(),
             started_mode: state.mode,
+            started_mode_revision: state.mode_revision,
             restart_required,
             wake_gc: Arc::new(tokio::sync::Notify::new()),
             wake_tasks: Arc::new(tokio::sync::Notify::new()),
@@ -672,12 +676,18 @@ impl App {
     pub async fn status(&self) -> Result<Value> {
         let state = self.runtime.state().await?;
         let (pool_size, pool_idle) = self.runtime.pool();
-        let mismatch = self.started_mode != state.mode
+        let mismatch = self.started_mode_revision != state.mode_revision
+            || self.started_mode != state.mode
             || !crate::model::runtime::accepts_role(&state.mode, &self.role)
             || self
                 .restart_required
                 .load(std::sync::atomic::Ordering::Acquire);
-        let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":state.mode,"deployment_mode_revision":state.mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":state.gc_paused,"maintenance":state.maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":pool_size,"db_pool_idle":pool_idle,"data_slots_available":self.slots.available_permits(),"active_streams":self.active_operations()});
+        let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":state.mode,"deployment_mode_revision":state.mode_revision,"started_mode":self.started_mode,"started_mode_revision":self.started_mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":state.gc_paused,"maintenance":state.maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":pool_size,"db_pool_idle":pool_idle,"data_slots_available":self.slots.available_permits(),"active_streams":self.active_operations()});
+        status["supported_modes"] = if self.config.database.backend.supports_cluster() {
+            json!(["single", "single_control", "cluster"])
+        } else {
+            json!(["single", "single_control"])
+        };
         status["runtime"] = self.statistics.runtime();
         status["cache_jobs_active"] = json!(self.storage.cache_jobs_active());
         status["http_compression"] = self.compression_observations.snapshot();

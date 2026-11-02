@@ -88,7 +88,7 @@ pub(in super::super) fn forget_boots(node: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn clear_report(node: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE nodes SET report=NULL WHERE id=?").bind(node)
+    sqlx::query("UPDATE nodes SET report=NULL,reported_at=NULL WHERE id=?").bind(node)
 }
 
 pub(in super::super) fn save(node: Uuid, lease: &Lease) -> Statement<'_> {
@@ -106,7 +106,7 @@ pub(in super::super) fn save_report<'a>(
     lease: &'a Lease,
     report: &'a Value,
 ) -> Statement<'a> {
-    sqlx::query("UPDATE nodes SET report=?,run_state=?,last_seen_at=UTC_TIMESTAMP(6) WHERE id=?")
+    sqlx::query("UPDATE nodes SET report=?,run_state=?,reported_at=UTC_TIMESTAMP(6),last_seen_at=UTC_TIMESTAMP(6) WHERE id=?")
         .bind(Json(report))
         .bind(Json(lease))
         .bind(node)

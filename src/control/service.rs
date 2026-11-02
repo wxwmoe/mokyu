@@ -19,6 +19,10 @@ pub(super) struct RuntimeCounter {
 pub(super) struct ServiceStatus {
     nonce_alerts: Vec<crate::model::key_usage::NonceCapacity>,
     deployment_mode: String,
+    deployment_mode_revision: i64,
+    started_mode: String,
+    started_mode_revision: i64,
+    supported_modes: Vec<String>,
     current_node: Option<NodeContext>,
     version: &'static str,
     started_at: String,
@@ -133,10 +137,20 @@ pub(super) async fn status(
     Ok(Json(ServiceStatus {
         nonce_alerts,
         deployment_mode: text(&raw["deployment_mode"]),
-        current_node: (raw["deployment_mode"] == "cluster").then(|| NodeContext {
+        deployment_mode_revision: raw["deployment_mode_revision"].as_i64().unwrap_or_default(),
+        started_mode: text(&raw["started_mode"]),
+        supported_modes: serde_json::from_value(raw["supported_modes"].clone())?,
+        started_mode_revision: raw["started_mode_revision"].as_i64().unwrap_or_default(),
+        current_node: (raw["deployment_mode"] != "single").then(|| NodeContext {
             id: app.node.get().map(|node| node.node_id),
-            name: app.config.instance.name.clone(),
-            role: app.role.to_owned(),
+            name: app.config.instance.name.clone().or_else(|| {
+                (app.deployment_mode() == "single_control").then(|| "control".to_owned())
+            }),
+            role: app
+                .node
+                .get()
+                .map(|s| s.role.clone())
+                .unwrap_or_else(|| app.role.clone()),
         }),
         version: env!("CARGO_PKG_VERSION"),
         started_at: text(&raw["runtime"]["started_at"]),

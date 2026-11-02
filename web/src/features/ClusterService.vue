@@ -18,6 +18,7 @@ import TrendChart from '../components/TrendChart.vue'
 import { requestHistory, type Runtime } from '../app/insights'
 
 const { status, overview } = useDeployment(10_000)
+const singleControl = computed(() => status.data.value?.deployment_mode === 'single_control')
 const route = useRoute(), router = useRouter(), after = ref(''), role = ref(''), contact = ref(''), work = ref(''), name = ref('')
 const configuration = computed(() => typeof route.query.configuration === 'string' ? route.query.configuration : '')
 const section = computed(() => typeof route.query.section === 'string' ? route.query.section : '')
@@ -51,11 +52,16 @@ function refresh() { void overview.refetch(); void nodes.refetch(); void runtime
 </script>
 
 <template>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('serviceEyebrow') }}</p><h1>{{ t('service') }}</h1><p>{{ t('clusterServiceHint') }}</p></div><div class="heading-actions"><button @click="diagnostic"><Copy :size="16" />{{ t('copyDiagnostics') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="refresh"><RefreshCw :size="17" /></button></div></div>
+  <div class="page-heading"><div><p class="eyebrow">{{ t('serviceEyebrow') }}</p><h1>{{ t('service') }}</h1><p>{{ t(singleControl ? 'singleControlCluster' : 'clusterDeploymentLabel') }}<template v-if="status.data.value"> · {{ t('revisionLabel', { value: status.data.value.deployment_mode_revision }) }}</template></p></div><div class="heading-actions"><button @click="diagnostic"><Copy :size="16" />{{ t('copyDiagnostics') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="refresh"><RefreshCw :size="17" /></button></div></div>
   <ErrorNotice v-if="overview.error.value || nodes.error.value" :error="overview.error.value || nodes.error.value" />
+  <section v-if="singleControl && overview.data.value" class="surface node-detail-section" :aria-label="t('singleControlCluster')">
+    <h2>{{ t(overview.data.value.remote_work ? 'singleControlData' : 'singleControlLocal') }}</h2>
+    <p>{{ t(overview.data.value.remote_nodes ? 'singleControlPeers' : 'singleControlEmpty', { count: overview.data.value.remote_nodes, data: overview.data.value.ready_data, worker: overview.data.value.ready_workers }) }}</p>
+    <p v-if="overview.data.value.remote_work && !overview.data.value.ready_workers">{{ t('singleControlWaiting') }}</p>
+  </section>
   <div class="service-metrics cluster-summary">
     <section class="surface service-metric sky"><Network :size="25" /><span>{{ t('clusterNodesOnline') }}</span><strong>{{ online }} / {{ total }}</strong><small>{{ t('clusterAvailable', { count: available }) }}</small><small>{{ t('clusterContactHint') }}</small></section>
-    <section class="surface service-metric lilac"><HeartPulse :size="25" /><span>{{ t('clusterRoles') }}</span><div class="cluster-role-counts"><span v-for="item in roles" :key="item.role">{{ t('nodeRole_' + item.role) }} <strong>{{ item.count }}</strong></span></div><small>{{ t('clusterWorkersHint') }}</small></section>
+    <section class="surface service-metric lilac"><HeartPulse :size="25" /><span>{{ t('clusterRoles') }}</span><div class="cluster-role-counts"><span v-for="item in roles" :key="item.role">{{ t('nodeRole_' + item.role) }} <strong>{{ item.count }}</strong></span></div><small>{{ t(singleControl ? 'ownerPendingHint' : 'clusterWorkersHint') }}</small></section>
     <section class="surface service-metric mint"><Settings2 :size="25" /><span>{{ t('clusterConfiguration') }}</span><strong>{{ !overview.data.value || !total ? t('nodeState_unknown') : pending ? t('clusterPending', { count: pending }) : unknown ? t('clusterUnknown', { count: unknown }) : t('clusterValuesApplied') }}</strong><RouterLink class="text-button" to="/runtime-config">{{ t('clusterDeploymentSettings') }}<ArrowUpRight :size="15" /></RouterLink></section>
   </div>
   <section class="surface cluster-board">
