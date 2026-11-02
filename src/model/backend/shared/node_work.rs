@@ -68,7 +68,7 @@ impl Offer {
     }
 }
 
-async fn material(
+pub(super) async fn material(
     tx: &mut registry::Tx<'_>,
     storage: Uuid,
     key: &Key,
@@ -158,6 +158,12 @@ async fn finish(
     };
     let mut issue = None;
     let state = match (offer.plan.map(|p| p.0), result.outcomes.as_slice()) {
+        (Some(work::Plan::UploadRaw { items, .. }), [outcome]) if items.len() == 1 => {
+            let (next, error) =
+                super::node_files::finish(tx, node, task, &items[0], outcome).await?;
+            issue = error;
+            next
+        }
         (Some(work::Plan::ExternalTest(plan)), [work::Outcome::ExternalTest(report)]) => {
             external::finish_test(tx, task, &plan, report).await?;
             if report.phase == crate::model::external_test::Phase::Done {
@@ -259,7 +265,7 @@ impl NodeWork for Backend {
         let mut tx = registry::begin(self).await?;
         let active = node_registry::require_work(self, &mut tx, node, key, input.run).await?;
         ensure!(
-            matches!(node.role.as_str(), "worker" | "node"),
+            matches!(node.role.as_str(), "data" | "worker" | "node"),
             Error::NodeAuthentication
         );
         if let Some(known) = q::offer(node.node_id, input.operation)
@@ -273,7 +279,13 @@ impl NodeWork for Backend {
         }
         let token = Uuid::new_v4();
         let next = if active && input.max_items > 0 {
-            q::next_task(input.class).fetch_optional(&mut *tx).await?
+            q::next_task(
+                input.class,
+                node.node_id,
+                matches!(node.role.as_str(), "worker" | "node"),
+            )
+            .fetch_optional(&mut *tx)
+            .await?
         } else {
             None
         };
@@ -291,6 +303,9 @@ impl NodeWork for Backend {
             );
             let task = Execution { id: task, token };
             let prepared = match detail["operation"].as_str() {
+                Some("cache") if detail.get("source_node").is_some() => {
+                    super::node_files::offer(&mut tx, node, task, &detail, key).await?
+                }
                 Some("external_test") => {
                     let assignment =
                         external::prepare_test(&mut tx, task, Some(node.node_id)).await?;

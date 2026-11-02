@@ -617,12 +617,13 @@ impl Source {
             Self::Pack { pack, .. } => ("pack", pack.address()),
             Self::Raw { source } => ("raw", source.address()),
             Self::Staged { fragment, .. } => ("fragment", *fragment),
-            Self::Local { chunk, .. } => {
-                let crate::model::Id::Uuid(id) = chunk.encoding_id else {
-                    anyhow::bail!("invalid encoding identity");
-                };
-                ("chunk", id)
-            }
+            Self::Local { chunk, .. } => (
+                "chunk",
+                match chunk.encoding_id {
+                    crate::model::Id::Uuid(id) => id,
+                    crate::model::Id::Integer(_) => chunk.location_id,
+                },
+            ),
             Self::Fragment { source, .. } => ("fragment", source.location_id),
         })
     }

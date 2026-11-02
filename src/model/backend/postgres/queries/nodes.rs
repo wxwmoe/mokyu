@@ -200,16 +200,7 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn check_raw_files(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_native::Inventory,
-    ) -> Result<Vec<crate::model::node_raw::File>> {
-        transactions::raw_cache::inventory(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
+
     async fn prepare_native_complete(
         &self,
         node: &NodeState,
@@ -734,6 +725,16 @@ impl crate::model::cluster::StoragePermits for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWrites for Backend {
+    async fn check_raw_files(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Inventory,
+    ) -> Result<Vec<crate::model::node_raw::File>> {
+        transactions::raw_cache::inventory(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn prepare_tail(
         &self,
         node: &crate::cluster::NodeState,

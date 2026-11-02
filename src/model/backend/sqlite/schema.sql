@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102221441.
+-- Generated from the complete sqlite migration chain through 20261102223038.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -373,7 +373,7 @@ CREATE TABLE multipart_files (
     source_id INTEGER UNIQUE REFERENCES raw_sources(id),
     reclaim_pending INTEGER NOT NULL DEFAULT 0 CHECK (reclaim_pending IN (0,1)),
     state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','sealed','deleting'))
-) STRICT, WITHOUT ROWID;
+, node_id BLOB, part_stream INTEGER) STRICT, WITHOUT ROWID;
 
 CREATE TABLE node_boots (
     node_id BLOB NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
@@ -734,7 +734,7 @@ CREATE TABLE pending_uploads (
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     next_retry_at INTEGER NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
-    last_error TEXT, encoding_policy TEXT CHECK (encoding_policy IS NULL OR json_valid(encoding_policy)),
+    last_error TEXT, encoding_policy TEXT CHECK (encoding_policy IS NULL OR json_valid(encoding_policy)), node_id BLOB,
     CONSTRAINT pending_chunk FOREIGN KEY (chunk_id) REFERENCES chunks(id),
     CONSTRAINT pending_stream FOREIGN KEY (stream_id) REFERENCES streams(id) ON DELETE SET NULL,
     CONSTRAINT pending_pack FOREIGN KEY (source_pack_id) REFERENCES packs(id),
@@ -896,7 +896,7 @@ CREATE TABLE raw_uploads (
     next_attempt_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
-);
+, node_id BLOB);
 
 CREATE TABLE redundancy_backlogs (
     id BLOB PRIMARY KEY NOT NULL,
@@ -1218,7 +1218,7 @@ CREATE TABLE tasks (
     execution_token BLOB CHECK (execution_token IS NULL OR length(execution_token)=16),
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    started_at INTEGER,
+    started_at INTEGER, source_node BLOB,
     CONSTRAINT tasks_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE SET NULL,
     CONSTRAINT tasks_state CHECK (state IN ('queued','running','paused','completed','failed')),
     CONSTRAINT tasks_type CHECK (task_type IN ('purge','sweep','integrity','pack','unpack','upload','cache_flush','gc','cleanup','storage_migration','rewrite','usage')),
@@ -1647,6 +1647,10 @@ CREATE INDEX member_grants_bucket ON member_bucket_grants(bucket_id,project_id);
 
 CREATE INDEX member_grants_member ON member_bucket_grants(user_id,project_id);
 
+CREATE INDEX multipart_files_node ON multipart_files(node_id,state,id);
+
+CREATE UNIQUE INDEX multipart_files_part ON multipart_files(part_stream);
+
 CREATE INDEX multipart_files_reclaim ON multipart_files(storage_id,id) WHERE reclaim_pending;
 
 CREATE INDEX multipart_files_upload ON multipart_files(upload_id,state);
@@ -1715,6 +1719,8 @@ CREATE INDEX pending_due ON pending_uploads(owner_task,next_retry_at,chunk_id);
 
 CREATE INDEX pending_stream_offset ON pending_uploads(stream_id,offset_bytes);
 
+CREATE INDEX pending_uploads_node ON pending_uploads(node_id,chunk_id);
+
 CREATE INDEX pending_uploads_source_pack_id_fk ON pending_uploads(source_pack_id);
 
 CREATE INDEX physical_demand_expiry ON physical_demand_windows(hour_start,unit,physical_id);
@@ -1740,6 +1746,8 @@ CREATE INDEX raw_sources_processing ON raw_sources(processing_task);
 CREATE INDEX raw_sources_sync ON raw_sources(id) WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL;
 
 CREATE INDEX raw_uploads_due ON raw_uploads(next_attempt_at,source_id);
+
+CREATE INDEX raw_uploads_node ON raw_uploads(node_id,next_attempt_at,source_id);
 
 CREATE INDEX redundancy_links_admission ON redundancy_links(source_bucket,synchronous,state,id);
 
@@ -1804,6 +1812,8 @@ CREATE INDEX tasks_bucket_id_fk ON tasks(bucket_id);
 CREATE INDEX tasks_list ON tasks(created_at DESC,id DESC);
 
 CREATE INDEX tasks_policy_recent ON tasks(policy,created_at DESC,id DESC);
+
+CREATE INDEX tasks_source_node ON tasks(source_node,state,task_type);
 
 CREATE INDEX tasks_state_list ON tasks(state,created_at DESC,id DESC);
 

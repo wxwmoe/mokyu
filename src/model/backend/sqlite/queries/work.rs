@@ -23,8 +23,12 @@ pub(in super::super) fn insert<'a>(
     sqlx::query("INSERT INTO node_work(node_id,operation_id,boot_id,fence,request_hash,task_id,token,plan,materials_encrypted,expires_at) VALUES(?,?,?,?,?,?,?,?,?,CAST(unixepoch('subsec')*1000000 AS INTEGER)+90000000)").bind(node).bind(input.operation).bind(input.run.boot).bind(input.run.fence).bind(hash).bind(task).bind(token).bind(plan.map(Json)).bind(secret)
 }
 
-pub(in super::super) fn next_task(class: u32) -> Rows<'static, (Uuid, serde_json::Value)> {
-    sqlx::query_as("SELECT t.id,t.detail FROM tasks t WHERE t.state='queued' AND ((?=0 AND t.task_type='integrity' AND (json_extract(t.detail,'$.operation')='external_test' OR json_type(t.detail,'$.source_operation')='object')) OR (?=2 AND t.task_type='storage_migration' AND json_extract(t.detail,'$.operation')='tiering')) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND remote_work AND NOT maintenance) AND NOT EXISTS(SELECT 1 FROM maintenance_controls WHERE policy=t.task_type AND paused) ORDER BY t.updated_at,t.id LIMIT 1").bind(class as i64).bind(class as i64)
+pub(in super::super) fn next_task(
+    class: u32,
+    node: Uuid,
+    worker: bool,
+) -> Rows<'static, (Uuid, serde_json::Value)> {
+    sqlx::query_as("SELECT t.id,t.detail FROM tasks t WHERE t.state='queued' AND ((t.source_node=? AND t.task_type='upload' AND ?=2 AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=CAST(json_extract(t.detail,'$.source_id') AS INTEGER) AND u.next_attempt_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND NOT maintenance)) OR (t.source_node IS NULL AND ? AND ((?=0 AND t.task_type='integrity' AND (json_extract(t.detail,'$.operation')='external_test' OR json_type(t.detail,'$.source_operation')='object')) OR (?=2 AND t.task_type='storage_migration' AND json_extract(t.detail,'$.operation')='tiering')) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND remote_work AND NOT maintenance))) AND NOT EXISTS(SELECT 1 FROM maintenance_controls WHERE policy=t.task_type AND paused) ORDER BY t.updated_at,t.id LIMIT 1").bind(node).bind(class as i64).bind(worker).bind(class as i64).bind(class as i64)
 }
 
 pub(in super::super) fn settle(node: Uuid, operation: Uuid, hash: &[u8]) -> Statement<'_> {

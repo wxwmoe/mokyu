@@ -359,6 +359,14 @@ async fn permits(
 }
 #[async_trait::async_trait]
 impl NodeWrites for Backend {
+    async fn check_raw_files(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: crate::model::node_native::Inventory,
+    ) -> Result<Vec<crate::model::node_raw::File>> {
+        super::node_files::inventory(self, node, key, input).await
+    }
     async fn prepare_tail(
         &self,
         node: &NodeState,
@@ -1415,12 +1423,13 @@ impl NodeWrites for Backend {
                 row.next_batch == 1
                     && row.next_offset == 0
                     && row.intent.part.is_none()
-                    && !input.input.local
+                    && (!input.input.local || row.profile.upload_cache)
                     && !row.profile.cdc_enabled
                     && !row.profile.pack_enabled
                     && !row.profile.compression_enabled
                     && row.block_key_id.is_none()
                     && (!row.profile.upload_cache
+                        || input.input.local
                         || row.profile.upload_cache_overflow == "fallback")
                     && (row.profile.deduplication_enabled
                         && row.profile.write_processing == "inline")
@@ -1469,7 +1478,11 @@ impl NodeWrites for Backend {
                         stream,
                         row.storage_id,
                         row.profile.revision,
-                        "shared_s3",
+                        if input.input.local {
+                            "local"
+                        } else {
+                            "shared_s3"
+                        },
                     )
                     .await?,
                     location,
@@ -1512,7 +1525,7 @@ impl NodeWrites for Backend {
             &mut tx,
             &row,
             node.node_id,
-            usize::from(!committed),
+            usize::from(!committed && !input.input.local),
             0,
             row.storage_id,
             row.profile.upload_concurrency,
@@ -1557,7 +1570,39 @@ impl NodeWrites for Backend {
             queries::raw_attach(stream, raw.source_id, raw.size)
                 .execute(&mut *tx)
                 .await?;
-            if let Some(hash) = &raw.content_hash {
+            let source = queries::raw_source(raw.source_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            if source.medium == "local" {
+                ensure!(
+                    queries::raw_stage(raw.source_id, row.profile.revision, None)
+                        .execute(&mut *tx)
+                        .await?
+                        .rows_affected()
+                        == 1,
+                    Error::OperationAborted
+                );
+                queries::raw_queue(
+                    raw.source_id,
+                    row.profile.deduplication_enabled,
+                    row.profile.write_processing == "background",
+                )
+                .execute(&mut *tx)
+                .await?;
+                if let Some(hash) = &raw.content_hash {
+                    queries::raw_upload_hash(raw.source_id, Some(hash))
+                        .execute(&mut *tx)
+                        .await?;
+                }
+                super::node_files::queue(
+                    &mut tx,
+                    node.node_id,
+                    stream,
+                    raw.source_id,
+                    row.storage_id,
+                )
+                .await?;
+            } else if let Some(hash) = &raw.content_hash {
                 let source = queries::raw_source(raw.source_id)
                     .fetch_one(&mut *tx)
                     .await?;

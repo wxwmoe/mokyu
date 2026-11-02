@@ -308,7 +308,7 @@ async fn finish_source(
 }
 
 pub(crate) async fn inventory(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: crate::model::node_native::Inventory,
@@ -319,7 +319,8 @@ pub(crate) async fn inventory(
             && input.files.iter().collect::<HashSet<_>>().len() == input.files.len(),
         Error::NodeReadLimit
     );
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
     ensure!(
         matches!(node.role.as_str(), "data" | "node"),

@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102221441.
+-- Generated from the complete mysql migration chain through 20261102223038.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -504,11 +504,15 @@ CREATE TABLE `multipart_files` (
   `source_id` bigint DEFAULT NULL,
   `reclaim_pending` tinyint(1) NOT NULL DEFAULT '0',
   `state` varchar(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL DEFAULT 'open',
+  `node_id` binary(16) DEFAULT NULL,
+  `part_stream` bigint DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `source_id` (`source_id`),
+  UNIQUE KEY `multipart_files_part` (`part_stream`),
   KEY `storage_id` (`storage_id`),
   KEY `multipart_files_upload` (`upload_id`,`state`),
   KEY `multipart_files_reclaim` (`reclaim_pending`,`storage_id`,`id`),
+  KEY `multipart_files_node` (`node_id`,`state`,`id`),
   CONSTRAINT `multipart_files_ibfk_1` FOREIGN KEY (`upload_id`) REFERENCES `uploads` (`id`) ON DELETE SET NULL,
   CONSTRAINT `multipart_files_ibfk_2` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
   CONSTRAINT `multipart_files_source` FOREIGN KEY (`source_id`) REFERENCES `raw_sources` (`id`),
@@ -948,11 +952,13 @@ CREATE TABLE `pending_uploads` (
   `attempts` int NOT NULL DEFAULT '0',
   `last_error` text /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */,
   `encoding_policy` json DEFAULT NULL,
+  `node_id` binary(16) DEFAULT NULL,
   PRIMARY KEY (`chunk_id`),
   KEY `pending_pack` (`source_pack_id`),
   KEY `pending_due` (`owner_task`,`next_retry_at`,`chunk_id`),
   KEY `pending_stream_offset` (`stream_id`,`offset_bytes`),
   KEY `pending_cache_key` (`cache_key`),
+  KEY `pending_uploads_node` (`node_id`,`chunk_id`),
   CONSTRAINT `pending_chunk` FOREIGN KEY (`chunk_id`) REFERENCES `chunks` (`id`),
   CONSTRAINT `pending_owner` FOREIGN KEY (`owner_task`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
   CONSTRAINT `pending_pack` FOREIGN KEY (`source_pack_id`) REFERENCES `packs` (`id`),
@@ -1162,8 +1168,10 @@ CREATE TABLE `raw_uploads` (
   `next_attempt_at` timestamp(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `attempts` int NOT NULL DEFAULT '0',
   `last_error` text COLLATE utf8mb4_bin,
+  `node_id` binary(16) DEFAULT NULL,
   PRIMARY KEY (`source_id`),
   KEY `raw_uploads_due` (`next_attempt_at`,`source_id`),
+  KEY `raw_uploads_node` (`node_id`,`next_attempt_at`,`source_id`),
   CONSTRAINT `raw_uploads_source` FOREIGN KEY (`source_id`) REFERENCES `raw_sources` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
@@ -1590,16 +1598,18 @@ CREATE TABLE `tasks` (
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `started_at` datetime(6) DEFAULT NULL,
+  `source_node` binary(16) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `tasks_bucket` (`bucket_id`),
   KEY `tasks_work` (`state`,`updated_at`,`id`),
   KEY `tasks_list` (`created_at` DESC,`id` DESC),
   KEY `tasks_state_list` (`state`,`created_at` DESC,`id` DESC),
+  KEY `tasks_source_node` (`source_node`,`state`,`task_type`),
   KEY `tasks_policy_recent` (`policy`,`created_at` DESC,`id` DESC),
   CONSTRAINT `tasks_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE SET NULL,
   CONSTRAINT `tasks_processed` CHECK ((`processed` >= 0)),
-  CONSTRAINT `tasks_state` CHECK ((`state` in (_utf8mb4'queued',_utf8mb4'running',_utf8mb4'paused',_utf8mb4'completed',_utf8mb4'failed'))),
-  CONSTRAINT `tasks_type` CHECK ((`task_type` in (_utf8mb4'purge',_utf8mb4'sweep',_utf8mb4'integrity',_utf8mb4'pack',_utf8mb4'unpack',_utf8mb4'upload',_utf8mb4'cache_flush',_utf8mb4'gc',_utf8mb4'cleanup',_utf8mb4'storage_migration',_utf8mb4'rewrite',_utf8mb4'usage')))
+  CONSTRAINT `tasks_state` CHECK ((`state` in (_ascii'queued',_ascii'running',_ascii'paused',_ascii'completed',_ascii'failed'))),
+  CONSTRAINT `tasks_type` CHECK ((`task_type` in (_ascii'purge',_ascii'sweep',_ascii'integrity',_ascii'pack',_ascii'unpack',_ascii'upload',_ascii'cache_flush',_ascii'gc',_ascii'cleanup',_ascii'storage_migration',_ascii'rewrite',_ascii'usage')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
 
 CREATE TABLE `tier_locations` (

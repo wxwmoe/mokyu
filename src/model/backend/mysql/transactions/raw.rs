@@ -606,13 +606,27 @@ pub(in super::super) async fn reuse_raw_upload(
     }
     let mut tx = pool.begin().await?;
 
+    let result = reuse_raw_upload_in(&mut tx, work, hash, streams).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+pub(in super::super) async fn reuse_raw_upload_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    work: &crate::model::raw::RawUpload,
+    hash: &[u8],
+    streams: &[Id],
+) -> Result<bool> {
+    ensure!(
+        hash.len() == 32 && streams.len() <= 128,
+        crate::model::Error::NodeOperationConflict
+    );
     for stream in streams {
         queries::raw_upload_stream_lock(*stream)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
     }
     let current = queries::raw_upload_record(work.source.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         current.token == work.token && current.token.is_some() && current.source == work.source,
@@ -620,7 +634,7 @@ pub(in super::super) async fn reuse_raw_upload(
     );
     current.source.validate()?;
     let candidate = queries::raw_duplicate(work.source.storage_id, hash, work.source.size)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     let Some(candidate) = candidate.filter(|c| {
         c.id != work.source.id
@@ -631,38 +645,37 @@ pub(in super::super) async fn reuse_raw_upload(
     }) else {
         return Ok(false);
     };
-    super::super::raw_pages::inherit(&mut tx, work.source.id, &candidate).await?;
+    super::super::raw_pages::inherit(tx, work.source.id, &candidate).await?;
     for stream in streams {
         if queries::raw_upload_share(*stream, work.source.id, candidate.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             > 0
         {
             queries::raw_processing_changed(*stream)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
     }
     queries::raw_reference(candidate.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::raw_touch_unreferenced(work.source.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if !queries::raw_upload_references(work.source.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?
     {
         queries::raw_upload_delete(work.source.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     } else {
         queries::raw_upload_retry(work, None)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
-    tx.commit().await?;
     Ok(true)
 }
 
@@ -677,8 +690,21 @@ pub(in super::super) async fn complete_raw_upload(
     );
     let mut tx = pool.begin().await?;
 
+    complete_raw_upload_in(&mut tx, work, hash).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn complete_raw_upload_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    work: &crate::model::raw::RawUpload,
+    hash: Option<&[u8]>,
+) -> Result<()> {
+    ensure!(
+        hash.is_none_or(|h| h.len() == 32),
+        crate::model::Error::NodeOperationConflict
+    );
     let current = queries::raw_upload_record(work.source.id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         current.token == work.token && current.token.is_some() && current.source == work.source,
@@ -688,7 +714,7 @@ pub(in super::super) async fn complete_raw_upload(
     if current.source.pending_upload {
         ensure!(
             queries::raw_uploaded(work.source.id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?
                 .rows_affected()
                 == 1,
@@ -699,7 +725,7 @@ pub(in super::super) async fn complete_raw_upload(
     if let Some(hash) = hash {
         if let Some(candidate) =
             queries::raw_duplicate(work.source.storage_id, hash, work.source.size)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?
         {
             duplicate = candidate.id != work.source.id
@@ -709,26 +735,25 @@ pub(in super::super) async fn complete_raw_upload(
                 && candidate.digest == work.source.digest;
             if !duplicate && candidate.id != work.source.id {
                 queries::raw_hash(candidate.id, None)
-                    .execute(&mut *tx)
+                    .execute(&mut **tx)
                     .await?;
             }
         }
         if !duplicate {
             queries::raw_hash(work.source.id, Some(hash))
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
     }
     if duplicate {
         queries::raw_upload_hash(work.source.id, hash)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     } else {
         queries::raw_upload_delete(work.source.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 

@@ -888,7 +888,7 @@ pub(in super::super) fn raw_reusable<'a>(
 }
 
 pub(in super::super) fn raw_uploads(after: Id) -> Rows<'static, RawUpload> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,u.token,u.deduplicate,u.background,u.content_hash FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.source_id>? ORDER BY u.source_id LIMIT 128").bind(after)
+    sqlx::query_as("SELECT r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,u.token,u.deduplicate,u.background,u.content_hash FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.node_id IS NULL AND u.source_id>? ORDER BY u.source_id LIMIT 128").bind(after)
 }
 
 pub(in super::super) fn raw_upload_record(source: Id) -> Rows<'static, RawUpload> {
@@ -900,7 +900,7 @@ pub(in super::super) fn raw_upload_due(
     urgent: &[Uuid],
 ) -> sqlx::QueryBuilder<MySql> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT u.source_id FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id JOIN storage_profiles sp ON sp.storage_id=r.storage_id WHERE u.next_attempt_at<=CURRENT_TIMESTAMP(6) AND r.state='ready'",
+        "SELECT u.source_id FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id JOIN storage_profiles sp ON sp.storage_id=r.storage_id WHERE u.node_id IS NULL AND u.next_attempt_at<=CURRENT_TIMESTAMP(6) AND r.state='ready'",
     );
     if let Some(before) = before {
         query

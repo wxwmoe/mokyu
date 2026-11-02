@@ -184,6 +184,8 @@ impl Worker {
                 let outcomes = match plan {
                     work::Plan::ExternalTest(_) | work::Plan::ExternalTransfer(_) => unreachable!(),
                     work::Plan::UploadRaw { storage, items } => {
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::point("node-cache-before-upload").await;
                         ensure!(
                             !items.is_empty() && items.len() <= work::MAX_ITEMS,
                             "invalid cache upload batch"

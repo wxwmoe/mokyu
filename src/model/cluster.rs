@@ -183,6 +183,12 @@ pub(crate) trait StoragePermits: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeWrites: Send + Sync {
+    async fn check_raw_files(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Inventory,
+    ) -> Result<Vec<super::node_raw::File>>;
     async fn prepare_tail(
         &self,
         node: &NodeState,
@@ -327,12 +333,6 @@ pub(crate) trait ClusterStore:
         input: super::node_native::Finish,
     ) -> Result<()>;
     async fn check_local_files(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_native::Inventory,
-    ) -> Result<Vec<super::node_raw::File>>;
-    async fn check_raw_files(
         &self,
         node: &NodeState,
         key: &Key,

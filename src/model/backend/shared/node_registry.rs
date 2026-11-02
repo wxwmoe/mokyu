@@ -246,8 +246,13 @@ async fn identity(
     })
 }
 
-async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease) -> Result<Snapshot> {
+async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease, node: Uuid) -> Result<Snapshot> {
     let (maintenance, mode, mode_revision, work_pending) = q::mode().fetch_one(&mut **tx).await?;
+    let work_pending = work_pending
+        || (!maintenance
+            && super::queries::node_files::pending(node)
+                .fetch_one(&mut **tx)
+                .await?);
     let settings = q::settings().fetch_all(&mut **tx).await?;
     Ok(Snapshot {
         mode,
@@ -474,7 +479,7 @@ impl NodeSessions for Backend {
         super::queries::notices::retire_previous(consumer)
             .execute(&mut *tx)
             .await?;
-        let reply = snapshot(&mut tx, &lease).await?;
+        let reply = snapshot(&mut tx, &lease, state.node_id).await?;
         tx.commit().await?;
         Ok(reply)
     }
@@ -485,7 +490,7 @@ impl NodeSessions for Backend {
             q::epoch(self)?,
             run,
         )?;
-        let reply = snapshot(&mut tx, &lease).await?;
+        let reply = snapshot(&mut tx, &lease, state.node_id).await?;
         tx.commit().await?;
         Ok(reply)
     }
@@ -570,7 +575,7 @@ impl NodeSessions for Backend {
         })
         .execute(&mut *tx)
         .await?;
-        let mut reply = snapshot(&mut tx, &lease).await?;
+        let mut reply = snapshot(&mut tx, &lease, state.node_id).await?;
         reply.grants = super::node_work::grants(&mut tx, state.node_id, run, resources).await?;
         tx.commit().await?;
         Ok(reply)
