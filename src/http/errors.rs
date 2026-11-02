@@ -26,7 +26,7 @@ impl IntoResponse for HttpError {
 }
 impl HttpError {
     fn response(self) -> Response {
-        if let Some(pending) = self.0.downcast_ref::<crate::model::node::PendingFiles>() {
+        if let Some(pending) = self.0.downcast_ref::<crate::model::node::NodeDrain>() {
             let mut response = StatusCode::CONFLICT.into_response();
             response
                 .extensions_mut()

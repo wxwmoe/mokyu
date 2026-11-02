@@ -75,6 +75,12 @@ pub(crate) trait NodeSessions: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeWork: Send + Sync {
+    async fn read_migration(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_work::ReadMigration,
+    ) -> Result<super::node_read::Reply>;
     async fn recover_work(&self) -> Result<u64>;
     async fn exchange_work(
         &self,
@@ -400,12 +406,6 @@ pub(crate) trait ClusterStore:
     ) -> Result<()>;
     async fn notification_changes(&self) -> Result<Box<dyn NotificationChanges>>;
     async fn task_targets(&self, tasks: &[Uuid]) -> Result<Vec<Option<Uuid>>>;
-    async fn read_migration(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_work::ReadMigration,
-    ) -> Result<super::node_read::Reply>;
     async fn read_transfer(
         &self,
         node: &NodeState,

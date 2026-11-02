@@ -1423,7 +1423,7 @@ impl NodeWork for Service {
             operation: super::uuid(&input.operation_id)?,
             cached: super::read::cached(input.cached)?,
         };
-        let value = bounded(self.app.cluster().map_err(failure)?.read_migration(
+        let value = bounded(self.app.node_work.read_migration(
             &node,
             &self.app.secrets.credential_key,
             input,

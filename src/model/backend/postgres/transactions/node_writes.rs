@@ -1235,6 +1235,7 @@ pub(in super::super) async fn publish_node_write(
                 && raw.size == input.size
                 && (row.copy_source.is_some()
                     || row.completion_upload.is_some()
+                    || row.owner_task_id.is_some() && input.etag.contains('-')
                     || hex::encode(&raw.digest) == input.etag),
             s3s::s3_error!(IncompleteBody)
         );

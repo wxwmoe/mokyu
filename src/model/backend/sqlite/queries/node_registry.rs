@@ -120,7 +120,7 @@ pub(in super::super) fn embedded() -> Scalar<'static, Uuid> {
 
 pub(in super::super) fn mode() -> Rows<'static, (bool, String, i64, bool)> {
     sqlx::query_as(
-        "SELECT maintenance,deployment_mode,deployment_mode_revision,(remote_work AND NOT maintenance AND (EXISTS(SELECT 1 FROM raw_processing w JOIN raw_sources r ON r.id=w.source_id WHERE r.medium='shared_s3' AND NOT r.pending_upload AND w.next_attempt_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=r.id) AND (w.token IS NULL OR w.lease_expires_at IS NULL OR w.lease_expires_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tasks j WHERE j.id=w.token AND j.state IN ('queued','running','paused','failed'))) OR EXISTS(SELECT 1 FROM tasks t WHERE t.state='queued' AND (t.task_type IN ('pack','unpack') OR (t.task_type='integrity' AND (json_extract(t.detail,'$.operation')='external_test' OR json_type(t.detail,'$.source_operation')='object')) OR ((t.task_type='storage_migration' AND json_extract(t.detail,'$.operation')='tiering' OR t.task_type='upload' AND json_extract(t.detail,'$.operation') IN ('deduplicate','cdc'))))))) FROM mokyu_meta WHERE id=1",
+        "SELECT maintenance,deployment_mode,deployment_mode_revision,(remote_work AND NOT maintenance AND (EXISTS(SELECT 1 FROM raw_processing w JOIN raw_sources r ON r.id=w.source_id WHERE r.medium='shared_s3' AND NOT r.pending_upload AND w.next_attempt_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=r.id) AND (w.token IS NULL OR w.lease_expires_at IS NULL OR w.lease_expires_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM tasks j WHERE j.id=w.token AND j.state IN ('queued','running','paused','failed'))) OR EXISTS(SELECT 1 FROM tasks t WHERE t.state='queued' AND (t.task_type IN ('pack','unpack') OR (t.task_type='integrity' AND (json_extract(t.detail,'$.operation')='external_test' OR json_type(t.detail,'$.source_operation')='object')) OR ((t.task_type='storage_migration' AND (json_extract(t.detail,'$.operation')='tiering' OR json_type(t.detail,'$.job')='object') OR t.task_type='upload' AND json_extract(t.detail,'$.operation') IN ('deduplicate','cdc'))))))) FROM mokyu_meta WHERE id=1",
     )
 }
 
@@ -144,12 +144,10 @@ pub(in super::super) fn release_handoff() -> Statement<'static> {
     )
 }
 
-pub(in super::super) fn pending_files(node: Uuid) -> Rows<'static, (i64, i64, i64, i64)> {
-    sqlx::query_as("SELECT (SELECT count(*) FROM pending_uploads WHERE node_id=?),(SELECT count(*) FROM raw_uploads WHERE node_id=?),(SELECT count(*) FROM native_parts p JOIN uploads u ON u.id=p.upload_id WHERE p.node_id=? AND u.state IN ('active','completing')),(SELECT count(*) FROM node_writes WHERE node_id=? AND (phase='preparing' OR phase='active' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)))").bind(node).bind(node).bind(node).bind(node)
+pub(in super::super) fn pending_files(node: Uuid) -> Rows<'static, (i64, i64, i64, i64, i64)> {
+    sqlx::query_as("SELECT (SELECT count(*) FROM pending_uploads WHERE node_id=?),(SELECT count(*) FROM raw_uploads WHERE node_id=?),(SELECT count(*) FROM native_parts p JOIN uploads u ON u.id=p.upload_id WHERE p.node_id=? AND u.state IN ('active','completing')),(SELECT count(*) FROM node_writes WHERE node_id=? AND (phase='preparing' OR phase='active' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))),(SELECT count(*) FROM node_reads WHERE node_id=? AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(node).bind(node).bind(node).bind(node).bind(node)
 }
-pub(in super::super) fn active_reads(node: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_reads WHERE node_id=? AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(node)
-}
+
 pub(in super::super) fn active_grants() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM node_reads WHERE expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) OR EXISTS(SELECT 1 FROM node_writes WHERE phase='preparing' OR phase='active' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) OR EXISTS(SELECT 1 FROM storage_permits WHERE expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))",

@@ -314,7 +314,7 @@ pub(crate) async fn errors(
                 .or_else(|| {
                     response
                         .extensions()
-                        .get::<crate::model::node::PendingFiles>()
+                        .get::<crate::model::node::NodeDrain>()
                         .map(ToString::to_string)
                 }),
         }),

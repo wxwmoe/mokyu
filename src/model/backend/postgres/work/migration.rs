@@ -48,6 +48,14 @@ async fn source(
         .map_err(Into::into)
 }
 
+async fn selected(
+    db: &mut Transaction<'_, Postgres>,
+    job: &StorageMigration,
+) -> Result<crate::app::StoredStream> {
+    let stream = source(db, job).await?;
+    selected_object(db, job.target_bucket, &job.target_key, job.target_version).await?;
+    Ok(stream)
+}
 pub(super) async fn prepare(
     db: &mut Transaction<'_, Postgres>,
     node: &NodeState,
@@ -60,13 +68,7 @@ pub(super) async fn prepare(
     if !detail["replica_parked"].is_null() && resume_migration_in(db, task, &job).await? {
         return Ok(None);
     }
-    let selected = async {
-        let source = source(db, &job).await?;
-        selected_object(db, job.target_bucket, &job.target_key, job.target_version).await?;
-        Ok::<_, anyhow::Error>(source)
-    }
-    .await;
-    let original = match selected {
+    let original = match selected(db, &job).await {
         Ok(value) => value,
         Err(error)
             if error
@@ -220,12 +222,13 @@ pub(super) async fn prepare(
 }
 
 pub(crate) async fn read(
-    pool: &PgPool,
+    backend: &Backend,
     node: &NodeState,
     key: &Key,
     input: work::ReadMigration,
 ) -> Result<read::Reply> {
-    let mut db = pool.begin().await?;
+    let mut db = backend.pool.begin().await?;
+    backend.fence_control(&mut db).await?;
     let row = node_write_owned(&mut db, node, key, input.run, input.operation).await?;
     require_node_write(&mut db, &row).await?;
     let detail: Value = sqlx::query_scalar(
@@ -334,6 +337,15 @@ pub(super) async fn finish(
         return Err(Error::NodeOperationConflict.into());
     };
     if matches!(outcome, work::Outcome::Retry) {
+        if let Err(err) = selected(db, &job(detail)?).await {
+            if err
+                .downcast_ref::<s3s::S3Error>()
+                .is_some_and(|e| e.code() == &s3s::S3ErrorCode::PreconditionFailed)
+            {
+                return Ok((false, Some("object_changed")));
+            }
+            return Err(err);
+        }
         return Ok((false, Some("backend_io_failed")));
     }
     ensure!(

@@ -122,14 +122,6 @@ impl ClusterStore for Backend {
     ) -> Result<Box<dyn crate::model::cluster::NotificationChanges>> {
         connection::notification_changes(&self.pool).await
     }
-    async fn read_migration(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_work::ReadMigration,
-    ) -> Result<crate::model::node_read::Reply> {
-        transactions::work::migration::read(&self.pool, node, key, input).await
-    }
     async fn read_transfer(
         &self,
         node: &NodeState,
@@ -506,6 +498,14 @@ impl crate::model::cluster::NodeSessions for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWork for Backend {
+    async fn read_migration(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_work::ReadMigration,
+    ) -> Result<crate::model::node_read::Reply> {
+        transactions::work::migration::read(self, node, key, input).await
+    }
     async fn recover_work(&self) -> Result<u64> {
         if self.control_epoch.is_some() {
             let mut tx = self.pool.begin().await?;

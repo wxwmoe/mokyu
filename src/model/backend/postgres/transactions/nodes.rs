@@ -92,19 +92,20 @@ pub(in super::super) async fn release_node(
         .await?
         .ok_or_else(|| anyhow::anyhow!("node not found or already released"))?;
     if backend.control_epoch.is_some() {
-        let (role, chunks, raw, parts, writes) =
+        let (role, chunks, raw, parts, writes, reads) =
             queries::retirement(id).fetch_one(&mut *tx).await?;
         ensure!(
             role != "control",
             crate::model::runtime::ModeConflict("the embedded control cannot be released")
         );
         ensure!(
-            chunks + raw + parts + writes == 0,
-            crate::model::node::PendingFiles {
+            chunks + raw + parts + writes + reads == 0,
+            crate::model::node::NodeDrain {
                 chunks,
                 raw,
                 parts,
-                writes
+                writes,
+                reads
             }
         );
         queries::release_handoff().execute(&mut *tx).await?;

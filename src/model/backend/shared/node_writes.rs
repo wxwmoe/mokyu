@@ -1463,7 +1463,8 @@ impl NodeWrites for Backend {
             ensure!(
                 row.next_batch == 1
                     && row.next_offset == 0
-                    && row.owner_task_id.is_none()
+                    && (row.owner_task_id.is_none()
+                        || row.intent.access == "node-migration" && !input.input.local)
                     && (row.intent.part.is_none() || row.profile.cdc_enabled && input.input.local)
                     && (!input.input.local || row.profile.upload_cache)
                     && (row.profile.cdc_enabled
@@ -1485,14 +1486,16 @@ impl NodeWrites for Backend {
                 row.intent.size.is_none_or(|s| s == size),
                 s3s::s3_error!(IncompleteBody)
             );
-            transactions::reserve_quota_in(
-                &mut tx,
-                stream,
-                size,
-                false,
-                row.intent.part.as_ref().map(|p| (p.upload, p.number)),
-            )
-            .await?;
+            if row.owner_task_id.is_none() {
+                transactions::reserve_quota_in(
+                    &mut tx,
+                    stream,
+                    size,
+                    false,
+                    row.intent.part.as_ref().map(|p| (p.upload, p.number)),
+                )
+                .await?;
+            }
             let duplicate = if let Some(hash) = &input.input.hash {
                 queries::raw_duplicate(row.storage_id, hash, size)
                     .fetch_optional(&mut *tx)
@@ -1745,6 +1748,9 @@ impl NodeWrites for Backend {
                 raw.committed
                     && raw.size == input.size
                     && (row.copy_source.is_some()
+                        || row.owner_task_id.is_some()
+                            && row.intent.access == "node-migration"
+                            && input.etag.contains('-')
                         || row.intent.completion.is_some()
                         || hex::encode(&raw.digest) == input.etag),
                 s3s::s3_error!(IncompleteBody)
@@ -1802,7 +1808,11 @@ impl NodeWrites for Backend {
         );
         let mut phase = "published";
         if let Some(task) = row.owner_task_id {
-            super::work_conversion::seal(&mut tx, &row, task, &input).await?;
+            if row.intent.access == "node-migration" {
+                super::work_migration::seal(&mut tx, &row, task, &input).await?;
+            } else {
+                super::work_conversion::seal(&mut tx, &row, task, &input).await?;
+            }
         } else if let Some(part) = &row.intent.part {
             ensure!(
                 input.etag.len() == 32 && input.if_match.is_none() && input.if_none.is_none(),

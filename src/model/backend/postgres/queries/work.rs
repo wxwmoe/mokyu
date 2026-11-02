@@ -79,7 +79,7 @@ pub(crate) fn finish(
     complete: bool,
     error: Option<&str>,
 ) -> Statement<'_> {
-    sqlx::query("WITH changed AS (UPDATE tasks SET processed=processed+$3,state=CASE WHEN $5::text IS NOT NULL THEN 'failed' WHEN $4 THEN 'completed' ELSE 'queued' END,error=$5,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND lease_token=$2 AND state IN ('running','completed') RETURNING parent_task_id) UPDATE tasks SET state='failed',error=$5,updated_at=clock_timestamp() WHERE $5::text IS NOT NULL AND id=(SELECT parent_task_id FROM changed) AND state IN ('queued','running')").bind(task).bind(token).bind(count).bind(complete).bind(error)
+    sqlx::query("WITH changed AS (UPDATE tasks SET processed=processed+$3,state=CASE WHEN $5::text='backend_io_failed' AND task_type='storage_migration' AND detail ? 'job' AND (SELECT deployment_mode FROM mokyu_meta WHERE singleton)='single_control' THEN 'queued' WHEN $5::text IS NOT NULL THEN 'failed' WHEN $4 THEN 'completed' ELSE 'queued' END,error=$5,lease_node_id=NULL,lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp() WHERE id=$1 AND lease_token=$2 AND state IN ('running','completed') RETURNING parent_task_id,state) UPDATE tasks SET state='failed',error=$5,updated_at=clock_timestamp() WHERE $5::text IS NOT NULL AND id=(SELECT parent_task_id FROM changed WHERE state='failed') AND state IN ('queued','running')").bind(task).bind(token).bind(count).bind(complete).bind(error)
 }
 
 pub(crate) fn physical_active(location: Uuid) -> Scalar<'static, bool> {

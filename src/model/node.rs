@@ -7,24 +7,25 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PendingFiles {
+pub(crate) struct NodeDrain {
     pub(crate) chunks: i64,
     pub(crate) raw: i64,
     pub(crate) parts: i64,
     pub(crate) writes: i64,
+    pub(crate) reads: i64,
 }
 
-impl std::fmt::Display for PendingFiles {
+impl std::fmt::Display for NodeDrain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "resume and drain the node before release ({} pending chunks, {} raw files, {} multipart parts, {} active writes)",
-            self.chunks, self.raw, self.parts, self.writes
+            "resume and drain the node before release ({} pending chunks, {} raw files, {} multipart parts, {} active writes, {} protected reads)",
+            self.chunks, self.raw, self.parts, self.writes, self.reads
         )
     }
 }
 
-impl std::error::Error for PendingFiles {}
+impl std::error::Error for NodeDrain {}
 
 pub(crate) const REPORT_FORMAT: u32 = 1;
 pub(crate) const CONTACT_SECONDS: i64 = 30;

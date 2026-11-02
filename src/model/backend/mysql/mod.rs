@@ -44,6 +44,8 @@ mod transactions;
 mod work_conversion;
 #[path = "../shared/work_media.rs"]
 mod work_media;
+#[path = "../shared/work_migration.rs"]
+mod work_migration;
 #[path = "../shared/work_raw.rs"]
 mod work_raw;
 #[path = "../shared/work_sources.rs"]

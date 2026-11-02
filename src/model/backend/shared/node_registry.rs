@@ -378,19 +378,17 @@ impl NodeSessions for Backend {
             .await?
             .ok_or(Error::NodeInactive)?;
         ensure!(row.enabled && row.role != "control", Error::NodeInactive);
-        let (chunks, raw, parts, writes) = q::pending_files(row.id).fetch_one(&mut *tx).await?;
+        let (chunks, raw, parts, writes, reads) =
+            q::pending_files(row.id).fetch_one(&mut *tx).await?;
         ensure!(
-            chunks + raw + parts + writes == 0,
-            crate::model::node::PendingFiles {
+            chunks + raw + parts + writes + reads == 0,
+            crate::model::node::NodeDrain {
                 chunks,
                 raw,
                 parts,
-                writes
+                writes,
+                reads
             }
-        );
-        ensure!(
-            !q::active_reads(row.id).fetch_one(&mut *tx).await?,
-            Error::NodeConflict
         );
         super::queries::work::drop_node_lanes(row.id)
             .execute(&mut *tx)

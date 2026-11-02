@@ -206,6 +206,10 @@ async fn finish(
             }
             super::work_conversion::finish(tx, task, outcome).await?
         }
+        (Some(work::Plan::Migrate { .. }), [outcome]) => {
+            super::work_migration::finish(tx, task, outcome).await?;
+            return settle(tx, node, task, result.operation, &hash).await;
+        }
         (Some(work::Plan::Pack { storage, batch, .. }), outcomes) => {
             let (state, error) =
                 super::work_media::finish(tx, task, storage, *batch, outcomes, key).await?;
@@ -284,15 +288,30 @@ async fn finish(
             == 1,
         Error::OperationAborted
     );
+    settle(tx, node, task, result.operation, &hash).await
+}
+async fn settle(
+    tx: &mut registry::Tx<'_>,
+    node: Uuid,
+    task: Execution,
+    operation: Uuid,
+    hash: &[u8],
+) -> Result<()> {
     q::drop_lanes(task.token).execute(&mut **tx).await?;
-    q::settle(node, result.operation, &hash)
-        .execute(&mut **tx)
-        .await?;
+    q::settle(node, operation, hash).execute(&mut **tx).await?;
     Ok(())
 }
 
 #[async_trait::async_trait]
 impl NodeWork for Backend {
+    async fn read_migration(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: work::ReadMigration,
+    ) -> Result<crate::model::node_read::Reply> {
+        super::work_migration::read(self, node, key, input).await
+    }
     async fn recover_work(&self) -> Result<u64> {
         let mut tx = registry::begin(self).await?;
         let count = q::requeue().execute(&mut *tx).await?.rows_affected();
@@ -398,6 +417,10 @@ impl NodeWork for Backend {
                 }
                 _ if matches!(task_type.as_str(), "pack" | "unpack") => {
                     super::work_media::offer(&mut tx, task, &detail, key).await?
+                }
+                _ if task_type == "storage_migration" && detail.get("job").is_some() => {
+                    super::work_migration::offer(&mut tx, node, input.run, task, &detail, key)
+                        .await?
                 }
                 Some("tiering") => tier_plan(&mut tx, task, &detail, key).await?,
                 _ if detail.get("source_operation").is_some() => {
