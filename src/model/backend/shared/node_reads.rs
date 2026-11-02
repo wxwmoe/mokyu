@@ -490,6 +490,14 @@ impl NodeReads for Backend {
     fn refresh_status(&self) -> serde_json::Value {
         q::refresh_status(self)
     }
+    async fn report_observations(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: crate::model::node_observation::Batch,
+    ) -> Result<Vec<bool>> {
+        q::observations(self, node, key, input).await
+    }
     async fn report_read(
         &self,
         state: &NodeState,

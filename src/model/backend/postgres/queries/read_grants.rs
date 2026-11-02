@@ -164,3 +164,12 @@ pub(in super::super) async fn report(
 ) -> Result<Vec<Uuid>> {
     transactions::report_node_read(b, node, key, input).await
 }
+
+pub(in super::super) async fn observations(
+    b: &Backend,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_observation::Batch,
+) -> Result<Vec<bool>> {
+    transactions::report_node_observations(b, node, key, input).await
+}

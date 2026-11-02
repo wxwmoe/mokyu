@@ -115,6 +115,12 @@ pub(crate) trait NodeRequests: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeReads: Send + Sync {
+    async fn report_observations(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_observation::Batch,
+    ) -> Result<Vec<bool>>;
     async fn report_read(
         &self,
         node: &NodeState,
@@ -339,12 +345,6 @@ pub(crate) trait ClusterStore:
         input: super::node_write::Lookup,
         abort: bool,
     ) -> Result<super::node_write::Reply>;
-    async fn report_observations(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_observation::Batch,
-    ) -> Result<Vec<bool>>;
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
     async fn begin_remote(
         &self,

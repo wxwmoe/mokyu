@@ -355,3 +355,23 @@ pub(in super::super) async fn expire(tx: &mut Tx<'_>) -> Result<()> {
     sqlx::query("DELETE FROM node_reads WHERE expires_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND read_id IN (SELECT read_id FROM node_reads WHERE expires_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) LIMIT 512)").execute(&mut **tx).await?;
     Ok(())
 }
+
+pub(in super::super) use super::super::node_registry::observations;
+pub(in super::super) const DATABASE: crate::config::DatabaseType =
+    crate::config::DatabaseType::Sqlite;
+pub(in super::super) async fn access_interval(tx: &mut Tx<'_>) -> Result<u64> {
+    let interval:String=sqlx::query_scalar("SELECT json_extract(value,'$.access_flush_interval') FROM runtime_settings WHERE section='metrics'").fetch_one(&mut **tx).await?;
+    Ok(crate::config::seconds(&interval)?.saturating_mul(2))
+}
+pub(in super::super) async fn touch_credentials(tx: &mut Tx<'_>, keys: &[String]) -> Result<()> {
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "UPDATE s3_credentials SET last_used_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE (last_used_at IS NULL OR last_used_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-300000000) AND access_key_id IN (",
+    );
+    let mut list = query.separated(",");
+    for key in keys {
+        list.push_bind(key);
+    }
+    list.push_unseparated(")");
+    query.build().execute(&mut **tx).await?;
+    Ok(())
+}

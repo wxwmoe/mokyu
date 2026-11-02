@@ -40,6 +40,87 @@ pub(super) struct Lease {
     draining: bool,
     closed: bool,
     report_sequence: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    access: Option<AccessReceipt>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct AccessReceipt {
+    sequence: i64,
+    hash: [u8; 32],
+    received: DateTime<Utc>,
+}
+
+pub(super) async fn observations(
+    b: &Backend,
+    state: &NodeState,
+    key: &Key,
+    input: crate::model::node_observation::Batch,
+) -> Result<Vec<bool>> {
+    input.validate()?;
+    ensure!(
+        matches!(state.role.as_str(), "data" | "node"),
+        Error::NodeAuthentication
+    );
+    let mut tx = q::begin(b).await?;
+    let mut lease = require(
+        authenticated(&mut tx, state, key).await?,
+        q::epoch(b)?,
+        input.run,
+    )?;
+    if !input.compression.is_empty() || !input.credentials.is_empty() {
+        ensure!(
+            !lease.draining && !q::mode().fetch_one(&mut *tx).await?.0,
+            Error::NodeInactive
+        );
+    }
+    if let Some(access) = input.access {
+        access.validate_ids(super::queries::read_grants::DATABASE)?;
+        let hash = *blake3::hash(&serde_json::to_vec(&access)?).as_bytes();
+        let sequence = access.sequence;
+        let now = Utc::now();
+        if let Some(old) = &lease.access
+            && old.sequence >= sequence
+        {
+            ensure!(
+                old.sequence != sequence || old.hash == hash,
+                Error::OperationAborted
+            );
+        } else {
+            access.validate_hours(now)?;
+            let stale = super::queries::read_grants::access_interval(&mut tx).await?;
+            let gap = lease.access.as_ref().is_none_or(|old| {
+                old.sequence + 1 != sequence || (now - old.received).num_seconds() > stale as i64
+            });
+            let mut pending = access.pending();
+            pending.dropped |= gap;
+            super::transactions::persist_node_access(&mut tx, &pending, stale as f64).await?;
+            lease.access = Some(AccessReceipt {
+                sequence,
+                hash,
+                received: now,
+            });
+            q::save(state.node_id, &lease).execute(&mut *tx).await?;
+        }
+    }
+    let mut written = Vec::with_capacity(input.compression.len());
+    for item in input.compression {
+        item.stream
+            .validate(super::queries::read_grants::DATABASE)?;
+        written.push(
+            super::queries::learn_compression(item)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                > 0,
+        );
+    }
+    if !input.credentials.is_empty() {
+        super::queries::read_grants::touch_credentials(&mut tx, &input.credentials).await?;
+    }
+    validate_run(&mut tx, state, input.run).await?;
+    tx.commit().await?;
+    Ok(written)
 }
 
 impl Node {
@@ -370,6 +451,10 @@ impl NodeSessions for Backend {
             boot: input.boot,
             fence,
             epoch,
+            access: previous
+                .as_ref()
+                .filter(|old| old.boot == input.boot)
+                .and_then(|old| old.access.clone()),
             connection: input.connection,
             sequence: 0,
             expires: now + chrono::Duration::seconds(session::LEASE_SECONDS),

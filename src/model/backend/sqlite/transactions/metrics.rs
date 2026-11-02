@@ -75,14 +75,23 @@ pub(in super::super) async fn flush_access(
     stale: f64,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    queries::flush_chunk_access(&mut tx, &pending).await?;
-    queries::flush_pack_access(&mut tx, &pending).await?;
-    queries::flush_member_access(&mut tx, &pending).await?;
-    super::super::tier_access::demand(&mut tx, &pending).await?;
-    queries::access_coverage(pending.dropped, stale)
-        .execute(&mut *tx)
-        .await?;
+    persist_node_access(&mut tx, &pending, stale).await?;
     tx.commit().await?;
+    Ok(())
+}
+
+pub(in super::super) async fn persist_node_access(
+    tx: &mut super::super::queries::node_registry::Tx<'_>,
+    pending: &AccessBatch,
+    stale: f64,
+) -> Result<()> {
+    queries::flush_chunk_access(tx, pending).await?;
+    queries::flush_pack_access(tx, pending).await?;
+    queries::flush_member_access(tx, pending).await?;
+    super::super::tier_access::demand(tx, pending).await?;
+    queries::access_coverage(pending.dropped, stale)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 

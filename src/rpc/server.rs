@@ -862,6 +862,11 @@ impl NodeControl for Service {
             ));
         }
         let input = super::read::observations(request.into_inner())?;
+        if let Some(access) = &input.access {
+            access
+                .validate_ids(self.app.config.database.backend)
+                .map_err(|_| Status::invalid_argument("invalid access observation identity"))?;
+        }
         for item in &input.compression {
             item.stream
                 .validate(self.app.config.database.backend)
@@ -869,7 +874,7 @@ impl NodeControl for Service {
         }
         let compression_written = tokio::time::timeout(
             Duration::from_secs(2),
-            bounded(self.app.cluster().map_err(failure)?.report_observations(
+            bounded(self.app.node_reads.report_observations(
                 &node,
                 &self.app.secrets.credential_key,
                 input,

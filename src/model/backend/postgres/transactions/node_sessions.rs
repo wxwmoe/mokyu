@@ -465,16 +465,17 @@ pub(in super::super) async fn sync_node(
 }
 
 pub(in super::super) async fn report_node_observations(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     input: crate::model::node_observation::Batch,
 ) -> Result<Vec<bool>> {
     use crate::model::Error;
     input.validate()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
     // Dropping a query future does not cancel PostgreSQL's lock wait.
     queries::observation_limits().execute(&mut *tx).await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
     ensure!(
         matches!(state.role.as_str(), "data" | "node"),
@@ -488,10 +489,14 @@ pub(in super::super) async fn report_node_observations(
         );
     }
     if let Some(access) = input.access {
+        access.validate_ids(crate::config::DatabaseType::Postgres)?;
         persist_node_access(&mut tx, state.node_id, input.run.boot, access).await?;
     }
     let mut written = Vec::with_capacity(input.compression.len());
     for observation in input.compression {
+        observation
+            .stream
+            .validate(crate::config::DatabaseType::Postgres)?;
         written.push(
             queries::learn_compression(observation, Some(state.node_id))
                 .execute(&mut *tx)
@@ -529,17 +534,7 @@ async fn persist_node_access(
         return Ok(());
     }
     let (now, collecting) = queries::demand_clock().fetch_one(&mut *db).await?;
-    let valid_hour = |at: &DateTime<Utc>| {
-        *at >= now - chrono::Duration::hours(24) && *at <= now + chrono::Duration::hours(1)
-    };
-    ensure!(
-        access.chunks.iter().all(|((_, at), _)| valid_hour(at))
-            && access.packs.iter().all(|((_, at), _)| valid_hour(at))
-            && access.members.iter().all(|((_, _, at), _)| valid_hour(at))
-            && access.demand.iter().all(|((_, _, at), _)| valid_hour(at))
-            && access.cached.iter().all(|((_, at), _)| valid_hour(at)),
-        s3s::s3_error!(InvalidArgument)
-    );
+    access.validate_hours(now)?;
     let stale = previous
         .as_ref()
         .map(|row| crate::config::seconds(&row.5))

@@ -360,3 +360,23 @@ pub(in super::super) async fn expire(tx: &mut Tx<'_>) -> Result<()> {
         .await?;
     Ok(())
 }
+
+pub(in super::super) use super::super::node_registry::observations;
+pub(in super::super) const DATABASE: crate::config::DatabaseType =
+    crate::config::DatabaseType::Mysql;
+pub(in super::super) async fn access_interval(tx: &mut Tx<'_>) -> Result<u64> {
+    let interval:String=sqlx::query_scalar("SELECT JSON_UNQUOTE(JSON_EXTRACT(value,'$.access_flush_interval')) FROM runtime_settings WHERE section='metrics'").fetch_one(&mut **tx).await?;
+    Ok(crate::config::seconds(&interval)?.saturating_mul(2))
+}
+pub(in super::super) async fn touch_credentials(tx: &mut Tx<'_>, keys: &[String]) -> Result<()> {
+    let mut query = sqlx::QueryBuilder::<sqlx::MySql>::new(
+        "UPDATE s3_credentials SET last_used_at=UTC_TIMESTAMP(6) WHERE (last_used_at IS NULL OR last_used_at<UTC_TIMESTAMP(6)-INTERVAL 5 MINUTE) AND access_key_id IN (",
+    );
+    let mut list = query.separated(",");
+    for key in keys {
+        list.push_bind(key);
+    }
+    list.push_unseparated(")");
+    query.build().execute(&mut **tx).await?;
+    Ok(())
+}

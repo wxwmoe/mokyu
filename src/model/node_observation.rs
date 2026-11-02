@@ -64,6 +64,38 @@ impl Access {
         }
     }
 
+    pub(crate) fn validate_ids(&self, db: crate::config::DatabaseType) -> Result<()> {
+        for id in self
+            .chunks
+            .iter()
+            .map(|((id, _), _)| *id)
+            .chain(self.packs.iter().map(|((id, _), _)| *id))
+            .chain(
+                self.members
+                    .iter()
+                    .flat_map(|((pack, member, _), _)| [*pack, *member]),
+            )
+        {
+            id.validate(db)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_hours(&self, now: DateTime<Utc>) -> Result<()> {
+        let valid = |at: &DateTime<Utc>| {
+            *at >= now - chrono::Duration::hours(24) && *at <= now + chrono::Duration::hours(1)
+        };
+        ensure!(
+            self.chunks.iter().all(|((_, at), _)| valid(at))
+                && self.packs.iter().all(|((_, at), _)| valid(at))
+                && self.members.iter().all(|((_, _, at), _)| valid(at))
+                && self.demand.iter().all(|((_, _, at), _)| valid(at))
+                && self.cached.iter().all(|((_, at), _)| valid(at)),
+            s3s::s3_error!(InvalidArgument)
+        );
+        Ok(())
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         let invalid = || s3s::s3_error!(InvalidArgument, "invalid access observation");
         let cached_slots: usize = self.cached.iter().map(|((ids, _), _)| ids.len() + 1).sum();
@@ -77,7 +109,7 @@ impl Access {
                     <= ACCESS_LIMIT,
             invalid()
         );
-        let id = |value: Id| matches!(value, Id::Uuid(id) if !id.is_nil());
+        let id = Id::is_valid;
         let hour = |value: DateTime<Utc>| {
             value.minute() == 0 && value.second() == 0 && value.nanosecond() == 0
         };
@@ -183,7 +215,7 @@ impl Batch {
         for observation in &self.compression {
             observation.validate()?;
             ensure!(
-                matches!(observation.stream, super::Id::Uuid(id) if !id.is_nil())
+                observation.stream.is_valid()
                     && keys.insert((
                         observation.stream,
                         observation.version,

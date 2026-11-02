@@ -395,14 +395,6 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn report_observations(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_observation::Batch,
-    ) -> Result<Vec<bool>> {
-        transactions::report_node_observations(&self.pool, node, key, input).await
-    }
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
         Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
     }
