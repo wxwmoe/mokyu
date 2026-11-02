@@ -83,19 +83,19 @@ pub(in super::super) fn reset_access_coverage() -> Statement<'static> {
 
 pub(in super::super) fn abandon_startup_streams() -> Statement<'static> {
     sqlx::query(
-        "UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_execution_token=NULL,touched_at=CURRENT_TIMESTAMP(6) WHERE state='writing' AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i JOIN transfer_items t ON t.id=i.item_id WHERE i.part_stream=streams.id OR t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared'))",
+        "UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_execution_token=NULL,touched_at=CURRENT_TIMESTAMP(6) WHERE state='writing' AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i JOIN transfer_items t ON t.id=i.item_id WHERE i.part_stream=streams.id OR t.candidate=streams.id) AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared')) AND NOT EXISTS(SELECT 1 FROM node_writes w WHERE w.stream_id=streams.id AND (w.phase='preparing' OR w.phase='active' AND w.expires_at>UTC_TIMESTAMP(6)))",
     )
 }
 
 pub(in super::super) fn fail_startup_chunks() -> Statement<'static> {
     sqlx::query(
-        "UPDATE chunks SET state='failed',unreferenced_at=COALESCE(unreferenced_at,CURRENT_TIMESTAMP(6)) WHERE state IN ('preparing','uploading') AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=chunks.owner_stream)",
+        "UPDATE chunks SET state='failed',unreferenced_at=COALESCE(unreferenced_at,CURRENT_TIMESTAMP(6)) WHERE state IN ('preparing','uploading') AND NOT EXISTS(SELECT 1 FROM transfer_sources t WHERE t.candidate=chunks.owner_stream) AND NOT EXISTS(SELECT 1 FROM node_writes w WHERE w.stream_id=chunks.owner_stream AND (w.phase='preparing' OR w.phase='active' AND w.expires_at>UTC_TIMESTAMP(6)))",
     )
 }
 
 pub(in super::super) fn retire_startup_encodings() -> Statement<'static> {
     sqlx::query(
-        "UPDATE chunk_encodings SET owner_stream=NULL,state='retired',unreferenced_at=COALESCE(unreferenced_at,CURRENT_TIMESTAMP(6)) WHERE state='uploading' AND NOT (boot_id IS NOT NULL AND quarantined_at IS NOT NULL AND encoding_id IN (SELECT current_encoding_id FROM chunks WHERE state='ready'))",
+        "UPDATE chunk_encodings SET owner_stream=NULL,state='retired',unreferenced_at=COALESCE(unreferenced_at,CURRENT_TIMESTAMP(6)) WHERE state='uploading' AND NOT (boot_id IS NOT NULL AND quarantined_at IS NOT NULL AND encoding_id IN (SELECT current_encoding_id FROM chunks WHERE state='ready')) AND NOT EXISTS(SELECT 1 FROM node_writes w WHERE w.stream_id=chunk_encodings.owner_stream AND (w.phase='preparing' OR w.phase='active' AND w.expires_at>UTC_TIMESTAMP(6)))",
     )
 }
 
@@ -120,7 +120,7 @@ pub(in super::super) fn reset_startup_tasks(maintenance: bool) -> Statement<'sta
 }
 
 fn stale_stream_filter(query: &mut sqlx::QueryBuilder<MySql>, retention: Option<f64>) {
-    query.push(" AND NOT EXISTS(SELECT 1 FROM node_reads nr WHERE nr.stream_id=s.id AND nr.expires_at>UTC_TIMESTAMP(6))");
+    query.push(" AND NOT EXISTS(SELECT 1 FROM node_writes w WHERE w.stream_id=s.id AND (w.phase='preparing' OR w.phase='active' AND w.expires_at>UTC_TIMESTAMP(6))) AND NOT EXISTS(SELECT 1 FROM node_reads nr WHERE nr.stream_id=s.id AND nr.expires_at>UTC_TIMESTAMP(6))");
     query.push(" AND ((s.state IN ('retired','abandoned') AND (").push_bind(retention).push(" IS NULL OR s.touched_at<TIMESTAMPADD(MICROSECOND,-").push_bind(retention.map(|v|v*1_000_000.)).push(",CURRENT_TIMESTAMP(6)))) OR s.state='writing') AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_changes p WHERE p.source_version=s.id) AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=s.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=s.id AND rt.phase IN ('preparing','prepared')) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.source_pin=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_items p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_imports i WHERE i.part_stream=s.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p WHERE p.candidate=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing')) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.state='running' AND t.execution_token=s.owner_execution_token)");
 }
 
@@ -167,7 +167,7 @@ pub(in super::super) fn lock_stale_stream(
 }
 
 pub(in super::super) fn abandon_cleanup_stream(id: Id) -> Statement<'static> {
-    sqlx::query("UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_execution_token=NULL WHERE id=? AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared'))").bind(id)
+    sqlx::query("UPDATE streams SET state='abandoned',owner_task_id=NULL,owner_execution_token=NULL WHERE id=? AND NOT EXISTS(SELECT 1 FROM replica_publications rp WHERE rp.source_pin=streams.id AND rp.phase='preparing') AND NOT EXISTS(SELECT 1 FROM replica_targets rt WHERE rt.candidate=streams.id AND rt.phase IN ('preparing','prepared')) AND NOT EXISTS(SELECT 1 FROM node_writes w WHERE w.stream_id=streams.id AND (w.phase='preparing' OR w.phase='active' AND w.expires_at>UTC_TIMESTAMP(6)))").bind(id)
 }
 
 pub(in super::super) fn cleanup_stream_bucket(id: Id) -> Scalar<'static, Uuid> {
@@ -175,7 +175,7 @@ pub(in super::super) fn cleanup_stream_bucket(id: Id) -> Scalar<'static, Uuid> {
 }
 
 pub(in super::super) fn lock_cleanup_stream(id: Id) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT id FROM streams s WHERE id=? AND state='abandoned' AND NOT EXISTS(SELECT 1 FROM node_reads nr WHERE nr.stream_id=s.id AND nr.expires_at>UTC_TIMESTAMP(6)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing')) FOR UPDATE SKIP LOCKED").bind(id)
+    sqlx::query_scalar("SELECT id FROM streams s WHERE id=? AND state='abandoned' AND NOT EXISTS(SELECT 1 FROM node_writes w WHERE w.stream_id=s.id AND (w.phase='preparing' OR w.phase='active' AND w.expires_at>UTC_TIMESTAMP(6))) AND NOT EXISTS(SELECT 1 FROM node_reads nr WHERE nr.stream_id=s.id AND nr.expires_at>UTC_TIMESTAMP(6)) AND NOT EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=s.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE output_stream=s.id AND state IN ('active','completing')) FOR UPDATE SKIP LOCKED").bind(id)
 }
 
 pub(in super::super) async fn detach_stream_chunks(

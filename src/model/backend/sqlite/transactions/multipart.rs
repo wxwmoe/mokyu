@@ -83,13 +83,24 @@ pub(in super::super) async fn begin_upload_part(
     stream: Id,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_permit(&mut tx, authority).await?;
+    begin_upload_part_in(&mut tx, authority, upload, number, stream).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn begin_upload_part_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    authority: &crate::authorization::Permit,
+    upload: Uuid,
+    number: i32,
+    stream: Id,
+) -> Result<()> {
+    lock_permit(tx, authority).await?;
     let parent = queries::lock_upload(upload)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
     ensure!(parent.state == "active", s3s::s3_error!(NoSuchUpload));
-    let info = queries::quota_stream(stream).fetch_one(&mut *tx).await?;
+    let info = queries::quota_stream(stream).fetch_one(&mut **tx).await?;
     ensure!(
         info.bucket_id == parent.bucket_id
             && info.object_key == parent.object_key
@@ -98,14 +109,17 @@ pub(in super::super) async fn begin_upload_part(
         crate::model::Error::OperationAborted
     );
     if let Some((_, token, _)) = queries::lock_upload_part(upload, number)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         && token != stream
     {
-        let mut accounts = lock_quota(&mut tx, parent.bucket_id).await?;
-        if let Some(write) = queries::quota_write(token).fetch_optional(&mut *tx).await? {
+        let mut accounts = lock_quota(tx, parent.bucket_id).await?;
+        if let Some(write) = queries::quota_write(token)
+            .fetch_optional(&mut **tx)
+            .await?
+        {
             let mut row = queries::owned_quota_reservation(Id::default(), Some(upload))
-                .fetch_one(&mut *tx)
+                .fetch_one(&mut **tx)
                 .await?;
             ensure!(
                 write.reservation_id == row.id && !row.closed,
@@ -116,16 +130,15 @@ pub(in super::super) async fn begin_upload_part(
                 row.inflight_bytes,
                 row.credit_bytes,
             );
-            change_reservation(&mut tx, &mut accounts, &mut row, logical, inflight, credit).await?;
+            change_reservation(tx, &mut accounts, &mut row, logical, inflight, credit).await?;
             queries::change_quota_write(token, write.allocated_bytes, 0)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
     }
     queries::begin_upload_part(upload, number, stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -138,18 +151,30 @@ pub(in super::super) async fn commit_upload_part(
     stream: Id,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_permit(&mut tx, authority).await?;
+    commit_upload_part_in(&mut tx, authority, bucket, upload, number, stream).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn commit_upload_part_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    authority: &crate::authorization::Permit,
+    bucket: Uuid,
+    upload: Uuid,
+    number: i32,
+    stream: Id,
+) -> Result<()> {
+    lock_permit(tx, authority).await?;
     let (state, _) = queries::lock_bucket_uploads(bucket)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
     let parent = queries::lock_upload(upload)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
     ensure!(parent.state == "active", s3s::s3_error!(NoSuchUpload));
     let info = queries::publish_stream_record(stream)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         parent.bucket_id == bucket
@@ -159,11 +184,10 @@ pub(in super::super) async fn commit_upload_part(
         crate::model::Error::OperationAborted
     );
     let (old, token, accepted) = queries::lock_upload_part(upload, number)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(token == stream, crate::model::Error::OperationAborted);
     if old == Some(stream) && info.state == "ready" {
-        tx.commit().await?;
         return Ok(());
     }
     ensure!(
@@ -171,22 +195,22 @@ pub(in super::super) async fn commit_upload_part(
         crate::model::Error::OperationAborted
     );
     if info.payload_type == "raw" {
-        validate_raw(&mut tx, stream, info.size).await?;
+        validate_raw(tx, stream, info.size).await?;
     } else {
         let (end, contiguous) = queries::extent_continuity(stream)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
         ensure!(
             end == info.size && contiguous,
             "part mapping has gaps or overlaps"
         );
-        require_sources(&mut tx, Some(stream), &[]).await?;
+        require_sources(tx, Some(stream), &[]).await?;
     }
-    let mut accounts = lock_quota(&mut tx, bucket).await?;
+    let mut accounts = lock_quota(tx, bucket).await?;
     let mut row = queries::owned_quota_reservation(Id::default(), Some(upload))
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
-    let write = queries::quota_write(stream).fetch_one(&mut *tx).await?;
+    let write = queries::quota_write(stream).fetch_one(&mut **tx).await?;
     ensure!(
         write.reservation_id == row.id && write.allocated_bytes >= info.size && !row.closed,
         "part is not reserved"
@@ -202,28 +226,27 @@ pub(in super::super) async fn commit_upload_part(
             - i128::from(write.allocated_bytes),
     )?;
     let credit = row.credit_bytes;
-    change_reservation(&mut tx, &mut accounts, &mut row, logical, inflight, credit).await?;
+    change_reservation(tx, &mut accounts, &mut row, logical, inflight, credit).await?;
     queries::delete_quota_write(stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::publish_upload_part(upload, number, stream, info.size)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    queries::publish_stream(stream).execute(&mut *tx).await?;
-    queries::ready_stream_queues(&mut tx, stream).await?;
+    queries::publish_stream(stream).execute(&mut **tx).await?;
+    queries::ready_stream_queues(tx, stream).await?;
     if let Some(old) = old {
-        forget_quota_write(&mut tx, &mut accounts, old).await?;
-        queries::retire_stream(old).execute(&mut *tx).await?;
+        forget_quota_write(tx, &mut accounts, old).await?;
+        queries::retire_stream(old).execute(&mut **tx).await?;
     }
-    queries::touch_upload(upload).execute(&mut *tx).await?;
+    queries::touch_upload(upload).execute(&mut **tx).await?;
     checkpoint_event(
-        &mut tx,
+        tx,
         "upload.part",
         &upload.to_string(),
         serde_json::json!({"bucket_id":bucket,"part":number}),
     )
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 

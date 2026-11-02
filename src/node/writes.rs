@@ -255,7 +255,10 @@ impl Writes {
                     .any(|grant| grant.reference.r#type == wire::GrantType::WriteProtection as i32),
             "invalid write admission"
         );
-        Uuid::parse_str(&reply.stream_id)?;
+        ensure!(
+            reply.stream_id.parse::<crate::model::Id>()?.is_valid(),
+            "invalid write stream"
+        );
         request.materials = self.reads.cache.apply(
             node.client.identity.deployment_id,
             held,

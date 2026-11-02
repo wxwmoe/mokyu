@@ -127,22 +127,25 @@ pub(in super::super) async fn install_replica(
 }
 
 pub(in super::super) async fn validate_replica_node(
-    _db: &mut super::super::queries::replica::Tx<'_>,
+    db: &mut super::super::queries::replica::Tx<'_>,
+    stream: Id,
+    node: Option<(Uuid, Uuid)>,
+) -> Result<()> {
+    super::super::node_writes::verify_replica(db, stream, node).await
+}
+pub(in super::super) async fn abort_replica_node(
+    db: &mut super::super::queries::replica::Tx<'_>,
+    node: Option<(Uuid, Uuid)>,
+) -> Result<()> {
+    super::super::node_writes::settle_replica(db, node, false).await
+}
+pub(in super::super) async fn finish_replica_node(
+    db: &mut super::super::queries::replica::Tx<'_>,
     _stream: Id,
     node: Option<(Uuid, Uuid)>,
 ) -> Result<()> {
-    ensure!(node.is_none(), crate::model::Error::OperationAborted);
-    Ok(())
+    super::super::node_writes::settle_replica(db, node, true).await
 }
-
-pub(in super::super) async fn abort_replica_node(
-    _db: &mut super::super::queries::replica::Tx<'_>,
-    node: Option<(Uuid, Uuid)>,
-) -> Result<()> {
-    ensure!(node.is_none(), crate::model::Error::OperationAborted);
-    Ok(())
-}
-
 pub(super) async fn reject_admission(pool: &SqlitePool, id: Id, reason: &str) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     super::super::replica_transactions::reap_admission(&mut tx, id, Some(reason)).await?;

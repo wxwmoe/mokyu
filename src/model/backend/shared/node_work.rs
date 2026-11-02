@@ -233,6 +233,7 @@ impl NodeWork for Backend {
         let mut tx = registry::begin(self).await?;
         let count = q::requeue().execute(&mut *tx).await?.rows_affected();
         q::prune().execute(&mut *tx).await?;
+        super::node_writes::expire(&mut tx).await?;
         super::queries::node_receipts::prune()
             .execute(&mut *tx)
             .await?;
@@ -379,6 +380,18 @@ pub(super) async fn grants(
                     .rows_affected()
                     == 1;
                 held.then_some(90_000)
+            } else if grant.r#type == GrantType::Write || grant.r#type == GrantType::StorageWrite {
+                let statement = if grant.r#type == GrantType::Write {
+                    queries::node_writes::touch(node, run, grant.id, renew)
+                } else {
+                    queries::node_writes::touch_permit(node, run, grant.id, renew)
+                };
+                let held = statement.execute(&mut **tx).await?.rows_affected() > 0;
+                held.then_some(if grant.r#type == GrantType::Write {
+                    90_000
+                } else {
+                    60_000
+                })
             } else {
                 super::queries::read_grants::touch_read(tx, node, run, grant, renew).await?
             };

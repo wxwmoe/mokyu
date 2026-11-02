@@ -62,7 +62,6 @@ use serde_json::json;
 use sqlx::{Connection, SqliteConnection};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use uuid::Uuid;
-pub(super) use validate_replica_node as finish_replica_node;
 
 #[cfg(test)]
 #[path = "../../../../../tests/recovery/sqlite_cleanup.rs"]

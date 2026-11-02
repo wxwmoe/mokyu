@@ -175,8 +175,43 @@ pub(crate) trait StoragePermits: Send + Sync {
 }
 
 #[async_trait]
+pub(crate) trait NodeWrites: Send + Sync {
+    async fn begin_write(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_write::Begin,
+    ) -> Result<super::node_write::Reply>;
+    async fn write_status(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_write::Lookup,
+        abort: bool,
+    ) -> Result<super::node_write::Reply>;
+    async fn publish_write(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_write::Publish,
+    ) -> Result<super::node_write::Reply>;
+    async fn prepare_raw(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_raw::Prepare,
+    ) -> Result<super::node_raw::Prepared>;
+    async fn commit_raw(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_raw::Commit,
+    ) -> Result<super::node_raw::Prepared>;
+}
+
+#[async_trait]
 pub(crate) trait ClusterStore:
-    NodeSessions + NodeWork + NodeNotices + NodeRequests + NodeReads
+    NodeSessions + NodeWork + NodeNotices + NodeRequests + NodeReads + NodeWrites
 {
     async fn begin_report(
         &self,
@@ -289,18 +324,6 @@ pub(crate) trait ClusterStore:
         key: &Key,
         input: super::node_write::Lookup,
     ) -> Result<super::node_tail::Prepared>;
-    async fn prepare_raw(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_raw::Prepare,
-    ) -> Result<super::node_raw::Prepared>;
-    async fn commit_raw(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_raw::Commit,
-    ) -> Result<super::node_raw::Prepared>;
     async fn prepare_chunks(
         &self,
         node: &NodeState,
@@ -320,31 +343,12 @@ pub(crate) trait ClusterStore:
         key: &Key,
         input: super::node_chunk::Commit,
     ) -> Result<i64>;
-    async fn publish_write(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_write::Publish,
-    ) -> Result<super::node_write::Reply>;
     async fn copy_write_references(
         &self,
         node: &NodeState,
         key: &Key,
         input: super::node_write::CopyBatch,
     ) -> Result<i64>;
-    async fn begin_write(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_write::Begin,
-    ) -> Result<super::node_write::Reply>;
-    async fn write_status(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_write::Lookup,
-        abort: bool,
-    ) -> Result<super::node_write::Reply>;
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
     async fn begin_remote(
         &self,

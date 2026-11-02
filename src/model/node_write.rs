@@ -178,7 +178,7 @@ pub(crate) enum Phase {
 pub(crate) struct Reply {
     pub operation: Uuid,
     pub bucket: Option<Uuid>,
-    pub stream: Option<Uuid>,
+    pub stream: Option<super::Id>,
     pub phase: Phase,
     pub materials: Vec<node_read::Material>,
     pub storage: Option<node_read::Version>,
@@ -191,6 +191,8 @@ pub(crate) struct Reply {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Published {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<(Uuid, super::Id)>,
     pub size: i64,
     pub etag: String,
     pub modified: chrono::DateTime<chrono::Utc>,

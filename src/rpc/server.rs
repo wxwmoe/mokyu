@@ -405,7 +405,7 @@ impl NodeWrites for Service {
     ) -> Result<Response<wire::PreparedRaw>, Status> {
         let node = write_identity(&request)?;
         let input = super::write::prepare_raw(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.prepare_raw(
+        let reply = bounded(self.app.node_writes.prepare_raw(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -422,7 +422,7 @@ impl NodeWrites for Service {
     ) -> Result<Response<wire::PreparedRaw>, Status> {
         let node = write_identity(&request)?;
         let input = super::write::commit_raw(write_request(request)?)?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.commit_raw(
+        let reply = bounded(self.app.node_writes.commit_raw(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -529,7 +529,7 @@ impl NodeWrites for Service {
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = write_identity(&request)?;
         let input = super::write::publish(write_request(request)?)?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.publish_write(
+        let reply = bounded(self.app.node_writes.publish_write(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -549,7 +549,7 @@ impl NodeWrites for Service {
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::write::begin(write_request(request)?)?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.begin_write(
+        let reply = bounded(self.app.node_writes.begin_write(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -614,7 +614,7 @@ impl Service {
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = write_identity(&request)?;
         let input = super::write::lookup(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.write_status(
+        let reply = bounded(self.app.node_writes.write_status(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1240,7 +1240,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::multipart::begin_complete(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.begin_write(
+        let reply = bounded(self.app.node_writes.begin_write(
             &node,
             &self.app.secrets.credential_key,
             input,

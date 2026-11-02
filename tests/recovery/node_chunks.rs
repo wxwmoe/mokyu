@@ -4,7 +4,7 @@ use crate::{
     content::codec::{self, Key},
     model::{
         self, RuntimeSettingsStore,
-        cluster::{ClusterStore, NodeSessions},
+        cluster::{ClusterStore, NodeSessions, NodeWrites},
         key::ManagedKeyStore,
         node_chunk as chunk, node_write as write,
         session::{Open, Run},
@@ -462,7 +462,7 @@ async fn postgres_node_chunks_replay_claims_nonces_and_publication() -> Result<(
     .bind(bucket)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(retained, Some(stream));
+    assert_eq!(retained.map(crate::model::Id::from), Some(stream));
     let permits: i64 = sqlx::query_scalar("SELECT count(*) FROM node_write_permits")
         .fetch_one(&pool)
         .await?;

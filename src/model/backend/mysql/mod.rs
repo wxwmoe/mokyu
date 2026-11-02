@@ -12,6 +12,8 @@ mod node_registry;
 mod node_requests;
 #[path = "../shared/node_work.rs"]
 mod node_work;
+#[path = "../shared/node_writes.rs"]
+mod node_writes;
 #[path = "../shared/notices.rs"]
 mod notices;
 mod queries;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::cluster::NodeWrites;
 use crate::model::{node_read as read, node_work as work};
 use anyhow::Context;
 

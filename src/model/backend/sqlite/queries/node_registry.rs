@@ -145,10 +145,10 @@ pub(in super::super) fn release_handoff() -> Statement<'static> {
 }
 
 pub(in super::super) fn active_reads(node: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_reads WHERE node_id=? AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(node)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_reads WHERE node_id=? AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) OR EXISTS(SELECT 1 FROM node_writes WHERE node_id=? AND (phase='preparing' OR phase='active' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)))").bind(node).bind(node)
 }
 pub(in super::super) fn active_grants() -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM node_reads WHERE expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) OR EXISTS(SELECT 1 FROM storage_permits WHERE expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))",
+        "SELECT EXISTS(SELECT 1 FROM node_reads WHERE expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) OR EXISTS(SELECT 1 FROM node_writes WHERE phase='preparing' OR phase='active' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) OR EXISTS(SELECT 1 FROM storage_permits WHERE expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))",
     )
 }

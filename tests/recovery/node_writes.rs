@@ -4,7 +4,7 @@ use crate::{
     content::codec::{self, Key},
     model::{
         self, RuntimeSettingsStore,
-        cluster::{ClusterStore, NodeRequests, NodeSessions},
+        cluster::{ClusterStore, NodeRequests, NodeSessions, NodeWrites},
         node_read as read, node_write as write,
         session::{Open, Run},
     },
@@ -599,7 +599,7 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
     .bind(bucket)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(Some(token), replacement.stream);
+    assert_eq!(Some(token.into()), replacement.stream);
     backend
         .write_status(
             &peer,

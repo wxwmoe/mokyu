@@ -284,26 +284,6 @@ impl ClusterStore for Backend {
             .map_err(normalize_error)
     }
 
-    async fn prepare_raw(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_raw::Prepare,
-    ) -> Result<crate::model::node_raw::Prepared> {
-        transactions::prepare_node_raw(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn commit_raw(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_raw::Commit,
-    ) -> Result<crate::model::node_raw::Prepared> {
-        transactions::commit_node_raw(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
     async fn prepare_chunks(
         &self,
         node: &crate::cluster::NodeState,
@@ -335,16 +315,7 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn publish_write(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_write::Publish,
-    ) -> Result<crate::model::node_write::Reply> {
-        super::super::transactions::publish_node_write(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
+
     async fn copy_write_references(
         &self,
         node: &crate::cluster::NodeState,
@@ -355,27 +326,7 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn begin_write(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_write::Begin,
-    ) -> Result<crate::model::node_write::Reply> {
-        transactions::begin_node_write(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn write_status(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_write::Lookup,
-        abort: bool,
-    ) -> Result<crate::model::node_write::Reply> {
-        transactions::node_write_status(&self.pool, node, key, input, abort)
-            .await
-            .map_err(normalize_error)
-    }
+
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
         Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
     }
@@ -880,5 +831,60 @@ impl crate::model::cluster::StoragePermits for Backend {
 
     async fn release_storage_permit(&self, token: uuid::Uuid) -> Result<()> {
         transactions::release_storage_permit(&self.pool, token).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::model::cluster::NodeWrites for Backend {
+    async fn begin_write(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::Begin,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::begin_node_write(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn write_status(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::Lookup,
+        abort: bool,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::node_write_status(self, node, key, input, abort)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn publish_write(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::Publish,
+    ) -> Result<crate::model::node_write::Reply> {
+        super::super::transactions::publish_node_write(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn prepare_raw(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_raw::Prepare,
+    ) -> Result<crate::model::node_raw::Prepared> {
+        transactions::prepare_node_raw(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn commit_raw(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_raw::Commit,
+    ) -> Result<crate::model::node_raw::Prepared> {
+        transactions::commit_node_raw(self, node, key, input)
+            .await
+            .map_err(normalize_error)
     }
 }

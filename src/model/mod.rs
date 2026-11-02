@@ -105,6 +105,7 @@ pub(crate) struct Stores {
     pub(crate) integrity_rates: Arc<crate::storage::rate::IntegrityRates>,
     pub(crate) runtime: Arc<dyn runtime::RuntimeStore>,
     pub(crate) storage_permits: Arc<dyn cluster::StoragePermits>,
+    pub(crate) node_writes: Arc<dyn cluster::NodeWrites>,
     pub(crate) node_reads: Arc<dyn cluster::NodeReads>,
     pub(crate) node_requests: Arc<dyn cluster::NodeRequests>,
     pub(crate) notices: Arc<dyn cluster::NodeNotices>,

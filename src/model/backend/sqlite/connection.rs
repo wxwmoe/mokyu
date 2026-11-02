@@ -43,6 +43,7 @@ pub(crate) async fn connect(
         integrity_rates: backend.integrity_rates.clone(),
         notices: std::sync::Arc::new(super::notices::Single(backend.clone())),
         storage_permits: backend.clone(),
+        node_writes: backend.clone(),
         node_reads: backend.clone(),
         node_requests: backend.clone(),
         node_work: backend.clone(),

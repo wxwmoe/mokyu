@@ -1,7 +1,7 @@
 use super::*;
 
 pub(in super::super) async fn begin_node_write(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     input: crate::model::node_write::Begin,
@@ -10,7 +10,8 @@ pub(in super::super) async fn begin_node_write(
     input.intent.validate()?;
     let issued = write::operation_time(input.operation)?;
     let hash = input.intent.hash()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
     ensure!(
         matches!(state.role.as_str(), "data" | "node"),
@@ -388,8 +389,13 @@ pub(in super::super) async fn node_write_reply(
     };
     let mut reply = write::Reply {
         operation: owned.operation_id,
-        bucket: owned.bucket_id,
-        stream: owned.stream_id,
+        bucket: owned
+            .bucket_id
+            .or_else(|| owned.result.as_ref()?.identity.map(|(bucket, _)| bucket)),
+        stream: owned
+            .stream_id
+            .map(Into::into)
+            .or_else(|| owned.result.as_ref()?.identity.map(|(_, stream)| stream)),
         phase,
         copy_references: owned
             .copy_source
@@ -468,14 +474,15 @@ async fn abort_node_writes(
 }
 
 pub(in super::super) async fn node_write_status(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     input: crate::model::node_write::Lookup,
     abort: bool,
 ) -> Result<crate::model::node_write::Reply> {
     use crate::model::Error;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
     ensure!(
         matches!(state.role.as_str(), "data" | "worker" | "node"),
@@ -1186,13 +1193,14 @@ pub(in super::super) async fn copy_node_references(
 }
 
 pub(in super::super) async fn publish_node_write(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     mut input: write::Publish,
 ) -> Result<write::Reply> {
     let hash = input.hash()?;
-    let mut tx: Transaction<'_, Postgres> = pool.begin().await?;
+    let mut tx: Transaction<'_, Postgres> = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     if let Some(previous) = &row.publish_hash {
         ensure!(previous == &hash, Error::NodeOperationConflict);
@@ -1381,7 +1389,7 @@ pub(in super::super) async fn publish_node_write(
             Err(error) => {
                 if let Some(reason) = crate::model::replica_rejection(&error) {
                     tx.rollback().await?;
-                    reject_admission(pool, stream, reason).await?;
+                    reject_admission(&backend.pool, stream, reason).await?;
                 }
                 return Err(error);
             }
@@ -1392,6 +1400,7 @@ pub(in super::super) async fn publish_node_write(
         .execute(&mut *tx)
         .await?;
     let result = write::Published {
+        identity: row.bucket_id.map(|bucket| (bucket, stream)),
         size: input.size,
         etag: input.etag,
         modified,
@@ -1598,14 +1607,15 @@ pub(in super::super) async fn commit_node_tail(
 }
 
 pub(in super::super) async fn prepare_node_raw(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: crate::model::node_raw::Prepare,
 ) -> Result<crate::model::node_raw::Prepared> {
     input.input.validate()?;
     let hash = chunk::hash(&input.input)?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     if let Some(raw) = queries::node_raw_write(node.node_id, input.operation)
         .fetch_optional(&mut *tx)
@@ -1761,12 +1771,13 @@ pub(in super::super) async fn prepare_node_raw(
 }
 
 pub(in super::super) async fn commit_node_raw(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: crate::model::node_raw::Commit,
 ) -> Result<crate::model::node_raw::Prepared> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     let raw = queries::node_raw_write(node.node_id, input.operation)
         .fetch_optional(&mut *tx)

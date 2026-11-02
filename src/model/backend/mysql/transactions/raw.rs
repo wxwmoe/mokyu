@@ -269,7 +269,7 @@ pub(in super::super) async fn deduplicate_raw(
     Ok(reused)
 }
 
-async fn share_raw(
+pub(in super::super) async fn share_raw(
     db: &mut sqlx::MySqlConnection,
     stream: Id,
     current: &crate::model::raw::RawSource,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::cluster::NodeReads;
+use crate::model::cluster::NodeWrites;
 use crate::model::node_read as read;
 
 fn source(run: Run, key: &str) -> read::Query {

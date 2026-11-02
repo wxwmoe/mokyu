@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102213026.
+-- Generated from the complete mysql migration chain through 20261102214049.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -616,6 +616,61 @@ CREATE TABLE `node_work` (
   KEY `node_work_task` (`task_id`),
   CONSTRAINT `node_work_node_fk` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`),
   CONSTRAINT `node_work_task_fk` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_write_permits` (
+  `token` binary(16) NOT NULL,
+  `node_id` binary(16) NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  PRIMARY KEY (`token`),
+  KEY `node_id` (`node_id`,`operation_id`),
+  CONSTRAINT `node_write_permits_ibfk_1` FOREIGN KEY (`token`) REFERENCES `storage_permits` (`token`) ON DELETE CASCADE,
+  CONSTRAINT `node_write_permits_ibfk_2` FOREIGN KEY (`node_id`, `operation_id`) REFERENCES `node_writes` (`node_id`, `operation_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_write_raw` (
+  `node_id` binary(16) NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  `request_hash` binary(32) NOT NULL,
+  `source_id` bigint NOT NULL,
+  `location_id` binary(16) NOT NULL,
+  `size` bigint NOT NULL,
+  `digest` binary(16) NOT NULL,
+  `content_hash` binary(32) DEFAULT NULL,
+  `committed` tinyint(1) NOT NULL,
+  PRIMARY KEY (`node_id`,`operation_id`),
+  CONSTRAINT `node_write_raw_ibfk_1` FOREIGN KEY (`node_id`, `operation_id`) REFERENCES `node_writes` (`node_id`, `operation_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_writes` (
+  `node_id` binary(16) NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  `lease_id` binary(16) NOT NULL,
+  `boot_id` binary(16) NOT NULL,
+  `fence` binary(16) NOT NULL,
+  `credential_generation` bigint NOT NULL,
+  `request_hash` binary(32) NOT NULL,
+  `stream_id` bigint DEFAULT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `block_key_id` binary(16) DEFAULT NULL,
+  `profile` json NOT NULL,
+  `intent` json NOT NULL,
+  `copy_source` json DEFAULT NULL,
+  `next_offset` bigint NOT NULL DEFAULT '0',
+  `next_batch` bigint NOT NULL DEFAULT '1',
+  `phase` varchar(12) COLLATE utf8mb4_bin NOT NULL DEFAULT 'active',
+  `publish_hash` binary(32) DEFAULT NULL,
+  `published` json DEFAULT NULL,
+  `expires_at` datetime(6) NOT NULL,
+  `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`node_id`,`operation_id`),
+  UNIQUE KEY `lease_id` (`lease_id`),
+  KEY `stream_id` (`stream_id`),
+  KEY `node_writes_expiry` (`phase`,`expires_at`),
+  KEY `node_writes_retention` (`phase`,`updated_at`),
+  CONSTRAINT `node_writes_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`),
+  CONSTRAINT `node_writes_ibfk_2` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `nodes` (

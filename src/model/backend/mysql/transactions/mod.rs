@@ -59,7 +59,6 @@ use serde_json::{Value, json};
 use sqlx::{Connection, MySqlConnection};
 use sqlx::{MySql, MySqlPool, Transaction};
 use uuid::Uuid;
-pub(super) use validate_replica_node as finish_replica_node;
 
 mod metrics;
 pub(super) use metrics::*;

@@ -655,21 +655,28 @@ pub(in super::super) async fn publish_migration_in(
 
 pub(in super::super) async fn abandon_copy(pool: &MySqlPool, id: Id) -> Result<()> {
     let mut tx = pool.begin().await?;
+    abandon_copy_in(&mut tx, id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn abandon_copy_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    id: Id,
+) -> Result<()> {
     let stream = queries::publish_stream_record(id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     if let Some(stream) = stream
         && stream.state == "writing"
         && queries::abandon_copy_stream(id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1
     {
-        let mut accounts = lock_quota(&mut tx, stream.bucket_id).await?;
-        forget_quota_write(&mut tx, &mut accounts, id).await?;
+        let mut accounts = lock_quota(tx, stream.bucket_id).await?;
+        forget_quota_write(tx, &mut accounts, id).await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 

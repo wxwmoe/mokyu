@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::cluster::NodeRequests;
+use crate::model::cluster::NodeWrites;
 use crate::model::{
     node_complete as complete, node_native as native, node_read as read, node_write as write,
 };
@@ -70,7 +71,9 @@ pub(super) async fn check(
         cached: vec![],
     };
     let admitted = backend.begin_write(node, key, begin(id, None)).await?;
-    let stream = admitted.stream.unwrap();
+    let Some(crate::model::Id::Uuid(stream)) = admitted.stream else {
+        anyhow::bail!("expected PostgreSQL stream identity")
+    };
     let local = || native::LocalPart {
         run,
         operation: id,

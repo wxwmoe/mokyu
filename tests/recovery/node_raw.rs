@@ -4,7 +4,7 @@ use crate::{
     content::codec::{self, Key},
     model::{
         self, RuntimeSettingsStore,
-        cluster::{ClusterStore, NodeSessions, NodeWork},
+        cluster::{ClusterStore, NodeSessions, NodeWork, NodeWrites},
         node_raw as raw, node_write as write,
         session::{Open, Run},
     },
@@ -375,7 +375,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
             .is_err()
     );
     assert!(backend.prepare_raw(&node, &key, pending).await.is_err());
-    let retained: (Uuid, String) =
+    let retained: (crate::model::Id, String) =
         sqlx::query_as("SELECT owner_stream,state FROM raw_sources WHERE id=$1")
             .bind(plan.source)
             .fetch_one(&pool)

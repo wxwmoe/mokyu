@@ -1,5 +1,6 @@
 use super::*;
 use crate::model::cluster::NodeRequests;
+use crate::model::cluster::NodeWrites;
 use crate::model::{node_read as read, node_tail as tail, node_write as write};
 
 pub(super) async fn check(
@@ -263,7 +264,8 @@ pub(super) async fn check(
         queries::node_write(node.node_id, replacement)
             .fetch_one(pool)
             .await?
-            .stream_id,
+            .stream_id
+            .map(crate::model::Id::from),
         current.stream
     );
     backend
