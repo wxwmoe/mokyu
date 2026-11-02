@@ -13,6 +13,31 @@ async fn close(backend: Backend) {
     backend.write.close().await;
 }
 
+#[tokio::test]
+async fn single_control_requires_saved_and_active_full_sync() -> Result<()> {
+    let mut connection = SqliteConnection::connect("sqlite::memory:").await?;
+    super::migration::run(&mut connection).await?;
+    sqlx::query("UPDATE mokyu_meta SET maintenance=1")
+        .execute(&mut connection)
+        .await?;
+    for (pragma, setting) in [
+        ("PRAGMA synchronous=NORMAL", "full"),
+        ("PRAGMA synchronous=OFF", "full"),
+        ("PRAGMA synchronous=FULL", "normal"),
+    ] {
+        sqlx::query(pragma).execute(&mut connection).await?;
+        sqlx::query("INSERT INTO runtime_settings(section,value) VALUES('io',json_object('sqlite_synchronous',?)) ON CONFLICT(section) DO UPDATE SET value=excluded.value")
+            .bind(setting).execute(&mut connection).await?;
+        let mut tx = connection.begin().await?;
+        let error = super::transactions::change_mode(&mut tx, "single_control")
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), super::CONTROL_SYNC);
+        tx.rollback().await?;
+    }
+    Ok(())
+}
+
 struct Process(Child);
 impl Drop for Process {
     fn drop(&mut self) {

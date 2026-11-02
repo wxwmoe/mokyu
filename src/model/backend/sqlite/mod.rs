@@ -72,6 +72,9 @@ use std::{fs::File, path::PathBuf};
 
 pub(crate) use connection::connect;
 
+const CONTROL_SYNC: &str =
+    "SQLite single control requires io.sqlite_synchronous=full. Save full and restart the primary";
+
 pub(crate) struct Backend {
     read_reports: tokio::sync::Mutex<()>,
     integrity_rates: std::sync::Arc<crate::storage::rate::IntegrityRates>,

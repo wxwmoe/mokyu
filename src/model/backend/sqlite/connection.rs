@@ -257,9 +257,6 @@ pub(super) async fn open(
             blake3::hash(&secrets.credential_key.material).as_bytes(),
         )
         .await?;
-        control_epoch = queries::claim_control_epoch()
-            .fetch_optional(&mut connection)
-            .await?;
         let settings = queries::runtime_setting("io")
             .fetch_optional(&mut connection)
             .await?
@@ -274,6 +271,18 @@ pub(super) async fn open(
                     .await?,
             "SQLite OFF synchronization is unavailable after encryption nonce reservations"
         );
+        if settings.sqlite_synchronous != "full" {
+            ensure!(
+                queries::replication::mode()
+                    .fetch_one(&mut connection)
+                    .await?
+                    != "single_control",
+                super::CONTROL_SYNC
+            );
+        }
+        control_epoch = queries::claim_control_epoch()
+            .fetch_optional(&mut connection)
+            .await?;
         synchronous = match settings.sqlite_synchronous.as_str() {
             "normal" => SqliteSynchronous::Normal,
             "off" => SqliteSynchronous::Off,

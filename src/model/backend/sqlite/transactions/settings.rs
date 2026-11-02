@@ -82,6 +82,17 @@ pub(in super::super) async fn change_mode(
         ModeConflict("drain active node reads and storage permits before changing deployment mode")
     );
     if mode == "single_control" {
+        let settings = queries::runtime_setting("io")
+            .fetch_optional(&mut **tx)
+            .await?
+            .map(serde_json::from_value::<crate::config::runtime::IoSettings>)
+            .transpose()?
+            .unwrap_or_default();
+        ensure!(
+            settings.sqlite_synchronous == "full"
+                && queries::synchronous().fetch_one(&mut **tx).await? == 2,
+            ModeConflict(super::super::CONTROL_SYNC)
+        );
         ensure!(
             !queries::local_storages().fetch_one(&mut **tx).await?,
             ModeConflict(

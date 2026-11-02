@@ -100,6 +100,12 @@ pub(in super::super) async fn save_runtime_settings(
 ) -> Result<RuntimeSettingsRow> {
     let mut tx = admin_transaction(pool, principal).await?;
     check_upload_stage(&mut tx, section, &value).await?;
+    if section == "io" && matches!(value["sqlite_synchronous"].as_str(), Some("off" | "normal")) {
+        ensure!(
+            queries::replication::mode().fetch_one(&mut *tx).await? != "single_control",
+            crate::model::runtime::ModeConflict(super::super::CONTROL_SYNC)
+        );
+    }
     if section == "io" && value["sqlite_synchronous"] == "off" {
         ensure!(
             !queries::nonces_reserved().fetch_one(&mut *tx).await?,

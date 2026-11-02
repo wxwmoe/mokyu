@@ -33,6 +33,8 @@ SQLite 使用 WAL、外键和默认 FULL 同步，数据库及其 `-wal`、`-shm
 
 SQLite 将 `instance.database_connections` 中的一个连接用于串行写入，其余用于只读查询；设置为 `1` 时读写共用一个连接。更高的连接数不增加同时写入的事务数。
 
+SQLite 单主控群集要求 `io.sqlite_synchronous = "full"`，使模式修订、节点凭据撤销和对象发布在答复前同步到 WAL。先在单容器保存 FULL 并重启，使写连接实际生效，再切入单主控。回到单容器后可重新选择同步档位。
+
 SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`normal`、`off`，保存后重启生效。NORMAL 在断电或系统崩溃后可能丢失已提交事务，OFF 还可能损坏数据库；影响整个元数据库，包括配置、凭据和对象映射。初始化与迁移始终使用 FULL，完成后才按保存值创建运行连接池。NORMAL 下加密 nonce 的预留仍以 FULL 提交；已有任何加密预留的数据库不能设置 OFF，OFF 生效或等待生效期间拒绝新的加密预留。恢复加密写入需保存 FULL/NORMAL 并重启。面板的 `database.journal_mode` 和 `database.synchronous` 显示实际连接读取值；后端存储设置不会修改此选项，其他数据库不提供它。
 
 ## replica_database
