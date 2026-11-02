@@ -78,6 +78,21 @@ fn require(row: Node, control: i64, run: Run) -> Result<Lease> {
     Ok(lease)
 }
 
+pub(super) async fn require_work(
+    backend: &Backend,
+    tx: &mut q::Tx<'_>,
+    state: &NodeState,
+    key: &Key,
+    run: Run,
+) -> Result<bool> {
+    let lease = require(
+        authenticated(tx, state, key).await?,
+        q::epoch(backend)?,
+        run,
+    )?;
+    Ok(!lease.draining)
+}
+
 fn valid_name(name: &str) -> Result<()> {
     ensure!(
         (1..=128).contains(&name.len())
@@ -109,6 +124,10 @@ async fn identity(
     let deployment = q::deployment().fetch_one(&mut **tx).await?;
     let encrypted = protect(secret.as_bytes(), key, credential_binding(id).as_bytes())?;
     if row.is_some() {
+        super::queries::work::expire_node(id)
+            .execute(&mut **tx)
+            .await?;
+        super::queries::work::requeue().execute(&mut **tx).await?;
         q::rotate(id, generation, &encrypted)
             .execute(&mut **tx)
             .await?;
@@ -129,7 +148,7 @@ async fn identity(
 }
 
 async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease) -> Result<Snapshot> {
-    let (maintenance, mode, mode_revision) = q::mode().fetch_one(&mut **tx).await?;
+    let (maintenance, mode, mode_revision, work_pending) = q::mode().fetch_one(&mut **tx).await?;
     let settings = q::settings().fetch_all(&mut **tx).await?;
     Ok(Snapshot {
         mode,
@@ -145,22 +164,9 @@ async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease) -> Result<Snapshot> {
         settings,
         grants: Vec::new(),
         native_pending: false,
-        work_pending: false,
+        work_pending,
         pending_uploads: 0,
     })
-}
-
-fn grants(resources: KeepAlive) -> Vec<GrantResult> {
-    resources
-        .renew
-        .into_iter()
-        .chain(resources.release)
-        .map(|grant| GrantResult {
-            grant,
-            accepted: false,
-            valid_for_ms: 0,
-        })
-        .collect()
 }
 
 #[async_trait::async_trait]
@@ -255,13 +261,20 @@ impl NodeSessions for Backend {
         Ok(state)
     }
     async fn release(&self, name: &str) -> Result<()> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = q::membership(self, None, true).await?;
         let row = q::named(name)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(Error::NodeInactive)?;
         ensure!(row.enabled && row.role != "control", Error::NodeInactive);
+        super::queries::work::expire_node(row.id)
+            .execute(&mut *tx)
+            .await?;
+        super::queries::work::requeue().execute(&mut *tx).await?;
         q::release(row.id).execute(&mut *tx).await?;
+        if matches!(row.role.as_str(), "node" | "worker") {
+            q::release_handoff().execute(&mut *tx).await?;
+        }
         tx.commit().await?;
         Ok(())
     }
@@ -318,6 +331,12 @@ impl NodeSessions for Backend {
                 .await?;
             q::clear_report(state.node_id).execute(&mut *tx).await?;
         }
+        if previous.as_ref().is_some_and(|old| old.fence != fence) {
+            super::queries::work::expire_node(state.node_id)
+                .execute(&mut *tx)
+                .await?;
+            super::queries::work::requeue().execute(&mut *tx).await?;
+        }
         let lease = Lease {
             control,
             boot: input.boot,
@@ -370,7 +389,7 @@ impl NodeSessions for Backend {
     ) -> Result<bool> {
         report.validate()?;
         ensure!(report.boot_id == run.boot, Error::NodeConflict);
-        let mut tx = q::begin(self).await?;
+        let mut tx = q::membership(self, report.worker_revision(&state.role), false).await?;
         let mut lease = require(
             authenticated(&mut tx, state, key).await?,
             q::epoch(self)?,
@@ -380,6 +399,7 @@ impl NodeSessions for Backend {
             return Ok(false);
         }
         lease.report_sequence = report.sequence;
+
         let mut value = serde_json::to_value(report)?;
         if report.metadata.is_none()
             && let Some(previous) = q::report(state.node_id).fetch_one(&mut *tx).await?
@@ -418,7 +438,7 @@ impl NodeSessions for Backend {
         lease.expires = Utc::now() + chrono::Duration::seconds(session::LEASE_SECONDS);
         q::save(state.node_id, &lease).execute(&mut *tx).await?;
         let mut reply = snapshot(&mut tx, &lease).await?;
-        reply.grants = grants(resources);
+        reply.grants = super::node_work::grants(&mut tx, state.node_id, run, resources).await?;
         tx.commit().await?;
         Ok(reply)
     }
@@ -443,10 +463,11 @@ impl NodeSessions for Backend {
         );
         lease.sequence = sequence;
         q::save(state.node_id, &lease).execute(&mut *tx).await?;
+        let granted = super::node_work::grants(&mut tx, state.node_id, run, resources).await?;
         tx.commit().await?;
         Ok((
             (lease.expires - Utc::now()).num_milliseconds().max(0),
-            grants(resources),
+            granted,
         ))
     }
 }

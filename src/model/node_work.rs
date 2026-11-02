@@ -341,6 +341,71 @@ pub(crate) struct Reply {
     pub external: Option<serde_json::Value>,
 }
 
+pub(crate) fn materialize(
+    node: &crate::cluster::NodeState,
+    key: &crate::content::codec::Key,
+    input: &Exchange,
+    plan: Option<Plan>,
+    encrypted: Option<&[u8]>,
+    token: Uuid,
+    ttl: i64,
+) -> Result<Reply> {
+    use crate::{content::codec, model::Error};
+    use anyhow::Context as _;
+    let mut materials = vec![];
+    let mut grants = vec![];
+    let mut external = None;
+    if let Some(plan) = &plan {
+        let material = codec::unprotect(
+            encrypted.context("work storage is missing")?,
+            key,
+            token.as_bytes(),
+        )?;
+        if let Some(storage) = plan.storage() {
+            let values: Materials = serde_json::from_str(&material)?;
+            ensure!(
+                values.storage.profile.storage_id == storage,
+                Error::NodeOperationConflict
+            );
+            for value in std::iter::once(values.storage).chain(values.additional) {
+                node_read::material(
+                    &mut materials,
+                    node.deployment_id,
+                    node_read::MaterialType::Storage,
+                    value.profile.storage_id.to_string(),
+                    &value,
+                    &input.cached,
+                )?;
+            }
+            for block in values.keys {
+                node_read::material(
+                    &mut materials,
+                    node.deployment_id,
+                    node_read::MaterialType::Key,
+                    block.id.to_string(),
+                    &block,
+                    &input.cached,
+                )?;
+            }
+        } else {
+            external = Some(serde_json::from_str(&material)?);
+        }
+        grants.push(node_read::Grant {
+            r#type: node_read::GrantType::Work,
+            id: token,
+            valid_for_ms: ttl as u64,
+            storage: plan.storage(),
+        });
+    }
+    Ok(Reply {
+        operation: input.operation,
+        plan,
+        materials,
+        grants,
+        external,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

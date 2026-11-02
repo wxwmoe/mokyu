@@ -160,7 +160,7 @@ pub(in super::super) fn active_staging() -> Scalar<'static, Uuid> {
 }
 
 pub(in super::super) fn set_deployment_mode(mode: &str) -> Statement<'_> {
-    sqlx::query("UPDATE mokyu_meta SET deployment_mode=?,deployment_mode_revision=deployment_mode_revision+1 WHERE id=1").bind(mode)
+    sqlx::query("UPDATE mokyu_meta SET remote_work=FALSE,deployment_mode=?,deployment_mode_revision=deployment_mode_revision+1 WHERE id=1").bind(mode)
 }
 
 pub(in super::super) fn preserve_task_mode(mode: &str) -> Statement<'_> {

@@ -399,6 +399,11 @@ pub(in super::super) async fn report_node_session(
         sample.validate()?;
     }
     let mut tx = backend.pool.begin().await?;
+    if backend.control_epoch.is_some()
+        && let Some(revision) = report.worker_revision(&state.role)
+    {
+        queries::hand_off(revision).execute(&mut *tx).await?;
+    }
     backend.fence_control(&mut tx).await?;
     queries::runtime_diagnostic_limits()
         .execute(&mut *tx)
@@ -410,7 +415,10 @@ pub(in super::super) async fn report_node_session(
         .await?
         .rows_affected()
         == 1;
-    if written && let Some(sample) = &sample {
+    if !written {
+        return Ok(false);
+    }
+    if let Some(sample) = &sample {
         queries::node_runtime_sample(state.node_id, sample)
             .execute(&mut *tx)
             .await?;

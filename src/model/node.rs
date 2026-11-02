@@ -165,6 +165,21 @@ pub(crate) struct NodeReport {
     pub status: Value,
 }
 impl NodeReport {
+    pub(crate) fn worker_revision(&self, role: &str) -> Option<i64> {
+        if !matches!(role, "worker" | "node")
+            || self.status.get("role")?.as_str()? != role
+            || self.status.get("ready")?.as_bool()? != true
+            || self.status.get("draining")?.as_bool()?
+            || self.status.get("deployment_mode")?.as_str()? != "single_control"
+        {
+            return None;
+        }
+        self.status
+            .get("deployment_mode_revision")?
+            .as_i64()
+            .filter(|r| *r > 0)
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(self.sequence > 0, "report sequence must be positive");
         ensure!(

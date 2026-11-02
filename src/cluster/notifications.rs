@@ -126,7 +126,7 @@ impl Hub {
         })
     }
 
-    fn hint(&self, signal: &Signal) {
+    pub(crate) fn hint(&self, signal: &Signal) {
         if let Signal::Task(task) = signal {
             let mut tasks = self.tasks.lock().unwrap();
             if tasks.len() < 256 {

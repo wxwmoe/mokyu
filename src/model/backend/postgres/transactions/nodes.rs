@@ -83,6 +83,9 @@ pub(in super::super) async fn release_node(
     name: &str,
 ) -> Result<()> {
     let mut tx = backend.pool.begin().await?;
+    if backend.control_epoch.is_some() {
+        queries::deployment_mode_lock().fetch_one(&mut *tx).await?;
+    }
     backend.fence_control(&mut tx).await?;
     let id: Uuid = queries::release_node_name(&name)
         .fetch_optional(&mut *tx)
@@ -104,6 +107,7 @@ pub(in super::super) async fn release_node(
                 writes
             }
         );
+        queries::release_handoff().execute(&mut *tx).await?;
     }
     queries::release_node_tasks(&id).execute(&mut *tx).await?;
     queries::release_raw_uploads(id).execute(&mut *tx).await?;

@@ -411,3 +411,16 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
     }
     Ok(ready)
 }
+
+pub(crate) async fn recover_remote(app: Arc<App>) -> Result<()> {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        match app.node_work.recover_work().await {
+            Ok(0) => {}
+            Ok(_) => app
+                .notifications
+                .hint(&crate::model::notification::Signal::Work(None)),
+            Err(error) => tracing::warn!(%error,"remote work recovery will retry"),
+        }
+    }
+}

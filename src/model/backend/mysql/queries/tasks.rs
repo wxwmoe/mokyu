@@ -50,7 +50,7 @@ pub(in super::super) fn finish_task<'q>(
 #[async_trait::async_trait]
 impl TaskExecutionStore for Backend {
     async fn claim(&self, input: TaskClaim<'_>) -> Result<Option<Uuid>> {
-        transactions::claim_task(&self.pool, input).await
+        transactions::claim_task(self, input).await
     }
     async fn load(&self, id: Uuid) -> Result<TaskRecord> {
         Ok(task_record(id).fetch_one(&self.pool).await?)

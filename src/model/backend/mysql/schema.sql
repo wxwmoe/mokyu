@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102183444.
+-- Generated from the complete mysql migration chain through 20261102190847.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -486,6 +486,7 @@ CREATE TABLE `mokyu_meta` (
   `deployment_mode` varchar(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'single',
   `deployment_mode_revision` bigint NOT NULL DEFAULT '1',
   `control_epoch` bigint NOT NULL DEFAULT '0',
+  `remote_work` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   CONSTRAINT `mokyu_meta_chk_1` CHECK ((`deployment_mode_revision` > 0)),
   CONSTRAINT `mokyu_meta_chk_2` CHECK ((`control_epoch` >= 0)),
@@ -516,6 +517,25 @@ CREATE TABLE `node_boots` (
   `boot_id` binary(16) NOT NULL,
   PRIMARY KEY (`node_id`,`boot_id`),
   CONSTRAINT `node_boots_node_fk` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_work` (
+  `node_id` binary(16) NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  `boot_id` binary(16) NOT NULL,
+  `fence` binary(16) NOT NULL,
+  `request_hash` binary(32) NOT NULL,
+  `task_id` binary(16) DEFAULT NULL,
+  `token` binary(16) NOT NULL,
+  `plan` json DEFAULT NULL,
+  `materials_encrypted` mediumblob,
+  `result_hash` binary(32) DEFAULT NULL,
+  `expires_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`node_id`,`operation_id`),
+  KEY `node_work_expiry` (`expires_at`),
+  KEY `node_work_task` (`task_id`),
+  CONSTRAINT `node_work_node_fk` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`),
+  CONSTRAINT `node_work_task_fk` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `nodes` (

@@ -1,10 +1,11 @@
 use super::*;
 
 pub(in super::super) async fn claim_task(
-    pool: &MySqlPool,
+    backend: &super::super::Backend,
     input: crate::model::TaskClaim<'_>,
 ) -> Result<Option<Uuid>> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let Some(id) = queries::claim_task_candidate(input.class, input.active, input.draining)
         .build_query_scalar::<Uuid>()
         .fetch_optional(&mut *tx)

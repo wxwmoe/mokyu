@@ -152,23 +152,6 @@ fn endpoint(value: String) -> anyhow::Result<String> {
     Ok(value)
 }
 
-fn row_record(row: &StorageRow) -> BackendRecord {
-    BackendRecord {
-        id: row.id,
-        name: row.name.clone(),
-        r#type: row.r#type.clone(),
-        path: row.path.clone(),
-        endpoint_url: row.endpoint_url.clone(),
-        remote_bucket_name: row.remote_bucket_name.clone(),
-        region: row.region.clone(),
-        prefix: row.prefix.clone(),
-        access_key_encrypted: row.access_key_encrypted.clone(),
-        secret_key_encrypted: row.secret_key_encrypted.clone(),
-        identity_marker: row.identity_marker.clone(),
-        enabled: row.enabled,
-    }
-}
-
 fn build_record(
     app: &App,
     id: Uuid,
@@ -779,7 +762,7 @@ pub(crate) async fn check(
         .await?
         .context("storage was not found")?;
     app.storage
-        .verify_store_record(row_record(&row))
+        .verify_store_record((&row).into())
         .await
         .map_err(|error| {
             tracing::warn!(%error, storage_id=%row.id, "storage verification failed");

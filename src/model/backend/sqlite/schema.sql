@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102183444.
+-- Generated from the complete sqlite migration chain through 20261102190847.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -364,7 +364,7 @@ CREATE TABLE mokyu_meta (
     pack_creation_paused INTEGER NOT NULL DEFAULT 0 CHECK(pack_creation_paused IN (0,1))
 , deployment_mode TEXT NOT NULL DEFAULT 'single'
     CHECK (deployment_mode IN ('single', 'single_control')), deployment_mode_revision INTEGER NOT NULL DEFAULT 1
-    CHECK (deployment_mode_revision > 0), control_epoch INTEGER NOT NULL DEFAULT 0 CHECK (control_epoch >= 0)) STRICT;
+    CHECK (deployment_mode_revision > 0), control_epoch INTEGER NOT NULL DEFAULT 0 CHECK (control_epoch >= 0), remote_work INTEGER NOT NULL DEFAULT 0 CHECK(remote_work IN (0,1))) STRICT;
 
 CREATE TABLE multipart_files (
     id BLOB NOT NULL PRIMARY KEY CHECK (length(id)=16),
@@ -379,6 +379,21 @@ CREATE TABLE node_boots (
     node_id BLOB NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     boot_id BLOB NOT NULL CHECK (length(boot_id)=16),
     PRIMARY KEY (node_id,boot_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE node_work (
+    node_id BLOB NOT NULL REFERENCES nodes(id),
+    operation_id BLOB NOT NULL CHECK(length(operation_id)=16),
+    boot_id BLOB NOT NULL CHECK(length(boot_id)=16),
+    fence BLOB NOT NULL CHECK(length(fence)=16),
+    request_hash BLOB NOT NULL CHECK(length(request_hash)=32),
+    task_id BLOB REFERENCES tasks(id) ON DELETE SET NULL,
+    token BLOB NOT NULL CHECK(length(token)=16),
+    plan TEXT CHECK(plan IS NULL OR json_valid(plan)),
+    materials_encrypted BLOB,
+    result_hash BLOB CHECK(result_hash IS NULL OR length(result_hash)=32),
+    expires_at INTEGER NOT NULL,
+    PRIMARY KEY (node_id,operation_id)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE nodes (
@@ -1433,6 +1448,10 @@ CREATE INDEX member_grants_member ON member_bucket_grants(user_id,project_id);
 CREATE INDEX multipart_files_reclaim ON multipart_files(storage_id,id) WHERE reclaim_pending;
 
 CREATE INDEX multipart_files_upload ON multipart_files(upload_id,state);
+
+CREATE INDEX node_work_expiry ON node_work(expires_at);
+
+CREATE INDEX node_work_task ON node_work(task_id) WHERE task_id IS NOT NULL;
 
 CREATE UNIQUE INDEX nodes_active_control ON nodes(role) WHERE role='control';
 

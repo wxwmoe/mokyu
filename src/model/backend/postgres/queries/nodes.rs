@@ -112,14 +112,6 @@ impl ClusterStore for Backend {
     ) -> Result<crate::model::node_read::Reply> {
         transactions::work::migration::read(&self.pool, node, key, input).await
     }
-    async fn exchange_work(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_work::Exchange,
-    ) -> Result<crate::model::node_work::Reply> {
-        transactions::work::exchange(&self.pool, node, key, input).await
-    }
     async fn read_transfer(
         &self,
         node: &NodeState,
@@ -590,7 +582,7 @@ impl ClusterStore for Backend {
         role: &str,
         key: &crate::content::codec::Key,
     ) -> Result<Option<Uuid>> {
-        transactions::claim_task(&self.pool, input, Some((node, role, key))).await
+        transactions::claim_task(self, input, Some((node, role, key))).await
     }
     async fn recover_tasks(&self) -> Result<u64> {
         transactions::recover_stale(&self.pool).await
@@ -918,5 +910,20 @@ impl crate::model::cluster::NodeSessions for Backend {
         key: &crate::content::codec::Key,
     ) -> Result<()> {
         transactions::heartbeat(&self.pool, state, role, key).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::model::cluster::NodeWork for Backend {
+    async fn recover_work(&self) -> Result<u64> {
+        transactions::recover_stale(&self.pool).await
+    }
+    async fn exchange_work(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_work::Exchange,
+    ) -> Result<crate::model::node_work::Reply> {
+        transactions::work::exchange(self, node, key, input).await
     }
 }

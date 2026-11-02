@@ -380,7 +380,7 @@ pub(in super::super) fn invalidate_mode_sessions() -> Statement<'static> {
 }
 
 pub(in super::super) fn update_deployment_mode<'q>(mode: &'q str) -> Statement<'q> {
-    sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1,deployment_mode_revision=deployment_mode_revision+1 WHERE singleton").bind(mode)
+    sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1,deployment_mode_revision=deployment_mode_revision+1,remote_work=CASE WHEN $1='single' THEN FALSE ELSE remote_work END WHERE singleton").bind(mode)
 }
 
 pub(in super::super) fn retirement(id: Uuid) -> Rows<'static, (String, i64, i64, i64, i64)> {
@@ -484,5 +484,15 @@ pub(in super::super) fn health() -> Statement<'static> {
 fn runtime_state() -> Rows<'static, (bool, bool, bool, String, i64)> {
     sqlx::query_as(
         "SELECT gc_paused,maintenance,pack_creation_paused,deployment_mode,deployment_mode_revision FROM mokyu_meta",
+    )
+}
+
+pub(in super::super) fn hand_off(revision: i64) -> Statement<'static> {
+    sqlx::query("UPDATE mokyu_meta SET remote_work=TRUE WHERE singleton AND deployment_mode='single_control' AND deployment_mode_revision=$1 AND NOT maintenance AND NOT remote_work").bind(revision)
+}
+
+pub(in super::super) fn release_handoff() -> Statement<'static> {
+    sqlx::query(
+        "UPDATE mokyu_meta SET remote_work=FALSE WHERE singleton AND deployment_mode='single_control' AND remote_work AND NOT EXISTS(SELECT 1 FROM nodes WHERE enabled AND role IN ('worker','node'))",
     )
 }

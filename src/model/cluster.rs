@@ -74,7 +74,18 @@ pub(crate) trait NodeSessions: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait ClusterStore: NodeSessions {
+pub(crate) trait NodeWork: Send + Sync {
+    async fn recover_work(&self) -> Result<u64>;
+    async fn exchange_work(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_work::Exchange,
+    ) -> Result<super::node_work::Reply>;
+}
+
+#[async_trait]
+pub(crate) trait ClusterStore: NodeSessions + NodeWork {
     async fn begin_report(
         &self,
         state: &NodeState,
@@ -110,12 +121,6 @@ pub(crate) trait ClusterStore: NodeSessions {
         super::node_read::Reply,
         Option<super::replication::external::RawRead>,
     )>;
-    async fn exchange_work(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_work::Exchange,
-    ) -> Result<super::node_work::Reply>;
     async fn checkpoint_raw_pages(
         &self,
         node: &NodeState,

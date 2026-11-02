@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261102175500.
+-- Generated from the complete postgres migration chain through 20261102190847.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1112,6 +1112,7 @@ CREATE TABLE public.mokyu_meta (
     deployment_key_fingerprint bytea,
     deployment_mode_revision bigint DEFAULT 1 NOT NULL,
     control_epoch bigint DEFAULT 0 NOT NULL,
+    remote_work boolean DEFAULT false NOT NULL,
     CONSTRAINT mokyu_meta_control_epoch_check CHECK ((control_epoch >= 0)),
     CONSTRAINT mokyu_meta_deployment_key_fingerprint_check CHECK (((deployment_key_fingerprint IS NULL) OR (octet_length(deployment_key_fingerprint) = 32))),
     CONSTRAINT mokyu_meta_deployment_mode_check CHECK ((deployment_mode = ANY (ARRAY['single'::text, 'single_control'::text, 'cluster'::text]))),

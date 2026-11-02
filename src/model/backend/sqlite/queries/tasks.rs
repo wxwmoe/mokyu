@@ -212,7 +212,7 @@ impl TaskExecutionStore for Backend {
         {
             return Ok(None);
         }
-        transactions::claim_task(&self.write, input).await
+        transactions::claim_task(self, input).await
     }
     async fn load(&self, id: Uuid) -> Result<TaskRecord> {
         Ok(task_record(id).fetch_one(&self.read).await?)

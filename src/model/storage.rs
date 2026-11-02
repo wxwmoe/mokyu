@@ -108,3 +108,22 @@ pub(crate) trait StorageUpdate: Send {
         profile: &StorageProfile,
     ) -> Result<()>;
 }
+
+impl From<&StorageRow> for crate::storage::model::Record {
+    fn from(row: &StorageRow) -> Self {
+        Self {
+            id: row.id,
+            name: row.name.clone(),
+            r#type: row.r#type.clone(),
+            path: row.path.clone(),
+            endpoint_url: row.endpoint_url.clone(),
+            remote_bucket_name: row.remote_bucket_name.clone(),
+            region: row.region.clone(),
+            prefix: row.prefix.clone(),
+            access_key_encrypted: row.access_key_encrypted.clone(),
+            secret_key_encrypted: row.secret_key_encrypted.clone(),
+            identity_marker: row.identity_marker.clone(),
+            enabled: row.enabled,
+        }
+    }
+}

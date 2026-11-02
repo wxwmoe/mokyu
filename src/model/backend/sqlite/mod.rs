@@ -4,6 +4,8 @@ mod image_transactions;
 mod migration;
 #[path = "../shared/node_registry.rs"]
 mod node_registry;
+#[path = "../shared/node_work.rs"]
+mod node_work;
 mod queries;
 #[path = "../shared/raw_pages.rs"]
 mod raw_pages;

@@ -1484,7 +1484,7 @@ impl NodeWork for Service {
     ) -> Result<Response<wire::WorkReply>, Status> {
         let node = identity(&request)?;
         let input = super::work::exchange(request.into_inner())?;
-        let value = bounded(self.app.cluster().map_err(failure)?.exchange_work(
+        let value = bounded(self.app.node_work.exchange_work(
             &node,
             &self.app.secrets.credential_key,
             input,

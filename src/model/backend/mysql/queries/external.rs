@@ -43,7 +43,7 @@ impl TestRow {
     }
 }
 pub(in super::super) fn test(id: Uuid) -> Rows<'static, TestRow> {
-    sqlx::query_as("SELECT e.id,e.external_id,e.revision,e.connection_encrypted,e.node_id,e.attempts,e.report,e.cleanup_required,CAST(UNIX_TIMESTAMP(e.created_at)*1000000 AS SIGNED) AS created_at,CAST(UNIX_TIMESTAMP(e.updated_at)*1000000 AS SIGNED) AS updated_at,t.state,COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')),'false')='true' AS stopped FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.id=? FOR UPDATE").bind(id)
+    sqlx::query_as("SELECT e.id,e.external_id,e.revision,e.connection_encrypted,e.node_id,e.attempts,e.report,e.cleanup_required,CAST(UNIX_TIMESTAMP(e.created_at)*1000000 AS SIGNED) AS created_at,CAST(UNIX_TIMESTAMP(e.updated_at)*1000000 AS SIGNED) AS updated_at,t.state,COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')),'false')='true' AS stopped FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.id=?").bind(id)
 }
 pub(in super::super) fn latest_test(id: Uuid) -> Rows<'static, TestRow> {
     sqlx::query_as("SELECT e.id,e.external_id,e.revision,e.connection_encrypted,e.node_id,e.attempts,e.report,e.cleanup_required,CAST(UNIX_TIMESTAMP(e.created_at)*1000000 AS SIGNED) AS created_at,CAST(UNIX_TIMESTAMP(e.updated_at)*1000000 AS SIGNED) AS updated_at,t.state,COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')),'false')='true' AS stopped FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.external_id=? ORDER BY e.created_at DESC,e.id DESC LIMIT 1").bind(id)
@@ -57,7 +57,7 @@ pub(in super::super) fn insert_test(
         .bind(Json(crate::model::external_test::State { report: input.report.clone(), started: false }))
 }
 pub(in super::super) fn test_owned(task: crate::model::task::Execution) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT id FROM tasks WHERE id=? AND execution_token=? AND state='running' AND task_type='integrity' AND JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation'))='external_test' FOR UPDATE").bind(task.id).bind(task.token)
+    sqlx::query_scalar("SELECT t.id FROM tasks t STRAIGHT_JOIN external_tests e ON e.id=t.id WHERE t.id=? AND t.execution_token=? AND t.state='running' AND t.task_type='integrity' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test' FOR UPDATE").bind(task.id).bind(task.token)
 }
 pub(in super::super) fn test_dispatched(
     id: Uuid,

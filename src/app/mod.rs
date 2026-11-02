@@ -189,6 +189,7 @@ impl Active {
     }
 }
 pub struct App {
+    pub(crate) node_work: Arc<dyn crate::model::cluster::NodeWork>,
     pub(crate) node_sessions: Arc<dyn crate::model::cluster::NodeSessions>,
     cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
     pub(crate) metrics: Arc<dyn crate::model::metrics::MetricsStore>,
@@ -374,6 +375,7 @@ impl App {
         let (public_reads, public_receiver) =
             public_reads::Cache::new(cors_cache.clone(), &response_cache);
         let app = Arc::new(Self {
+            node_work: stores.node_work,
             node_sessions: stores.node_sessions,
             cluster: stores.cluster,
             role: role.to_owned(),

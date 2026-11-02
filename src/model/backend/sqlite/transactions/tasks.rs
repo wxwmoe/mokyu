@@ -297,10 +297,11 @@ pub(in super::super) async fn cache_status(pool: &SqlitePool) -> Result<(Value, 
 }
 
 pub(in super::super) async fn claim_task(
-    pool: &SqlitePool,
+    backend: &super::super::Backend,
     input: crate::model::TaskClaim<'_>,
 ) -> Result<Option<Uuid>> {
-    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let mut tx = backend.write.begin_with(queries::BEGIN_WRITE).await?;
+    backend.fence_control(&mut tx).await?;
     let Some(id) = queries::claim_task_candidate(input.class, input.active, input.draining)
         .build_query_scalar::<Uuid>()
         .fetch_optional(&mut *tx)

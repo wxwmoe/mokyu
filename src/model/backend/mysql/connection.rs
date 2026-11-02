@@ -35,6 +35,7 @@ pub(crate) async fn connect(
     );
     let stores = crate::model::Stores {
         runtime: backend.clone(),
+        node_work: backend.clone(),
         node_sessions: backend.clone(),
         cluster: None,
         metrics: backend.clone(),

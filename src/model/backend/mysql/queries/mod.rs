@@ -141,3 +141,5 @@ pub(super) mod tier_reads;
 pub(super) mod transfer;
 
 pub(super) mod node_registry;
+
+pub(super) mod work;

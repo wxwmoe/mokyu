@@ -18,8 +18,21 @@ pub(in super::super) fn epoch(backend: &Backend) -> Result<i64> {
 }
 
 pub(in super::super) async fn begin(backend: &Backend) -> Result<Tx<'_>> {
+    membership(backend, None, false).await
+}
+
+pub(in super::super) async fn membership(
+    backend: &Backend,
+    handoff: Option<i64>,
+    release: bool,
+) -> Result<Tx<'_>> {
     epoch(backend)?;
     let mut tx = backend.write.begin_with(super::BEGIN_WRITE).await?;
+    if release {
+        super::guard_stage_mode().fetch_one(&mut *tx).await?;
+    } else if let Some(revision) = handoff {
+        hand_off(revision).execute(&mut *tx).await?;
+    }
     backend.fence_control(&mut tx).await?;
     Ok(tx)
 }
@@ -105,9 +118,9 @@ pub(in super::super) fn embedded() -> Scalar<'static, Uuid> {
     sqlx::query_scalar("SELECT id FROM nodes WHERE role='control' AND enabled LIMIT 1")
 }
 
-pub(in super::super) fn mode() -> Rows<'static, (bool, String, i64)> {
+pub(in super::super) fn mode() -> Rows<'static, (bool, String, i64, bool)> {
     sqlx::query_as(
-        "SELECT maintenance,deployment_mode,deployment_mode_revision FROM mokyu_meta WHERE id=1",
+        "SELECT maintenance,deployment_mode,deployment_mode_revision,(remote_work AND NOT maintenance AND EXISTS(SELECT 1 FROM tasks t WHERE t.state='queued' AND ((t.task_type='integrity' AND json_extract(t.detail,'$.operation')='external_test') OR (t.task_type='storage_migration' AND json_extract(t.detail,'$.operation')='tiering')))) FROM mokyu_meta WHERE id=1",
     )
 }
 
@@ -119,4 +132,14 @@ pub(in super::super) fn settings() -> Rows<'static, (String, Value, i64)> {
 
 pub(in super::super) fn has_registered_peers() -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE role<>'control' AND enabled)")
+}
+
+pub(in super::super) fn hand_off(revision: i64) -> Statement<'static> {
+    sqlx::query("UPDATE mokyu_meta SET remote_work=TRUE WHERE id=1 AND deployment_mode='single_control' AND deployment_mode_revision=? AND NOT maintenance AND NOT remote_work").bind(revision)
+}
+
+pub(in super::super) fn release_handoff() -> Statement<'static> {
+    sqlx::query(
+        "UPDATE mokyu_meta SET remote_work=FALSE WHERE id=1 AND deployment_mode='single_control' AND remote_work AND NOT EXISTS(SELECT 1 FROM nodes WHERE enabled AND role IN ('worker','node'))",
+    )
 }

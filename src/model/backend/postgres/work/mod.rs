@@ -126,61 +126,15 @@ fn reply(
             Error::NodeExpired
         );
     }
-    let mut materials = vec![];
-    let mut grants = vec![];
-    let mut external = None;
-    let plan = row.plan.map(|value| value.0);
-    if let Some(plan) = &plan {
-        let material = codec::unprotect(
-            row.storage_encrypted
-                .as_deref()
-                .context("work storage is missing")?,
-            key,
-            row.token.as_bytes(),
-        )?;
-        if let Some(storage) = plan.storage() {
-            let values: work::Materials = serde_json::from_str(&material)?;
-            ensure!(
-                values.storage.profile.storage_id == storage,
-                Error::NodeOperationConflict
-            );
-            for value in std::iter::once(values.storage).chain(values.additional) {
-                read::material(
-                    &mut materials,
-                    node.deployment_id,
-                    read::MaterialType::Storage,
-                    value.profile.storage_id.to_string(),
-                    &value,
-                    &input.cached,
-                )?;
-            }
-            for block in values.keys {
-                read::material(
-                    &mut materials,
-                    node.deployment_id,
-                    read::MaterialType::Key,
-                    block.id.to_string(),
-                    &block,
-                    &input.cached,
-                )?;
-            }
-        } else {
-            external = Some(serde_json::from_str(&material)?);
-        }
-        grants.push(read::Grant {
-            r#type: read::GrantType::Work,
-            id: row.token,
-            valid_for_ms: row.valid_for_ms as u64,
-            storage: plan.storage(),
-        });
-    }
-    Ok(work::Reply {
-        operation: input.operation,
-        plan,
-        materials,
-        grants,
-        external,
-    })
+    work::materialize(
+        node,
+        key,
+        input,
+        row.plan.map(|v| v.0),
+        row.storage_encrypted.as_deref(),
+        row.token,
+        row.valid_for_ms,
+    )
 }
 
 #[cfg(test)]
@@ -970,7 +924,7 @@ async fn collect(
 }
 
 pub(crate) async fn exchange(
-    pool: &PgPool,
+    backend: &super::Backend,
     node: &NodeState,
     key: &Key,
     input: work::Exchange,
@@ -979,7 +933,9 @@ pub(crate) async fn exchange(
     let mut boundary = None;
     let hash = input.hash()?;
     let issued = write::operation_time(input.operation)?;
+    let pool = &backend.pool;
     let mut tx = pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let sweep_barrier = q::sweep_pending().fetch_one(&mut *tx).await?;
     let maintenance_enabled: bool = sqlx::query_scalar(if sweep_barrier {
         "SELECT maintenance FROM mokyu_meta WHERE singleton FOR UPDATE"

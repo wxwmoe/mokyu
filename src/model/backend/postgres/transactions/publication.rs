@@ -169,7 +169,7 @@ pub(in super::super) async fn recover_stale(pool: &PgPool) -> Result<u64> {
 }
 
 pub(in super::super) async fn claim_task(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     input: crate::model::TaskClaim<'_>,
     node: Option<(
         &crate::cluster::NodeState,
@@ -177,7 +177,8 @@ pub(in super::super) async fn claim_task(
         &crate::content::codec::Key,
     )>,
 ) -> Result<Option<uuid::Uuid>> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     if let Some((state, role, key)) = node {
         validate_node(&mut tx, state, role, key).await?;
     }
