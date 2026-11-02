@@ -354,73 +354,14 @@ impl ReplicationStore for Backend {
                 let mut run = owned(&mut db, task).await?;
                 #[cfg(feature = "fault-injection")]
                 let boundary = run.boundary();
-                if run.redundancy_id.is_some() {
-                    match super::super::transactions::redundancy::prepare(&mut db, &mut run).await {
-                        Ok(true) => {
-                            save(&mut db, &run).await?;
-                            db.commit().await?;
-                            return Ok(Step::Continue);
-                        }
-                        Ok(false) => {}
-                        Err(error)
-                            if crate::model::error(&error) == Some(Error::RedundancyBacklog) =>
-                        {
-                            // A publisher used the remaining space while this scan page was being read.
-                            db.rollback().await?;
-                            return Ok(Step::Continue);
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
-                if run.options.0.external() {
-                    if let Some(step) =
-                        super::super::transactions::replication_remote::preflight(&mut db, &run)
-                            .await?
-                    {
-                        save(&mut db, &run).await?;
-                        db.commit().await?;
-                        return Ok(step);
-                    }
-                    let plan = super::super::transactions::replication_remote::prepare(
-                        &mut db, task, &mut run,
-                    )
-                    .await?;
-                    let connections = q::connections(task.id).fetch_all(&mut *db).await?;
-                    save(&mut db, &run).await?;
-                    db.commit().await?;
-                    #[cfg(feature = "fault-injection")]
-                    if let Some(boundary) = boundary {
-                        crate::faults::point(boundary).await;
-                    }
-                    return Ok(match plan {
-                        Some(plan) => Step::External {
-                            plan: Box::new(plan),
-                            connections,
-                        },
-                        None => Step::Continue,
-                    });
-                }
                 #[cfg(feature = "fault-injection")]
                 let completed = run.progress.0.completed;
-                let result = match run.phase.as_str() {
-                    "scan" => {
-                        scan(&mut db, &mut run).await?;
-                        Step::Continue
+                let result = match step_in(&mut db, task, &mut run).await {
+                    Err(err) if crate::model::error(&err) == Some(Error::RedundancyBacklog) => {
+                        db.rollback().await?;
+                        return Ok(Step::Continue);
                     }
-                    "plan" => {
-                        plan(&mut db, &mut run).await?;
-                        Step::Continue
-                    }
-                    "verify" => verification(&mut db, task, &mut run).await?,
-                    "publish" => {
-                        publish(&mut db, task, &mut run).await?;
-                        Step::Continue
-                    }
-                    "cancel" => {
-                        cancel(&mut db, &mut run).await?;
-                        Step::Continue
-                    }
-                    _ => return Err(Error::OperationAborted.into()),
+                    other => other?,
                 };
                 save(&mut db, &run).await?;
                 db.commit().await?;
@@ -551,6 +492,10 @@ impl ReplicationStore for Backend {
         Ok(())
     }
 }
+
+#[path = "../../shared/replication_step.rs"]
+mod steps;
+pub(in super::super) use steps::step_in;
 
 pub(in super::super) async fn source_page(
     db: &mut Tx<'_>,

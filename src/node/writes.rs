@@ -472,8 +472,15 @@ impl Writes {
                     let notified = waiter.notified();
                     tokio::pin!(notified);
                     notified.as_mut().enable();
-                    reply = self.reads.node.client.write_status(operation.lookup()).await?;
-                    if reply.phase != wire::WritePhase::WritePreparing as i32 { break }
+                    match self.reads.node.client.write_status(operation.lookup()).await {
+                        Ok(next) => {
+                            reply=next;
+                            if reply.phase != wire::WritePhase::WritePreparing as i32 { break }
+                        }
+                        // The control already accepted publication. A rolled-back lookup can read the same receipt again.
+                        Err(status) if crate::rpc::client::retryable(&status) || status.code()==tonic::Code::Aborted && status.metadata().get("mokyu-s3-code").is_some_and(|code|code=="OperationAborted") => {}
+                        Err(status) => return Err(status.into()),
+                    }
                     tokio::select! { _ = notified => {}, _ = tokio::time::sleep(Duration::from_secs(3)) => {} }
                 }
                 Ok::<_, anyhow::Error>(())

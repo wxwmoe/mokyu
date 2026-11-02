@@ -240,10 +240,6 @@ impl Work {
         );
         let mut expected = std::collections::BTreeMap::new();
         for target in copy.prepared.targets.iter().filter(|target| !target.reused) {
-            ensure!(
-                target.chunk.id == Id::Uuid(target.chunk.uuid),
-                "invalid node target identity"
-            );
             expected.entry(target.chunk.id).or_insert(target);
         }
         ensure!(
@@ -257,6 +253,10 @@ impl Work {
                 let target = expected
                     .get(&chunk.id)
                     .context("unexpected transfer destination")?;
+                ensure!(
+                    chunk.physical_id()? == target.chunk.uuid,
+                    "invalid node target identity"
+                );
                 Ok((target.source, chunk.id))
             })
             .collect::<Result<_>>()?;

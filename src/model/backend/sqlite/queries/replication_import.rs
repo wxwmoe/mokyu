@@ -51,3 +51,11 @@ pub(in super::super) fn forget(item: Id) -> Statement<'static> {
 pub(in super::super) fn stream(stream: Id) -> Rows<'static, crate::app::StoredStream> {
     sqlx::query_as("SELECT * FROM streams WHERE id=? AND state='writing'").bind(stream)
 }
+
+pub(in super::super) fn owner(
+    task: Uuid,
+    stream: Id,
+    operation: Uuid,
+) -> super::Scalar<'static, Id> {
+    sqlx::query_scalar("SELECT t.id FROM transfer_imports i JOIN transfer_items t ON t.id=i.item_id WHERE t.task_id=? AND i.part_stream=? AND i.operation_id=?").bind(task).bind(stream).bind(operation)
+}

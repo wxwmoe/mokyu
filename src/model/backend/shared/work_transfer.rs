@@ -1,19 +1,27 @@
-use super::*;
+use super::{packing, queries, rewrite, transactions};
 use crate::model::{
     node_pack as wire,
     transfer::{Copy, Input, Work},
 };
+use crate::{
+    config,
+    content::codec::Key,
+    model::{Error, Id, Mapping, node_read as read, task::Execution},
+};
+use anyhow::{Context, Result, ensure};
 use queries::pack_work as p;
+use queries::pack_work::Tx;
 use std::collections::BTreeSet;
+use uuid::Uuid;
 
-pub(super) struct Prepared {
+pub(in super::super) struct Prepared {
     pub work: Work,
     pub batch: wire::Batch,
     pub keys: Vec<read::BlockKey>,
 }
 
-pub(super) async fn prepare(
-    db: &mut Transaction<'_, Postgres>,
+pub(in super::super) async fn prepare(
+    db: &mut Tx<'_>,
     task: Execution,
     copy: &Copy,
     key: &Key,
@@ -32,8 +40,8 @@ pub(super) async fn prepare(
         })
         .collect();
     if rows.is_empty() {
-        let run = super::super::super::transactions::replication::owned(db, task).await?;
-        super::super::super::transactions::transfer::copied(db, task, &run, copy, &[]).await?;
+        let run = transactions::replication::owned(db, task).await?;
+        transactions::transfer::copied(db, task, &run, copy, &[]).await?;
         return Ok(None);
     }
     rows.sort_by_key(|row| row.offset_bytes);
@@ -43,7 +51,7 @@ pub(super) async fn prepare(
     let mut batch = wire::Batch {
         algorithm: policy.algorithm.clone(),
         key: policy.block_key_id,
-        created: queries::node_clock().fetch_one(&mut **db).await?,
+        created: p::clock(&mut **db).await?,
         sources: vec![],
         chunks: vec![],
         groups: vec![],
@@ -51,7 +59,7 @@ pub(super) async fn prepare(
     };
     for row in &rows {
         batch.chunks.push(wire::Target {
-            uuid: None,
+            uuid: matches!(row.chunk.id, Id::Integer(_)).then_some(row.chunk.uuid),
             encoding: None,
             id: row.chunk.id,
             size: row.chunk.raw_size,
@@ -104,8 +112,8 @@ pub(super) async fn prepare(
     Ok(Some(Prepared { work, batch, keys }))
 }
 
-pub(super) async fn finish(
-    db: &mut Transaction<'_, Postgres>,
+pub(in super::super) async fn finish(
+    db: &mut Tx<'_>,
     task: Execution,
     storage: Uuid,
     work: &Work,
@@ -114,8 +122,8 @@ pub(super) async fn finish(
     key: &Key,
 ) -> Result<()> {
     work.validate(storage, batch)?;
-    let run = super::super::super::transactions::replication::owned(db, task).await?;
-    let unit = super::super::super::queries::transfer::unit(task.id, work.unit)
+    let run = transactions::replication::owned(db, task).await?;
+    let unit = queries::transfer::unit(task.id, work.unit)
         .fetch_one(&mut **db)
         .await?;
     let copy = Copy {
@@ -147,5 +155,5 @@ pub(super) async fn finish(
     .await?;
     let rows = copy.outputs(&outputs)?;
     p::record_outputs(db, task.id, &rows, &outputs).await?;
-    super::super::super::transactions::transfer::copied(db, task, &run, &copy, &outputs).await
+    transactions::transfer::copied(db, task, &run, &copy, &outputs).await
 }

@@ -16,6 +16,8 @@ use transactions::{check_source_inputs, commit_pack_outputs_in, pin_inputs, rese
 use uuid::Uuid;
 #[path = "work_packing.rs"]
 pub(super) mod packing;
+#[path = "work_transfer.rs"]
+pub(super) mod transfer;
 async fn release_task_inputs(tx: &mut db::Connection, task: Uuid) -> Result<()> {
     queries::release_task_inputs(task).execute(tx).await?;
     Ok(())

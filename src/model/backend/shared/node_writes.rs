@@ -1531,7 +1531,10 @@ impl NodeWrites for Backend {
                 row.next_batch == 1
                     && row.next_offset == 0
                     && (row.owner_task_id.is_none()
-                        || row.intent.access == "node-migration" && !input.input.local)
+                        || matches!(
+                            row.intent.access.as_str(),
+                            "node-migration" | "node-replication"
+                        ) && !input.input.local)
                     && (row.intent.part.is_none() || row.profile.cdc_enabled && input.input.local)
                     && (!input.input.local || row.profile.upload_cache)
                     && (row.profile.cdc_enabled
@@ -1816,7 +1819,10 @@ impl NodeWrites for Backend {
                     && raw.size == input.size
                     && (row.copy_source.is_some()
                         || row.owner_task_id.is_some()
-                            && row.intent.access == "node-migration"
+                            && matches!(
+                                row.intent.access.as_str(),
+                                "node-migration" | "node-replication"
+                            )
                             && input.etag.contains('-')
                         || row.intent.completion.is_some()
                         || hex::encode(&raw.digest) == input.etag),
@@ -1875,7 +1881,9 @@ impl NodeWrites for Backend {
         );
         let mut phase = "published";
         if let Some(task) = row.owner_task_id {
-            if row.intent.access == "node-migration" {
+            if row.intent.access == "node-replication" {
+                super::work_import::seal(&mut tx, &row, &input).await?;
+            } else if row.intent.access == "node-migration" {
                 super::work_migration::seal(&mut tx, &row, task, &input).await?;
             } else {
                 super::work_conversion::seal(&mut tx, &row, task, &input).await?;

@@ -122,17 +122,6 @@ impl ClusterStore for Backend {
     ) -> Result<Box<dyn crate::model::cluster::NotificationChanges>> {
         connection::notification_changes(&self.pool).await
     }
-    async fn read_transfer(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_work::ReadTransfer,
-    ) -> Result<(
-        crate::model::node_read::Reply,
-        Option<crate::model::replication::external::RawRead>,
-    )> {
-        transactions::work::export::read(&self.pool, node, key, input).await
-    }
     async fn checkpoint_raw_pages(
         &self,
         node: &NodeState,
@@ -140,17 +129,6 @@ impl ClusterStore for Backend {
         input: crate::model::node_work::RawPages,
     ) -> Result<()> {
         transactions::work::checkpoint_raw_pages(&self.pool, node, key, input).await
-    }
-    async fn checkpoint_transfer(
-        &self,
-        node: &NodeState,
-        key: &crate::content::codec::Key,
-        run: crate::model::session::Run,
-        operation: Uuid,
-        progress: &crate::model::transfer::RawProgress,
-    ) -> Result<()> {
-        transactions::work::checkpoint_transfer(&self.pool, node, key, run, operation, progress)
-            .await
     }
 
     async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool> {
@@ -498,6 +476,27 @@ impl crate::model::cluster::NodeSessions for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWork for Backend {
+    async fn read_transfer(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_work::ReadTransfer,
+    ) -> Result<(
+        crate::model::node_read::Reply,
+        Option<crate::model::replication::external::RawRead>,
+    )> {
+        transactions::work::export::read(self, node, key, input).await
+    }
+    async fn checkpoint_transfer(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        operation: Uuid,
+        progress: &crate::model::transfer::RawProgress,
+    ) -> Result<()> {
+        transactions::work::checkpoint_transfer(self, node, key, run, operation, progress).await
+    }
     async fn read_migration(
         &self,
         node: &NodeState,

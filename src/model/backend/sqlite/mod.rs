@@ -42,12 +42,18 @@ mod tier_transactions;
 mod transactions;
 #[path = "../shared/work_conversion.rs"]
 mod work_conversion;
+#[path = "../shared/work_export.rs"]
+mod work_export;
+#[path = "../shared/work_import.rs"]
+mod work_import;
 #[path = "../shared/work_media.rs"]
 mod work_media;
 #[path = "../shared/work_migration.rs"]
 mod work_migration;
 #[path = "../shared/work_raw.rs"]
 mod work_raw;
+#[path = "../shared/work_replication.rs"]
+mod work_replication;
 #[path = "../shared/work_sources.rs"]
 mod work_sources;
 

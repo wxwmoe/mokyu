@@ -68,6 +68,37 @@ impl Offer {
     }
 }
 
+pub(super) async fn checkpoint(
+    tx: &mut registry::Tx<'_>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+) -> Result<(work::Plan, Execution)> {
+    ensure!(
+        matches!(node.role.as_str(), "worker" | "node"),
+        Error::NodeAuthentication
+    );
+    let row = q::offer(node.node_id, operation)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(Error::NodeExpired)?;
+    row.verify(run)?;
+    ensure!(
+        row.remaining > 0 && row.result_hash.is_none(),
+        Error::NodeExpired
+    );
+    let task = Execution {
+        id: row.task_id.ok_or(Error::NodeExpired)?,
+        token: row.token,
+    };
+    let record = queries::task_record(task.id).fetch_one(&mut **tx).await?;
+    ensure!(
+        record.state == "running" && record.execution_token == Some(task.token),
+        Error::NodeExpired
+    );
+    Ok((row.plan.ok_or(Error::NodeOperationConflict)?.0, task))
+}
+
 pub(super) async fn material(
     tx: &mut registry::Tx<'_>,
     storage: Uuid,
@@ -88,6 +119,7 @@ pub(super) async fn material(
 async fn reserve_io(
     tx: &mut registry::Tx<'_>,
     token: Uuid,
+    task_type: &str,
     plan: &work::Plan,
     secret: &[u8],
 ) -> Result<()> {
@@ -99,25 +131,33 @@ async fn reserve_io(
     for storage in std::iter::once(materials.storage).chain(materials.additional) {
         profiles.insert(storage.profile.storage_id, storage.profile);
     }
-    for (id, p) in profiles {
+    for (_, p) in profiles {
         let direction = match plan {
+            _ if task_type == "storage_migration" => ("migration", p.migration_concurrency),
             work::Plan::UploadRaw { .. } => ("upload", p.upload_concurrency),
             work::Plan::Inspect { .. } => ("integrity", Some(p.integrity_concurrency)),
-            work::Plan::Tier { .. }
-            | work::Plan::Migrate { .. }
-            | work::Plan::CopyTransfer { .. }
-            | work::Plan::RawTransfer { .. } => ("migration", p.migration_concurrency),
             _ => ("maintenance", p.maintenance_concurrency),
         };
-        for (scope, cap) in [("control", p.control_concurrency), direction] {
-            if let Some(cap) = cap {
-                queries::read_grants::lock_storage(&mut **tx, id, scope).await?;
-                ensure!(
-                    q::lane_count(id, scope).fetch_one(&mut **tx).await? < i64::from(cap),
-                    Error::NodeWriteBusy
-                );
-                q::lane(id, scope, token).execute(&mut **tx).await?;
-            }
+        profile_permits(tx, token, &p, direction).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn profile_permits(
+    tx: &mut registry::Tx<'_>,
+    token: Uuid,
+    p: &crate::storage::profile::StorageProfile,
+    direction: (&str, Option<i32>),
+) -> Result<()> {
+    let id = p.storage_id;
+    for (scope, cap) in [("control", p.control_concurrency), direction] {
+        if let Some(cap) = cap {
+            queries::read_grants::lock_storage(&mut **tx, id, scope).await?;
+            ensure!(
+                q::lane_count(id, scope).fetch_one(&mut **tx).await? < i64::from(cap),
+                Error::NodeWriteBusy
+            );
+            q::lane(id, scope, token).execute(&mut **tx).await?;
         }
     }
     Ok(())
@@ -194,8 +234,25 @@ async fn finish(
         id: offer.task_id.ok_or(Error::NodeOperationConflict)?,
         token: offer.token,
     };
+    let plan = offer.plan.ok_or(Error::NodeOperationConflict)?.0;
+    if matches!(
+        &plan,
+        work::Plan::ExternalTransfer(_)
+            | work::Plan::ScanTransfer(_)
+            | work::Plan::RawTransfer { .. }
+            | work::Plan::CopyTransfer { .. }
+    ) || matches!(plan, work::Plan::HashRaw { .. })
+        && queries::task_record(task.id)
+            .fetch_one(&mut **tx)
+            .await?
+            .detail["operation"]
+            == "replication"
+    {
+        super::work_replication::finish(tx, task, &plan, &result.outcomes, key).await?;
+        return settle(tx, node, task, result.operation, &hash).await;
+    }
     let mut issue = None;
-    let state = match (offer.plan.map(|p| p.0), result.outcomes.as_slice()) {
+    let state = match (Some(plan), result.outcomes.as_slice()) {
         (Some(work::Plan::HashRaw { items, .. }), outcomes) => {
             super::work_raw::finish(tx, task, &items, outcomes).await?;
             "completed"
@@ -304,6 +361,40 @@ async fn settle(
 
 #[async_trait::async_trait]
 impl NodeWork for Backend {
+    async fn read_transfer(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: work::ReadTransfer,
+    ) -> Result<(
+        crate::model::node_read::Reply,
+        Option<crate::model::replication::external::RawRead>,
+    )> {
+        super::work_export::read(self, node, key, input).await
+    }
+    async fn checkpoint_transfer(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: Run,
+        operation: Uuid,
+        progress: &crate::model::transfer::RawProgress,
+    ) -> Result<()> {
+        progress.validate()?;
+        let mut tx = super::node_writes::start(self, node, key, run).await?;
+        ensure!(
+            q::writable().fetch_one(&mut *tx).await?,
+            Error::OperationAborted
+        );
+        let (plan, task) = checkpoint(&mut tx, node, run, operation).await?;
+        let work::Plan::RawTransfer { transfer: plan, .. } = plan else {
+            anyhow::bail!(Error::NodeOperationConflict)
+        };
+        let run = super::transactions::replication::owned(&mut tx, task).await?;
+        super::transactions::transfer::raw_progress(&mut tx, task, &run, &plan, progress).await?;
+        tx.commit().await?;
+        Ok(())
+    }
     async fn read_migration(
         &self,
         node: &NodeState,
@@ -422,6 +513,9 @@ impl NodeWork for Backend {
                     super::work_migration::offer(&mut tx, node, input.run, task, &detail, key)
                         .await?
                 }
+                Some("replication") if task_type == "storage_migration" => {
+                    super::work_replication::offer(&mut tx, node, input.run, task, key).await?
+                }
                 Some("tiering") => tier_plan(&mut tx, task, &detail, key).await?,
                 _ if detail.get("source_operation").is_some() => {
                     let store = serde_json::from_value(detail["storage_id"].clone())?;
@@ -456,7 +550,7 @@ impl NodeWork for Backend {
                 _ => anyhow::bail!(Error::NodeOperationConflict),
             };
             if let Some((proposal, secret)) = prepared {
-                reserve_io(&mut tx, token, &proposal, &secret).await?;
+                reserve_io(&mut tx, token, &task_type, &proposal, &secret).await?;
                 encrypted = Some(codec::protect(&secret, key, token.as_bytes())?);
                 plan = Some(proposal);
                 task_id = Some(task.id);

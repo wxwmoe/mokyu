@@ -1153,7 +1153,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             run.phase = "plan".into();
             return Ok(());
         }
-        if run.mode == "cluster" {
+        if run.mode != "single" {
             q::renew(id).execute(&mut **db).await?;
             transactions::create_write_lease(db, id, 120).await?;
         }
@@ -1169,7 +1169,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             completion: None,
             owner: Some((task.id, task.token)),
         };
-        let id = transactions::create_stream_in(db, input, (run.mode == "cluster").then_some(120))
+        let id = transactions::create_stream_in(db, input, (run.mode != "single").then_some(120))
             .await?;
         q::candidate(item.id, id).execute(&mut **db).await?;
         id

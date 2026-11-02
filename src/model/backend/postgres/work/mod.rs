@@ -14,6 +14,8 @@ mod rewrite;
 #[path = "../../shared/work_packing.rs"]
 mod packing;
 
+use super::super::transactions;
+#[path = "../../shared/work_transfer.rs"]
 mod transfer;
 
 mod raw;
@@ -74,22 +76,6 @@ fn owned(node: &NodeState, run: Run, batch: &q::Batch) -> Result<()> {
     Ok(())
 }
 
-fn replication_error(error: &anyhow::Error) -> Option<&'static str> {
-    match crate::model::error(error) {
-        Some(Error::QuotaExceeded) => return Some("quota_exceeded"),
-        Some(Error::SourceUnavailable) => return Some("source_unavailable"),
-        _ => {}
-    }
-    match error
-        .downcast_ref::<s3s::S3Error>()
-        .map(|error| error.code())
-    {
-        Some(s3s::S3ErrorCode::AccessDenied) => Some("access_revoked"),
-        Some(s3s::S3ErrorCode::OperationAborted) => Some("transfer_configuration_changed"),
-        _ => None,
-    }
-}
-
 async fn fail_replication(
     db: &mut Transaction<'_, Postgres>,
     task: Uuid,
@@ -97,7 +83,7 @@ async fn fail_replication(
     maintenance: Uuid,
     failure: anyhow::Error,
 ) -> Result<()> {
-    let Some(error) = replication_error(&failure) else {
+    let Some(error) = crate::model::replication::worker_error(&failure) else {
         return Err(failure);
     };
     q::release_permits(&[token, maintenance])
@@ -276,7 +262,7 @@ async fn finish(
                 Ok(()) => publication.commit().await?,
                 Err(failure) => {
                     publication.rollback().await?;
-                    if let Some(reason) = replication_error(&failure) {
+                    if let Some(reason) = crate::model::replication::worker_error(&failure) {
                         error = Some(reason);
                     } else {
                         return Err(failure);
@@ -1711,7 +1697,7 @@ pub(crate) async fn checkpoint_raw_pages(
 }
 
 pub(crate) async fn checkpoint_transfer(
-    pool: &sqlx::PgPool,
+    backend: &Backend,
     node: &NodeState,
     key: &Key,
     run: Run,
@@ -1719,7 +1705,8 @@ pub(crate) async fn checkpoint_transfer(
     progress: &crate::model::transfer::RawProgress,
 ) -> Result<()> {
     progress.validate()?;
-    let mut db = pool.begin().await?;
+    let mut db = backend.pool.begin().await?;
+    backend.fence_control(&mut db).await?;
     ensure!(
         q::writable().fetch_one(&mut *db).await?,
         Error::OperationAborted

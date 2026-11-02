@@ -75,6 +75,23 @@ pub(crate) trait NodeSessions: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeWork: Send + Sync {
+    async fn read_transfer(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_work::ReadTransfer,
+    ) -> Result<(
+        super::node_read::Reply,
+        Option<super::replication::external::RawRead>,
+    )>;
+    async fn checkpoint_transfer(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        operation: Uuid,
+        progress: &super::transfer::RawProgress,
+    ) -> Result<()>;
     async fn read_migration(
         &self,
         node: &NodeState,
@@ -406,28 +423,11 @@ pub(crate) trait ClusterStore:
     ) -> Result<()>;
     async fn notification_changes(&self) -> Result<Box<dyn NotificationChanges>>;
     async fn task_targets(&self, tasks: &[Uuid]) -> Result<Vec<Option<Uuid>>>;
-    async fn read_transfer(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_work::ReadTransfer,
-    ) -> Result<(
-        super::node_read::Reply,
-        Option<super::replication::external::RawRead>,
-    )>;
     async fn checkpoint_raw_pages(
         &self,
         node: &NodeState,
         key: &Key,
         input: super::node_work::RawPages,
-    ) -> Result<()>;
-    async fn checkpoint_transfer(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        run: super::session::Run,
-        operation: Uuid,
-        progress: &super::transfer::RawProgress,
     ) -> Result<()>;
     async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool>;
     async fn prioritize_uploads(&self, streams: &[Id]) -> Result<()>;

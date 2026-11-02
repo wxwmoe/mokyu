@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn read(
-    pool: &PgPool,
+    backend: &Backend,
     node: &NodeState,
     key: &Key,
     input: work::ReadTransfer,
@@ -13,7 +13,8 @@ pub(crate) async fn read(
         input.length > 0 && input.length as usize <= crate::storage::external::objects::WINDOW,
         Error::NodeOperationConflict
     );
-    let mut db = pool.begin().await?;
+    let mut db = backend.pool.begin().await?;
+    backend.fence_control(&mut db).await?;
     authenticate_rpc_node(&mut db, node, key, false).await?;
     require_node_run(&mut db, node, input.run, true).await?;
     ensure!(

@@ -560,7 +560,13 @@ impl NodeWrites for Service {
         &self,
         request: Request<wire::WriteRequest>,
     ) -> Result<Response<wire::WriteReply>, Status> {
-        self.write_lookup(request, false).await
+        let reply = self.write_lookup(request, false).await?;
+        #[cfg(feature = "fault-injection")]
+        if crate::faults::requested("node-write-status-contended") {
+            crate::faults::point("node-write-status-contended").await;
+            return Err(failure(model::Error::OperationAborted.into()));
+        }
+        Ok(reply)
     }
 
     async fn abort_write(
@@ -1397,7 +1403,7 @@ impl NodeWork for Service {
         progress
             .validate()
             .map_err(|_| Status::invalid_argument("invalid transfer checkpoint"))?;
-        bounded(self.app.cluster().map_err(failure)?.checkpoint_transfer(
+        bounded(self.app.node_work.checkpoint_transfer(
             &node,
             &self.app.secrets.credential_key,
             super::read::run(input.run)?,
@@ -1456,7 +1462,7 @@ impl NodeWork for Service {
             length: input.length,
             cached: super::read::cached(input.cached)?,
         };
-        let (value, raw) = bounded(self.app.cluster().map_err(failure)?.read_transfer(
+        let (value, raw) = bounded(self.app.node_work.read_transfer(
             &node,
             &self.app.secrets.credential_key,
             input,

@@ -290,7 +290,7 @@ pub(in super::super) async fn prepare(
                 == 1,
             Error::OperationAborted
         );
-        if run.mode == "cluster" {
+        if run.mode != "single" {
             r::renew(candidate).execute(&mut **db).await?;
             super::super::transactions::create_write_lease(db, candidate, 120).await?;
         }
@@ -309,7 +309,7 @@ pub(in super::super) async fn prepare(
         let candidate = super::super::transactions::create_stream_in(
             db,
             request,
-            (run.mode == "cluster").then_some(120),
+            (run.mode != "single").then_some(120),
         )
         .await?;
         ensure!(

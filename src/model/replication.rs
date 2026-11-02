@@ -657,3 +657,19 @@ mod tests {
         );
     }
 }
+
+pub(crate) fn worker_error(error: &anyhow::Error) -> Option<&'static str> {
+    match crate::model::error(error) {
+        Some(super::Error::QuotaExceeded) => return Some("quota_exceeded"),
+        Some(super::Error::SourceUnavailable) => return Some("source_unavailable"),
+        _ => {}
+    }
+    match error
+        .downcast_ref::<s3s::S3Error>()
+        .map(|error| error.code())
+    {
+        Some(s3s::S3ErrorCode::AccessDenied) => Some("access_revoked"),
+        Some(s3s::S3ErrorCode::OperationAborted) => Some("transfer_configuration_changed"),
+        _ => None,
+    }
+}
