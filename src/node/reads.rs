@@ -305,6 +305,7 @@ pub(crate) struct Prepared {
     pub(super) grants: Vec<Arc<Grant>>,
     pub(super) memory: Arc<OwnedSemaphorePermit>,
     pub(super) buffers: Arc<Semaphore>,
+    pub(super) spare: Option<Arc<crate::storage::read_buffer::Spares>>,
     limits: (u32, u32),
     pub(super) cached_body: Option<Arc<crate::app::responses::Entry>>,
     pub(super) route: [u8; 32],
@@ -437,6 +438,19 @@ impl Prepared {
         version: &wire::Cached,
     ) -> Result<T> {
         material(&self.materials, version)
+    }
+
+    pub(super) async fn reserve(
+        &self,
+        bytes: usize,
+    ) -> Result<crate::storage::read_buffer::Charge> {
+        crate::storage::read_buffer::reserve(
+            &self.buffers,
+            &self.memory,
+            self.spare.as_ref(),
+            bytes,
+        )
+        .await
     }
 
     pub(crate) fn page_hashes(&self, segment: &read::Segment) -> Result<Option<&[u8]>> {
@@ -613,6 +627,7 @@ impl Reads {
             grants,
             memory,
             buffers: Arc::new(Semaphore::new(super::body::BUFFER_UNITS)),
+            spare: Some(crate::storage::read_buffer::Spares::new(self.slots.clone())),
             limits,
             cached_body,
             route,
@@ -651,6 +666,7 @@ impl Reads {
             grants,
             memory,
             buffers,
+            spare: None,
             limits: (256, read::TARGET_BYTES as u32),
             cached_body: None,
             route: [0; 32],
@@ -736,6 +752,7 @@ impl Reads {
                     grants,
                     memory: previous.memory.clone(),
                     buffers: previous.buffers.clone(),
+                    spare: previous.spare.clone(),
                     limits: previous.limits,
                     cached_body: None,
                     route: previous.route,

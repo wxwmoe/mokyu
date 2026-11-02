@@ -15,7 +15,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
-use futures_util::{StreamExt, stream::BoxStream};
+use futures_util::{FutureExt, StreamExt, stream::BoxStream};
 use object_store::{ObjectStoreExt, path::Path};
 use std::{
     collections::BTreeMap,
@@ -280,13 +280,6 @@ impl Reader {
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         loaded: &mut Option<Loaded>,
     ) -> Result<(Bytes, bool)> {
-        let mut memory = Some(
-            prepared
-                .buffers
-                .clone()
-                .acquire_many_owned((3 * codec::MAX + 16).div_ceil(UNIT) as u32)
-                .await?,
-        );
         let (chunk, local) = match source {
             read::Source::Chunk { chunk } | read::Source::Pack { chunk, .. } => (chunk, false),
             read::Source::Local { node: owner, chunk } => {
@@ -298,6 +291,18 @@ impl Reader {
             }
             _ => anyhow::bail!("invalid chunk source"),
         };
+        ensure!(
+            (1..=codec::MAX as i32).contains(&chunk.raw_size),
+            codec::IntegrityError::Length
+        );
+        let raw = chunk.raw_size as usize;
+        let bound = raw * 2
+            + chunk
+                .stored_size
+                .unwrap_or(chunk.raw_size)
+                .clamp(1, codec::MAX as i32 + 16) as usize
+            + 16;
+        let mut memory = Some(prepared.reserve(bound).await?);
         let verify = prepared.verify
             || if let Some(id) = source.storage()? {
                 crate::storage::ReadContext::integrity(
@@ -315,16 +320,16 @@ impl Reader {
             let backend = prepared.backend(source.storage()?.context("source storage missing")?)?;
             let cached = {
                 let _io = self.io(&prepared, None).await?;
-                self.files.read(id, &backend.profile).await
+                self.files.read(id, &backend.profile, raw).await
             };
             if let Some((bytes, compressed, pin)) = cached {
                 let cpu = self.cpu.clone().acquire_owned().await?;
                 let pool = self.pool.clone();
                 let chunk = chunk.clone();
                 let held = prepared.clone();
-                let memory = memory.take().unwrap();
-                let decoded = tokio::task::spawn_blocking(move || {
-                    let (_cpu, _pin) = (cpu, pin);
+                let allocation = memory.take().unwrap();
+                let (decoded, charge) = tokio::task::spawn_blocking(move || {
+                    let (_cpu, _pin, _read) = (cpu, pin, held);
                     #[cfg(feature = "fault-injection")]
                     crate::faults::blocking("node-cache-decode");
                     let bytes = codec::decode_cache_read(
@@ -333,28 +338,20 @@ impl Reader {
                         compressed,
                         &pool,
                         verify,
-                    )?;
-                    Ok::<_, anyhow::Error>(owned(bytes, memory, &held))
+                    );
+                    (bytes, allocation)
                 })
                 .await?;
                 if let Ok(bytes) = decoded {
                     self.files.hit();
-                    return Ok((bytes, false));
+                    return Ok((charge.hold(bytes), false));
                 }
+                memory = Some(charge);
                 // Local cache damage must fall back before considering the authoritative source suspect.
                 self.files.reject(id).await;
             }
         }
-        let memory = match memory {
-            Some(memory) => memory,
-            None => {
-                prepared
-                    .buffers
-                    .clone()
-                    .acquire_many_owned((3 * codec::MAX + 16).div_ceil(UNIT) as u32)
-                    .await?
-            }
-        };
+        let memory = memory.unwrap();
         if let read::Source::Pack { pack, .. } = source {
             let current = loaded.as_ref().is_some_and(|value| {
                 value.pack.location_id == pack.location_id
@@ -409,10 +406,7 @@ impl Reader {
                 !self.background && !prepared.verify,
                 prepared.reply.http_status == 206,
             );
-            return Ok((
-                owned(loaded.data.chunk(chunk)?, memory, &prepared),
-                !current,
-            ));
+            return Ok((memory.hold(loaded.data.chunk(chunk)?), !current));
         }
         *loaded = None;
         let mut compressed = false;
@@ -451,7 +445,7 @@ impl Reader {
                 &prepared,
                 chunk.storage_id.context("chunk storage missing")?,
                 Path::from(crate::storage::chunk_name(chunk.address())),
-                codec::MAX + 16,
+                usize::try_from(chunk.stored_size.context("chunk size missing")?)?,
             )
             .await?
         };
@@ -467,7 +461,8 @@ impl Reader {
             } else {
                 codec::decode_read(&chunk, encoded, keys.as_ref(), 0, &pool, verify)?.0
             };
-            Ok((owned(bytes, memory, &prepared), !local))
+            let _read = prepared;
+            Ok((memory.hold(bytes), !local))
         })
         .await?
     }
@@ -867,7 +862,6 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
         }
         let mut current = Arc::new(prepared);
         let mut retired = None;
-        let mut loaded = None;
         let mut demand=crate::status::access::DemandRead::default();
         loop {
             current.check()?;
@@ -877,12 +871,47 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                 let reads = reads.clone(); let current = current.clone();
                 Prefetch(tokio::spawn(async move { reads.window(current, cursor, retired).await }))
             });
-            for (index, segment) in value.segments.into_iter().enumerate() {
+            for (batch_index,batch) in value.segments.chunks(read::LANES).enumerate() {
+                let mut packs=std::collections::HashMap::new();
+                let mut chunks=std::collections::HashMap::new();
+                let mut tasks=Vec::with_capacity(batch.len());
+                for (offset,segment) in batch.iter().enumerate() {
+                    let index=batch_index*read::LANES+offset;
+                    let loader = match &segment.source {
+                        read::Source::Pack {pack,..} => Some(packs.entry(pack.location_id).or_insert_with(||Arc::new(tokio::sync::Mutex::new(None))).clone()),
+                        _=>None,
+                    };
+                    let read=reads.clone();let held=current.clone();let keys=keys.clone();
+                    let src=segment.source.clone();
+                    let group = match &src {
+                        read::Source::Chunk {chunk} | read::Source::Pack {chunk,..} | read::Source::Local {chunk,..} => Some(chunk.uuid),
+                        _=>None,
+                    };
+                    let work=async move {
+                        match &src {
+                            read::Source::Raw {..} => Ok((Bytes::new(),false)),
+                            read::Source::Chunk {..} | read::Source::Local {..} | read::Source::Pack {..} => {
+                                if let Some(loader)=loader {
+                                    let mut loaded=loader.lock().await;
+                                    read.reader.chunk(&read.node,held.clone(),&src,keys,&mut loaded).await
+                                } else {
+                                    read.reader.chunk(&read.node,held.clone(),&src,keys,&mut None).await
+                                }
+                            }
+                            _=>read.reader.fragment(&read.node,held.clone(),&src).await.map(|bytes|(bytes,false))
+                        }
+                    }.map(|result|result.map_err(Arc::new)).boxed().shared();
+                    let job=if let Some(group)=group { chunks.entry(group).or_insert(work).clone() } else {work};
+                    tasks.push(async move {(index,segment,job.await)});
+                }
+                drop(packs);drop(chunks);
+                let mut ready=futures_util::stream::iter(tasks).buffered(read::LANES);
+                while let Some((index,segment,result))=current.guard(&reads.node,async {Ok(ready.next().await)}).await? {
+
                 if let Some(capture)=&current.capture && let Some(source)=segment.source.cached_source(){
                     capture.lock().unwrap().demand(position as i64,position as i64+segment.length,source);
                 }
                 if let read::Source::Raw { source } = &segment.source {
-                    loaded = None;
                     let result = current.guard(&reads.node, reads.reader.raw(&reads.node, &current, source, false)).await;
                     if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
                     let (mut file, _io) = result?;
@@ -912,14 +941,8 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         yield bytes;
                     }
                 } else {
-                    let result = current.guard(&reads.node, async {
-                        match &segment.source {
-                            read::Source::Chunk { .. } | read::Source::Pack { .. } | read::Source::Local { .. } => reads.reader.chunk(&reads.node, current.clone(), &segment.source, keys.clone(), &mut loaded).await,
-                            _ => { loaded = None; reads.reader.fragment(&reads.node, current.clone(), &segment.source).await.map(|bytes|(bytes,false)) }
-                        }
-                    }).await;
                     if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
-                    let (bytes,origin) = result?;
+                    let (bytes,origin)=result.map_err(|e|Arc::try_unwrap(e).unwrap_or_else(|e|anyhow::anyhow!("{e:#}")))?;
                     reads.check_chunk(current.clone(), index, &segment.source, bytes.clone())?;
                     if position + segment.length as u64 == end { current.finish_source(); }
                     if !reads.reader.background && !current.verify {
@@ -933,6 +956,7 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                     yield bytes.slice(segment.source_offset as usize..(segment.source_offset + segment.length) as usize);
                 }
                 position += segment.length as u64;
+                }
             }
             let Some(next) = &mut prefetch else { break; };
             retired = current.grants.iter().find(|grant| grant.reference.r#type == wire::GrantType::ReadWindow as i32)

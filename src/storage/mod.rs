@@ -23,6 +23,7 @@ pub(crate) mod raw_cache;
 pub(crate) mod raw_manifest;
 pub(crate) mod raw_request;
 pub(crate) mod raw_upload;
+pub(crate) mod read_buffer;
 pub(crate) mod resource_gate;
 mod s3;
 mod sources;
@@ -1680,7 +1681,9 @@ impl Storage {
         let secrets = self.secrets.clone();
         let (compression, _, threshold) = self.compression_for(c.storage_id)?;
         let diagnostics = self.diagnostics.clone();
+        let charge = read_buffer::WORK.try_with(Arc::clone).ok();
         tokio::task::spawn_blocking(move || {
+            let _charge = charge;
             let _permit = permit;
             codec::decode_read(&c, encoded, &secrets, threshold, &compression, verify)
                 .inspect_err(|e| diagnostics.content(e))
@@ -1795,7 +1798,9 @@ impl Storage {
                 let permit = self.cpu.clone().acquire_owned().await?;
                 let chunk = c.clone();
                 let (compression, _, _) = self.compression_for(c.storage_id)?;
+                let charge = read_buffer::WORK.try_with(Arc::clone).ok();
                 let decoded = tokio::task::spawn_blocking(move || {
+                    let _charge = charge;
                     let _permit = permit;
                     codec::decode_cache_read(
                         &chunk,

@@ -367,6 +367,7 @@ impl Cache {
         &self,
         id: Uuid,
         profile: &StorageProfile,
+        max: usize,
     ) -> Option<(Vec<u8>, bool, CachePin)> {
         self.lookups.fetch_add(1, Ordering::Relaxed);
         if !profile.cache_enabled || self.initialize().await.is_err() {
@@ -376,7 +377,7 @@ impl Cache {
         let CacheFile::Chunk(compressed) = file else {
             return None;
         };
-        match crate::storage::local::read_bounded(file.path(&self.root, id), codec::MAX).await {
+        match crate::storage::local::read_bounded(file.path(&self.root, id), max).await {
             Ok(bytes) => Some((bytes, compressed, pin)),
             Err(_) => {
                 drop(pin);
