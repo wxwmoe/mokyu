@@ -1018,7 +1018,7 @@ pub(in super::super) fn conversion_layout(chunk: Id, pack: Option<Id>) -> Statem
 }
 
 pub(in super::super) fn conversion_current(stream: Id, revision: i64) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT id FROM streams WHERE id=? AND payload_revision=? AND payload_type='raw' AND state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=streams.id)").bind(stream).bind(revision)
+    sqlx::query_scalar("SELECT id FROM streams WHERE id=? AND payload_revision=? AND payload_type='raw' AND state='ready' AND (EXISTS(SELECT 1 FROM objects WHERE stream_id=streams.id) OR EXISTS(SELECT 1 FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.stream_id=streams.id AND u.state IN ('active','completing')))").bind(stream).bind(revision)
 }
 
 pub(in super::super) fn conversion_move(candidate: Id, stream: Id) -> Statement<'static> {

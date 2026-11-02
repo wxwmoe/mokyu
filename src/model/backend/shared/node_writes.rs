@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 #[derive(sqlx::FromRow)]
 pub(super) struct Write {
+    pub(super) owner_task_id: Option<Uuid>,
     pub(super) operation_id: Uuid,
     pub(super) lease_id: Uuid,
     pub(super) boot_id: Uuid,
@@ -421,14 +422,16 @@ impl NodeWrites for Backend {
                         == 0,
                 s3s::s3_error!(InvalidArgument)
             );
-            transactions::reserve_quota_in(
-                &mut tx,
-                stream,
-                end,
-                false,
-                Some((part.upload, part.number)),
-            )
-            .await?;
+            if row.owner_task_id.is_none() {
+                transactions::reserve_quota_in(
+                    &mut tx,
+                    stream,
+                    end,
+                    false,
+                    Some((part.upload, part.number)),
+                )
+                .await?;
+            }
             let settings = mp::settings().fetch_one(&mut *tx).await?;
             let storage = settings
                 .staging_storage_id
@@ -785,7 +788,7 @@ impl NodeWrites for Backend {
                 < node_chunk::MAX_PENDING,
             Error::NodeWriteBusy
         );
-        if row.intent.completion.is_none() {
+        if row.owner_task_id.is_none() && row.intent.completion.is_none() {
             transactions::reserve_quota_in(
                 &mut tx,
                 stream,
@@ -1429,7 +1432,8 @@ impl NodeWrites for Backend {
                 row = lookup(&mut tx, node.node_id, input.operation).await?;
             }
         }
-        let reply = row.reply(&mut tx, node, key, input.run, None).await?;
+        let cached = (!abort && row.owner_task_id.is_some()).then_some([].as_slice());
+        let reply = row.reply(&mut tx, node, key, input.run, cached).await?;
         tx.commit().await?;
         Ok(reply)
     }
@@ -1459,16 +1463,20 @@ impl NodeWrites for Backend {
             ensure!(
                 row.next_batch == 1
                     && row.next_offset == 0
-                    && row.intent.part.is_none()
+                    && row.owner_task_id.is_none()
+                    && (row.intent.part.is_none() || row.profile.cdc_enabled && input.input.local)
                     && (!input.input.local || row.profile.upload_cache)
-                    && !row.profile.cdc_enabled
-                    && !row.profile.pack_enabled
-                    && !row.profile.compression_enabled
-                    && row.block_key_id.is_none()
+                    && (row.profile.cdc_enabled
+                        && (row.profile.write_processing == "background" || input.input.local)
+                        || !row.profile.cdc_enabled
+                            && !row.profile.pack_enabled
+                            && !row.profile.compression_enabled
+                            && row.block_key_id.is_none())
                     && (!row.profile.upload_cache
                         || input.input.local
                         || row.profile.upload_cache_overflow == "fallback")
-                    && (row.profile.deduplication_enabled
+                    && (!row.profile.cdc_enabled
+                        && row.profile.deduplication_enabled
                         && row.profile.write_processing == "inline")
                         == input.input.hash.is_some(),
                 s3s::s3_error!(InvalidRequest, "write does not accept this raw source")
@@ -1477,7 +1485,14 @@ impl NodeWrites for Backend {
                 row.intent.size.is_none_or(|s| s == size),
                 s3s::s3_error!(IncompleteBody)
             );
-            transactions::reserve_quota_in(&mut tx, stream, size, false, None).await?;
+            transactions::reserve_quota_in(
+                &mut tx,
+                stream,
+                size,
+                false,
+                row.intent.part.as_ref().map(|p| (p.upload, p.number)),
+            )
+            .await?;
             let duplicate = if let Some(hash) = &input.input.hash {
                 queries::raw_duplicate(row.storage_id, hash, size)
                     .fetch_optional(&mut *tx)
@@ -1610,6 +1625,33 @@ impl NodeWrites for Backend {
             let source = queries::raw_source(raw.source_id)
                 .fetch_one(&mut *tx)
                 .await?;
+            if row.profile.cdc_enabled {
+                let algorithm = if let Some(id) = row.block_key_id {
+                    queries::work::block_key(id)
+                        .fetch_one(&mut *tx)
+                        .await?
+                        .algorithm
+                } else {
+                    "none".into()
+                };
+                let encoding = crate::model::cache::EncodingPolicy {
+                    compression: row.profile.compression_config("30s"),
+                    pack_enabled: row.profile.pack_enabled,
+                    pack_max_size: row.profile.pack_max_size.clone(),
+                    pack_flush_timeout: row.profile.pack_upload_flush_timeout.clone(),
+                    algorithm,
+                    block_key_id: row.block_key_id,
+                };
+                transactions::enqueue_conversion(
+                    &mut tx,
+                    stream,
+                    raw.source_id,
+                    row.storage_id,
+                    &encoding,
+                    (source.medium == "local").then_some(node.node_id),
+                )
+                .await?;
+            }
             if source.medium == "local" {
                 ensure!(
                     queries::raw_stage(raw.source_id, row.profile.revision, None)
@@ -1621,7 +1663,7 @@ impl NodeWrites for Backend {
                 );
                 queries::raw_queue(
                     raw.source_id,
-                    row.profile.deduplication_enabled,
+                    !row.profile.cdc_enabled && row.profile.deduplication_enabled,
                     row.profile.write_processing == "background",
                 )
                 .execute(&mut *tx)
@@ -1644,7 +1686,8 @@ impl NodeWrites for Backend {
                     .fetch_one(&mut *tx)
                     .await?;
                 transactions::share_raw(&mut tx, stream, &source, hash).await?;
-            } else if row.profile.deduplication_enabled
+            } else if !row.profile.cdc_enabled
+                && row.profile.deduplication_enabled
                 && row.profile.write_processing == "background"
             {
                 queries::raw_enqueue_processing(stream, raw.source_id)
@@ -1758,7 +1801,9 @@ impl NodeWrites for Backend {
             s3s::s3_error!(IncompleteBody)
         );
         let mut phase = "published";
-        if let Some(part) = &row.intent.part {
+        if let Some(task) = row.owner_task_id {
+            super::work_conversion::seal(&mut tx, &row, task, &input).await?;
+        } else if let Some(part) = &row.intent.part {
             ensure!(
                 input.etag.len() == 32 && input.if_match.is_none() && input.if_none.is_none(),
                 s3s::s3_error!(InvalidRequest)

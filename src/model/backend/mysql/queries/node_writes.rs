@@ -9,7 +9,7 @@ use sqlx::types::Json;
 use uuid::Uuid;
 
 pub(in super::super) fn owned(node: Uuid, op: Uuid) -> Rows<'static, Write> {
-    sqlx::query_as("SELECT w.*,CASE WHEN w.phase='active' AND s.state='writing' AND (EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=w.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id) OR EXISTS(SELECT 1 FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.write_token=s.id AND u.state='active') OR s.owner_task_id IS NOT NULL) THEN CAST(GREATEST(0,TIMESTAMPDIFF(MICROSECOND,UTC_TIMESTAMP(6),w.expires_at) DIV 1000) AS SIGNED) ELSE 0 END AS remaining FROM node_writes w LEFT JOIN streams s ON s.id=w.stream_id WHERE w.node_id=? AND w.operation_id=? FOR UPDATE").bind(node).bind(op)
+    sqlx::query_as("SELECT w.*,s.owner_task_id,CASE WHEN w.phase='active' AND s.state='writing' AND (EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=w.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id) OR EXISTS(SELECT 1 FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.write_token=s.id AND u.state='active') OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.execution_token=s.owner_execution_token AND t.state='running')) THEN CAST(GREATEST(0,TIMESTAMPDIFF(MICROSECOND,UTC_TIMESTAMP(6),w.expires_at) DIV 1000) AS SIGNED) ELSE 0 END AS remaining FROM node_writes w LEFT JOIN streams s ON s.id=w.stream_id WHERE w.node_id=? AND w.operation_id=? FOR UPDATE").bind(node).bind(op)
 }
 pub(in super::super) fn insert<'a>(
     node: &'a NodeState,

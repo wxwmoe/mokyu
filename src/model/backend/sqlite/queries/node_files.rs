@@ -38,3 +38,7 @@ pub(in super::super) fn snapshot(
 pub(in super::super) fn pending(node: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks t WHERE t.source_node=? AND t.task_type='upload' AND t.state='queued' AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=CAST(json_extract(t.detail,'$.source_id') AS INTEGER) AND u.next_attempt_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND NOT EXISTS(SELECT 1 FROM maintenance_controls WHERE policy='upload' AND paused))").bind(node)
 }
+
+pub(in super::super) fn share_conversion(source: Id) -> Statement<'static> {
+    sqlx::query("UPDATE tasks SET source_node=NULL WHERE source_node IS NOT NULL AND id=(SELECT processing_task FROM raw_sources WHERE id=?)").bind(source)
+}

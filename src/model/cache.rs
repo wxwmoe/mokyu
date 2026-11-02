@@ -18,6 +18,31 @@ pub(crate) struct EncodingPolicy {
 }
 
 impl EncodingPolicy {
+    pub(crate) fn apply(
+        &self,
+        profile: &mut crate::storage::profile::StorageProfile,
+    ) -> Result<()> {
+        self.validate()?;
+        profile.cdc_enabled = true;
+        profile.upload_cache = false;
+        profile.write_processing = "inline".into();
+        profile.compression_enabled = self.compression.enabled;
+        profile.compression_strategy = serde_json::to_value(self.compression.strategy)?
+            .as_str()
+            .unwrap()
+            .to_owned();
+        profile.compression_level = self.compression.level;
+        profile.compression_sample_level = self.compression.sample_level;
+        profile.compression_min_savings_percent = i32::from(self.compression.min_savings_percent);
+        profile.compression_min_savings_bytes = i64::try_from(self.compression.min_savings_bytes)?;
+        profile.pack_enabled = self.pack_enabled;
+        profile.pack_max_size = self.pack_max_size.clone();
+        profile
+            .pack_upload_flush_timeout
+            .clone_from(&self.pack_flush_timeout);
+        Ok(())
+    }
+
     pub(crate) fn pack_config(&self) -> crate::content::pack::Config {
         use crate::content::{
             compression::Strategy,

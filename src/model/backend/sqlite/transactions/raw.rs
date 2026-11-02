@@ -122,44 +122,7 @@ pub(in super::super) async fn begin_raw(
     .await?;
     let id = Id::from(inserted.last_insert_rowid());
     if let Some(encoding) = encoding {
-        encoding.validate()?;
-        ensure!(
-            queries::conversion_key(storage, encoding.block_key_id)
-                .fetch_one(&mut *tx)
-                .await?,
-            crate::model::Error::OperationAborted
-        );
-        if let Some(key) = encoding.block_key_id {
-            let (_, algorithm) = queries::replacement_key(key)
-                .fetch_optional(&mut *tx)
-                .await?
-                .ok_or(crate::model::Error::OperationAborted)?;
-            ensure!(
-                algorithm == encoding.algorithm,
-                crate::model::Error::OperationAborted
-            );
-        }
-        let (bucket, object_key, payload_revision) = queries::conversion_stream(stream)
-            .fetch_one(&mut *tx)
-            .await?;
-        let job = crate::model::raw::Conversion {
-            stream,
-            source: id.into(),
-            bucket,
-            object_key,
-            payload_revision,
-            encoding: encoding.clone(),
-            target_key_id: encoding.block_key_id,
-        };
-        let mut detail = serde_json::to_value(job)?;
-        detail["operation"] = serde_json::json!("cdc");
-        let task = Uuid::new_v4();
-        queries::insert_task(task, "upload", Some(bucket), detail, None)
-            .execute(&mut *tx)
-            .await?;
-        queries::conversion_link(id.into(), task)
-            .execute(&mut *tx)
-            .await?;
+        enqueue_conversion(&mut tx, stream, id.into(), storage, encoding, None).await?;
     } else if background {
         queries::raw_enqueue_processing(stream, id)
             .execute(&mut *tx)
@@ -934,6 +897,9 @@ pub(in super::super) async fn complete_raw_upload_in(
     );
     current.source.validate()?;
     if current.source.pending_upload {
+        super::super::queries::node_files::share_conversion(work.source.id)
+            .execute(&mut **tx)
+            .await?;
         ensure!(
             queries::raw_uploaded(work.source.id)
                 .execute(&mut **tx)
@@ -1123,71 +1089,84 @@ pub(in super::super) async fn finish_conversion(
     lease: Option<Uuid>,
 ) -> Result<bool> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_execution(&mut tx, task).await?;
+    let _ = lease;
+    let done = finish_conversion_in(&mut tx, task, job, source, candidate).await?;
+    if done {
+        queries::complete_task(task.id).execute(&mut *tx).await?;
+    }
+    tx.commit().await?;
+    Ok(done)
+}
+pub(in super::super) async fn finish_conversion_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: Execution,
+    job: &crate::model::raw::Conversion,
+    source: &crate::model::raw::RawSource,
+    candidate: Id,
+) -> Result<bool> {
+    lock_execution(tx, task).await?;
     ensure!(
         queries::conversion_owned(candidate, task.id, task.token)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .is_some(),
         crate::model::Error::OperationAborted
     );
     if queries::conversion_current(job.stream, job.payload_revision)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .is_none()
     {
         queries::conversion_abandon(candidate)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        queries::complete_task(task.id).execute(&mut *tx).await?;
-        tx.commit().await?;
+
         return Ok(true);
     }
-    let _ = lease;
 
-    validate_raw(&mut tx, job.stream, source.size).await?;
-    let current = queries::raw_source(source.id).fetch_one(&mut *tx).await?;
+    validate_raw(tx, job.stream, source.size).await?;
+    let current = queries::raw_source(source.id).fetch_one(&mut **tx).await?;
     ensure!(
         current == *source && source.id == job.source,
         crate::model::Error::SourceUnavailable
     );
     let (end, contiguous) = queries::extent_continuity(candidate)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         end == source.size && contiguous,
         "conversion candidate is incomplete"
     );
     if !queries::conversion_no_pending(candidate)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?
     {
         return Ok(false);
     }
-    require_sources(&mut tx, Some(candidate), &[]).await?;
+    require_sources(tx, Some(candidate), &[]).await?;
     queries::conversion_move(candidate, job.stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::conversion_detach(job.stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::conversion_changed(job.stream)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::conversion_unpin(candidate)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::conversion_abandon(candidate)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::raw_touch_unreferenced(source.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    queries::ready_stream_queues(&mut tx, job.stream).await?;
-    queries::complete_task(task.id).execute(&mut *tx).await?;
+    queries::ready_stream_queues(tx, job.stream).await?;
+
     #[cfg(feature = "fault-injection")]
     crate::faults::point("cdc-switch-before-commit").await;
-    tx.commit().await?;
+
     Ok(true)
 }
 
@@ -1317,5 +1296,59 @@ pub(in super::super) async fn publish_import_in(
     );
     queries::ready_stream_queues(tx, id).await?;
     replace_object_reference(tx, &stream, old).await?;
+    Ok(())
+}
+
+pub(in super::super) async fn enqueue_conversion(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    stream: Id,
+    source: Id,
+    storage: Uuid,
+    encoding: &crate::model::cache::EncodingPolicy,
+    node: Option<Uuid>,
+) -> Result<()> {
+    encoding.validate()?;
+    ensure!(
+        queries::conversion_key(storage, encoding.block_key_id)
+            .fetch_one(&mut **tx)
+            .await?,
+        crate::model::Error::OperationAborted
+    );
+    if let Some(key) = encoding.block_key_id {
+        let (_, algorithm) = queries::replacement_key(key)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or(crate::model::Error::OperationAborted)?;
+        ensure!(
+            algorithm == encoding.algorithm,
+            crate::model::Error::OperationAborted
+        );
+    }
+    let (bucket, object_key, payload_revision) = queries::conversion_stream(stream)
+        .fetch_one(&mut **tx)
+        .await?;
+    let job = crate::model::raw::Conversion {
+        stream,
+        source,
+        bucket,
+        object_key,
+        payload_revision,
+        encoding: encoding.clone(),
+        target_key_id: encoding.block_key_id,
+    };
+    let mut detail = serde_json::to_value(job)?;
+    detail["operation"] = serde_json::json!("cdc");
+    let task = Uuid::new_v4();
+    queries::insert_task(task, "upload", Some(bucket), detail, None)
+        .execute(&mut **tx)
+        .await?;
+    queries::conversion_link(source, task)
+        .execute(&mut **tx)
+        .await?;
+    if let Some(node) = node {
+        queries::node_files::target(task, node)
+            .execute(&mut **tx)
+            .await?;
+    }
     Ok(())
 }

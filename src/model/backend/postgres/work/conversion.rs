@@ -15,25 +15,7 @@ pub(super) fn freeze(
     profile: &mut crate::storage::profile::StorageProfile,
 ) -> Result<()> {
     let job: Conversion = serde_json::from_value(detail.clone())?;
-    job.encoding.validate()?;
-    profile.cdc_enabled = true;
-    profile.upload_cache = false;
-    profile.write_processing = "inline".into();
-    profile.compression_enabled = job.encoding.compression.enabled;
-    profile.compression_strategy = serde_json::to_value(job.encoding.compression.strategy)?
-        .as_str()
-        .unwrap()
-        .to_owned();
-    profile.compression_level = job.encoding.compression.level;
-    profile.compression_sample_level = job.encoding.compression.sample_level;
-    profile.compression_min_savings_percent =
-        i32::from(job.encoding.compression.min_savings_percent);
-    profile.compression_min_savings_bytes =
-        i64::try_from(job.encoding.compression.min_savings_bytes)?;
-    profile.pack_enabled = job.encoding.pack_enabled;
-    profile.pack_max_size = job.encoding.pack_max_size.clone();
-    profile.pack_upload_flush_timeout = job.encoding.pack_flush_timeout;
-    Ok(())
+    job.encoding.apply(profile)
 }
 
 pub(super) async fn prepare(

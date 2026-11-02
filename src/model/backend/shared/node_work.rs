@@ -162,6 +162,12 @@ async fn finish(
             super::work_raw::finish(tx, task, &items, outcomes).await?;
             "completed"
         }
+        (Some(work::Plan::ConvertRaw { .. }), [outcome]) => {
+            if matches!(outcome, work::Outcome::Retry) {
+                issue = Some("backend_io_failed");
+            }
+            super::work_conversion::finish(tx, task, outcome).await?
+        }
         (Some(work::Plan::UploadRaw { items, .. }), [outcome]) if items.len() == 1 => {
             let (next, error) =
                 super::node_files::finish(tx, node, task, &items[0], outcome).await?;
@@ -332,6 +338,10 @@ impl NodeWork for Backend {
                     ))
                 }
                 Some("deduplicate") => super::work_raw::offer(&mut tx, task, &detail, key).await?,
+                Some("cdc") => {
+                    super::work_conversion::offer(&mut tx, node, input.run, task, &detail, key)
+                        .await?
+                }
                 Some("tiering") => tier_plan(&mut tx, task, &detail, key).await?,
                 _ if detail.get("source_operation").is_some() => {
                     let store = serde_json::from_value(detail["storage_id"].clone())?;

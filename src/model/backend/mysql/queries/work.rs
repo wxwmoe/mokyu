@@ -28,7 +28,7 @@ pub(in super::super) fn next_task(
     node: Uuid,
     worker: bool,
 ) -> Rows<'static, (Uuid, serde_json::Value)> {
-    sqlx::query_as("SELECT t.id,t.detail FROM tasks t WHERE t.state='queued' AND ((t.source_node=? AND t.task_type='upload' AND ?=2 AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.source_id')) AS SIGNED) AND u.next_attempt_at>UTC_TIMESTAMP(6)) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND NOT maintenance)) OR (t.source_node IS NULL AND ? AND ((?=0 AND t.task_type='integrity' AND (JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test' OR JSON_EXTRACT(t.detail,'$.source_operation') IS NOT NULL)) OR (?=2 AND (t.task_type='storage_migration' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='tiering' OR t.task_type='upload' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='deduplicate'))) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND remote_work AND NOT maintenance))) AND NOT EXISTS(SELECT 1 FROM maintenance_controls WHERE policy=t.task_type AND paused) ORDER BY t.updated_at,t.id LIMIT 1 FOR UPDATE SKIP LOCKED").bind(node).bind(class as i64).bind(worker).bind(class as i64).bind(class as i64)
+    sqlx::query_as("SELECT t.id,t.detail FROM tasks t WHERE t.state='queued' AND (t.error IS NULL OR t.error<>'backend_io_failed' OR t.updated_at<=UTC_TIMESTAMP(6)-INTERVAL 5 SECOND) AND ((t.source_node=? AND t.task_type='upload' AND ?=2 AND (JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))<>'cdc' OR NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing')))) AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.source_id')) AS SIGNED) AND u.next_attempt_at>UTC_TIMESTAMP(6)) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND NOT maintenance)) OR (t.source_node IS NULL AND ? AND ((?=0 AND t.task_type='integrity' AND (JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test' OR JSON_EXTRACT(t.detail,'$.source_operation') IS NOT NULL)) OR (?=2 AND (t.task_type='storage_migration' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='tiering' OR t.task_type='upload' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='deduplicate' OR t.task_type='upload' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='cdc' AND EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND r.medium='shared_s3' AND NOT r.pending_upload AND r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))))) AND EXISTS(SELECT 1 FROM mokyu_meta WHERE id=1 AND remote_work AND NOT maintenance))) AND NOT EXISTS(SELECT 1 FROM maintenance_controls WHERE policy=t.task_type AND paused) ORDER BY t.updated_at,t.id LIMIT 1 FOR UPDATE SKIP LOCKED").bind(node).bind(class as i64).bind(worker).bind(class as i64).bind(class as i64)
 }
 
 pub(in super::super) fn settle(node: Uuid, operation: Uuid, hash: &[u8]) -> Statement<'_> {
@@ -100,4 +100,25 @@ pub(in super::super) fn progress(
         .bind(Json(detail))
         .bind(task.id)
         .bind(task.token)
+}
+
+pub(in super::super) fn rebind_candidate(
+    stream: crate::model::Id,
+    task: crate::model::task::Execution,
+) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET owner_execution_token=? WHERE id=? AND state='writing' AND owner_task_id=?").bind(task.token).bind(stream).bind(task.id)
+}
+pub(in super::super) fn allow_candidate(id: crate::model::Id, task: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM streams WHERE id=? AND state='writing' AND owner_task_id=?)",
+    )
+    .bind(id)
+    .bind(task)
+}
+
+pub(in super::super) fn part_owner(id: crate::model::Id) -> Rows<'static, (Uuid, i32)> {
+    sqlx::query_as("SELECT upload_id,part_number FROM parts WHERE stream_id=?").bind(id)
+}
+pub(in super::super) fn discard_write(node: Uuid, operation: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE node_writes SET phase='aborted' WHERE node_id=? AND operation_id=? AND phase='active'").bind(node).bind(operation)
 }
