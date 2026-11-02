@@ -36,7 +36,7 @@ pub(in super::super) fn clear_pack_inputs() -> Statement<'static> {
 
 pub(in super::super) fn reset_completing_uploads() -> Statement<'static> {
     sqlx::query(
-        "UPDATE uploads SET state='active' WHERE state='completing' AND output_stream IS NULL",
+        "UPDATE uploads SET state='active' WHERE state='completing' AND output_stream IS NULL AND NOT EXISTS(SELECT 1 FROM node_completions c WHERE c.upload_id=uploads.id)",
     )
 }
 
@@ -172,8 +172,18 @@ pub(in super::super) fn stale_fragments(
 
 pub(in super::super) fn lock_cleanup_fragment(
     id: Id,
-) -> Rows<'static, (Uuid, bool, Option<Id>, Option<Uuid>)> {
-    sqlx::query_as("SELECT location_id,sealed,owner_stream,file_id FROM fragments f WHERE id=? AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=f.location_id AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(id)
+) -> Rows<
+    'static,
+    (
+        Uuid,
+        bool,
+        Option<Id>,
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<String>,
+    ),
+> {
+    sqlx::query_as("SELECT location_id,sealed,owner_stream,file_id,staging_storage_id,staging_object_key FROM fragments f WHERE id=? AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) AND NOT EXISTS(SELECT 1 FROM node_read_sources ns JOIN node_read_windows w ON w.id=ns.window_id JOIN node_reads nr ON nr.read_id=w.read_id WHERE ns.location_id=f.location_id AND nr.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(id)
 }
 
 pub(in super::super) fn remove_fragment_row(id: Id) -> Statement<'static> {
@@ -428,7 +438,7 @@ impl MaintenanceStore for Backend {
         )
     }
     async fn recovery_fragments(&self, after: Id) -> Result<Vec<RecoveryFragment>> {
-        Ok(sqlx::query_as("SELECT f.id,f.location_id AS fragment_location,f.size,f.hash,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>? AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT f.id,f.location_id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>? AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after).fetch_all(&self.read).await?)
     }
     async fn fragment_uploads(&self, id: Id) -> Result<Vec<Uuid>> {
         Ok(sqlx::query_scalar("SELECT DISTINCT p.upload_id FROM parts p JOIN extents e ON e.stream_id=p.stream_id WHERE e.fragment_id=?").bind(id).fetch_all(&self.read).await?)

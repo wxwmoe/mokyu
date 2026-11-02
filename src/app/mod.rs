@@ -327,6 +327,7 @@ impl App {
                 &budget,
                 stores.physical.clone(),
                 stores.cluster.clone(),
+                (state.mode != "single").then(|| stores.staging.clone()),
                 (state.mode != "single").then(|| stores.storage_permits.clone()),
                 stores.storage_profiles.clone(),
                 stores.raw.clone(),

@@ -1,13 +1,14 @@
 use super::*;
 
 pub(in super::super) async fn node_completion_status(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: crate::model::node_complete::Lookup,
 ) -> Result<(write::Phase, crate::model::node_complete::Summary)> {
     input.validate()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
     ensure!(
         matches!(node.role.as_str(), "data" | "node"),
@@ -67,7 +68,7 @@ pub(in super::super) async fn node_completion_status(
 }
 
 pub(in super::super) async fn node_complete_sources(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: crate::model::node_complete::Sources,
@@ -84,7 +85,8 @@ pub(in super::super) async fn node_complete_sources(
         unique.len() == input.reads.len() && input.reads.iter().all(|id| !id.is_nil()),
         s3s::s3_error!(InvalidArgument)
     );
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     require_node_write(&mut tx, &row).await?;
     let upload = row

@@ -132,7 +132,7 @@ impl ChunkStore for Backend {
     }
     async fn fragment(&self, id: Id) -> Result<FragmentSource> {
         Ok(
-            sqlx::query_as("SELECT f.location_id AS fragment_location,f.size,f.hash,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id=?")
+            sqlx::query_as("SELECT f.location_id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id=?")
                 .bind(id)
                 .fetch_one(&self.pool)
                 .await?,

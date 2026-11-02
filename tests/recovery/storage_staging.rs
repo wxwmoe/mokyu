@@ -1,5 +1,6 @@
 use super::{Backend, migration};
 use crate::model::cluster::ClusterStore;
+use crate::model::cluster::StagingStore;
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;

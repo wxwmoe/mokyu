@@ -177,10 +177,20 @@ pub(in super::super) async fn complete_quota(
     size: i64,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    complete_quota_in(&mut tx, upload, stream, size).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn complete_quota_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    upload: Uuid,
+    stream: Id,
+    size: i64,
+) -> Result<()> {
     let (bucket, key) = queries::quota_upload(upload, true)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
-    let output = queries::quota_stream(stream).fetch_one(&mut *tx).await?;
+    let output = queries::quota_stream(stream).fetch_one(&mut **tx).await?;
     ensure!(
         size >= 0
             && output.bucket_id == bucket
@@ -188,18 +198,17 @@ pub(in super::super) async fn complete_quota(
             && output.state == "writing",
         crate::model::Error::OperationAborted
     );
-    lock_quota(&mut tx, bucket).await?;
+    lock_quota(tx, bucket).await?;
     let row = queries::owned_quota_reservation(Id::default(), Some(upload))
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         row.logical_bytes >= size && row.upload_id == Some(upload) && !row.closed,
         "multipart quota reservation is missing"
     );
     queries::complete_quota(upload, stream, size)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 

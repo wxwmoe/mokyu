@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102220116.
+-- Generated from the complete sqlite migration chain through 20261102221441.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -238,7 +238,7 @@ CREATE TABLE fragments (
     sealed INTEGER CHECK (sealed IN (0,1)) NOT NULL DEFAULT FALSE,
     size INTEGER NOT NULL,
     hash BLOB CHECK (hash IS NULL OR length(hash)=32) NOT NULL,
-    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), file_id BLOB REFERENCES multipart_files(id), file_offset INTEGER CHECK ((file_id IS NULL)=(file_offset IS NULL) AND (file_offset IS NULL OR file_offset>=0)),
+    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), file_id BLOB REFERENCES multipart_files(id), file_offset INTEGER CHECK ((file_id IS NULL)=(file_offset IS NULL) AND (file_offset IS NULL OR file_offset>=0)), staging_storage_id BLOB, staging_object_key TEXT,
     CONSTRAINT fragments_stream FOREIGN KEY (owner_stream) REFERENCES streams(id) ON DELETE SET NULL,
     CONSTRAINT fragments_size CHECK (size BETWEEN 1 AND 4194304)
 ) STRICT;
@@ -381,6 +381,26 @@ CREATE TABLE node_boots (
     PRIMARY KEY (node_id,boot_id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE node_completion_parts (
+    upload_id BLOB NOT NULL,
+    ordinal INTEGER NOT NULL,
+    stream_id INTEGER NOT NULL,
+    part_number INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    etag TEXT NOT NULL,
+    checksums TEXT NOT NULL,
+    PRIMARY KEY (upload_id,ordinal),
+    FOREIGN KEY (upload_id) REFERENCES node_completions(upload_id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE node_completions (
+    upload_id BLOB NOT NULL PRIMARY KEY,
+    manifest_hash TEXT NOT NULL,
+    conditions TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    FOREIGN KEY (upload_id) REFERENCES uploads(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE node_notices (
     node_id BLOB NOT NULL,
     slot INTEGER NOT NULL CHECK (slot BETWEEN 0 AND 1023),
@@ -497,6 +517,21 @@ CREATE TABLE node_write_raw (
     digest BLOB NOT NULL,
     content_hash BLOB,
     committed INTEGER NOT NULL,
+    PRIMARY KEY (node_id,operation_id),
+    FOREIGN KEY (node_id,operation_id) REFERENCES node_writes(node_id,operation_id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE node_write_tails (
+    node_id BLOB NOT NULL,
+    operation_id BLOB NOT NULL,
+    request_hash BLOB NOT NULL,
+    fragment_id INTEGER NOT NULL,
+    location_id BLOB NOT NULL,
+    storage_id BLOB NOT NULL,
+    object_key TEXT NOT NULL,
+    offset_bytes INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    committed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (node_id,operation_id),
     FOREIGN KEY (node_id,operation_id) REFERENCES node_writes(node_id,operation_id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
@@ -1010,6 +1045,15 @@ CREATE TABLE setup_tokens (
     created_at INTEGER NOT NULL DEFAULT(CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     expires_at INTEGER NOT NULL
 ) STRICT;
+
+CREATE TABLE staging_objects (
+    storage_id BLOB NOT NULL,
+    object_key TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    PRIMARY KEY (storage_id,object_key),
+    FOREIGN KEY (storage_id) REFERENCES storages(id)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE storage_gates (
     storage_id BLOB NOT NULL,
@@ -1565,6 +1609,8 @@ CREATE INDEX fragments_file ON fragments(file_id,file_offset) WHERE file_id IS N
 
 CREATE INDEX fragments_owner_stream_fk ON fragments(owner_stream);
 
+CREATE INDEX fragments_staging ON fragments(staging_storage_id,staging_object_key);
+
 CREATE INDEX integrity_issues_code ON integrity_issues(task_id,code,id);
 
 CREATE INDEX integrity_issues_page ON integrity_issues(task_id,id);
@@ -1604,6 +1650,8 @@ CREATE INDEX member_grants_member ON member_bucket_grants(user_id,project_id);
 CREATE INDEX multipart_files_reclaim ON multipart_files(storage_id,id) WHERE reclaim_pending;
 
 CREATE INDEX multipart_files_upload ON multipart_files(upload_id,state);
+
+CREATE INDEX node_completion_parts_stream ON node_completion_parts(stream_id);
 
 CREATE INDEX node_read_locations ON node_read_sources(source_type,location_id);
 
@@ -1736,6 +1784,8 @@ CREATE INDEX s3_credentials_project ON s3_credentials(project_id);
 CREATE INDEX sessions_expiry ON sessions(expires_at);
 
 CREATE INDEX sessions_user_created ON sessions(user_id,created_at DESC,id DESC);
+
+CREATE INDEX staging_objects_age ON staging_objects(created_at);
 
 CREATE INDEX storage_permit_usage ON storage_permits(storage_id,direction,expires_at);
 

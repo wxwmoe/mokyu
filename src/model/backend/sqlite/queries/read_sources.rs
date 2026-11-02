@@ -24,7 +24,7 @@ pub(in super::super) fn node_read_pending(ids: &[Id]) -> Rows<'_, (Id, Option<Uu
     sqlx::query_as("SELECT p.chunk_id,(SELECT id FROM nodes WHERE enabled AND role='control' LIMIT 1) FROM pending_uploads p WHERE p.chunk_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) ORDER BY p.chunk_id").bind(Json(ids))
 }
 pub(in super::super) fn node_read_fragments(ids: &[Id]) -> Rows<'_, NodeReadFragment> {
-    sqlx::query_as("SELECT f.id,f.location_id AS fragment_location,f.size,f.hash,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source,(SELECT id FROM nodes WHERE enabled AND role='control' LIMIT 1) AS node_id FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) ORDER BY f.id").bind(Json(ids))
+    sqlx::query_as("SELECT f.id,f.location_id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source,(SELECT id FROM nodes WHERE enabled AND role='control' LIMIT 1) AS node_id FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) ORDER BY f.id").bind(Json(ids))
 }
 pub(in super::super) fn node_read_storages(
     ids: &[Uuid],

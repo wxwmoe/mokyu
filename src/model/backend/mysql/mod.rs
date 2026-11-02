@@ -25,6 +25,8 @@ mod read_map;
 mod read_reports;
 #[path = "../shared/replica.rs"]
 mod replica_transactions;
+#[path = "../shared/staging.rs"]
+mod staging;
 #[path = "../shared/tier_access.rs"]
 mod tier_access;
 #[path = "../shared/tier_moves.rs"]

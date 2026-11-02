@@ -23,7 +23,7 @@ pub(in super::super) async fn claim_fragment(
     let Some(mut tx) = try_cleanup_transaction(pool).await? else {
         return Ok(None);
     };
-    let Some((location_id, sealed, owner, file)) = queries::lock_cleanup_fragment(id)
+    let Some((location_id, sealed, owner, file, storage, key)) = queries::lock_cleanup_fragment(id)
         .fetch_optional(&mut *tx)
         .await?
     else {
@@ -34,8 +34,8 @@ pub(in super::super) async fn claim_fragment(
         sealed,
         file,
         owner,
-        storage: None,
-        key: None,
+        storage,
+        key,
         deletion: Box::new(FragmentDelete { tx, id }),
     }))
 }

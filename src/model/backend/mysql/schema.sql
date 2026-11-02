@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102220116.
+-- Generated from the complete mysql migration chain through 20261102221441.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -328,11 +328,14 @@ CREATE TABLE `fragments` (
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `file_id` binary(16) DEFAULT NULL,
   `file_offset` bigint DEFAULT NULL,
+  `staging_storage_id` binary(16) DEFAULT NULL,
+  `staging_object_key` varchar(256) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `fragments_location` (`location_id`),
   KEY `fragments_cleanup` (`created_at`,`id`),
   KEY `fragments_file` (`file_id`,`file_offset`),
   KEY `fragments_stream` (`owner_stream`),
+  KEY `fragments_staging` (`staging_storage_id`,`staging_object_key`),
   CONSTRAINT `fragments_ibfk_1` FOREIGN KEY (`file_id`) REFERENCES `multipart_files` (`id`),
   CONSTRAINT `fragments_stream` FOREIGN KEY (`owner_stream`) REFERENCES `streams` (`id`) ON DELETE SET NULL,
   CONSTRAINT `fragments_chk_1` CHECK ((((`file_id` is null) = (`file_offset` is null)) and ((`file_offset` is null) or (`file_offset` >= 0)))),
@@ -519,6 +522,28 @@ CREATE TABLE `node_boots` (
   CONSTRAINT `node_boots_node_fk` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `node_completion_parts` (
+  `upload_id` binary(16) NOT NULL,
+  `ordinal` int NOT NULL,
+  `stream_id` bigint NOT NULL,
+  `part_number` int NOT NULL,
+  `size` bigint NOT NULL,
+  `etag` varchar(96) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `checksums` json NOT NULL,
+  PRIMARY KEY (`upload_id`,`ordinal`),
+  KEY `node_completion_parts_stream` (`stream_id`),
+  CONSTRAINT `node_completion_parts_ibfk_1` FOREIGN KEY (`upload_id`) REFERENCES `node_completions` (`upload_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_completions` (
+  `upload_id` binary(16) NOT NULL,
+  `manifest_hash` varchar(96) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `conditions` json NOT NULL,
+  `summary` json NOT NULL,
+  PRIMARY KEY (`upload_id`),
+  CONSTRAINT `node_completions_ibfk_1` FOREIGN KEY (`upload_id`) REFERENCES `uploads` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `node_notices` (
   `node_id` binary(16) NOT NULL,
   `slot` smallint NOT NULL,
@@ -654,6 +679,21 @@ CREATE TABLE `node_write_raw` (
   `committed` tinyint(1) NOT NULL,
   PRIMARY KEY (`node_id`,`operation_id`),
   CONSTRAINT `node_write_raw_ibfk_1` FOREIGN KEY (`node_id`, `operation_id`) REFERENCES `node_writes` (`node_id`, `operation_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_write_tails` (
+  `node_id` binary(16) NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  `request_hash` binary(32) NOT NULL,
+  `fragment_id` bigint NOT NULL,
+  `location_id` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `object_key` varchar(256) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `offset_bytes` bigint NOT NULL,
+  `size` int NOT NULL,
+  `committed` tinyint(1) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`node_id`,`operation_id`),
+  CONSTRAINT `node_write_tails_ibfk_1` FOREIGN KEY (`node_id`, `operation_id`) REFERENCES `node_writes` (`node_id`, `operation_id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `node_writes` (
@@ -1331,6 +1371,16 @@ CREATE TABLE `setup_tokens` (
   `expires_at` datetime(6) NOT NULL,
   PRIMARY KEY (`id`),
   CONSTRAINT `setup_singleton` CHECK ((`id` = 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `staging_objects` (
+  `storage_id` binary(16) NOT NULL,
+  `object_key` varchar(256) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `size` bigint NOT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`storage_id`,`object_key`),
+  KEY `staging_objects_age` (`created_at`),
+  CONSTRAINT `staging_objects_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storage_gates` (

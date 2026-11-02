@@ -189,6 +189,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         } else {
             backend.clone()
         },
+        staging: backend.clone(),
         storage_permits: backend.clone(),
         node_writes: backend.clone(),
         node_reads: backend.clone(),

@@ -327,18 +327,24 @@ impl App {
             if self.storage.disk.pending(fragment.location_id) {
                 continue;
             }
-            // Keep the row locked against new references while releasing coord for I/O.
             drop(coord);
-            if fragment.file.is_none() {
-                self.storage
-                    .remove_fragment(
-                        fragment.location_id,
-                        fragment.storage,
-                        fragment.key.as_deref(),
-                    )
-                    .await?;
+            match (fragment.storage, fragment.key) {
+                (Some(storage), Some(key)) => {
+                    // The staging reservation survives a crash between the metadata and S3 deletes.
+                    fragment.deletion.finish().await?;
+                    self.storage.delete_staged(storage, &key).await?;
+                }
+                (None, None) => {
+                    if fragment.file.is_none() {
+                        self.storage
+                            .disk
+                            .remove_fragment(fragment.location_id)
+                            .await?;
+                    }
+                    fragment.deletion.finish().await?;
+                }
+                _ => anyhow::bail!("incomplete fragment location"),
             }
-            fragment.deletion.finish().await?;
             removed += 1;
         }
         let (files, ranges) = self

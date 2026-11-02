@@ -240,49 +240,6 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn completion_status(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_complete::Lookup,
-    ) -> Result<(
-        crate::model::node_write::Phase,
-        crate::model::node_complete::Summary,
-    )> {
-        transactions::node_completion_status(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn complete_sources(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_complete::Sources,
-    ) -> Result<crate::model::node_complete::SourceBatch> {
-        transactions::node_complete_sources(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn prepare_tail(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_tail::Prepare,
-    ) -> Result<crate::model::node_tail::Prepared> {
-        transactions::prepare_node_tail(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn commit_tail(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_write::Lookup,
-    ) -> Result<crate::model::node_tail::Prepared> {
-        transactions::commit_node_tail(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
 
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
         Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
@@ -412,22 +369,6 @@ impl ClusterStore for Backend {
             .fetch_all(&self.pool)
             .await?)
     }
-    async fn release_staging(&self, storage: Uuid, key: &str) -> Result<()> {
-        sqlx::query("DELETE FROM staging_objects WHERE storage_id=$1 AND object_key=$2")
-            .bind(storage)
-            .bind(key)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-    async fn stale_staging(&self, storage: Option<Uuid>) -> Result<Vec<(Uuid, String)>> {
-        Ok(sqlx::query_as("SELECT s.storage_id,s.object_key FROM staging_objects s WHERE ($1::uuid IS NULL OR s.storage_id=$1) AND s.created_at < now()-interval '5 minutes' AND NOT EXISTS (SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key) ORDER BY s.created_at LIMIT 128").bind(storage).fetch_all(&self.pool).await?)
-    }
-
-    async fn claim_staging(&self, storage: Uuid, key: &str, bytes: u64, limit: u64) -> Result<()> {
-        transactions::claim_staging(&self.pool, storage, key, bytes, limit).await
-    }
-
     async fn claim_task(
         &self,
         input: TaskClaim<'_>,
@@ -793,6 +734,49 @@ impl crate::model::cluster::StoragePermits for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWrites for Backend {
+    async fn prepare_tail(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_tail::Prepare,
+    ) -> Result<crate::model::node_tail::Prepared> {
+        transactions::prepare_node_tail(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn commit_tail(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::Lookup,
+    ) -> Result<crate::model::node_tail::Prepared> {
+        transactions::commit_node_tail(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn completion_status(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_complete::Lookup,
+    ) -> Result<(
+        crate::model::node_write::Phase,
+        crate::model::node_complete::Summary,
+    )> {
+        transactions::node_completion_status(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn complete_sources(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_complete::Sources,
+    ) -> Result<crate::model::node_complete::SourceBatch> {
+        transactions::node_complete_sources(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn prepare_chunks(
         &self,
         node: &crate::cluster::NodeState,
@@ -884,5 +868,24 @@ impl crate::model::cluster::NodeWrites for Backend {
         transactions::commit_node_raw(self, node, key, input)
             .await
             .map_err(normalize_error)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::model::cluster::StagingStore for Backend {
+    async fn release_staging(&self, storage: Uuid, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM staging_objects WHERE storage_id=$1 AND object_key=$2")
+            .bind(storage)
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+    async fn stale_staging(&self, storage: Option<Uuid>) -> Result<Vec<(Uuid, String)>> {
+        Ok(sqlx::query_as("SELECT s.storage_id,s.object_key FROM staging_objects s WHERE ($1::uuid IS NULL OR s.storage_id=$1) AND s.created_at < now()-interval '5 minutes' AND NOT EXISTS (SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key) ORDER BY s.created_at LIMIT 128").bind(storage).fetch_all(&self.pool).await?)
+    }
+
+    async fn claim_staging(&self, storage: Uuid, key: &str, bytes: u64, limit: u64) -> Result<()> {
+        transactions::claim_staging(&self.pool, storage, key, bytes, limit).await
     }
 }

@@ -84,6 +84,7 @@ pub struct Storage {
     maintenance: Arc<std::sync::atomic::AtomicBool>,
     physical: Arc<dyn crate::model::PhysicalStore>,
     cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+    staging: Option<Arc<dyn crate::model::cluster::StagingStore>>,
     shared_permits: Option<Arc<dyn crate::model::cluster::StoragePermits>>,
     profile_store: Arc<dyn crate::model::StorageProfileStore>,
     raw_store: Arc<dyn crate::model::raw::RawStore>,
@@ -338,6 +339,7 @@ impl Storage {
         budget: &Budget,
         physical: Arc<dyn crate::model::PhysicalStore>,
         cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
+        staging: Option<Arc<dyn crate::model::cluster::StagingStore>>,
         shared_permits: Option<Arc<dyn crate::model::cluster::StoragePermits>>,
         profile_store: Arc<dyn crate::model::StorageProfileStore>,
         raw_store: Arc<dyn crate::model::raw::RawStore>,
@@ -438,6 +440,7 @@ impl Storage {
             )),
             physical: physical.clone(),
             cluster,
+            staging,
             shared_permits,
             profile_store,
             wake_sync: Default::default(),
@@ -1168,8 +1171,8 @@ impl Storage {
     }
     fn shared_staging_id(&self) -> Result<Uuid> {
         ensure!(
-            self.cluster_mode,
-            "shared staging is only available in cluster mode"
+            self.staging.is_some(),
+            "shared staging requires a node deployment"
         );
         let id = self
             .staging_storage_id
@@ -1182,9 +1185,9 @@ impl Storage {
         Ok(id)
     }
     async fn claim_staging(&self, storage_id: Uuid, key: &str, bytes: u64) -> Result<()> {
-        self.cluster
+        self.staging
             .as_ref()
-            .context("shared staging requires cluster mode")?
+            .context("shared staging requires a node deployment")?
             .claim_staging(
                 storage_id,
                 key,
@@ -1194,9 +1197,9 @@ impl Storage {
             .await
     }
     async fn release_staging(&self, storage_id: Uuid, key: &str) -> Result<()> {
-        self.cluster
+        self.staging
             .as_ref()
-            .context("shared staging requires cluster mode")?
+            .context("shared staging requires a node deployment")?
             .release_staging(storage_id, key)
             .await?;
         Ok(())
@@ -1257,7 +1260,7 @@ impl Storage {
         id: Uuid,
         data: &[u8],
     ) -> Result<(Option<Uuid>, Option<String>, Option<Fragment>)> {
-        if !self.cluster_mode {
+        if self.staging.is_none() {
             return Ok((None, None, Some(self.disk.write_fragment(id, data).await?)));
         }
         let storage_id = self.shared_staging_id()?;
@@ -1345,22 +1348,11 @@ impl Storage {
             Err(error) => Err(error.into()),
         }
     }
-    pub(crate) async fn remove_fragment(
-        &self,
-        id: Uuid,
-        storage_id: Option<Uuid>,
-        key: Option<&str>,
-    ) -> Result<()> {
-        if let (Some(storage_id), Some(key)) = (storage_id, key) {
-            return self.delete_staged(storage_id, key).await;
-        }
-        self.disk.remove_fragment(id).await
-    }
     pub(crate) async fn reconcile_staging(&self, storage_id: Option<Uuid>) -> Result<()> {
-        let Some(cluster) = &self.cluster else {
+        let Some(staging) = &self.staging else {
             return Ok(());
         };
-        let rows: Vec<(Uuid, String)> = cluster.stale_staging(storage_id).await?;
+        let rows: Vec<(Uuid, String)> = staging.stale_staging(storage_id).await?;
         for (storage_id, key) in rows {
             if let Err(error) = self.delete_staged(storage_id, &key).await {
                 tracing::warn!(%storage_id, %key, error=%error, "orphan staging object cleanup failed");

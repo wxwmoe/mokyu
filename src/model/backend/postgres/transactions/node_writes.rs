@@ -1431,14 +1431,15 @@ pub(in super::super) async fn publish_node_write(
 }
 
 pub(in super::super) async fn prepare_node_tail(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: crate::model::node_tail::Prepare,
 ) -> Result<crate::model::node_tail::Prepared> {
     let end = input.end()?;
     let hash = input.hash()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     let tail = if let Some(tail) = queries::node_write_tail(node.node_id, input.operation)
         .fetch_optional(&mut *tx)
@@ -1557,12 +1558,13 @@ pub(in super::super) async fn prepare_node_tail(
 }
 
 pub(in super::super) async fn commit_node_tail(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: write::Lookup,
 ) -> Result<crate::model::node_tail::Prepared> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     let tail = queries::node_write_tail(node.node_id, input.operation)
         .fetch_optional(&mut *tx)

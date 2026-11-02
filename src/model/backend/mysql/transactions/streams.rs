@@ -243,10 +243,6 @@ pub(in super::super) async fn create_stream_in(
 }
 
 pub(in super::super) async fn append_tail(pool: &sqlx::MySqlPool, tail: StreamTail) -> Result<()> {
-    ensure!(
-        tail.staging_storage.is_none() && tail.staging_key.is_none(),
-        "shared staging is unavailable in single mode"
-    );
     let fragment = Id::try_from(
         queries::insert_fragment(&tail)
             .execute(pool)

@@ -47,14 +47,14 @@ pub(in super::super) fn claim_object(bucket: Uuid, key: &str, token: Id) -> Stat
 
 pub(in super::super) fn insert_fragment(tail: &StreamTail) -> Statement<'_> {
     sqlx::query(
-        "INSERT INTO fragments(location_id,size,hash,owner_stream,file_id,file_offset) VALUES(?,?,?,?,?,?)",
+        "INSERT INTO fragments(location_id,size,hash,owner_stream,file_id,file_offset,staging_storage_id,staging_object_key) VALUES(?,?,?,?,?,?,?,?)",
     )
     .bind(tail.fragment)
     .bind(tail.size)
     .bind(tail.hash.as_slice())
     .bind(tail.stream)
     .bind(tail.file)
-    .bind(tail.file_offset)
+    .bind(tail.file_offset).bind(tail.staging_storage).bind(&tail.staging_key)
 }
 
 pub(in super::super) fn seal_fragment(id: Id) -> Statement<'static> {

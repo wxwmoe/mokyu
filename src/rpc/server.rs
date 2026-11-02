@@ -373,7 +373,7 @@ impl NodeWrites for Service {
     ) -> Result<Response<wire::PreparedTail>, Status> {
         let node = data_identity(&request)?;
         let input = super::write::prepare_tail(write_request(request)?)?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.prepare_tail(
+        let reply = bounded(self.app.node_writes.prepare_tail(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -389,7 +389,7 @@ impl NodeWrites for Service {
     ) -> Result<Response<wire::PreparedTail>, Status> {
         let node = data_identity(&request)?;
         let input = super::write::lookup(write_request(request)?)?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.commit_tail(
+        let reply = bounded(self.app.node_writes.commit_tail(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1212,7 +1212,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::CompleteState>, Status> {
         let node = data_identity(&request)?;
         let input = super::multipart::status(request.into_inner())?;
-        let (phase, summary) = bounded(self.app.cluster().map_err(failure)?.completion_status(
+        let (phase, summary) = bounded(self.app.node_writes.completion_status(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1253,7 +1253,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::CompleteSources>, Status> {
         let node = data_identity(&request)?;
         let input = super::multipart::sources(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.complete_sources(
+        let reply = bounded(self.app.node_writes.complete_sources(
             &node,
             &self.app.secrets.credential_key,
             input,

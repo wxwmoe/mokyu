@@ -271,8 +271,8 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for FragmentSource {
             file_offset: row.try_get("file_offset")?,
             file_storage: row.try_get("file_storage")?,
             raw_source: row.try_get("raw_source")?,
-            staging_storage_id: None,
-            staging_object_key: None,
+            staging_storage_id: row.try_get("staging_storage_id")?,
+            staging_object_key: row.try_get("staging_object_key")?,
         })
     }
 }

@@ -1,10 +1,6 @@
 use super::*;
 
 pub(in super::super) async fn append_tail(pool: &sqlx::SqlitePool, tail: StreamTail) -> Result<()> {
-    ensure!(
-        tail.staging_storage.is_none() && tail.staging_key.is_none(),
-        "shared staging is unavailable in single mode"
-    );
     let fragment = Id::from(
         queries::insert_fragment(&tail)
             .execute(pool)

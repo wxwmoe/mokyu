@@ -162,6 +162,13 @@ pub(crate) trait NodeReads: Send + Sync {
 }
 
 #[async_trait]
+pub(crate) trait StagingStore: Send + Sync {
+    async fn claim_staging(&self, storage: Uuid, key: &str, bytes: u64, limit: u64) -> Result<()>;
+    async fn release_staging(&self, storage: Uuid, key: &str) -> Result<()>;
+    async fn stale_staging(&self, storage: Option<Uuid>) -> Result<Vec<(Uuid, String)>>;
+}
+
+#[async_trait]
 pub(crate) trait StoragePermits: Send + Sync {
     async fn acquire_storage_permit(
         &self,
@@ -176,6 +183,30 @@ pub(crate) trait StoragePermits: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeWrites: Send + Sync {
+    async fn prepare_tail(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_tail::Prepare,
+    ) -> Result<super::node_tail::Prepared>;
+    async fn commit_tail(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_write::Lookup,
+    ) -> Result<super::node_tail::Prepared>;
+    async fn completion_status(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_complete::Lookup,
+    ) -> Result<(super::node_write::Phase, super::node_complete::Summary)>;
+    async fn complete_sources(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_complete::Sources,
+    ) -> Result<super::node_complete::SourceBatch>;
     async fn prepare_chunks(
         &self,
         node: &NodeState,
@@ -236,7 +267,7 @@ pub(crate) trait NodeWrites: Send + Sync {
 
 #[async_trait]
 pub(crate) trait ClusterStore:
-    NodeSessions + NodeWork + NodeNotices + NodeRequests + NodeReads + NodeWrites
+    NodeSessions + NodeWork + NodeNotices + NodeRequests + NodeReads + NodeWrites + StagingStore
 {
     async fn begin_report(
         &self,
@@ -325,30 +356,6 @@ pub(crate) trait ClusterStore:
         key: &Key,
         input: super::node_native::Adopt,
     ) -> Result<super::node_write::Reply>;
-    async fn completion_status(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_complete::Lookup,
-    ) -> Result<(super::node_write::Phase, super::node_complete::Summary)>;
-    async fn complete_sources(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_complete::Sources,
-    ) -> Result<super::node_complete::SourceBatch>;
-    async fn prepare_tail(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_tail::Prepare,
-    ) -> Result<super::node_tail::Prepared>;
-    async fn commit_tail(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_write::Lookup,
-    ) -> Result<super::node_tail::Prepared>;
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
     async fn begin_remote(
         &self,
@@ -415,9 +422,6 @@ pub(crate) trait ClusterStore:
     async fn clean_remote(&self, upload: Uuid, token: Uuid) -> Result<()>;
     async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool>;
     async fn prioritize_uploads(&self, streams: &[Id]) -> Result<()>;
-    async fn claim_staging(&self, storage: Uuid, key: &str, bytes: u64, limit: u64) -> Result<()>;
-    async fn release_staging(&self, storage: Uuid, key: &str) -> Result<()>;
-    async fn stale_staging(&self, storage: Option<Uuid>) -> Result<Vec<(Uuid, String)>>;
 
     async fn claim_task(
         &self,

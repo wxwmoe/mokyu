@@ -1,3 +1,4 @@
+use super::queries::node_multipart as mp;
 use super::{
     Backend, node_registry,
     queries::{
@@ -5,6 +6,7 @@ use super::{
     },
     transactions,
 };
+use crate::model::node_complete as complete;
 use crate::{
     authorization::{Action, Permit, Principal},
     cluster::NodeState,
@@ -41,6 +43,113 @@ pub(super) struct Write {
     published: Option<Json<write::Published>>,
     remaining: i64,
 }
+#[derive(sqlx::FromRow)]
+pub(super) struct Tail {
+    request_hash: Vec<u8>,
+    fragment_id: Id,
+    location_id: Uuid,
+    storage_id: Uuid,
+    object_key: String,
+    offset_bytes: i64,
+    size: i32,
+    committed: bool,
+}
+impl Tail {
+    fn reply(&self) -> crate::model::node_tail::Prepared {
+        crate::model::node_tail::Prepared {
+            fragment: self.location_id,
+            object_key: self.object_key.clone(),
+            end: self.offset_bytes + i64::from(self.size),
+            committed: self.committed,
+            materials: Vec::new(),
+            storage: None,
+            grants: Vec::new(),
+        }
+    }
+}
+#[derive(sqlx::FromRow)]
+pub(super) struct Completion {
+    manifest_hash: String,
+    conditions: Json<complete::Conditions>,
+    summary: Json<complete::Summary>,
+}
+async fn completion(
+    tx: &mut registry::Tx<'_>,
+    input: &write::Begin,
+    bucket: Uuid,
+    authority: &Permit,
+    manifest: &complete::Manifest,
+) -> Result<(crate::model::multipart::Upload, complete::Summary, bool)> {
+    let hash = manifest.hash()?;
+    queries::lock_bucket_uploads(bucket)
+        .fetch_one(&mut **tx)
+        .await?;
+    let upload = requests::multipart_upload(
+        manifest.upload,
+        bucket,
+        &input.intent.key,
+        &input.intent.access,
+    )
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
+    let (state, previous, live) = queries::completion_state(upload.id)
+        .fetch_one(&mut **tx)
+        .await?;
+    ensure!(
+        matches!(state.as_str(), "active" | "completing" | "completed"),
+        s3s::s3_error!(NoSuchUpload)
+    );
+    let mut summary = if let Some(record) = mp::record(upload.id).fetch_optional(&mut **tx).await? {
+        ensure!(
+            record.manifest_hash == hash,
+            s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
+        );
+        record.summary.0
+    } else {
+        ensure!(
+            state == "active" && previous.is_none(),
+            s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
+        );
+        let numbers: Vec<_> = manifest.parts.iter().map(|p| p.number).collect();
+        let selected = mp::selected(upload.id, &numbers)
+            .fetch_all(&mut **tx)
+            .await?;
+        let summary = manifest.select(&upload, &selected)?;
+        let conditions = complete::Conditions {
+            if_match: manifest.if_match.clone(),
+            if_none: manifest.if_none.clone(),
+            checksums: manifest.checksums.clone(),
+        };
+        mp::save(upload.id, &hash, &conditions, &summary)
+            .execute(&mut **tx)
+            .await?;
+        ensure!(
+            mp::freeze(upload.id, &numbers)
+                .execute(&mut **tx)
+                .await?
+                .rows_affected()
+                == numbers.len() as u64,
+            Error::OperationAborted
+        );
+        summary
+    };
+    summary.result = upload.result.clone();
+    if !live && state != "completed" {
+        queries::begin_upload_completion(&crate::model::multipart::Completion {
+            authority,
+            upload: upload.id,
+            hash: &hash,
+            token: input.operation,
+            parts: &[],
+            node: None,
+        })
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok((upload, summary, live))
+}
+
 #[derive(sqlx::FromRow)]
 pub(super) struct Batch {
     request_hash: Vec<u8>,
@@ -114,7 +223,17 @@ impl Write {
                 .map(|p| p.0.clone()),
             copy_references: self.copy_source.as_ref().is_some_and(|v| v.references),
             checksum_algorithm: self.intent.part.as_ref().and_then(|p| p.algorithm.clone()),
-            completion: None,
+            completion: if let Some(manifest) = &self.intent.completion {
+                let mut summary = mp::record(manifest.upload)
+                    .fetch_one(&mut **tx)
+                    .await?
+                    .summary
+                    .0;
+                summary.result = mp::result(manifest.upload).fetch_one(&mut **tx).await?;
+                Some(summary)
+            } else {
+                None
+            },
         };
         if phase == write::Phase::Active
             && let Some(cached) = cached
@@ -172,6 +291,7 @@ async fn end(
     stream: Option<Id>,
     phase: &str,
 ) -> Result<()> {
+    mp::release_completion(op).execute(&mut **tx).await?;
     if let Some(stream) = stream {
         transactions::abandon_copy_in(tx, stream).await?;
     }
@@ -194,16 +314,17 @@ async fn permits(
     node: Uuid,
     wanted: usize,
     batch: i64,
+    storage: Uuid,
+    admitted: Option<i32>,
 ) -> Result<Vec<read::Grant>> {
     if wanted == 0 {
         return Ok(Vec::new());
     }
-    let storage = row.storage_id;
     let current = queries::storage_profile(storage)
         .fetch_one(&mut **tx)
         .await?
         .upload_concurrency;
-    let limit = match (row.profile.upload_concurrency, current) {
+    let limit = match (admitted, current) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (a, b) => a.or(b),
     };
@@ -238,6 +359,350 @@ async fn permits(
 }
 #[async_trait::async_trait]
 impl NodeWrites for Backend {
+    async fn prepare_tail(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: crate::model::node_tail::Prepare,
+    ) -> Result<crate::model::node_tail::Prepared> {
+        let end = input.end()?;
+        let hash = input.hash()?;
+        let mut tx = start(self, node, key, input.run).await?;
+        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        row.owned(node, input.run)?;
+        let tail = if let Some(tail) = mp::tail(node.node_id, input.operation)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            ensure!(tail.request_hash == hash, Error::NodeOperationConflict);
+            tail
+        } else {
+            let stream = row.active(&mut tx, node, input.run).await?;
+            let part = row
+                .intent
+                .part
+                .as_ref()
+                .filter(|_| row.profile.cdc_enabled && row.copy_source.is_none())
+                .ok_or_else(|| s3s::s3_error!(InvalidRequest))?;
+            ensure!(
+                row.next_offset == input.offset
+                    && row.intent.size.is_none_or(|n| n == end)
+                    && q::pending(node.node_id, input.operation)
+                        .fetch_one(&mut *tx)
+                        .await?
+                        == 0,
+                s3s::s3_error!(InvalidArgument)
+            );
+            transactions::reserve_quota_in(
+                &mut tx,
+                stream,
+                end,
+                false,
+                Some((part.upload, part.number)),
+            )
+            .await?;
+            let settings = mp::settings().fetch_one(&mut *tx).await?;
+            let storage = settings
+                .staging_storage_id
+                .ok_or(Error::SourceUnavailable)?;
+            let limit = settings
+                .staging_bytes_limit
+                .as_deref()
+                .map(crate::config::bytes)
+                .transpose()?
+                .unwrap_or(crate::storage::DEFAULT_STAGING_LIMIT);
+            let id = Uuid::now_v7();
+            let path = format!("{}fragment/{}", crate::storage::STAGING_PREFIX, id.simple());
+            super::staging::reserve(&mut tx, storage, &path, input.size as u64, limit).await?;
+            let value = crate::model::StreamTail {
+                fragment: id,
+                stream,
+                offset: input.offset,
+                size: input.size,
+                hash: input.hash,
+                staging_storage: Some(storage),
+                staging_key: Some(path),
+                file: None,
+                file_offset: None,
+            };
+            let fragment = mp::fragment(&mut tx, &value).await?;
+            mp::add_tail(node.node_id, input.operation, &hash, fragment, &value)
+                .execute(&mut *tx)
+                .await?;
+            mp::tail(node.node_id, input.operation)
+                .fetch_one(&mut *tx)
+                .await?
+        };
+        let mut reply = tail.reply();
+        if !tail.committed {
+            row.active(&mut tx, node, input.run).await?;
+            let record = queries::work::storage(tail.storage_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            let profile = queries::storage_profile(tail.storage_id)
+                .fetch_one(&mut *tx)
+                .await?;
+            reply.grants = permits(
+                &mut tx,
+                &row,
+                node.node_id,
+                1,
+                -1,
+                tail.storage_id,
+                profile.upload_concurrency,
+            )
+            .await?;
+            let material = read::Storage {
+                connection: crate::storage::model::Connection::unprotect(&(&record).into(), key)?,
+                revision: profile.revision,
+                profile,
+            };
+            reply.storage = Some(read::material(
+                &mut reply.materials,
+                node.deployment_id,
+                read::MaterialType::Storage,
+                tail.storage_id.to_string(),
+                &material,
+                &input.cached,
+            )?);
+        }
+        node_registry::validate_run(&mut tx, node, input.run).await?;
+        tx.commit().await?;
+        Ok(reply)
+    }
+    async fn commit_tail(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: write::Lookup,
+    ) -> Result<crate::model::node_tail::Prepared> {
+        let mut tx = start(self, node, key, input.run).await?;
+        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        row.owned(node, input.run)?;
+        let mut tail = mp::tail(node.node_id, input.operation)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NodeOperationMissing)?;
+        if !tail.committed {
+            let stream = row.active(&mut tx, node, input.run).await?;
+            ensure!(
+                row.next_offset == tail.offset_bytes,
+                Error::NodeOperationConflict
+            );
+            ensure!(
+                queries::seal_fragment(tail.fragment_id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                Error::SourceUnavailable
+            );
+            mp::attach(stream, tail.offset_bytes, tail.size, tail.fragment_id)
+                .execute(&mut *tx)
+                .await?;
+            let end = tail.offset_bytes + i64::from(tail.size);
+            queries::resize_writing_stream(stream, end)
+                .execute(&mut *tx)
+                .await?;
+            q::advance(node.node_id, input.operation, end)
+                .execute(&mut *tx)
+                .await?;
+            mp::finish_tail(node.node_id, input.operation)
+                .execute(&mut *tx)
+                .await?;
+            q::release_batch(node.node_id, input.operation, -1)
+                .execute(&mut *tx)
+                .await?;
+            tail.committed = true;
+        }
+        node_registry::validate_run(&mut tx, node, input.run).await?;
+        tx.commit().await?;
+        Ok(tail.reply())
+    }
+    async fn completion_status(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: complete::Lookup,
+    ) -> Result<(write::Phase, complete::Summary)> {
+        input.validate()?;
+        let mut tx = start(self, node, key, input.run).await?;
+        ensure!(
+            matches!(node.role.as_str(), "data" | "node"),
+            Error::NodeAuthentication
+        );
+        let route = ReadRoute::Bucket {
+            name: input.bucket,
+            key: input.key.clone(),
+            alias: None,
+        };
+        let bucket = requests::node_read_bucket(&route)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
+        let permit = Permit::for_action(
+            Principal::Service {
+                access_key: input.access.clone(),
+                revision: input.revision,
+            },
+            bucket.id,
+            Action::Write,
+        );
+        transactions::lock_permit(&mut tx, &permit).await?;
+        let upload = requests::multipart_upload(input.upload, bucket.id, &input.key, &input.access)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(NoSuchUpload))?;
+        let (state, _, live) = queries::completion_state(input.upload)
+            .fetch_one(&mut *tx)
+            .await?;
+        ensure!(
+            matches!(state.as_str(), "completing" | "completed"),
+            s3s::s3_error!(NoSuchUpload)
+        );
+        let record = mp::record(input.upload).fetch_one(&mut *tx).await?;
+        ensure!(
+            record.manifest_hash == input.hash,
+            s3s::s3_error!(InvalidRequest, "upload has another completion manifest")
+        );
+        let mut summary = record.summary.0;
+        summary.result = upload.result;
+        tx.commit().await?;
+        Ok((
+            if state == "completed" {
+                write::Phase::Published
+            } else if live {
+                write::Phase::Busy
+            } else {
+                write::Phase::Expired
+            },
+            summary,
+        ))
+    }
+    async fn complete_sources(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: complete::Sources,
+    ) -> Result<complete::SourceBatch> {
+        use std::collections::{BTreeMap, HashSet};
+        ensure!(
+            (0..10000).contains(&input.first)
+                && !input.reads.is_empty()
+                && input.reads.len() <= complete::SOURCES
+                && input.reads.iter().all(|id| !id.is_nil())
+                && input.reads.iter().collect::<HashSet<_>>().len() == input.reads.len()
+                && input.shared_permits.len() <= 16
+                && input.shared_permits.iter().collect::<HashSet<_>>().len()
+                    == input.shared_permits.len(),
+            s3s::s3_error!(InvalidArgument)
+        );
+        let mut tx = start(self, node, key, input.run).await?;
+        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        row.active(&mut tx, node, input.run).await?;
+        let upload = row
+            .intent
+            .completion
+            .as_ref()
+            .ok_or_else(|| s3s::s3_error!(InvalidRequest))?
+            .upload;
+        let record = mp::record(upload).fetch_one(&mut *tx).await?;
+        ensure!(
+            (input.first as usize) < record.summary.parts,
+            s3s::s3_error!(InvalidArgument)
+        );
+        let count = (record.summary.parts - input.first as usize).min(input.reads.len());
+        let streams = mp::sources(upload, input.first, count as i64)
+            .fetch_all(&mut *tx)
+            .await?;
+        ensure!(streams.len() == count, Error::SourceUnavailable);
+        let rows = mp::shared(node, input.run, &input.shared_permits)
+            .fetch_all(&mut *tx)
+            .await?;
+        ensure!(rows.len() == input.shared_permits.len(), Error::NodeExpired);
+        let mut shared: BTreeMap<_, _> = rows
+            .into_iter()
+            .map(|(id, storage, left)| {
+                (
+                    storage,
+                    read::Grant {
+                        r#type: read::GrantType::StorageRead,
+                        id,
+                        storage: Some(storage),
+                        valid_for_ms: left as u64,
+                    },
+                )
+            })
+            .collect();
+        ensure!(
+            shared.len() == input.shared_permits.len(),
+            s3s::s3_error!(InvalidArgument)
+        );
+        let mut parts = Vec::with_capacity(count);
+        for (operation, stream) in input.reads.into_iter().zip(streams) {
+            let query = read::Query {
+                run: input.run,
+                operation,
+                route: ReadRoute::Bucket {
+                    name: format!("completion:{}", input.operation),
+                    key: stream.id.to_string(),
+                    alias: None,
+                },
+                access: None,
+                head: false,
+                web: false,
+                mapping: true,
+                protection: true,
+                policy: false,
+                headers: Default::default(),
+                overrides: Default::default(),
+                cached: input.cached.clone(),
+                max_items: 16,
+                lanes: 1,
+                permits: Default::default(),
+                max_bytes: 128 * 1024,
+                body: None,
+            };
+            let mut reply = read::Reply::new(read::Outcome::Ready);
+            let object = read::Object::from_stream(&stream)?;
+            reply.object = Some(reply.material(
+                node.deployment_id,
+                read::MaterialType::Object,
+                object.id.to_string(),
+                &object,
+                &query.cached,
+            )?);
+            reply.length = stream.size as u64;
+            reply.etag = stream.etag.clone();
+            let value = super::node_reads::protect_node_read(
+                &mut tx,
+                node,
+                key,
+                &query,
+                &stream,
+                reply,
+                &mut shared,
+            )
+            .await?;
+            ensure!(
+                value.outcome != read::Outcome::Pending,
+                Error::NodeSourcePending
+            );
+            ensure!(
+                value.outcome == read::Outcome::Ready,
+                Error::SourceUnavailable
+            );
+            parts.push(value);
+        }
+        node_registry::validate_run(&mut tx, node, input.run).await?;
+        tx.commit().await?;
+        let next = input.first + count as i32;
+        Ok(complete::SourceBatch {
+            first: input.first,
+            next: ((next as usize) < record.summary.parts).then_some(next),
+            parts,
+        })
+    }
     async fn prepare_chunks(
         &self,
         node: &NodeState,
@@ -267,6 +732,10 @@ impl NodeWrites for Backend {
         let stream = row.active(&mut tx, node, input.run).await?;
         ensure!(
             row.profile.cdc_enabled
+                && mp::tail(node.node_id, input.operation)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .is_none()
                 && row.next_offset == input.offset
                 && row.next_batch == input.batch
                 && input.batch < i64::MAX
@@ -288,14 +757,16 @@ impl NodeWrites for Backend {
                 < node_chunk::MAX_PENDING,
             Error::NodeWriteBusy
         );
-        transactions::reserve_quota_in(
-            &mut tx,
-            stream,
-            end,
-            false,
-            row.intent.part.as_ref().map(|p| (p.upload, p.number)),
-        )
-        .await?;
+        if row.intent.completion.is_none() {
+            transactions::reserve_quota_in(
+                &mut tx,
+                stream,
+                end,
+                false,
+                row.intent.part.as_ref().map(|p| (p.upload, p.number)),
+            )
+            .await?;
+        }
         let algorithm = if let Some(id) = row.block_key_id {
             queries::work::block_key(id)
                 .fetch_one(&mut *tx)
@@ -410,6 +881,8 @@ impl NodeWrites for Backend {
             node.node_id,
             needed.len().min(input.parallelism as usize),
             input.batch,
+            row.storage_id,
+            row.profile.upload_concurrency,
         )
         .await?;
         if !batch.ready {
@@ -674,7 +1147,7 @@ impl NodeWrites for Backend {
         &self,
         node: &NodeState,
         key: &Key,
-        input: write::Begin,
+        mut input: write::Begin,
     ) -> Result<write::Reply> {
         input.intent.validate()?;
         let issued = write::operation_time(input.operation)?;
@@ -707,10 +1180,6 @@ impl NodeWrites for Backend {
         ensure!(
             q::count(node.node_id).fetch_one(&mut *tx).await? < write::MAX_ACTIVE,
             Error::NodeWriteLimit
-        );
-        ensure!(
-            input.intent.completion.is_none(),
-            s3s::s3_error!(InvalidRequest, "completion requires an active manifest")
         );
         let bucket = requests::node_read_bucket(&ReadRoute::Bucket {
             name: input.intent.bucket.clone(),
@@ -787,7 +1256,37 @@ impl NodeWrites for Backend {
         };
         transactions::lock_permit(&mut tx, &authority).await?;
         let mut metadata = input.intent.metadata.clone();
-        if let Some(part) = &input.intent.part {
+        let mut public = input.intent.public;
+        let mut object_completion = None;
+        if let Some(manifest) = &input.intent.completion {
+            let (upload, summary, live) =
+                completion(&mut tx, &input, bucket.id, &authority, manifest).await?;
+            if live || upload.state == "completed" {
+                let reply = write::Reply {
+                    operation: input.operation,
+                    bucket: Some(bucket.id),
+                    stream: None,
+                    phase: if upload.state == "completed" {
+                        write::Phase::Published
+                    } else {
+                        write::Phase::Busy
+                    },
+                    materials: vec![],
+                    storage: None,
+                    grants: vec![],
+                    published: None,
+                    copy_references: false,
+                    checksum_algorithm: summary.algorithm.clone(),
+                    completion: Some(summary),
+                };
+                tx.commit().await?;
+                return Ok(reply);
+            }
+            metadata = upload.metadata;
+            public = upload.public_read;
+            object_completion = Some(summary);
+        }
+        if let Some(part) = &mut input.intent.part {
             let upload = requests::multipart_upload(
                 part.upload,
                 bucket.id,
@@ -804,6 +1303,7 @@ impl NodeWrites for Backend {
                     .is_none_or(|a| upload.checksum_algorithm.as_ref().is_none_or(|b| a == b)),
                 s3s::s3_error!(InvalidRequest)
             );
+            part.algorithm = upload.checksum_algorithm.or_else(|| part.algorithm.clone());
             metadata = upload.metadata;
         }
         let stream = transactions::create_stream_in(
@@ -818,8 +1318,8 @@ impl NodeWrites for Backend {
                     StreamPurpose::Object
                 },
                 metadata,
-                public: input.intent.public,
-                completion: None,
+                public,
+                completion: object_completion.as_ref().map(|x| x.upload),
                 owner: None,
             },
         )
@@ -828,14 +1328,18 @@ impl NodeWrites for Backend {
         if let Some((upload, number)) = part {
             transactions::begin_upload_part_in(&mut tx, &authority, upload, number, stream).await?;
         }
-        transactions::reserve_quota_in(
-            &mut tx,
-            stream,
-            input.intent.size.unwrap_or(0),
-            false,
-            part,
-        )
-        .await?;
+        if let Some(summary) = &object_completion {
+            transactions::complete_quota_in(&mut tx, summary.upload, stream, summary.size).await?;
+        } else {
+            transactions::reserve_quota_in(
+                &mut tx,
+                stream,
+                input.intent.size.unwrap_or(0),
+                false,
+                part,
+            )
+            .await?;
+        }
         q::insert(
             node,
             &input,
@@ -1004,7 +1508,16 @@ impl NodeWrites for Backend {
                 .await?;
             (location, committed)
         };
-        let grants = permits(&mut tx, &row, node.node_id, usize::from(!committed), 0).await?;
+        let grants = permits(
+            &mut tx,
+            &row,
+            node.node_id,
+            usize::from(!committed),
+            0,
+            row.storage_id,
+            row.profile.upload_concurrency,
+        )
+        .await?;
         node_registry::validate_run(&mut tx, node, input.run).await?;
         tx.commit().await?;
         Ok(node_raw::Prepared {
@@ -1076,7 +1589,7 @@ impl NodeWrites for Backend {
         &self,
         node: &NodeState,
         key: &Key,
-        input: write::Publish,
+        mut input: write::Publish,
     ) -> Result<write::Reply> {
         let hash = input.hash()?;
         let mut tx = start(self, node, key, input.run).await?;
@@ -1111,15 +1624,45 @@ impl NodeWrites for Backend {
             );
         }
         ensure!(
-            queries::replication::finish_stream(
-                stream,
-                input.size,
-                &input.etag,
-                serde_json::to_value(&input.checksums)?
-            )
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
+            mp::tail(node.node_id, input.operation)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none_or(|t| t.committed),
+            s3s::s3_error!(IncompleteBody)
+        );
+        let mut sums = serde_json::to_value(&input.checksums)?;
+        let mut finish_upload = None;
+        if let Some(manifest) = &row.intent.completion {
+            let record = mp::record(manifest.upload).fetch_one(&mut *tx).await?;
+            ensure!(
+                input.size == record.summary.size
+                    && input.etag == record.summary.etag
+                    && input.if_match.is_none()
+                    && input.if_none.is_none(),
+                s3s::s3_error!(InvalidRequest, "completion differs from its manifest")
+            );
+            let parts = mp::checksums(manifest.upload).fetch_all(&mut *tx).await?;
+            sums = complete::checksums(
+                sums,
+                record.summary.algorithm.as_deref(),
+                record.summary.checksum_type.as_deref(),
+                &parts,
+                &record.conditions.checksums,
+            )?;
+            input.if_match = record.conditions.if_match.clone();
+            input.if_none = record.conditions.if_none.clone();
+            finish_upload = Some((
+                manifest.upload,
+                record.manifest_hash,
+                serde_json::json!({"etag":input.etag,"checksums":sums}),
+                input.operation,
+            ));
+        }
+        ensure!(
+            queries::replication::finish_stream(stream, input.size, &input.etag, sums)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
                 == 1,
             Error::OperationAborted
         );
@@ -1170,7 +1713,7 @@ impl NodeWrites for Backend {
                 stream,
                 condition(input.if_match)?,
                 condition(input.if_none)?,
-                None,
+                finish_upload,
             )
             .await
             {
