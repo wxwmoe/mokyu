@@ -151,11 +151,22 @@ async fn completion(
     Ok((upload, summary, live))
 }
 
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+pub(super) enum ChunkPlan<'a> {
+    Items(&'a [node_chunk::Item]),
+    Packed {
+        items: &'a [node_chunk::Item],
+        packing: &'a crate::model::node_pack::Batch,
+    },
+}
+
 #[derive(sqlx::FromRow)]
 pub(super) struct Batch {
     request_hash: Vec<u8>,
     end_bytes: i64,
     plan: Json<Vec<node_chunk::Item>>,
+    packing: Option<Json<crate::model::node_pack::Batch>>,
     ready: bool,
     commit_hash: Option<Vec<u8>>,
 }
@@ -744,7 +755,21 @@ impl NodeWrites for Backend {
         let end = input.end()?;
         let hash = input.hash()?;
         let mut tx = start(self, node, key, input.run).await?;
-        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        let mut row = lookup(&mut tx, node.node_id, input.operation).await?;
+        if row.owner_task_id.is_some()
+            && row.profile.pack_enabled
+            && row.block_key_id.is_some()
+            && self
+                .database_info
+                .synchronous
+                .as_deref()
+                .is_some_and(|level| level != "full")
+        {
+            tx.rollback().await?;
+            tx = super::queries::work::begin_media(self, true).await?;
+            node_registry::require_work(self, &mut tx, node, key, input.run).await?;
+            row = lookup(&mut tx, node.node_id, input.operation).await?;
+        }
         row.owned(node, input.run)?;
         if let Some(batch) = q::batch(node.node_id, input.operation, input.batch)
             .fetch_optional(&mut *tx)
@@ -848,14 +873,36 @@ impl NodeWrites for Backend {
             });
             offset += i64::from(item.raw_size);
         }
+        let packing = if let Some(task) = row.owner_task_id.filter(|_| row.profile.pack_enabled) {
+            super::work_media::packing::prepare_write(
+                &mut tx,
+                task,
+                row.storage_id,
+                row.block_key_id,
+                &row.profile,
+                &plan,
+            )
+            .await?
+        } else {
+            None
+        };
+        let ready = packing.is_some();
+        let saved = match &packing {
+            Some(packing) => ChunkPlan::Packed {
+                items: &plan,
+                packing,
+            },
+            None => ChunkPlan::Items(&plan),
+        };
         q::add_batch(
             node.node_id,
             input.operation,
             input.batch,
             &hash,
             end,
-            &plan,
-            false,
+            saved,
+            ready,
+            None,
         )
         .execute(&mut *tx)
         .await?;
@@ -866,7 +913,7 @@ impl NodeWrites for Backend {
         tx.commit().await?;
         Ok(node_chunk::Assembly {
             items: plan,
-            ready: false,
+            ready,
             committed: false,
         })
     }
@@ -987,7 +1034,7 @@ impl NodeWrites for Backend {
         node_registry::validate_run(&mut tx, node, input.run).await?;
         tx.commit().await?;
         Ok(node_chunk::Prepared {
-            packing: None,
+            packing: batch.packing.map(|b| b.0),
             batch: input.batch,
             end: batch.end_bytes,
             committed: false,
@@ -1017,35 +1064,54 @@ impl NodeWrites for Backend {
             return Ok(batch.end_bytes);
         }
         let stream = row.active(&mut tx, node, input.run).await?;
-        ensure!(
-            batch.ready && input.packed.is_none(),
-            Error::NodeOperationConflict
-        );
-        let mut needed: HashSet<_> = batch
-            .plan
-            .iter()
-            .filter(|i| !i.reused)
-            .map(|i| i.chunk.uuid)
-            .collect();
-        ensure!(
-            needed.len() == input.encoded.len()
-                && input.encoded.iter().all(|i| needed.contains(&i.chunk)),
-            Error::OperationAborted
-        );
-        for item in batch.plan.iter().filter(|i| !i.reused) {
-            if needed.remove(&item.chunk.uuid) {
-                transactions::complete_chunk_write_in(&mut tx, stream, item.offset, &item.chunk)
-                    .await?;
-            } else {
-                transactions::reference_chunk_in(
+        ensure!(batch.ready, Error::NodeOperationConflict);
+        match (&batch.packing, &input.packed) {
+            (Some(plan), Some(result)) if input.encoded.is_empty() => {
+                super::work_media::finish_write(
                     &mut tx,
+                    &row,
                     stream,
-                    item.offset,
-                    item.chunk.id,
-                    item.chunk.raw_size,
+                    &batch.plan,
+                    plan,
+                    result,
+                    key,
                 )
-                .await?;
+                .await?
             }
+            (None, None) => {
+                let mut needed: HashSet<_> = batch
+                    .plan
+                    .iter()
+                    .filter(|i| !i.reused)
+                    .map(|i| i.chunk.uuid)
+                    .collect();
+                ensure!(
+                    needed.len() == input.encoded.len()
+                        && input.encoded.iter().all(|i| needed.contains(&i.chunk)),
+                    Error::OperationAborted
+                );
+                for item in batch.plan.iter().filter(|i| !i.reused) {
+                    if needed.remove(&item.chunk.uuid) {
+                        transactions::complete_chunk_write_in(
+                            &mut tx,
+                            stream,
+                            item.offset,
+                            &item.chunk,
+                        )
+                        .await?;
+                    } else {
+                        transactions::reference_chunk_in(
+                            &mut tx,
+                            stream,
+                            item.offset,
+                            item.chunk.id,
+                            item.chunk.raw_size,
+                        )
+                        .await?;
+                    }
+                }
+            }
+            _ => anyhow::bail!(Error::NodeOperationConflict),
         }
         transactions::require_sources(&mut tx, Some(stream), &[]).await?;
         queries::resize_writing_stream(stream, batch.end_bytes)
@@ -1162,8 +1228,9 @@ impl NodeWrites for Backend {
             input.batch,
             &hash,
             end,
-            &[],
+            ChunkPlan::Items(&[]),
             true,
+            Some(&hash),
         )
         .execute(&mut *tx)
         .await?;

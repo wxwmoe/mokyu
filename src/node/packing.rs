@@ -415,9 +415,14 @@ impl Reader {
             pack::CompressionStrategy::Always => compression::Strategy::Always,
             pack::CompressionStrategy::Sample => compression::Strategy::Sample,
         };
+        let tag_bytes = if batch.key.is_some() { 16 } else { 0 };
         let old: i64 = batch.chunks[start..end]
             .iter()
-            .map(|c| i64::from(c.previous_size.unwrap_or(c.size)))
+            .map(|c| {
+                c.previous_size
+                    .map(i64::from)
+                    .unwrap_or(i64::from(c.size) + tag_bytes)
+            })
             .sum();
         let cpu = self.cpu.clone().acquire_owned().await?;
         let hold = memory.clone();

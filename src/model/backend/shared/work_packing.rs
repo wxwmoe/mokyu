@@ -440,7 +440,7 @@ async fn flush(db: &mut p::Connection) -> Result<f64> {
     Ok((2 * config::seconds(&metrics.access_flush_interval)?) as f64)
 }
 
-pub(super) async fn reserve_outputs(
+pub(in super::super) async fn reserve_outputs(
     db: &mut p::Connection,
     task: Uuid,
     storage: Uuid,
@@ -475,6 +475,81 @@ pub(super) async fn reserve_outputs(
     }
     p::prepare_outputs(db, task, storage, batch).await?;
     Ok(())
+}
+
+pub(in super::super) async fn prepare_write(
+    db: &mut p::Connection,
+    task: Uuid,
+    storage: Uuid,
+    block_key: Option<Uuid>,
+    profile: &crate::storage::profile::StorageProfile,
+    items: &[crate::model::node_chunk::Item],
+) -> Result<Option<wire::Batch>> {
+    let created = p::clock(&mut *db).await?;
+    let mut batch = wire::Batch {
+        algorithm: "none".into(),
+        key: block_key,
+        created,
+        sources: vec![],
+        chunks: vec![],
+        groups: vec![],
+        packs: vec![],
+    };
+    let mut unique = BTreeSet::new();
+    let maximum = config::bytes(&profile.pack_max_size)?;
+    let mut start = 0;
+    let mut bytes = 0u64;
+    for item in items.iter().filter(|item| !item.reused) {
+        ensure!(
+            !item.chunk.compressed && item.payload_hash.as_slice() == item.chunk.hash,
+            Error::NodeOperationConflict
+        );
+        if !unique.insert(item.chunk.id) {
+            continue;
+        }
+        if bytes + item.chunk.raw_size as u64 > maximum && start < batch.chunks.len() {
+            batch.groups.push((start, batch.chunks.len()));
+            start = batch.chunks.len();
+            bytes = 0;
+        }
+        bytes += item.chunk.raw_size as u64;
+        batch.algorithm = item.chunk.algorithm.clone();
+        batch.chunks.push(wire::Target {
+            uuid: (item.chunk.id != Id::Uuid(item.chunk.uuid)).then_some(item.chunk.uuid),
+            encoding: None,
+            id: item.chunk.id,
+            size: item.chunk.raw_size,
+            hash: item.chunk.hash.clone(),
+            previous_size: None,
+            compress: true,
+            location: Uuid::now_v7(),
+            nonce: None,
+            ready: None,
+        });
+    }
+    if batch.chunks.is_empty() {
+        return Ok(None);
+    }
+    batch.groups.push((start, batch.chunks.len()));
+    let allowed = p::creation_allowed(&mut *db).await?;
+    if allowed {
+        for &(start, end) in &batch.groups {
+            let middle = start + (end - start) / 2;
+            for (start, end) in [(start, end), (start, middle), (middle, end)] {
+                if end - start > 1 {
+                    batch.packs.push(wire::Attempt {
+                        id: None,
+                        start,
+                        end,
+                        location: Uuid::now_v7(),
+                        nonce: None,
+                    });
+                }
+            }
+        }
+    }
+    reserve_outputs(db, task, storage, &mut batch).await?;
+    Ok(Some(batch))
 }
 
 pub(super) async fn prepare(
@@ -780,7 +855,7 @@ pub(super) async fn prepare(
     Ok(None)
 }
 
-pub(super) async fn outputs(
+pub(in super::super) async fn outputs(
     db: &mut p::Connection,
     storage: Uuid,
     batch: &wire::Batch,

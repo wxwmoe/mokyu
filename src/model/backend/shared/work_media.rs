@@ -92,3 +92,67 @@ pub(super) async fn finish(
         error,
     ))
 }
+
+pub(super) async fn finish_write(
+    tx: &mut db::Tx<'_>,
+    row: &super::node_writes::Write,
+    stream: Id,
+    items: &[crate::model::node_chunk::Item],
+    batch: &crate::model::node_pack::Batch,
+    result: &crate::model::node_pack::Encoded,
+    key: &Key,
+) -> Result<()> {
+    let id = row.owner_task_id.ok_or(Error::NodeOperationConflict)?;
+    let record = queries::task_record(id).fetch_one(&mut **tx).await?;
+    let task = Execution {
+        id,
+        token: record.execution_token.ok_or(Error::NodeExpired)?,
+    };
+    if !result.packs.is_empty() {
+        ensure!(
+            db::creation_allowed(&mut **tx).await?,
+            Error::OperationAborted
+        );
+    }
+    let outputs = packing::outputs(
+        tx,
+        row.storage_id,
+        batch,
+        result,
+        &vec![None; batch.chunks.len()],
+        key,
+    )
+    .await?;
+    let mut used = std::collections::BTreeSet::new();
+    let rows = items
+        .iter()
+        .filter(|item| !item.reused && used.insert(item.chunk.id))
+        .map(|item| Mapping {
+            chunk: item.chunk.clone(),
+            offset_bytes: item.offset,
+            pack_id: None,
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        rows.iter()
+            .map(|r| r.chunk.id)
+            .eq(batch.chunks.iter().map(|c| c.id)),
+        Error::NodeOperationConflict
+    );
+    db::record_outputs(tx, id, &rows, &outputs).await?;
+    transactions::commit_conversion_batch_in(tx, task, stream, &rows, &outputs).await?;
+    used.clear();
+    for item in items.iter().filter(|item| !item.reused) {
+        if !used.insert(item.chunk.id) {
+            transactions::reference_chunk_in(
+                tx,
+                stream,
+                item.offset,
+                item.chunk.id,
+                item.chunk.raw_size,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}

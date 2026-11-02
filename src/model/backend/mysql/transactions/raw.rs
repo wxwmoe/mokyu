@@ -782,16 +782,28 @@ pub(in super::super) async fn commit_conversion_batch(
     rows: &[crate::model::Mapping],
     outputs: &[crate::model::packing::PackOutput],
 ) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    commit_conversion_batch_in(&mut tx, task, candidate, rows, outputs).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub(in super::super) async fn commit_conversion_batch_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    task: Execution,
+    candidate: Id,
+    rows: &[crate::model::Mapping],
+    outputs: &[crate::model::packing::PackOutput],
+) -> Result<()> {
     ensure!(
         !rows.is_empty() && rows.len() <= 1024,
         "invalid conversion batch"
     );
-    let mut tx = pool.begin().await?;
-    lock_execution(&mut tx, task).await?;
-    writing_stream(&mut tx, candidate).await?;
+    lock_execution(tx, task).await?;
+    writing_stream(tx, candidate).await?;
     ensure!(
         queries::conversion_owned(candidate, task.id, task.token)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .is_some(),
         crate::model::Error::OperationAborted
@@ -814,16 +826,16 @@ pub(in super::super) async fn commit_conversion_batch(
     for row in rows {
         ensure!(
             queries::conversion_chunk(row.chunk.id, candidate)
-                .fetch_optional(&mut *tx)
+                .fetch_optional(&mut **tx)
                 .await?
                 .is_some(),
             crate::model::Error::OperationAborted
         );
         queries::conversion_ready(row.chunk.id, candidate)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         queries::conversion_retire_encoding(row.chunk.encoding_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     for output in outputs {
@@ -831,35 +843,35 @@ pub(in super::super) async fn commit_conversion_batch(
             ensure!(
                 output.independent.is_none()
                     && queries::conversion_output_pack(pack.id, task.id)
-                        .fetch_optional(&mut *tx)
+                        .fetch_optional(&mut **tx)
                         .await?
                         .is_some(),
                 crate::model::Error::OperationAborted
             );
             queries::publish_prepared_pack(pack.id, task.id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         } else if let Some(chunk) = &output.independent {
             ensure!(
                 output.chunks == [chunk.id]
                     && queries::conversion_output_encoding(chunk.encoding_id, task.id, chunk.id)
-                        .fetch_optional(&mut *tx)
+                        .fetch_optional(&mut **tx)
                         .await?
                         .is_some(),
                 crate::model::Error::OperationAborted
             );
             queries::conversion_publish_encoding(chunk.encoding_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             queries::publish_chunk_encoding(chunk.id, chunk.encoding_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         } else {
             anyhow::bail!("conversion output has no physical source");
         }
         for chunk in &output.chunks {
             queries::conversion_layout(*chunk, output.pack.as_ref().map(|p| p.id))
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
         }
     }
@@ -870,16 +882,16 @@ pub(in super::super) async fn commit_conversion_batch(
             row.chunk.raw_size,
             row.chunk.id,
         )
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        queries::changed_references(&mut tx, &[row.chunk.id], true).await?;
+        queries::changed_references(tx, &[row.chunk.id], true).await?;
     }
-    require_sources(&mut tx, Some(candidate), &[]).await?;
+    require_sources(tx, Some(candidate), &[]).await?;
     let end = rows.last().unwrap().offset_bytes + i64::from(rows.last().unwrap().chunk.raw_size);
     queries::resize_writing_stream(candidate, end)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
+
     Ok(())
 }
 

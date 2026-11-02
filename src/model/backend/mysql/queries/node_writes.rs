@@ -140,7 +140,7 @@ pub(in super::super) fn batch(
     batch: i64,
 ) -> Rows<'static, super::super::node_writes::Batch> {
     sqlx::query_as(
-        "SELECT * FROM node_write_batches WHERE node_id=? AND operation_id=? AND batch_id=?",
+        "SELECT request_hash,end_bytes,ready,commit_hash,COALESCE(JSON_EXTRACT(plan,'$.items'),plan) AS plan,JSON_EXTRACT(plan,'$.packing') AS packing FROM node_write_batches WHERE node_id=? AND operation_id=? AND batch_id=?",
     )
     .bind(node)
     .bind(op)
@@ -155,10 +155,11 @@ pub(in super::super) fn add_batch<'a>(
     batch: i64,
     hash: &'a [u8],
     end: i64,
-    plan: &'a [crate::model::node_chunk::Item],
-    committed: bool,
+    plan: super::super::node_writes::ChunkPlan<'a>,
+    ready: bool,
+    receipt: Option<&'a [u8]>,
 ) -> Statement<'a> {
-    sqlx::query("INSERT INTO node_write_batches(node_id,operation_id,batch_id,request_hash,end_bytes,plan,ready,commit_hash) VALUES(?,?,?,?,?,?,?,?)").bind(node).bind(op).bind(batch).bind(hash).bind(end).bind(Json(plan)).bind(committed).bind(committed.then_some(hash))
+    sqlx::query("INSERT INTO node_write_batches(node_id,operation_id,batch_id,request_hash,end_bytes,plan,ready,commit_hash) VALUES(?,?,?,?,?,?,?,?)").bind(node).bind(op).bind(batch).bind(hash).bind(end).bind(Json(plan)).bind(ready).bind(receipt)
 }
 pub(in super::super) fn activate<'a>(
     node: Uuid,
