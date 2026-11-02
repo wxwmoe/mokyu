@@ -87,7 +87,7 @@ For `nonce_database_contract` provide a new database through `MOKYU_TEST_NONCE_C
 
 `python -m tests.recovery.source_read_cache` uses the same stopped-service fixture with no response body budget. It verifies zero-SQL raw reads and Range with explicit source snapshots, independent source expiry, strict and signed bypass, quarantine/recheck invalidation, pre-open pins through overwrite/GC, and bounded chunk refresh failures. Run each supported database locally and set `MOKYU_TEST_BACKEND` for remote raw/chunk/pack coverage. The optional source policy in `tests.recovery.cluster_public_cache` must retain real data-node read leases on body misses.
 
-`tests/recovery/read_integrity.py` tests optional digest policy, late cache fills, background queue/memory bounds, cancellation/ranges and the boundary between bad caches and damaged backend bytes across all four products on local and remote S3. Rust content tests also cover mandatory pack and encryption authentication.
+`tests/recovery/read_integrity.py` tests optional digest policy, late cache fills, background queue/memory bounds, exact partial ranges without whole-source verification, cancellation and the boundary between bad caches and damaged backend bytes across all four products on local and remote S3. Rust content tests also cover mandatory pack and encryption authentication.
 
 `python -m tests.recovery.received_responses` verifies hot-path PUT reuse for raw/chunks, signed and anonymous S3/Web/Range, rejected or disconnected uploads, bounded optional admission, no-store and current permissions. With `MOKYU_TEST_BACKEND`, it also verifies shared RAM allocation and independent write-quota release after drain. Uses the isolated recovery fixture and a 4MiB response cache.
 
