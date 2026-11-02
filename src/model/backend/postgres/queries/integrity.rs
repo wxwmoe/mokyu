@@ -223,6 +223,17 @@ impl IntegrityStore for Backend {
             .fetch_all(&self.pool)
             .await?)
     }
+    async fn next_raw(
+        &self,
+        detail: &Detail,
+        cursor: &Cursor,
+    ) -> Result<Option<(Uuid, String, Id, i64, Id)>> {
+        let mut db = self.pool.acquire().await?;
+        Ok(raw_targets(&mut db, detail, cursor, 1)
+            .await?
+            .into_iter()
+            .next())
+    }
     async fn mapping(
         &self,
         d: &Detail,
@@ -362,4 +373,31 @@ impl IntegrityStore for Backend {
         let rows: Vec<Value> = query.build_query_scalar().fetch_all(&self.pool).await?;
         Ok(rows)
     }
+}
+
+pub(in super::super) async fn raw_targets(
+    db: &mut sqlx::PgConnection,
+    detail: &Detail,
+    cursor: &Cursor,
+    limit: usize,
+) -> Result<Vec<(Uuid, String, Id, i64, Id)>> {
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT o.bucket_id,o.object_key,o.stream_id,e.offset_bytes,e.source_id FROM objects o JOIN streams s ON s.id=o.stream_id JOIN raw_ranges e ON e.stream_id=s.id WHERE s.payload_type='raw'",
+    );
+    integrity_scope(&mut query, detail);
+    if let (Some(bucket), Some(key)) = (cursor.bucket, &cursor.key) {
+        query
+            .push(" AND (o.bucket_id,o.object_key,e.offset_bytes)>(")
+            .push_bind(bucket)
+            .push(",")
+            .push_bind(key)
+            .push(",")
+            .push_bind(cursor.after_extent)
+            .push(")");
+    }
+    query
+        .push(" ORDER BY o.bucket_id,o.object_key,e.offset_bytes LIMIT ")
+        .push_bind(limit as i64);
+    let rows: Vec<(Uuid, String, Id, i64, Id)> = query.build_query_as().fetch_all(db).await?;
+    Ok(rows)
 }

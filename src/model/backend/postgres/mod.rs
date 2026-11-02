@@ -25,8 +25,12 @@ mod tier_move_transactions;
 #[path = "../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
+#[path = "../shared/work_audit.rs"]
+mod work_audit;
 #[path = "../shared/work_sources.rs"]
 mod work_sources;
+#[path = "../shared/work_sweep.rs"]
+mod work_sweep;
 
 #[cfg(test)]
 #[path = "../../../../tests/recovery/postgres_compression.rs"]

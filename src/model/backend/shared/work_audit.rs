@@ -1,4 +1,15 @@
-use super::*;
+use super::{
+    Backend,
+    queries::{
+        self,
+        pack_work::{Connection, Tx},
+        work_audit as q, work_sources,
+    },
+};
+use crate::{
+    content::codec::{self, Key},
+    model::{Error, Id, node_read as read, node_work as work, task::Execution},
+};
 use crate::{
     model::{
         PhysicalSource,
@@ -8,6 +19,9 @@ use crate::{
     },
     worker::integrity::Mode,
 };
+use anyhow::{Context, Result, ensure};
+use serde_json::{Value, json};
+use uuid::Uuid;
 
 fn unavailable(error: &anyhow::Error) -> Option<&'static str> {
     error
@@ -23,7 +37,7 @@ fn unavailable(error: &anyhow::Error) -> Option<&'static str> {
 }
 
 async fn checkpoint(
-    db: &mut PgConnection,
+    db: &mut Connection,
     task: Uuid,
     cursor: String,
     detail: &Detail,
@@ -41,7 +55,7 @@ async fn checkpoint(
 }
 
 async fn candidates(
-    db: &mut PgConnection,
+    db: &mut Connection,
     detail: &Detail,
     cursor: &Cursor,
     limit: usize,
@@ -73,24 +87,7 @@ async fn candidates(
         return Ok(targets);
     }
     ensure!(detail.phase == "raw", Error::NodeOperationConflict);
-    let mut query = sqlx::QueryBuilder::new(
-        "SELECT o.bucket_id,o.object_key,o.stream_id,e.offset_bytes,e.source_id FROM objects o JOIN streams s ON s.id=o.stream_id JOIN raw_ranges e ON e.stream_id=s.id WHERE s.payload_type='raw'",
-    );
-    queries::integrity_scope(&mut query, detail);
-    if let (Some(bucket), Some(key)) = (cursor.bucket, &cursor.key) {
-        query
-            .push(" AND (o.bucket_id,o.object_key,e.offset_bytes)>(")
-            .push_bind(bucket)
-            .push(",")
-            .push_bind(key)
-            .push(",")
-            .push_bind(cursor.after_extent)
-            .push(")");
-    }
-    query
-        .push(" ORDER BY o.bucket_id,o.object_key,e.offset_bytes LIMIT ")
-        .push_bind(limit as i64);
-    let rows: Vec<(Uuid, String, Id, i64, Id)> = query.build_query_as().fetch_all(db).await?;
+    let rows = q::raw_targets(db, detail, cursor, limit).await?;
     Ok(rows
         .into_iter()
         .map(|(bucket, key, stream, offset, source)| {
@@ -128,7 +125,8 @@ fn advance(cursor: &mut Cursor, target: &AuditTarget) {
 }
 
 pub(super) async fn prepare(
-    tx: &mut Transaction<'_, Postgres>,
+    backend: &Backend,
+    tx: &mut Tx<'_>,
     execution: Execution,
     detail: &Value,
     profile: &crate::storage::profile::StorageProfile,
@@ -140,10 +138,7 @@ pub(super) async fn prepare(
         detail.storage_id == Some(profile.storage_id) && detail.mode != Mode::Metadata,
         Error::NodeOperationConflict
     );
-    let saved: Option<String> = sqlx::query_scalar("SELECT cursor FROM tasks WHERE id=$1")
-        .bind(execution.id)
-        .fetch_one(&mut **tx)
-        .await?;
+    let saved = queries::pack_work::cursor(&mut **tx, execution.id).await?;
     let mut cursor: Cursor = saved
         .as_deref()
         .map(serde_json::from_str)
@@ -159,9 +154,7 @@ pub(super) async fn prepare(
         detail.phase = "done".into();
         detail.finished_at = Some(chrono::Utc::now());
         checkpoint(tx, execution.id, serde_json::to_string(&cursor)?, &detail).await?;
-        q::finish(execution.id, execution.token, 0, true, None)
-            .execute(&mut **tx)
-            .await?;
+        q::finish(execution, None).execute(&mut **tx).await?;
         return Ok(None);
     }
     let byte_limit = profile
@@ -202,9 +195,7 @@ pub(super) async fn prepare(
                         && detail.mode == Mode::Full
                         && source.quarantine_code.is_none()
                     {
-                        item.raw_pages = queries::missing_raw_pages(source.id)
-                            .fetch_one(&mut **tx)
-                            .await?;
+                        item.raw_pages = q::missing_pages(source.id).fetch_one(&mut **tx).await?;
                     }
                     let (size, block) = match &snapshot.physical {
                         PhysicalSource::Chunk(c) => (
@@ -217,8 +208,10 @@ pub(super) async fn prepare(
                         PhysicalSource::Raw(r) => (r.size, None),
                     };
                     item.previous = if let PhysicalSource::Pack(p) = &snapshot.physical {
-                        sqlx::query_scalar::<_, Option<String>>("SELECT error_code FROM integrity_packs WHERE task_id=$1 AND pack_id=$2")
-                            .bind(execution.id).bind(p.id).fetch_optional(&mut **tx).await?.map(|code| work::Outcome::Inspected { code })
+                        q::previous(execution.id, p.id)
+                            .fetch_optional(&mut **tx)
+                            .await?
+                            .map(|code| work::Outcome::Inspected { code })
                     } else {
                         None
                     };
@@ -232,7 +225,7 @@ pub(super) async fn prepare(
                     }
                     if item.previous.is_none() {
                         if let PhysicalSource::Pack(pack) = &snapshot.physical {
-                            item.members = q::members(pack.id).fetch_all(&mut **tx).await?;
+                            item.members = work_sources::members(tx, pack, &snapshot).await?;
                             if member_count + item.members.len() > 4096 && !items.is_empty() {
                                 break;
                             }
@@ -284,7 +277,7 @@ pub(super) async fn prepare(
     {
         rates.push(("integrity_bandwidth", rate as f64, bytes as f64));
     }
-    if !integrity_rate_in(tx, profile.storage_id, &rates).await? {
+    if !work_sources::rate(backend, tx, profile.storage_id, &rates).await? {
         return Ok(None);
     }
     Ok(Some((
@@ -299,7 +292,7 @@ pub(super) async fn prepare(
 }
 
 pub(super) async fn finish(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut Tx<'_>,
     execution: Execution,
     detail: Value,
     cursor: String,
@@ -388,8 +381,9 @@ pub(super) async fn finish(
                     let current = queries::integrity_current(*bucket, key, *stream)
                         .fetch_one(&mut **tx)
                         .await?;
-                    let mapped: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges WHERE stream_id=$1 AND offset_bytes=$2 AND source_id=$3)")
-                        .bind(stream).bind(offset).bind(item.location).fetch_one(&mut **tx).await?;
+                    let mapped: bool = q::mapped(*stream, *offset, item.location)
+                        .fetch_one(&mut **tx)
+                        .await?;
                     (
                         current && mapped,
                         Finding {
@@ -443,8 +437,9 @@ pub(super) async fn finish(
                     .max(0) as u64;
                 }
                 if let PhysicalSource::Pack(pack) = &snapshot.physical {
-                    sqlx::query("INSERT INTO integrity_packs(task_id,pack_id,error_code) VALUES($1,$2,$3) ON CONFLICT DO NOTHING")
-                        .bind(execution.id).bind(pack.id).bind(code).execute(&mut **tx).await?;
+                    q::remember(execution.id, pack.id, code.as_deref())
+                        .execute(&mut **tx)
+                        .await?;
                 }
             }
         }

@@ -1378,7 +1378,7 @@ impl NodeWork for Service {
             source: super::uuid(&input.source_id)?,
             group,
         };
-        bounded(self.app.cluster().map_err(failure)?.checkpoint_raw_pages(
+        bounded(self.app.node_work.checkpoint_raw_pages(
             &node,
             &self.app.secrets.credential_key,
             input,

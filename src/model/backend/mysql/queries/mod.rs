@@ -109,6 +109,7 @@ pub(super) use streams::*;
 mod chunks;
 pub(super) use chunks::*;
 mod physical;
+pub(super) use physical::physical_source;
 use physical::*;
 mod keys;
 pub(super) use keys::*;
@@ -159,4 +160,6 @@ pub(super) mod node_registry;
 
 pub(super) mod work;
 
+pub(super) mod work_audit;
 pub(super) mod work_sources;
+pub(super) mod work_sweep;

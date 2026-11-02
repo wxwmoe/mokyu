@@ -6,7 +6,7 @@ pub(in super::super) fn integrity_upper_chunk(storage: Option<Uuid>) -> Scalar<'
         .bind(storage)
 }
 
-fn integrity_scope(query: &mut sqlx::QueryBuilder<Sqlite>, detail: &Detail) {
+pub(in super::super) fn integrity_scope(query: &mut sqlx::QueryBuilder<Sqlite>, detail: &Detail) {
     if let Some(storage) = detail.storage_id {
         query
             .push(" AND EXISTS(SELECT 1 FROM buckets b WHERE b.id=o.bucket_id AND b.storage_id=")
@@ -90,11 +90,21 @@ impl IntegrityStore for Backend {
         transactions::start_integrity(&self.write, input, bucket).await
     }
     async fn chunks(&self, detail: &Detail, after: Id, limit: i64) -> Result<Vec<Chunk>> {
-        let mut query = chunk_query(true);
-        query.push(" WHERE c.state='ready' AND c.id>").push_bind(after).push(" AND c.id<=").push_bind(detail.upper_chunk_id.parse::<i64>()?).push(" AND EXISTS(SELECT 1 FROM extents e JOIN objects o ON o.stream_id=e.stream_id WHERE e.chunk_id=c.id");
-        integrity_scope(&mut query, detail);
-        query.push(") ORDER BY c.id LIMIT ").push_bind(limit);
-        Ok(query.build_query_as().fetch_all(&self.read).await?)
+        Ok(integrity_chunks(detail, after, limit)?
+            .build_query_as()
+            .fetch_all(&self.read)
+            .await?)
+    }
+    async fn next_raw(
+        &self,
+        detail: &Detail,
+        cursor: &Cursor,
+    ) -> Result<Option<(Uuid, String, Id, i64, Id)>> {
+        let mut db = self.read.acquire().await?;
+        Ok(super::work_audit::raw_targets(&mut db, detail, cursor, 1)
+            .await?
+            .into_iter()
+            .next())
     }
     async fn mapping(
         &self,
@@ -132,16 +142,12 @@ impl IntegrityStore for Backend {
         Ok(sqlx::query_as("SELECT e.offset_bytes,e.length,e.source_offset,e.fragment_id,e.chunk_id,c.state,c.raw_size FROM extents e LEFT JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=? AND e.offset_bytes>? ORDER BY e.offset_bytes LIMIT 65").bind(stream).bind(after).fetch_all(&self.read).await?)
     }
     async fn current(&self, bucket: Uuid, key: &str, stream: Id) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM objects WHERE bucket_id=? AND object_key=? AND stream_id=?)").bind(bucket).bind(key.as_bytes()).bind(stream).fetch_one(&self.read).await?)
+        Ok(integrity_current(bucket, key, stream)
+            .fetch_one(&self.read)
+            .await?)
     }
     async fn chunk_stream(&self, chunk: Id, detail: &Detail) -> Result<Option<Id>> {
-        let mut query = sqlx::QueryBuilder::<Sqlite>::new(
-            "SELECT o.stream_id FROM extents e JOIN objects o ON o.stream_id=e.stream_id JOIN chunks c ON c.id=e.chunk_id WHERE c.state='ready' AND c.id=",
-        );
-        query.push_bind(chunk);
-        integrity_scope(&mut query, detail);
-        query.push(" ORDER BY o.bucket_id,o.object_key LIMIT 1");
-        Ok(query
+        Ok(integrity_chunk_stream(chunk, detail)
             .build_query_scalar()
             .fetch_optional(&self.read)
             .await?)
@@ -267,4 +273,38 @@ pub(in super::super) async fn integrity_objects(
             }))
         })
         .collect()
+}
+
+pub(in super::super) fn integrity_chunks(
+    detail: &Detail,
+    after: Id,
+    limit: i64,
+) -> Result<sqlx::QueryBuilder<Sqlite>> {
+    let mut query = chunk_query(true);
+    query.push(" WHERE c.state='ready' AND c.id>").push_bind(after).push(" AND c.id<=").push_bind(detail.upper_chunk_id.parse::<i64>()?).push(" AND EXISTS(SELECT 1 FROM extents e JOIN objects o ON o.stream_id=e.stream_id WHERE e.chunk_id=c.id");
+    integrity_scope(&mut query, detail);
+    query.push(") ORDER BY c.id LIMIT ").push_bind(limit);
+    Ok(query)
+}
+
+pub(in super::super) fn integrity_chunk_stream(
+    chunk: Id,
+    detail: &Detail,
+) -> sqlx::QueryBuilder<Sqlite> {
+    let mut query = sqlx::QueryBuilder::<Sqlite>::new(
+        "SELECT o.stream_id FROM extents e JOIN objects o ON o.stream_id=e.stream_id JOIN chunks c ON c.id=e.chunk_id WHERE c.state='ready' AND c.id=",
+    );
+    query.push_bind(chunk);
+    integrity_scope(&mut query, detail);
+    query.push(" ORDER BY o.bucket_id,o.object_key LIMIT 1");
+    query
+}
+
+pub(in super::super) fn integrity_current(bucket: Uuid, key: &str, stream: Id) -> Scalar<'_, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM objects WHERE bucket_id=? AND object_key=? AND stream_id=?)",
+    )
+    .bind(bucket)
+    .bind(key.as_bytes())
+    .bind(stream)
 }

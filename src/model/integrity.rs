@@ -79,6 +79,11 @@ pub(crate) trait IntegrityStore: Send + Sync {
         node: Option<Uuid>,
     ) -> Result<(Uuid, usize)>;
     async fn chunks(&self, detail: &Detail, after: Id, limit: i64) -> Result<Vec<Chunk>>;
+    async fn next_raw(
+        &self,
+        detail: &Detail,
+        cursor: &Cursor,
+    ) -> Result<Option<(Uuid, String, Id, i64, Id)>>;
     async fn mapping(
         &self,
         detail: &Detail,

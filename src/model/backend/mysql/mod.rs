@@ -40,6 +40,8 @@ mod tier_move_transactions;
 #[path = "../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
+#[path = "../shared/work_audit.rs"]
+mod work_audit;
 #[path = "../shared/work_conversion.rs"]
 mod work_conversion;
 #[path = "../shared/work_export.rs"]
@@ -56,6 +58,8 @@ mod work_raw;
 mod work_replication;
 #[path = "../shared/work_sources.rs"]
 mod work_sources;
+#[path = "../shared/work_sweep.rs"]
+mod work_sweep;
 
 use sqlx::{MySqlConnection, MySqlPool};
 

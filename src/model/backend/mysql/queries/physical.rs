@@ -97,7 +97,9 @@ impl PhysicalStore for Backend {
             .await?)
     }
     async fn indexed(&self, location: Uuid) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM chunk_encodings u WHERE u.location_id=? AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=u.location_id)) OR EXISTS(SELECT 1 FROM packs u WHERE u.location_id=? AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=u.location_id)) OR EXISTS(SELECT 1 FROM tier_locations WHERE address=?) OR EXISTS(SELECT 1 FROM tier_moves WHERE source_address=?) OR EXISTS(SELECT 1 FROM tier_moves WHERE target_address=?)").bind(location).bind(location).bind(location).bind(location).bind(location).fetch_one(&self.pool).await?)
+        Ok(super::work_sweep::physical_indexed(location)
+            .fetch_one(&self.pool)
+            .await?)
     }
     async fn upload_pins(
         &self,
@@ -116,19 +118,10 @@ impl PhysicalStore for Backend {
         transactions::register_encoding(&self.pool, chunk).await
     }
     async fn source(&self, id: Id, inspection: bool) -> Result<PhysicalSource> {
-        let mut query = chunk_query(true);
-        query
-            .push(" WHERE c.id=")
-            .push_bind(id)
-            .push(" AND c.state='ready' AND l.encoding_id IS NOT NULL");
-        if !inspection {
-            query.push(" AND l.quarantined_at IS NULL");
-        }
-        if let Some(chunk) = query.build_query_as().fetch_optional(&self.pool).await? {
-            return Ok(PhysicalSource::Chunk(chunk));
-        }
-        let pack=sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=p.location_id) AS tier_material,p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=? AND c.state='ready' AND p.state='ready' AND (? OR p.quarantined_at IS NULL)").bind(id).bind(inspection).fetch_optional(&self.pool).await?.context(crate::model::Error::SourceUnavailable)?;
-        Ok(PhysicalSource::Pack(pack))
+        let mut connection = self.pool.begin().await?;
+        let selected = physical_source(&mut connection, id, inspection).await?;
+        connection.commit().await?;
+        Ok(selected)
     }
     async fn pack_chunks(&self, pack: Id) -> Result<Vec<Chunk>> {
         let mut query = chunk_query(true);
@@ -284,4 +277,24 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for Pack {
             row.try_get("tier_material"),
         )
     }
+}
+
+pub(in super::super) async fn physical_source(
+    db: &mut sqlx::MySqlConnection,
+    id: Id,
+    inspection: bool,
+) -> Result<PhysicalSource> {
+    let mut query = chunk_query(true);
+    query
+        .push(" WHERE c.id=")
+        .push_bind(id)
+        .push(" AND c.state='ready' AND l.encoding_id IS NOT NULL");
+    if !inspection {
+        query.push(" AND l.quarantined_at IS NULL");
+    }
+    if let Some(chunk) = query.build_query_as().fetch_optional(&mut *db).await? {
+        return Ok(PhysicalSource::Chunk(chunk));
+    }
+    let pack=sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=1 AND tl.physical_id=p.location_id) AS tier_material,p.* FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=? AND c.state='ready' AND p.state='ready' AND (? OR p.quarantined_at IS NULL)").bind(id).bind(inspection).fetch_optional(&mut *db).await?.context(crate::model::Error::SourceUnavailable)?;
+    Ok(PhysicalSource::Pack(pack))
 }

@@ -271,7 +271,9 @@ impl TaskControlStore for Backend {
         processed: i64,
         detail: Value,
     ) -> Result<()> {
-        sqlx::query("UPDATE tasks SET progress_cursor=?,processed=processed+?,detail=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND execution_token=? AND state='running'").bind(cursor).bind(processed).bind(detail).bind(task.id).bind(task.token).execute(&self.pool).await?;
+        super::work_sweep::task_progress(task, cursor, processed, detail)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
     async fn load(&self, id: Uuid) -> Result<Option<(bool, String, Value)>> {

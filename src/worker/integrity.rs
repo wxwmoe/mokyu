@@ -172,17 +172,21 @@ impl App {
         };
         if d.phase == "metadata" {
             let mode = d.mode;
-            if self.role == "control" {
+            let split = self.role == "control" || self.deployment_mode() == "single_control";
+            if split {
                 d.mode = Mode::Metadata;
             }
             self.inspect_mapping(&mut d, &mut cursor, &mut issues)
                 .await?;
             d.mode = mode;
-            if self.role == "control" && mode != Mode::Metadata && d.phase == "chunks" {
+            if split && mode != Mode::Metadata && d.phase == "chunks" {
                 d.phase = "raw".into();
                 cursor = Cursor::default();
                 cursor.after_extent = -1;
             }
+        } else if d.phase == "raw" && self.deployment_mode() == "single_control" {
+            self.inspect_raw_batch(&mut d, &mut cursor, &mut issues)
+                .await?;
         } else if d.phase == "chunks" {
             let count = profile
                 .as_ref()
@@ -301,6 +305,49 @@ impl App {
             .checkpoint(id, serde_json::to_string(&cursor)?, d, issues)
             .await?;
         Ok(true)
+    }
+
+    async fn inspect_raw_batch(
+        &self,
+        detail: &mut Detail,
+        cursor: &mut Cursor,
+        issues: &mut Vec<Finding>,
+    ) -> Result<()> {
+        let coord = self.coord.lock().await;
+        let Some((bucket, key, stream, offset, _)) =
+            self.integrity_store.next_raw(detail, cursor).await?
+        else {
+            detail.phase = "chunks".into();
+            *cursor = Cursor::default();
+            return Ok(());
+        };
+        let selected = Cursor {
+            stream: Some(stream),
+            ..Cursor::default()
+        };
+        let row = self.integrity_store.mapping(detail, &selected).await?;
+        cursor.bucket = Some(bucket);
+        cursor.key = Some(key.clone());
+        cursor.after_extent = offset - 1;
+        cursor.position = offset;
+        let Some((object, _, _)) = row else {
+            cursor.after_extent = offset;
+            detail.skipped += 1;
+            return Ok(());
+        };
+        let pin = self.pin(stream);
+        drop(coord);
+        let mut found = Vec::new();
+        self.inspect_raw_mapping(&object, detail, cursor, &mut found)
+            .await?;
+        let _coord = self.coord.lock().await;
+        if self.integrity_store.current(bucket, &key, stream).await? {
+            issues.extend(found)
+        } else {
+            detail.skipped += 1;
+        }
+        drop(pin);
+        Ok(())
     }
 
     async fn inspect_mapping(

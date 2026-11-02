@@ -1,6 +1,14 @@
-use super::*;
+use super::queries::{
+    self,
+    pack_work::{Connection, Tx},
+    work_sweep as q,
+};
 use crate::model::node_work::ListedObject;
+use crate::model::{Error, node_work as work, task::Execution};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use uuid::Uuid;
 
 #[derive(Deserialize, Serialize)]
 struct Page {
@@ -10,14 +18,14 @@ struct Page {
 }
 
 async fn progress(
-    db: &mut PgConnection,
+    db: &mut Connection,
     task: Execution,
     cursor: &str,
     count: usize,
     detail: &Value,
 ) -> Result<()> {
     ensure!(
-        queries::task_progress(task, cursor, count as i64, detail.clone())
+        q::task_progress(task, cursor, count as i64, detail.clone())
             .execute(db)
             .await?
             .rows_affected()
@@ -69,18 +77,18 @@ fn account(detail: &mut Value, row: &ListedObject) -> Result<()> {
 }
 
 async fn retained(
-    db: &mut PgConnection,
+    db: &mut Connection,
     row: &ListedObject,
     before: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
     let Some(id) = crate::storage::Storage::parse_physical_path(&row.path) else {
         return Ok(true);
     };
-    Ok(row.modified > before || queries::physical_indexed(id).fetch_one(db).await?)
+    Ok(row.modified > before || q::physical_indexed(id).fetch_one(db).await?)
 }
 
 pub(super) async fn prepare(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut Tx<'_>,
     task: Execution,
     mut detail: Value,
     profile: &crate::storage::profile::StorageProfile,
@@ -102,7 +110,7 @@ pub(super) async fn prepare(
         None
     };
     if let Some(error) = error {
-        q::finish(task.id, task.token, 0, true, Some(error))
+        queries::work_audit::finish(task, Some(error))
             .execute(&mut **tx)
             .await?;
         return Ok(None);
@@ -110,14 +118,11 @@ pub(super) async fn prepare(
     if destructive && !q::sweep_drained(task.id).fetch_one(&mut **tx).await? {
         return Ok(None);
     }
-    let mut cursor: Option<String> = sqlx::query_scalar("SELECT cursor FROM tasks WHERE id=$1")
-        .bind(task.id)
-        .fetch_one(&mut **tx)
-        .await?;
+    let mut cursor: Option<String> = queries::pack_work::cursor(&mut **tx, task.id).await?;
     let before = cutoff(
         &detail,
         profile,
-        queries::node_clock().fetch_one(&mut **tx).await?,
+        queries::pack_work::clock(&mut **tx).await?,
     )?;
     let limit = maximum.min(work::SCAN_ITEMS);
     if let Some(value) = detail.get("sweep_page") {
@@ -162,7 +167,7 @@ pub(super) async fn prepare(
 }
 
 pub(super) async fn listed(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut Tx<'_>,
     task: Execution,
     mut detail: Value,
     after: Option<String>,
@@ -219,7 +224,7 @@ pub(super) async fn listed(
     let before = cutoff(
         &detail,
         &profile,
-        queries::node_clock().fetch_one(&mut **tx).await?,
+        queries::pack_work::clock(&mut **tx).await?,
     )?;
     let mut candidates = vec![];
     for row in items {
@@ -256,7 +261,7 @@ pub(super) async fn listed(
 }
 
 pub(super) async fn deleted(
-    tx: &mut Transaction<'_, Postgres>,
+    tx: &mut Tx<'_>,
     task: Execution,
     mut detail: Value,
     before: chrono::DateTime<chrono::Utc>,
@@ -304,10 +309,7 @@ pub(super) async fn deleted(
         progress(tx, task, &page.cursor, page.scanned, &detail).await?;
     } else {
         detail["sweep_page"] = serde_json::to_value(&page)?;
-        let cursor: Option<String> = sqlx::query_scalar("SELECT cursor FROM tasks WHERE id=$1")
-            .bind(task.id)
-            .fetch_one(&mut **tx)
-            .await?;
+        let cursor: Option<String> = queries::pack_work::cursor(&mut **tx, task.id).await?;
         progress(tx, task, cursor.as_deref().unwrap_or(""), 0, &detail).await?;
     }
     Ok(failed.then_some("backend_io_failed"))

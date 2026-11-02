@@ -171,4 +171,6 @@ pub(super) mod tier;
 pub(super) mod tier_reads;
 pub(super) mod transfer;
 
+pub(super) mod work_audit;
 pub(super) mod work_sources;
+pub(super) mod work_sweep;

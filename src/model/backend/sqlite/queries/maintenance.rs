@@ -613,7 +613,7 @@ impl MaintenanceStore for Backend {
 
 pub(in super::super) fn destructive_sweep() -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='sweep' AND json_extract(detail,'$.dry_run')=FALSE AND state IN ('queued','running'))",
+        "SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='sweep' AND json_extract(detail,'$.dry_run')=FALSE AND state IN ('queued','running')) OR EXISTS(SELECT 1 FROM node_work WHERE result_hash IS NULL AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER) AND json_extract(plan,'$.action')='sweep_delete')",
     )
 }
 

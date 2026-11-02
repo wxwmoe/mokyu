@@ -135,7 +135,9 @@ async fn reserve_io(
         let direction = match plan {
             _ if task_type == "storage_migration" => ("migration", p.migration_concurrency),
             work::Plan::UploadRaw { .. } => ("upload", p.upload_concurrency),
-            work::Plan::Inspect { .. } => ("integrity", Some(p.integrity_concurrency)),
+            work::Plan::Inspect { .. } | work::Plan::Audit { .. } => {
+                ("integrity", Some(p.integrity_concurrency))
+            }
             _ => ("maintenance", p.maintenance_concurrency),
         };
         profile_permits(tx, token, &p, direction).await?;
@@ -267,6 +269,70 @@ async fn finish(
             super::work_migration::finish(tx, task, outcome).await?;
             return settle(tx, node, task, result.operation, &hash).await;
         }
+        (Some(work::Plan::Audit { cursor, items, .. }), outcomes) => {
+            let record = queries::task_record(task.id).fetch_one(&mut **tx).await?;
+            ensure!(
+                record.execution_token == Some(task.token) && record.state == "running",
+                Error::NodeExpired
+            );
+            issue =
+                super::work_audit::finish(tx, task, record.detail, cursor, items, outcomes).await?;
+            if issue.is_some() { "failed" } else { "queued" }
+        }
+        (
+            Some(work::Plan::SweepScan {
+                after,
+                limit,
+                bytes,
+                ..
+            }),
+            outcomes,
+        ) => {
+            let record = queries::task_record(task.id).fetch_one(&mut **tx).await?;
+            ensure!(
+                record.execution_token == Some(task.token),
+                Error::NodeExpired
+            );
+            let maintenance = !q::writable().fetch_one(&mut **tx).await?;
+            let (done, error) = super::work_sweep::listed(
+                tx,
+                task,
+                record.detail,
+                after,
+                limit,
+                bytes,
+                outcomes,
+                maintenance,
+            )
+            .await?;
+            issue = error;
+            if issue.is_some() {
+                "failed"
+            } else if done {
+                "completed"
+            } else {
+                "queued"
+            }
+        }
+        (Some(work::Plan::SweepDelete { before, items, .. }), outcomes) => {
+            let record = queries::task_record(task.id).fetch_one(&mut **tx).await?;
+            ensure!(
+                record.execution_token == Some(task.token),
+                Error::NodeExpired
+            );
+            let maintenance = !q::writable().fetch_one(&mut **tx).await?;
+            issue = super::work_sweep::deleted(
+                tx,
+                task,
+                record.detail,
+                before,
+                items,
+                outcomes,
+                maintenance,
+            )
+            .await?;
+            if issue.is_some() { "failed" } else { "queued" }
+        }
         (Some(work::Plan::Pack { storage, batch, .. }), outcomes) => {
             let (state, error) =
                 super::work_media::finish(tx, task, storage, *batch, outcomes, key).await?;
@@ -395,6 +461,57 @@ impl NodeWork for Backend {
         tx.commit().await?;
         Ok(())
     }
+    async fn checkpoint_raw_pages(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: work::RawPages,
+    ) -> Result<()> {
+        let mut db = super::node_writes::start(self, node, key, input.run).await?;
+        let (plan, _) = checkpoint(&mut db, node, input.run, input.operation).await?;
+        let work::Plan::Audit {
+            mode: crate::worker::integrity::Mode::Full,
+            items,
+            ..
+        } = plan
+        else {
+            anyhow::bail!(Error::NodeOperationConflict)
+        };
+        let raw = items
+            .iter()
+            .filter(|item| item.raw_pages && item.previous.is_none())
+            .filter_map(|item| item.snapshot.as_deref())
+            .find_map(|snapshot| match &snapshot.physical {
+                crate::model::PhysicalSource::Raw(raw) if raw.location_id == input.source => {
+                    Some(raw)
+                }
+                _ => None,
+            })
+            .ok_or(Error::NodeOperationConflict)?;
+        let current = queries::raw_source(raw.id).fetch_one(&mut *db).await?;
+        ensure!(
+            current.size == raw.size
+                && current.digest == raw.digest
+                && current.quarantine_code.is_none()
+                && current.state == "ready",
+            Error::OperationAborted
+        );
+        if let Some(group) = input.group {
+            group.validate_size(raw.size)?;
+            super::raw_pages::put(&mut db, raw.id, &group).await?;
+        } else {
+            super::raw_pages::seal(
+                &mut db,
+                raw.id,
+                raw.size,
+                raw.digest.as_deref().ok_or(Error::SourceUnavailable)?,
+            )
+            .await?;
+        }
+        db.commit().await?;
+        Ok(())
+    }
+
     async fn read_migration(
         &self,
         node: &NodeState,
@@ -516,7 +633,73 @@ impl NodeWork for Backend {
                 Some("replication") if task_type == "storage_migration" => {
                     super::work_replication::offer(&mut tx, node, input.run, task, key).await?
                 }
+                _ if task_type == "sweep" => {
+                    let storage = serde_json::from_value(detail["storage_id"].clone())?;
+                    let profile = material(&mut tx, storage, key).await?;
+                    let prefix = profile.connection.prefix.clone();
+                    let maintenance = !q::writable().fetch_one(&mut *tx).await?;
+                    if let Some(plan) = super::work_sweep::prepare(
+                        &mut tx,
+                        task,
+                        detail,
+                        &profile.profile,
+                        &prefix,
+                        input.max_items,
+                        maintenance,
+                    )
+                    .await?
+                    {
+                        Some((
+                            plan,
+                            serde_json::to_vec(&work::Materials {
+                                storage: profile,
+                                additional: vec![],
+                                keys: vec![],
+                            })?,
+                        ))
+                    } else {
+                        let record = queries::task_record(task.id).fetch_one(&mut *tx).await?;
+                        if record.state == "running" {
+                            queries::finish_task(task, "queued", None)
+                                .execute(&mut *tx)
+                                .await?;
+                        }
+                        None
+                    }
+                }
                 Some("tiering") => tier_plan(&mut tx, task, &detail, key).await?,
+                _ if task_type == "integrity" && detail.get("source_operation").is_none() => {
+                    let id = serde_json::from_value(detail["storage_id"].clone())?;
+                    let storage = material(&mut tx, id, key).await?;
+                    if let Some((plan, keys)) = super::work_audit::prepare(
+                        self,
+                        &mut tx,
+                        task,
+                        &detail,
+                        &storage.profile,
+                        input.max_items,
+                        key,
+                    )
+                    .await?
+                    {
+                        Some((
+                            plan,
+                            serde_json::to_vec(&work::Materials {
+                                storage,
+                                additional: vec![],
+                                keys,
+                            })?,
+                        ))
+                    } else {
+                        let record = queries::task_record(task.id).fetch_one(&mut *tx).await?;
+                        if record.state == "running" {
+                            queries::finish_task(task, "queued", None)
+                                .execute(&mut *tx)
+                                .await?;
+                        }
+                        None
+                    }
+                }
                 _ if detail.get("source_operation").is_some() => {
                     let store = serde_json::from_value(detail["storage_id"].clone())?;
                     let storage = material(&mut tx, store, key).await?;

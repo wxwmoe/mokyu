@@ -5,9 +5,9 @@ use queries::work as q;
 
 use super::super::work_sources as sources;
 
-mod audit;
+use super::super::work_audit as audit;
 
-mod sweep;
+use super::super::work_sweep as sweep;
 
 mod rewrite;
 
@@ -1431,6 +1431,7 @@ pub(crate) async fn exchange(
                     .await?
                 } else if policy == "integrity" && detail.get("source_operation").is_none() {
                     audit::prepare(
+                        backend,
                         &mut tx,
                         Execution { id: task, token },
                         &detail,
@@ -1648,12 +1649,13 @@ async fn checkpoint_owner(
 }
 
 pub(crate) async fn checkpoint_raw_pages(
-    pool: &PgPool,
+    backend: &Backend,
     node: &NodeState,
     key: &Key,
     input: work::RawPages,
 ) -> Result<()> {
-    let mut db = pool.begin().await?;
+    let mut db = backend.pool.begin().await?;
+    backend.fence_control(&mut db).await?;
     let (plan, _) = checkpoint_owner(&mut db, node, key, input.run, input.operation).await?;
     let work::Plan::Audit {
         mode: crate::worker::integrity::Mode::Full,
