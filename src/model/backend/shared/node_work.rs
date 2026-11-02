@@ -233,6 +233,9 @@ impl NodeWork for Backend {
         let mut tx = registry::begin(self).await?;
         let count = q::requeue().execute(&mut *tx).await?.rows_affected();
         q::prune().execute(&mut *tx).await?;
+        super::queries::node_receipts::prune()
+            .execute(&mut *tx)
+            .await?;
         super::queries::read_grants::expire(&mut tx).await?;
         tx.commit().await?;
         Ok(count)

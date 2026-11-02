@@ -321,7 +321,7 @@ impl NodeObjects for Service {
     ) -> Result<Response<wire::ChangeObjectsReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::object::change(request.into_inner())?;
-        let outcome = bounded(self.app.cluster().map_err(failure)?.change_objects(
+        let outcome = bounded(self.app.node_requests.change_objects(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1272,7 +1272,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::MultipartReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::multipart::create(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.multipart_operation(
+        let reply = bounded(self.app.node_requests.multipart_operation(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -1290,7 +1290,7 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::MultipartReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::multipart::abort(request.into_inner())?;
-        let reply = bounded(self.app.cluster().map_err(failure)?.multipart_operation(
+        let reply = bounded(self.app.node_requests.multipart_operation(
             &node,
             &self.app.secrets.credential_key,
             input,

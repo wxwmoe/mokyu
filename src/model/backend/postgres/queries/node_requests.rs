@@ -35,3 +35,26 @@ pub(in super::super) async fn admit(
     );
     Ok(())
 }
+
+pub(in super::super) async fn change_objects(
+    b: &Backend,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_object::Request,
+) -> Result<crate::model::node_object::Outcome> {
+    transactions::change_node_objects(b, node, key, input)
+        .await
+        .map_err(super::super::normalize_error)
+}
+
+pub(in super::super) async fn multipart_operation(
+    b: &Backend,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_multipart::Request,
+    max_active: Option<i64>,
+) -> Result<crate::model::node_multipart::Outcome> {
+    transactions::node_multipart_operation(b, node, key, input, max_active)
+        .await
+        .map_err(super::super::normalize_error)
+}

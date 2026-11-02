@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::cluster::NodeRequests;
 use crate::model::{
     node_chunk as chunk, node_complete as complete, node_read as read, node_tail as tail,
     node_write as write,

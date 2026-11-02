@@ -5,21 +5,29 @@ pub(in super::super) async fn create_multipart(
     input: MultipartCreate<'_>,
 ) -> Result<(uuid::Uuid, bool)> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let result = create_multipart_in(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(in super::super) async fn create_multipart_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: MultipartCreate<'_>,
+) -> Result<(uuid::Uuid, bool)> {
     let mut authority = input.authority.clone();
     authority.add(input.bucket, crate::authorization::Action::Write);
     if input.public {
         authority.add(input.bucket, crate::authorization::Action::Acl);
     }
-    lock_permit(&mut tx, &authority).await?;
-    super::super::transactions::redundancy::writable(&mut tx, input.bucket, input.key, None)
-        .await?;
+    lock_permit(tx, &authority).await?;
+    super::super::transactions::redundancy::writable(tx, input.bucket, input.key, None).await?;
     let (state, paused) = queries::lock_bucket_uploads(input.bucket)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
     let expected = if let Some(web) = &input.web {
         if let Some((id, hash)) = queries::web_upload_identity(web.user, web.client_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
         {
             ensure!(
@@ -29,7 +37,7 @@ pub(in super::super) async fn create_multipart(
             return Ok((id, true));
         }
         let expected = queries::web_upload_expected(input.bucket, input.key)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .flatten();
         ensure!(
@@ -43,27 +51,27 @@ pub(in super::super) async fn create_multipart(
     ensure!(!paused, crate::model::Error::OperationAborted);
     if let Some(limit) = input.max_active {
         ensure!(
-            queries::active_upload_count().fetch_one(&mut *tx).await? < limit,
+            queries::active_upload_count().fetch_one(&mut **tx).await? < limit,
             s3s::s3_error!(SlowDown)
         );
     }
     let id = uuid::Uuid::new_v4();
     queries::insert_multipart(id, &input)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if let Some(web) = input.web {
         queries::insert_web_upload(id, &web, expected)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         checkpoint_event(
-            &mut tx,
+            tx,
             "upload.create",
             &id.to_string(),
             serde_json::json!({"bucket_id":input.bucket,"key":input.key,"size":web.size}),
         )
         .await?;
     }
-    tx.commit().await?;
+
     Ok((id, false))
 }
 
@@ -281,9 +289,20 @@ pub(in super::super) async fn abort_multipart(
     expired: bool,
 ) -> Result<bool> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_permit(&mut tx, authority).await?;
+    let result = abort_multipart_in(&mut tx, authority, upload, expired).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(in super::super) async fn abort_multipart_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    authority: &crate::authorization::Permit,
+    upload: Uuid,
+    expired: bool,
+) -> Result<bool> {
+    lock_permit(tx, authority).await?;
     let Some(parent) = queries::lock_upload(upload)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
     else {
         if expired {
@@ -299,7 +318,7 @@ pub(in super::super) async fn abort_multipart(
         s3s::s3_error!(NoSuchUpload)
     );
     if queries::abort_multipart(upload, expired)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .rows_affected()
         == 0
@@ -308,7 +327,7 @@ pub(in super::super) async fn abort_multipart(
             return Ok(false);
         }
         if queries::completion_state(upload)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .is_some_and(|(state, _, live)| state == "completing" && live)
         {
@@ -320,28 +339,28 @@ pub(in super::super) async fn abort_multipart(
         }
         return Err(s3s::s3_error!(NoSuchUpload).into());
     }
-    let mut accounts = lock_quota(&mut tx, parent.bucket_id).await?;
-    close_upload_quota(&mut tx, &mut accounts, upload).await?;
+    let mut accounts = lock_quota(tx, parent.bucket_id).await?;
+    close_upload_quota(tx, &mut accounts, upload).await?;
     for stream in queries::upload_part_streams(upload)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?
     {
-        forget_quota_write(&mut tx, &mut accounts, stream).await?;
-        queries::retire_stream(stream).execute(&mut *tx).await?;
+        forget_quota_write(tx, &mut accounts, stream).await?;
+        queries::retire_stream(stream).execute(&mut **tx).await?;
     }
     queries::delete_upload_parts(upload)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     if authority.principal.user_id().is_some() && crate::model::audit::active() {
         checkpoint_event(
-            &mut tx,
+            tx,
             "upload.abort",
             &upload.to_string(),
             serde_json::json!({"bucket_id":parent.bucket_id}),
         )
         .await?;
     }
-    tx.commit().await?;
+
     Ok(true)
 }
 

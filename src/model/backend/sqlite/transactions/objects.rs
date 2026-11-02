@@ -97,6 +97,15 @@ pub(in super::super) async fn change_object(
     input: ObjectChange,
 ) -> Result<bool> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let changed = change_object_in(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(changed)
+}
+
+pub(in super::super) async fn change_object_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    input: ObjectChange,
+) -> Result<bool> {
     let mut permit = Permit::for_action(
         input.principal,
         input.bucket,
@@ -109,11 +118,10 @@ pub(in super::super) async fn change_object(
     if matches!(input.if_match, Some(s3s::dto::ETagCondition::ETag(_))) {
         permit.add(input.bucket, Action::Read);
     }
-    lock_media_scope(&mut tx, &permit).await?;
-    super::super::transactions::redundancy::writable(&mut tx, input.bucket, &input.key, None)
-        .await?;
+    lock_media_scope(tx, &permit).await?;
+    super::super::transactions::redundancy::writable(tx, input.bucket, &input.key, None).await?;
     let old = queries::lock_object_version(input.bucket, &input.key)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .and_then(|r| r.0);
     ensure!(
@@ -122,7 +130,7 @@ pub(in super::super) async fn change_object(
     );
     if let Some(condition) = input.if_match.as_ref() {
         let etag = match old {
-            Some(id) => Some(queries::stream_size_etag(id).fetch_one(&mut *tx).await?.1),
+            Some(id) => Some(queries::stream_size_etag(id).fetch_one(&mut **tx).await?.1),
             None => None,
         };
         crate::model::check_write_conditions(etag.as_deref(), Some(condition), None)?;
@@ -130,21 +138,19 @@ pub(in super::super) async fn change_object(
     if let Some(public) = input.public {
         let id = old.ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
         queries::set_stream_public(id, public)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
         queries::set_catalog_public(input.bucket, &input.key, public)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        complete_media_operation(&mut tx, Some(id)).await?;
-        tx.commit().await?;
+        complete_media_operation(tx, Some(id)).await?;
         return Ok(false);
     }
-    remove_object_reference(&mut tx, input.bucket, &input.key, old).await?;
+    remove_object_reference(tx, input.bucket, &input.key, old).await?;
     if let Some(id) = old {
-        queries::retire_stream(id).execute(&mut *tx).await?;
+        queries::retire_stream(id).execute(&mut **tx).await?;
     }
-    complete_media_operation(&mut tx, None).await?;
-    tx.commit().await?;
+    complete_media_operation(tx, None).await?;
     Ok(true)
 }
 

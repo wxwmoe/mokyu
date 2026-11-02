@@ -283,26 +283,7 @@ impl ClusterStore for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn multipart_operation(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_multipart::Request,
-        max_active: Option<i64>,
-    ) -> Result<crate::model::node_multipart::Outcome> {
-        transactions::node_multipart_operation(&self.pool, node, key, input, max_active).await
-    }
 
-    async fn change_objects(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_object::Request,
-    ) -> Result<crate::model::node_object::Outcome> {
-        transactions::change_node_objects(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
     async fn prepare_raw(
         &self,
         node: &crate::cluster::NodeState,

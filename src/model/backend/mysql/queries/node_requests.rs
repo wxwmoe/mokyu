@@ -103,3 +103,5 @@ pub(in super::super) fn upload_parts_page(
 ) -> Rows<'static, UploadPart> {
     sqlx::query_as("SELECT p.part_number,s.size,s.etag,s.touched_at AS touched_at,s.checksums FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=? AND p.part_number>? ORDER BY p.part_number LIMIT ?").bind(id).bind(after).bind(limit)
 }
+
+pub(in super::super) use super::super::node_mutations::{change_objects, multipart_operation};

@@ -286,7 +286,7 @@ pub(super) async fn prepare_node_completion(
 }
 
 pub(in super::super) async fn node_multipart_operation(
-    pool: &PgPool,
+    b: &Backend,
     node: &NodeState,
     key: &Key,
     input: crate::model::node_multipart::Request,
@@ -294,7 +294,8 @@ pub(in super::super) async fn node_multipart_operation(
 ) -> Result<crate::model::node_multipart::Outcome> {
     use crate::model::node_multipart::{Operation, Outcome};
     let hash = input.validate()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = b.pool.begin().await?;
+    b.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
     ensure!(
         matches!(node.role.as_str(), "data" | "node"),

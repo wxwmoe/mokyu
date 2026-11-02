@@ -105,6 +105,19 @@ pub(crate) trait NodeNotices: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeRequests: Send + Sync {
+    async fn multipart_operation(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_multipart::Request,
+        max_active: Option<i64>,
+    ) -> Result<super::node_multipart::Outcome>;
+    async fn change_objects(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_object::Request,
+    ) -> Result<super::node_object::Outcome>;
     async fn prepare_request(
         &self,
         node: &NodeState,
@@ -276,19 +289,6 @@ pub(crate) trait ClusterStore:
         key: &Key,
         input: super::node_write::Lookup,
     ) -> Result<super::node_tail::Prepared>;
-    async fn multipart_operation(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_multipart::Request,
-        max_active: Option<i64>,
-    ) -> Result<super::node_multipart::Outcome>;
-    async fn change_objects(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_object::Request,
-    ) -> Result<super::node_object::Outcome>;
     async fn prepare_raw(
         &self,
         node: &NodeState,

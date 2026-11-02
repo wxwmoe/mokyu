@@ -77,6 +77,23 @@ pub(super) async fn materials(
 
 #[async_trait::async_trait]
 impl NodeRequests for Backend {
+    async fn multipart_operation(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: crate::model::node_multipart::Request,
+        max_active: Option<i64>,
+    ) -> Result<crate::model::node_multipart::Outcome> {
+        q::multipart_operation(self, node, key, input, max_active).await
+    }
+    async fn change_objects(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: crate::model::node_object::Request,
+    ) -> Result<crate::model::node_object::Outcome> {
+        q::change_objects(self, node, key, input).await
+    }
     async fn prepare_request(
         &self,
         node: &NodeState,

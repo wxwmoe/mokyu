@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102203720.
+-- Generated from the complete mysql migration chain through 20261102213026.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -584,6 +584,19 @@ CREATE TABLE `node_reads` (
   CONSTRAINT `node_reads_ibfk_2` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`),
   CONSTRAINT `node_reads_generation` CHECK (((`credential_generation` > 0) and (`payload_revision` > 0))),
   CONSTRAINT `node_reads_offsets` CHECK (((`offset_bytes` >= 0) and (`end_bytes` >= `offset_bytes`)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_receipts` (
+  `node_id` binary(16) NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  `action` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `credential_generation` bigint NOT NULL,
+  `request_hash` binary(32) NOT NULL,
+  `result` json NOT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`node_id`,`operation_id`),
+  KEY `node_receipts_expiry` (`created_at`),
+  CONSTRAINT `node_receipts_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `node_work` (

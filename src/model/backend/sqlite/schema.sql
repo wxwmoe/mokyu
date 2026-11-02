@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102203720.
+-- Generated from the complete sqlite migration chain through 20261102213026.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -437,6 +437,18 @@ CREATE TABLE node_reads (
     FOREIGN KEY (stream_id) REFERENCES streams(id),
     CONSTRAINT node_reads_offsets CHECK (offset_bytes>=0 AND end_bytes>=offset_bytes),
     CONSTRAINT node_reads_generation CHECK (credential_generation>0 AND payload_revision>0)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE node_receipts (
+    node_id BLOB NOT NULL,
+    operation_id BLOB NOT NULL,
+    action TEXT NOT NULL,
+    credential_generation INTEGER NOT NULL,
+    request_hash BLOB NOT NULL,
+    result TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    PRIMARY KEY (node_id,operation_id),
+    FOREIGN KEY (node_id) REFERENCES nodes(id)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE node_work (
@@ -1538,6 +1550,8 @@ CREATE INDEX node_read_permits_read ON node_read_permits(read_id);
 CREATE INDEX node_reads_expiry ON node_reads(expires_at);
 
 CREATE INDEX node_reads_stream ON node_reads(stream_id,expires_at);
+
+CREATE INDEX node_receipts_expiry ON node_receipts(created_at);
 
 CREATE INDEX node_work_expiry ON node_work(expires_at);
 

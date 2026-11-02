@@ -434,14 +434,15 @@ async fn change_object_in(
 }
 
 pub(in super::super) async fn change_node_objects(
-    pool: &PgPool,
+    b: &Backend,
     node: &NodeState,
     key: &Key,
     input: crate::model::node_object::Request,
 ) -> Result<crate::model::node_object::Outcome> {
     use crate::model::node_object::Outcome;
     let hash = input.validate()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = b.pool.begin().await?;
+    b.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, node, key, false).await?;
     ensure!(
         matches!(node.role.as_str(), "data" | "node"),
