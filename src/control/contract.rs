@@ -304,7 +304,13 @@ pub(crate) async fn errors(
             detail: response
                 .extensions()
                 .get::<crate::model::image_styles::InvalidImageInput>()
-                .map(|e| e.0.clone()),
+                .map(|e| e.0.clone())
+                .or_else(|| {
+                    response
+                        .extensions()
+                        .get::<crate::model::runtime::ModeConflict>()
+                        .map(|e| e.0.to_owned())
+                }),
         }),
     )
         .into_response();

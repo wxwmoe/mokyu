@@ -1,15 +1,13 @@
 use super::*;
 
 pub(in super::super) async fn set_deployment_mode(
-    pool: &PgPool,
+    owner: &mut PgConnection,
     principal: &Principal,
     mode: &str,
 ) -> Result<()> {
-    ensure!(
-        matches!(mode, "single" | "cluster"),
-        "mode must be single or cluster"
-    );
-    let mut tx = pool.begin().await?;
+    use crate::model::runtime::ModeConflict;
+    use sqlx::Connection as _;
+    let mut tx = owner.begin().await?;
     let current: String = queries::deployment_mode_lock().fetch_one(&mut *tx).await?;
     if current == mode {
         tx.rollback().await?;
@@ -17,29 +15,16 @@ pub(in super::super) async fn set_deployment_mode(
     }
     let (maintenance, tasks, uploads, sources) =
         queries::mode_transition_state().fetch_one(&mut *tx).await?;
-    ensure!(
-        maintenance,
-        "enable maintenance before changing deployment mode"
-    );
-    ensure!(
-        !tasks,
-        "finish queued, running and paused tasks before changing deployment mode"
-    );
-    ensure!(
-        !uploads,
-        "finish or abort uploads and wait for reads to drain before changing deployment mode"
-    );
-    ensure!(
-        !sources,
-        "flush pending uploads and referenced fragments before changing deployment mode"
-    );
-    if mode == "cluster" {
+    crate::model::runtime::check_drain(maintenance, tasks, uploads, sources)?;
+    if mode != "single" {
         let local: bool = queries::cluster_local_storages()
             .fetch_one(&mut *tx)
             .await?;
         ensure!(
             !local,
-            "local storages exist; migrate them to S3 and update their storage before enabling cluster mode"
+            ModeConflict(
+                "local storages exist; migrate or remove every local storage before changing deployment mode"
+            )
         );
         let staging: Option<uuid::Uuid> = queries::cluster_staging_id().fetch_one(&mut *tx).await?;
         let valid_staging: bool = queries::cluster_staging_valid(staging)
@@ -47,35 +32,48 @@ pub(in super::super) async fn set_deployment_mode(
             .await?;
         ensure!(
             valid_staging,
-            "cluster mode requires an enabled S3 uploads.staging_storage_id"
+            ModeConflict("cluster mode requires an enabled S3 uploads.staging_storage_id")
         );
-    } else {
+    }
+    if mode == "single" || current == "cluster" && mode == "single_control" {
         let local_node = match principal {
             Principal::Node { id, role } if role == "control" => Some(*id),
             _ => None,
         };
-        let other_nodes: bool = queries::cluster_other_nodes(local_node)
+        let other_nodes: bool = queries::cluster_other_nodes(local_node, mode == "single_control")
             .fetch_one(&mut *tx)
             .await?;
         ensure!(
             !other_nodes,
-            "disable all registered cluster nodes before returning to single mode"
+            ModeConflict(if mode == "single" {
+                "disable all registered cluster nodes before returning to single mode"
+            } else {
+                "release all other enabled control nodes before switching to single control"
+            })
         );
     }
     if mode == "single"
         && let Principal::Node { id, role } = principal
         && role == "control"
     {
-        queries::release_node_id(id).execute(&mut *tx).await?;
+        queries::park_control(*id).execute(&mut *tx).await?;
         queries::release_node_tasks(id).execute(&mut *tx).await?;
         queries::release_node_permits(id).execute(&mut *tx).await?;
+    }
+    if current == "single" {
+        queries::restore_parked_control().execute(&mut *tx).await?;
     }
     queries::preserve_failed_task_mode(&current)
         .execute(&mut *tx)
         .await?;
-    queries::update_deployment_mode(&mode)
+    queries::invalidate_mode_sessions()
         .execute(&mut *tx)
         .await?;
+    queries::update_deployment_mode(mode)
+        .execute(&mut *tx)
+        .await?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("mode-before-commit").await;
     tx.commit().await?;
     Ok(())
 }

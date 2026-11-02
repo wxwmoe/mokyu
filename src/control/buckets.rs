@@ -279,7 +279,7 @@ pub(super) async fn options(
     Ok(Json(BucketCreationOptions {
         projects,
         storages,
-        shared_storage_only: app.role != "single",
+        shared_storage_only: app.shared_storage_only(),
     }))
 }
 #[utoipa::path(get,operation_id="bucket_settings",path="/api/v1/buckets/{bucket}/settings",params(("bucket"=Uuid,Path)),responses((status=200,body=BucketSettings)))]

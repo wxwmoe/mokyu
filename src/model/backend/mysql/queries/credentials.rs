@@ -417,8 +417,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for crate::model::credential::
     }
 }
 
-pub(in super::super) fn storage_mode_lock() -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT deployment_id FROM mokyu_meta WHERE id=1 FOR UPDATE")
+pub(in super::super) fn storage_mode_lock() -> Rows<'static, (Uuid, String)> {
+    sqlx::query_as("SELECT deployment_id,deployment_mode FROM mokyu_meta WHERE id=1 FOR UPDATE")
 }
 
 pub(in super::super) fn valid_storage_key(id: Uuid) -> Scalar<'static, Uuid> {

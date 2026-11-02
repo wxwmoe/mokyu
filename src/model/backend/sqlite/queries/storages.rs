@@ -1,7 +1,7 @@
 use super::*;
 
-pub(in super::super) fn storage_deployment() -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT deployment_id FROM mokyu_meta WHERE id=1")
+pub(in super::super) fn storage_deployment() -> Rows<'static, (Uuid, String)> {
+    sqlx::query_as("SELECT deployment_id,deployment_mode FROM mokyu_meta WHERE id=1")
 }
 
 pub(in super::super) fn valid_storage_key(id: Uuid) -> Scalar<'static, Uuid> {

@@ -287,7 +287,7 @@ pub(crate) async fn profile(
 
 fn validate_profile_mode(app: &App, profile: &StorageProfile) -> anyhow::Result<()> {
     anyhow::ensure!(
-        app.role == "single" || profile.write_durability.is_none(),
+        !app.shared_storage_only() || profile.write_durability.is_none(),
         s3s::s3_error!(
             InvalidArgument,
             "write_durability is only available in single mode"
@@ -362,7 +362,7 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
     validate_concurrency(input.control_concurrency, "control")?;
     anyhow::ensure!(input.initialize, "store initialization must be explicit");
     anyhow::ensure!(
-        !(mode == "cluster" && input.storage_type == "local"),
+        !(mode != "single" && input.storage_type == "local"),
         "local storages are unavailable in cluster mode"
     );
     let id = Uuid::new_v4();
@@ -459,7 +459,10 @@ pub(crate) async fn update_record(
     let mut _local = None;
     if changing_type {
         use std::sync::atomic::Ordering;
-        anyhow::ensure!(app.role == "single", crate::model::Error::StorageNotDrained);
+        anyhow::ensure!(
+            !app.shared_storage_only(),
+            crate::model::Error::StorageNotDrained
+        );
         app.ensure_mode()?;
         anyhow::ensure!(
             app.maintenance.load(Ordering::Acquire),
@@ -505,7 +508,7 @@ pub(crate) async fn update_record(
         "storage changed while preparing the update; retry"
     );
     anyhow::ensure!(
-        !(mode == "cluster" && storage_type == "local"),
+        !(mode != "single" && storage_type == "local"),
         "local storages are unavailable in cluster mode"
     );
     let prefix = normalize_prefix(input.prefix.clone().unwrap_or_else(|| row.prefix.clone()))?;

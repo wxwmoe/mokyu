@@ -532,51 +532,101 @@ impl App {
             s3_error!(NotImplemented, "cluster operations require PostgreSQL").into()
         })
     }
+    pub(crate) fn deployment_mode(&self) -> &str {
+        &self.started_mode
+    }
+
+    pub(crate) fn shared_storage_only(&self) -> bool {
+        self.started_mode != "single"
+    }
+
     pub(crate) async fn change_mode(&self, principal: &Principal, mode: &str) -> Result<()> {
+        use crate::model::runtime::ModeConflict;
         use std::sync::atomic::Ordering;
+        let local = matches!(principal, Principal::Local) && self.role == "single"
+            || matches!(principal, Principal::Node { id, role } if role == "control" && self.node.get().is_some_and(|local| local.node_id == *id));
+        let recovery = matches!(principal, Principal::Bootstrap);
         ensure!(
-            matches!(mode, "single" | "cluster"),
-            "mode must be single or cluster"
+            local || recovery,
+            s3_error!(
+                AccessDenied,
+                "mode changes require a local control identity"
+            )
+        );
+        ensure!(
+            matches!(mode, "single" | "single_control" | "cluster"),
+            s3_error!(InvalidArgument, "unknown deployment mode")
+        );
+        ensure!(
+            mode != "cluster" || self.config.database.backend.supports_cluster(),
+            ModeConflict("cluster mode requires PostgreSQL")
+        );
+        #[cfg(not(any(test, feature = "fault-injection")))]
+        ensure!(
+            mode != "single_control",
+            ModeConflict("single control is not available in this build")
         );
         let _coord = self.coord.lock().await;
-        let cluster = self.cluster()?;
-        let current = cluster.mode().await?;
+        let current = self.runtime.state().await?.mode;
         if current == mode {
             return Ok(());
         }
+        ensure!(local, s3_error!(AccessDenied));
         ensure!(
             !self.restart_required.load(Ordering::Acquire),
-            "restart before changing deployment mode again"
+            ModeConflict("restart before changing deployment mode again")
         );
         ensure!(
             self.maintenance.load(Ordering::Acquire),
-            "enable maintenance before changing deployment mode"
+            ModeConflict("enable maintenance before changing deployment mode")
         );
         ensure!(
             self.active_operations() == 0,
-            "wait for active reads and writes to drain"
+            ModeConflict("wait for active reads and writes to drain")
         );
         ensure!(
             !self.gc_running.load(Ordering::Acquire),
-            "wait for the current GC batch"
+            ModeConflict("wait for the current GC batch")
         );
         let _cleanup = self
             .cleanup_state
             .running
             .try_lock()
-            .context("wait for history cleanup")?;
+            .map_err(|_| ModeConflict("wait for history cleanup"))?;
         let _local = self
             .local_cleanup
             .try_lock()
-            .context("wait for local cleanup")?;
+            .map_err(|_| ModeConflict("wait for local cleanup"))?;
+        let control;
+        let principal = if current == "single_control"
+            && matches!(principal, Principal::Local)
+            && let Some(cluster) = self.cluster.as_ref()
+            && let Some(state) = crate::cluster::identity::read_state(
+                &self.config.instance.data_path.join("node.json"),
+            )
+            .await?
+        {
+            cluster
+                .heartbeat(&state, "control", &self.secrets.credential_key)
+                .await?;
+            control = Principal::Node {
+                id: state.node_id,
+                role: "control".into(),
+            };
+            &control
+        } else {
+            principal
+        };
         // Cancellation or an uncertain commit must leave this process restricted.
         self.restart_required.store(true, Ordering::Release);
-        let result = cluster.set_mode(principal, mode).await;
+        let result = self.runtime.set_mode(principal, mode).await;
         #[cfg(feature = "fault-injection")]
         if result.is_ok() {
             crate::faults::point("mode-committed").await;
         }
-        if result.is_err() && matches!(cluster.mode().await, Ok(observed) if observed == current) {
+        if result.is_err()
+            && matches!(self.runtime.state().await, Ok(observed) if observed.mode == current)
+        {
             self.restart_required.store(false, Ordering::Release);
         }
         result

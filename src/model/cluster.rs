@@ -448,7 +448,6 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         report: &super::node::NodeReport,
     ) -> Result<bool>;
-    async fn set_mode(&self, principal: &Principal, mode: &str) -> Result<()>;
     async fn release(&self, name: &str) -> Result<()>;
     async fn recover(&self, name: &str, role: &str) -> Result<()>;
     async fn credential(&self, id: Uuid) -> Result<Option<(String, Vec<u8>)>>;

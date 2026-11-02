@@ -254,12 +254,6 @@ impl Config {
             }
         }
         ensure!(
-            c.database.backend.supports_cluster()
-                || (c.uploads.staging_storage_id.is_none()
-                    && c.uploads.staging_bytes_limit.is_none()),
-            "shared staging requires PostgreSQL"
-        );
-        ensure!(
             c.instance.control_url.is_none(),
             "control_url is only valid for data, worker or node configuration"
         );

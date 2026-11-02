@@ -58,3 +58,43 @@ pub(in super::super) async fn update_web_settings(
     tx.commit().await?;
     Ok((control, next_revision))
 }
+
+pub(in super::super) async fn change_mode(
+    tx: &mut Transaction<'_, Sqlite>,
+    mode: &str,
+) -> Result<()> {
+    use crate::model::runtime::ModeConflict;
+    ensure!(
+        matches!(mode, "single" | "single_control"),
+        ModeConflict("cluster mode requires PostgreSQL")
+    );
+    let (_, current) = queries::storage_deployment().fetch_one(&mut **tx).await?;
+    if current == mode {
+        return Ok(());
+    }
+    let (maintenance, tasks, uploads, sources) =
+        queries::mode_blockers().fetch_one(&mut **tx).await?;
+    crate::model::runtime::check_drain(maintenance, tasks, uploads, sources)?;
+    if mode == "single_control" {
+        ensure!(
+            !queries::local_storages().fetch_one(&mut **tx).await?,
+            ModeConflict(
+                "local storages exist; migrate or remove every local storage before changing deployment mode"
+            )
+        );
+        ensure!(
+            queries::active_staging()
+                .fetch_optional(&mut **tx)
+                .await?
+                .is_some(),
+            ModeConflict("cluster mode requires an enabled S3 uploads.staging_storage_id")
+        );
+    }
+    queries::preserve_task_mode(&current)
+        .execute(&mut **tx)
+        .await?;
+    queries::set_deployment_mode(mode)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}

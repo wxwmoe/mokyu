@@ -113,15 +113,6 @@ pub fn runtime_defaults(configured: &Config) -> Vec<(&'static str, Value)> {
         io["sqlite_synchronous"] = json!(configured.io.sqlite_synchronous);
     }
     values.push(("io", io));
-    if !configured.database.backend.supports_cluster() {
-        let uploads = values
-            .iter_mut()
-            .find(|(section, _)| *section == "uploads")
-            .unwrap();
-        let uploads = uploads.1.as_object_mut().unwrap();
-        uploads.remove("staging_storage_id");
-        uploads.remove("staging_bytes_limit");
-    }
     values
 }
 
@@ -139,12 +130,6 @@ pub(crate) fn apply_runtime_section(
             "SQLite synchronization settings require SQLite"
         )
     );
-    if section == "uploads"
-        && !config.database.backend.supports_cluster()
-        && (value.get("staging_storage_id").is_some() || value.get("staging_bytes_limit").is_some())
-    {
-        return Err(s3s::s3_error!(InvalidArgument, "shared staging requires PostgreSQL").into());
-    }
     config.runtime.apply_section(section, value)
 }
 

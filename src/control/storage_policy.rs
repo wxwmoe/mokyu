@@ -114,7 +114,7 @@ fn selected(presets: &[IoPreset], profile: &Value) -> Option<String> {
 
 fn constraints(app: &App) -> IoConstraints {
     let info = app.runtime.database_info();
-    let single = app.role == "single";
+    let single = !app.shared_storage_only();
     IoConstraints {
         single,
         database: info.map(|info| info.program.to_owned()),
@@ -132,10 +132,10 @@ fn catalog(app: &App, storage_type: &str, profile: Option<&StorageProfile>) -> R
         s3s::s3_error!(InvalidArgument, "invalid storage type")
     );
     ensure!(
-        app.role == "single" || storage_type == "s3",
+        !app.shared_storage_only() || storage_type == "s3",
         s3s::s3_error!(InvalidArgument, "local storage requires single mode")
     );
-    let presets = templates(storage_type == "local", app.role == "single");
+    let presets = templates(storage_type == "local", !app.shared_storage_only());
     let selected = profile
         .map(serde_json::to_value)
         .transpose()?

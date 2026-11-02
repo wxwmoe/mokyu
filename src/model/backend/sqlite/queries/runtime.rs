@@ -143,6 +143,45 @@ impl Backend {
     }
 }
 
+pub(in super::super) fn mode_blockers() -> Rows<'static, (bool, bool, bool, bool)> {
+    sqlx::query_as(
+        "SELECT maintenance,EXISTS(SELECT 1 FROM tasks WHERE state IN ('queued','running','paused')),EXISTS(SELECT 1 FROM uploads WHERE state IN ('active','completing')) OR EXISTS(SELECT 1 FROM streams WHERE state='writing'),EXISTS(SELECT 1 FROM pending_uploads) OR EXISTS(SELECT 1 FROM raw_uploads) OR EXISTS(SELECT 1 FROM extents e JOIN streams s ON s.id=e.stream_id WHERE e.fragment_id IS NOT NULL AND s.state IN ('ready','writing')) FROM mokyu_meta WHERE id=1",
+    )
+}
+
+pub(in super::super) fn local_storages() -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE type='local')")
+}
+
+pub(in super::super) fn active_staging() -> Scalar<'static, Uuid> {
+    sqlx::query_scalar(
+        "SELECT s.id FROM storages s JOIN runtime_settings r ON r.section='uploads' WHERE s.enabled AND s.type='s3' AND lower(hex(s.id))=replace(lower(json_extract(r.value,'$.staging_storage_id')),'-','') LIMIT 1",
+    )
+}
+
+pub(in super::super) fn set_deployment_mode(mode: &str) -> Statement<'_> {
+    sqlx::query("UPDATE mokyu_meta SET deployment_mode=?,deployment_mode_revision=deployment_mode_revision+1 WHERE id=1").bind(mode)
+}
+
+pub(in super::super) fn preserve_task_mode(mode: &str) -> Statement<'_> {
+    sqlx::query("UPDATE tasks SET detail=JSON_SET(detail,'$.execution_mode',?) WHERE state='failed' AND JSON_EXTRACT(detail,'$.execution_mode') IS NULL").bind(mode)
+}
+
+pub(in super::super) fn guard_stage_mode() -> Scalar<'static, String> {
+    sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE id=1")
+}
+
+pub(in super::super) fn configured_stage() -> Scalar<'static, Option<Uuid>> {
+    sqlx::query_scalar(
+        "SELECT s.id FROM storages s JOIN runtime_settings r ON r.section='uploads' AND lower(hex(s.id))=replace(lower(json_extract(r.value,'$.staging_storage_id')),'-','')",
+    )
+}
+
+pub(in super::super) fn valid_stage(id: Option<Uuid>) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type='s3' AND enabled)")
+        .bind(id)
+}
+
 #[async_trait::async_trait]
 impl RuntimeStore for Backend {
     fn database_info(&self) -> Option<&crate::model::runtime::DatabaseInfo> {
@@ -170,6 +209,16 @@ impl RuntimeStore for Backend {
             mode_revision,
         })
     }
+    async fn set_mode(&self, _principal: &Principal, mode: &str) -> Result<()> {
+        let mut tx = self.write.begin_with(BEGIN_WRITE).await?;
+        self.check_owner()?;
+        transactions::change_mode(&mut tx, mode).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("mode-before-commit").await;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn pending_uploads(&self) -> Result<bool> {
         Ok(
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads)")

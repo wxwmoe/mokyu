@@ -40,6 +40,13 @@ struct PreparedStorage {
 
 impl PreparedStorage {
     async fn insert(&self, tx: &mut Transaction<'_, Sqlite>) -> Result<()> {
+        if self.record.r#type == "local" {
+            let (_, mode) = queries::storage_deployment().fetch_one(&mut **tx).await?;
+            ensure!(
+                mode == "single",
+                s3s::s3_error!(InvalidArgument, "local storage requires single mode")
+            );
+        }
         validate_block_key(tx, self.key).await?;
         queries::insert_storage_record(&self.record, self.key)
             .execute(&mut **tx)
@@ -117,9 +124,10 @@ pub(in super::super) async fn storage_creation(
     read: &SqlitePool,
     write: &SqlitePool,
 ) -> Result<StorageCreation> {
+    let (deployment, mode) = queries::storage_deployment().fetch_one(read).await?;
     Ok(StorageCreation {
-        deployment: queries::storage_deployment().fetch_one(read).await?,
-        mode: "single".into(),
+        deployment,
+        mode,
         writer: Box::new(StorageInitialization {
             write: write.clone(),
             attempted: false,
@@ -145,6 +153,7 @@ pub(in super::super) async fn storage_edit(
     let profile = queries::storage_profile_lock(row.id)
         .fetch_one(&mut *tx)
         .await?;
+    let (_, mode) = queries::storage_deployment().fetch_one(&mut *tx).await?;
     let id = row.id;
     let revision = profile.revision;
     tx.commit().await?;
@@ -152,7 +161,7 @@ pub(in super::super) async fn storage_edit(
     Ok(StorageEdit {
         row,
         profile,
-        mode: "single".into(),
+        mode,
         update: Box::new(StorageModification {
             original_type,
             write: write.clone(),
@@ -207,6 +216,25 @@ impl StorageUpdate for StorageModification {
             )
             .execute(&mut *tx)
             .await?;
+        }
+        if !record.enabled || record.r#type == "local" {
+            let mode = queries::guard_stage_mode().fetch_one(&mut *tx).await?;
+            if mode != "single" {
+                ensure!(
+                    record.r#type != "local",
+                    crate::model::runtime::ModeConflict("local storage requires single mode")
+                );
+                ensure!(
+                    queries::configured_stage()
+                        .fetch_optional(&mut *tx)
+                        .await?
+                        .flatten()
+                        != Some(record.id),
+                    crate::model::runtime::ModeConflict(
+                        "select another shared staging storage before disabling it"
+                    )
+                );
+            }
         }
         validate_block_key(&mut tx, key).await?;
         queries::update_storage_record(record, key)

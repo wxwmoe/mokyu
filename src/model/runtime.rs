@@ -49,11 +49,53 @@ mod tests {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ModeConflict(pub(crate) &'static str);
+
+impl std::fmt::Display for ModeConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ModeConflict {}
+
+pub(crate) fn check_drain(
+    maintenance: bool,
+    tasks: bool,
+    uploads: bool,
+    sources: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        maintenance,
+        ModeConflict("enable maintenance before changing deployment mode")
+    );
+    anyhow::ensure!(
+        !tasks,
+        ModeConflict("finish queued, running and paused tasks before changing deployment mode")
+    );
+    anyhow::ensure!(
+        !uploads,
+        ModeConflict(
+            "finish or abort uploads and wait for reads to drain before changing deployment mode"
+        )
+    );
+    anyhow::ensure!(
+        !sources,
+        ModeConflict(
+            "flush pending uploads and referenced fragments before changing deployment mode"
+        )
+    );
+    Ok(())
+}
+
 #[async_trait]
 pub(crate) trait RuntimeStore: Send + Sync {
     fn database_info(&self) -> Option<&DatabaseInfo>;
     async fn initialize(&self, maintenance: bool) -> Result<RuntimeState>;
     async fn state(&self) -> Result<RuntimeState>;
+    async fn set_mode(&self, principal: &crate::authorization::Principal, mode: &str)
+    -> Result<()>;
     async fn pending_uploads(&self) -> Result<bool>;
     async fn health(&self) -> Result<()>;
     fn pool(&self) -> (u32, usize);

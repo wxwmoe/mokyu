@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn compatible_backends_exclude_cluster_settings() {
+    fn shared_staging_is_available_for_every_database() {
         let file: FileConfig =
             toml::from_str("[database]\nhost='database'\nname='mokyu'\nuser='mokyu'").unwrap();
         let mut config = file.into_config();
@@ -412,14 +412,8 @@ mod tests {
                 .find(|(section, _)| *section == "uploads")
                 .unwrap()
                 .1;
-            assert_eq!(
-                uploads.get("staging_storage_id").is_some(),
-                backend.supports_cluster()
-            );
-            assert_eq!(
-                uploads.get("staging_bytes_limit").is_some(),
-                backend.supports_cluster()
-            );
+            assert!(uploads.get("staging_storage_id").is_some());
+            assert!(uploads.get("staging_bytes_limit").is_some());
             let mut restored = config.clone();
             for (section, value) in defaults {
                 crate::model::apply_runtime_section(&mut restored, section, value).unwrap();
@@ -430,10 +424,10 @@ mod tests {
                     "uploads",
                     serde_json::json!({key: null}),
                 );
-                assert_eq!(result.is_ok(), backend.supports_cluster());
+                assert!(result.is_ok());
             }
             restored.uploads.staging_bytes_limit = Some("1GiB".into());
-            assert_eq!(restored.validate().is_ok(), backend.supports_cluster());
+            assert!(restored.validate().is_ok());
             for role in ["control", "worker", "data", "node"] {
                 assert_eq!(
                     backend.validate_role(role).is_ok(),

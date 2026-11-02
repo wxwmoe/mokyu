@@ -54,7 +54,7 @@ pub async fn password_hash(password: String) -> Result<String> {
     .await?
 }
 pub async fn execute_as(app: &Arc<App>, principal: &Principal, command: Command) -> Result<Value> {
-    if matches!(&command, Command::Cluster(_)) {
+    if matches!(&command, Command::Cluster(command) if !matches!(command, Cluster::Mode { .. })) {
         app.cluster()?;
     }
     if !super::audit::active()

@@ -31,6 +31,7 @@ pub(in super::super) async fn save_runtime_settings(
     value: Value,
 ) -> Result<RuntimeSettingsRow> {
     let mut tx = admin_transaction(pool, principal).await?;
+    check_upload_stage(&mut tx, section, &value).await?;
     let revision = match revision {
         Some(revision) => revision,
         None => {
@@ -69,6 +70,7 @@ pub(in super::super) async fn reset_runtime_settings(
     value: Value,
 ) -> Result<RuntimeSettingsRow> {
     let mut tx = admin_transaction(pool, principal).await?;
+    check_upload_stage(&mut tx, section, &value).await?;
     let row = queries::reset_runtime_settings(section, value, principal.user_id())
         .fetch_one(&mut *tx)
         .await?;
@@ -157,4 +159,28 @@ pub(in super::super) async fn list_managed_keys(
         .into_iter()
         .map(queries::managed_key_view)
         .collect())
+}
+
+async fn check_upload_stage(
+    tx: &mut Transaction<'_, Postgres>,
+    section: &str,
+    value: &Value,
+) -> Result<()> {
+    if section == "uploads"
+        && queries::deployment_mode_lock().fetch_one(&mut **tx).await? != "single"
+    {
+        let stage = value
+            .get("staging_storage_id")
+            .and_then(Value::as_str)
+            .and_then(|v| Uuid::parse_str(v).ok());
+        ensure!(
+            queries::cluster_staging_valid(stage)
+                .fetch_one(&mut **tx)
+                .await?,
+            crate::model::runtime::ModeConflict(
+                "cluster mode requires an enabled S3 uploads.staging_storage_id"
+            )
+        );
+    }
+    Ok(())
 }

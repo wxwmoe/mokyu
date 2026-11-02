@@ -26,6 +26,18 @@ impl IntoResponse for HttpError {
 }
 impl HttpError {
     fn response(self) -> Response {
+        if let Some(conflict) = self.0.downcast_ref::<crate::model::runtime::ModeConflict>() {
+            let mut response = (
+                StatusCode::CONFLICT,
+                Json(json!({"error":"Conflict","detail":conflict.0})),
+            )
+                .into_response();
+            response
+                .extensions_mut()
+                .insert(ErrorCode("DeploymentModeConflict".to_owned()));
+            response.extensions_mut().insert(*conflict);
+            return response;
+        }
         let status = if let Some(e) = self.0.downcast_ref::<s3s::S3Error>() {
             e.status_code().unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
         } else {

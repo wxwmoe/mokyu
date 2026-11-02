@@ -250,9 +250,11 @@ pub(super) async fn set_mode(
     let exclusive = queries::claim_runtime(true).fetch_one(&mut *owner).await?;
     ensure!(
         exclusive,
-        "stop every other runtime before changing deployment mode"
+        crate::model::runtime::ModeConflict(
+            "stop every other runtime before changing deployment mode"
+        )
     );
-    let result = transactions::set_deployment_mode(&backend.pool, principal, mode).await;
+    let result = transactions::set_deployment_mode(&mut owner, principal, mode).await;
     if result.is_err() {
         queries::release_runtime().fetch_one(&mut *owner).await?;
     }

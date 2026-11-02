@@ -90,7 +90,7 @@ pub(in super::super) fn task_lock<'q>(id: Uuid) -> Scalar<'q, Uuid> {
 }
 
 pub(in super::super) fn mode<'q>() -> Scalar<'q, String> {
-    sqlx::query_scalar("SELECT 'single'")
+    sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE id=1")
 }
 
 pub(in super::super) fn list<'q>(

@@ -188,6 +188,27 @@ impl StorageUpdate for StorageModification {
             .execute(&mut *self.tx)
             .await?;
         }
+        if !record.enabled || record.r#type == "local" {
+            let mode = queries::deployment_mode_lock()
+                .fetch_one(&mut *self.tx)
+                .await?;
+            if mode != "single" {
+                ensure!(
+                    record.r#type != "local",
+                    crate::model::runtime::ModeConflict("local storage requires single mode")
+                );
+                ensure!(
+                    queries::cluster_staging_id()
+                        .fetch_optional(&mut *self.tx)
+                        .await?
+                        .flatten()
+                        != Some(record.id),
+                    crate::model::runtime::ModeConflict(
+                        "select another shared staging storage before disabling it"
+                    )
+                );
+            }
+        }
         validate_block_key(&mut self.tx, key).await?;
         queries::update_storage_record(record, key)
             .execute(&mut *self.tx)

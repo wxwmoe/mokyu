@@ -7,12 +7,9 @@ use uuid::Uuid;
 /// data.  A mode transition or paused parent fences the child without allowing
 /// an in-flight batch to publish stale work.
 pub(crate) async fn fence(app: &App, id: Uuid, token: Uuid) -> Result<bool> {
-    let expected = if app.role == "single" {
-        "single"
-    } else {
-        "cluster"
-    };
-    app.task_execution.fence(expected, id, token).await
+    app.task_execution
+        .fence(app.deployment_mode(), id, token)
+        .await
 }
 
 impl App {
@@ -51,11 +48,7 @@ impl App {
                     s3s::s3_error!(OperationAborted, "external test recovery was stopped").into(),
                 );
             }
-            let mode = if self.role == "single" {
-                "single"
-            } else {
-                "cluster"
-            };
+            let mode = self.deployment_mode();
             anyhow::ensure!(
                 detail["execution_mode"]
                     .as_str()

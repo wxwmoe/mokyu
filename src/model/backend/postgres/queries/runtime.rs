@@ -331,11 +331,14 @@ pub(in super::super) fn cluster_staging_valid(id: Option<Uuid>) -> Scalar<'stati
     .bind(id)
 }
 
-pub(in super::super) fn cluster_other_nodes(id: Option<Uuid>) -> Scalar<'static, bool> {
+pub(in super::super) fn cluster_other_nodes(
+    id: Option<Uuid>,
+    controls_only: bool,
+) -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled AND ($1::uuid IS NULL OR id<>$1))",
+        "SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled AND ($1::uuid IS NULL OR id<>$1) AND (NOT $2 OR role='control'))",
     )
-    .bind(id)
+    .bind(id).bind(controls_only)
 }
 
 pub(in super::super) fn mode_transition_state() -> Rows<'static, (bool, bool, bool, bool)> {
@@ -348,6 +351,16 @@ pub(in super::super) fn preserve_failed_task_mode(mode: &str) -> Statement<'_> {
     sqlx::query("UPDATE tasks SET detail=jsonb_set(detail,'{execution_mode}',to_jsonb($1::text)) WHERE state='failed' AND NOT detail ? 'execution_mode'").bind(mode)
 }
 
+pub(in super::super) fn restore_parked_control() -> Statement<'static> {
+    sqlx::query(
+        "UPDATE nodes SET enabled=true,status='registered',updated_at=now() WHERE role='control' AND NOT enabled AND status='standby'",
+    )
+}
+
+pub(in super::super) fn park_control(id: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE nodes SET enabled=false,status='standby',last_seen_at=NULL,updated_at=now() WHERE id=$1 AND enabled AND role='control'").bind(id)
+}
+
 pub(in super::super) fn release_node_id<'q>(id: &'q Uuid) -> Statement<'q> {
     sqlx::query("UPDATE nodes SET enabled=false,credential_encrypted=NULL,last_seen_at=NULL,status='released',recovery_required=false,updated_at=now() WHERE id=$1").bind(id)
 }
@@ -358,6 +371,12 @@ pub(in super::super) fn release_node_tasks<'q>(id: &'q Uuid) -> Statement<'q> {
 
 pub(in super::super) fn release_node_permits<'q>(id: &'q Uuid) -> Statement<'q> {
     sqlx::query("DELETE FROM storage_permits WHERE holder_id=$1").bind(id)
+}
+
+pub(in super::super) fn invalidate_mode_sessions() -> Statement<'static> {
+    sqlx::query(
+        "UPDATE node_sessions SET expires_at=clock_timestamp(),draining=true WHERE expires_at>clock_timestamp()",
+    )
 }
 
 pub(in super::super) fn update_deployment_mode<'q>(mode: &'q str) -> Statement<'q> {
@@ -433,6 +452,9 @@ impl RuntimeStore for Backend {
         })
     }
 
+    async fn set_mode(&self, principal: &Principal, mode: &str) -> Result<()> {
+        connection::set_mode(self, principal, mode).await
+    }
     async fn pending_uploads(&self) -> Result<bool> {
         Ok(
             sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads)")

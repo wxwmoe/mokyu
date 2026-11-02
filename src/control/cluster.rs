@@ -78,7 +78,6 @@ pub(crate) async fn mode(
     Extension(actor): Extension<Identity>,
     Json(input): Json<ModeInput>,
 ) -> Result<Json<ClusterOverview>, HttpError> {
-    admin(&actor, &app).await?;
     app.change_mode(&actor.principal, &input.mode).await?;
     status(State(app), Extension(actor)).await
 }

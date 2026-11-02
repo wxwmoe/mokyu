@@ -889,9 +889,6 @@ impl ClusterStore for Backend {
     async fn credential(&self, id: Uuid) -> Result<Option<(String, Vec<u8>)>> {
         Ok(sqlx::query_as("SELECT role,credential_encrypted FROM nodes WHERE id=$1 AND role='control' AND enabled AND credential_encrypted IS NOT NULL").bind(id).fetch_optional(&self.pool).await?)
     }
-    async fn set_mode(&self, principal: &Principal, mode: &str) -> Result<()> {
-        connection::set_mode(self, principal, mode).await
-    }
     async fn release(&self, name: &str) -> Result<()> {
         transactions::release_node(&self.pool, name).await
     }

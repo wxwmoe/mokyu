@@ -501,7 +501,7 @@ pub enum Cluster {
         confirm: bool,
     },
     Mode {
-        #[arg(value_parser = ["single", "cluster"])]
+        #[arg(value_parser = ["single", "single_control", "cluster"])]
         mode: String,
     },
     Nodes {
@@ -616,7 +616,9 @@ impl Command {
     pub fn allows_bootstrap(&self) -> bool {
         matches!(
             self,
-            Self::Init { .. } | Self::Status { .. } | Self::Cluster(Cluster::Release { .. })
+            Self::Init { .. }
+                | Self::Status { .. }
+                | Self::Cluster(Cluster::Release { .. } | Cluster::Mode { .. })
         )
     }
 

@@ -63,7 +63,7 @@ impl TaskExecutionStore for Backend {
             return Ok(false);
         }
         let execution = Execution { id, token };
-        if expected_mode != "single" {
+        if expected_mode != super::replication::mode().fetch_one(&self.pool).await? {
             pause_owned_task(execution, None)
                 .execute(&self.pool)
                 .await?;
