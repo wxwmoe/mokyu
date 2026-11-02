@@ -155,6 +155,7 @@ pub(in super::super) async fn node_complete_sources(
             cached: input.cached.clone(),
             max_items: 16,
             lanes: 1,
+            permits: Default::default(),
             max_bytes: 128 * 1024,
             body: None,
         };

@@ -84,6 +84,12 @@ pub(crate) async fn append(write: &mut Option<Write>, data: &[u8]) {
 
 impl Storage {
     pub(crate) async fn reject_raw_cache(&self, id: Uuid) {
+        self.diagnostics
+            .cache_invalid
+            .fetch_add(1, Ordering::Relaxed);
+        self.diagnostics
+            .cache_fallback
+            .fetch_add(1, Ordering::Relaxed);
         self.file_cache().reject(id).await;
     }
 

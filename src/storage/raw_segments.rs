@@ -141,7 +141,6 @@ impl Remote {
             let mut next = span.start;
             let mut jobs = VecDeque::new();
             let (position,head)=tokio::sync::watch::channel(span.start);
-            let waiting=Arc::new(std::sync::atomic::AtomicBool::new(false));
             let (first,mut turn)=tokio::sync::oneshot::channel();
             let _=first.send(());
             let remote = Arc::new(self);
@@ -151,19 +150,20 @@ impl Remote {
                     let range = next..end;
                     let remote=remote.clone();let proof=proof.clone();let requested=requested.clone();
                     let acquire=acquire.clone();let retain=retain.clone();
-                    let (tx,incoming)=mpsc::channel(1);
+                    let piece=if proof.is_some(){PAGE}else{256*1024};
+                    let bytes=(range.end-range.start) as usize;
+                    // A granted segment can finish even while an earlier one owns the HTTP cursor.
+                    let (tx,incoming)=mpsc::channel(bytes.div_ceil(piece)+1);
                     let (admitted,after)=tokio::sync::oneshot::channel();
                     let before=std::mem::replace(&mut turn,after);
                     let op=super::read_retry::Attempt::segment(recovery.clone(),head.clone(),range.start);
-                    let reader_waiting=waiting.clone();
                     let task=tokio::spawn(async move {
                         let result=async {
                             before.await?;
-                            let buffer_size=(range.end-range.start).min(if proof.is_some(){PAGE as u64}else{256*1024}) as usize;
-                            let initial=retain(buffer_size).await?;
+                            let buffer=Arc::new(retain(bytes).await?);
                             let io=acquire().await?;
                             let _=admitted.send(());
-                            super::read_retry::OP.scope(op.clone(),remote.download(range,&requested,proof.as_ref(),&tx,io,acquire,retain,initial,op.clone(),reader_waiting)).await
+                            super::read_retry::OP.scope(op.clone(),remote.download(range,&requested,proof.as_ref(),&tx,io,buffer,op.clone())).await
                         }.await;
                         if let Err(error)=result { let _=tx.send(Err(error)).await; }
                     });
@@ -173,9 +173,7 @@ impl Remote {
                 let (start,mut head)=jobs.pop_front().context("empty raw read window")?;
                 position.send_replace(start);
                 loop {
-                    waiting.store(true,Ordering::Release);
                     let bytes=head.incoming.recv().await;
-                    waiting.store(false,Ordering::Release);
                     let Some(bytes)=bytes else{break};yield bytes?;
                 }
                 (&mut head.task).await?;
@@ -224,46 +222,24 @@ impl Remote {
         requested: &Range<u64>,
         proof: Option<&Arc<Proof>>,
         tx: &mpsc::Sender<Result<Bytes>>,
-        io: Permit,
-        acquire: Acquire,
-        retain: Retain,
-        initial: Permit,
+        _io: Permit,
+        buffer: Arc<Permit>,
         op: Arc<super::read_retry::Attempt>,
-        waiting: Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<()> {
-        let mut io = Some(io);
         let mut stream = None;
         let mut cursor = span.start;
         let mut restored = false;
-        let mut initial = Some(initial);
         let mut leftover = Bytes::new();
         let mut pos = span.start;
         while pos < span.end {
-            let output = loop {
-                match tokio::time::timeout(std::time::Duration::from_secs(2), tx.reserve()).await {
-                    Ok(permit) => break permit.context("raw reader closed")?,
-                    Err(_) if waiting.load(Ordering::Acquire) => continue,
-                    Err(_) => {
-                        stream = None;
-                        drop(io.take());
-                        let permit = tx.reserve().await.context("raw reader closed")?;
-                        io = Some(acquire().await?);
-                        op.continuation();
-                        break permit;
-                    }
-                }
-            };
+            let output = tx.reserve().await.context("raw reader closed")?;
             let n = (span.end - pos).min(if proof.is_some() {
                 PAGE as u64
             } else {
                 256 * 1024
             }) as usize;
-            let memory = if let Some(initial) = initial.take() {
-                initial
-            } else {
-                retain(n).await?
-            };
-            let mut page = BytesMut::with_capacity(n);
+            let immediate = proof.is_none() && pos == span.start;
+            let mut page = BytesMut::new();
             while page.len() < n {
                 if leftover.is_empty() {
                     loop {
@@ -308,12 +284,15 @@ impl Remote {
                     );
                 }
                 let count = leftover.len().min(n - page.len());
+                if page.capacity() == 0 {
+                    page = BytesMut::with_capacity(if immediate { count } else { n });
+                }
                 page.extend_from_slice(&leftover.split_to(count));
-                if proof.is_none() && !page.is_empty() {
+                if immediate && !page.is_empty() {
                     break;
                 }
             }
-            let page = Bytes::from_owner(Held(page.freeze(), memory));
+            let page = Bytes::from_owner(Held(page.freeze(), Box::new(buffer.clone())));
             let page = if let Some(proof) = proof {
                 proof.verify(pos, page).await?
             } else {

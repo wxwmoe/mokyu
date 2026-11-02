@@ -21,6 +21,7 @@ fn source(run: Run, key: &str) -> read::Query {
         cached: Vec::new(),
         max_items: read::MAX_ITEMS,
         lanes: 1,
+        permits: Default::default(),
         max_bytes: read::TARGET_BYTES,
         body: None,
     }

@@ -172,12 +172,15 @@ impl Store {
             "s3" => {
                 let access = row.access.as_deref().context("S3 access key is missing")?;
                 let secret = row.secret.as_deref().context("S3 secret key is missing")?;
-                let client = reqwest::Client::builder()
-                    .connect_timeout(options.connect_timeout)
-                    .timeout(options.request_timeout)
-                    .http1_only()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()?;
+                let build_client = || {
+                    reqwest::Client::builder()
+                        .connect_timeout(options.connect_timeout)
+                        .timeout(options.request_timeout)
+                        .http1_only()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                };
+                let client = build_client()?;
                 let remote = Arc::new(
                     AmazonS3Builder::new()
                         .with_endpoint(
@@ -206,7 +209,10 @@ impl Store {
                             retry_timeout: options.retry_timeout,
                             ..Default::default()
                         })
-                        .with_http_connector(super::s3::Connector(client.clone()))
+                        .with_http_connector(super::s3::Connector {
+                            main: client.clone(),
+                            ahead: build_client()?,
+                        })
                         .build()?,
                 );
                 let store = Arc::new(PrefixStore::new(remote.as_ref().clone(), prefix.clone()));

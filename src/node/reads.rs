@@ -601,12 +601,15 @@ impl Reads {
         ));
         let limits = (input.max_items, input.max_bytes);
         let started = Instant::now();
+        let mut offer = self.node.resources.read_offer(&snapshot.lease);
+        input.permits = offer.permits.take();
         let mut reply = self.node.client.read(input).await?;
         let grants = self
             .node
             .resources
             .adopt(&snapshot.lease, &reply.grants, started)?;
         super::resources::Grant::classify(&grants, true);
+        drop(offer);
         let (materials, public_generation) = {
             let _epoch = self.public_epoch.lock().unwrap();
             let current = self.public.generation() == generation;
@@ -704,12 +707,14 @@ impl Reads {
                 }
                 let declared = self.cache.snapshot();
                 let started = Instant::now();
+                let mut offer = self.node.resources.read_offer(&previous.run);
                 let mut reply = self
                     .node
                     .client
                     .read_window(wire::ReadWindowRequest {
                         run: Some(previous.run.run.clone()),
                         cursor: Some(cursor),
+                        permits: offer.permits.take(),
                         cached: cached(&declared),
                         max_items: previous.limits.0,
                         max_bytes: previous.limits.1,
@@ -728,6 +733,7 @@ impl Reads {
                         .resources
                         .adopt(&previous.run, &reply.grants, started)?;
                 super::resources::Grant::classify(&grants, true);
+                drop(offer);
                 grants.extend(
                     previous
                         .grants

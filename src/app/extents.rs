@@ -489,7 +489,7 @@ impl App {
                 (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
                 if let Some(capture)=&capture { let mut mapping=capture.lock().unwrap(); for row in &rows { mapping.record(row); } }
                 let mut pack_readers=std::collections::HashMap::<Uuid,std::sync::Weak<crate::storage::ReadContext>>::new();
-                let mut loaded=futures_util::stream::iter(rows.into_iter().map(|row| {
+                let mut loaded=futures_util::stream::iter(rows.into_iter().enumerate().map(|(index,row)| {
                     let app=app.clone();
                     let context=if let Some(pack)=row.demand_pack {
                         pack_readers.get(&pack).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| {
@@ -502,7 +502,7 @@ impl App {
                         let raw=usize::try_from(row.chunk.raw_size)?;
                         ensure!((1..=crate::content::codec::MAX).contains(&raw),"invalid read chunk size");
                         let allocation=Arc::new(crate::storage::read_buffer::reserve(&primary,&slot,Some(&spare),3*raw+16).await?);
-                        let (data,trace)=crate::storage::read_buffer::WORK.scope(allocation.clone(),crate::storage::read_retry::REQUEST.scope(recovery,app.storage.get_with_trace(&row.chunk,Some(&context)))).await?;
+                        let (data,trace)=crate::storage::read_buffer::WORK.scope(allocation.clone(),crate::storage::read_retry::READ_AHEAD.scope(index!=0,crate::storage::read_retry::REQUEST.scope(recovery,app.storage.get_with_trace(&row.chunk,Some(&context))))).await?;
                         let source=trace.source.or_else(||row.demand_source());
                         let data=row.extent.slice(allocation.hold_shared(data))?;
                         Ok::<_,anyhow::Error>((row.extent,data,source,trace.origin))

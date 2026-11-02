@@ -34,6 +34,7 @@ COPY src ./src
 COPY --from=web /web/dist ./web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
+    cargo clean --release --package mokyu && \
     if [ "$WEB_UI" = true ]; then cargo build --release --locked --bin mokyu; \
     else cargo build --release --locked --no-default-features --bin mokyu; fi \
     && cp target/release/mokyu /mokyu

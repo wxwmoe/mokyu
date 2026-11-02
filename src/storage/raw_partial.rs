@@ -29,6 +29,7 @@ pub(crate) trait Shelf: Send + Sync {
     fn files(&self) -> Files<'_>;
     fn epoch(&self) -> u64;
     fn fills(&self) -> &Locks<(Uuid, u64)>;
+    fn promotion(&self, id: Uuid) -> Option<super::cache::CacheWork>;
 }
 
 impl Shelf for super::Storage {
@@ -40,6 +41,9 @@ impl Shelf for super::Storage {
     }
     fn fills(&self) -> &Locks<(Uuid, u64)> {
         &self.partial_fills
+    }
+    fn promotion(&self, id: Uuid) -> Option<super::cache::CacheWork> {
+        self.cache_work(id, 1)
     }
 }
 impl super::Storage {
@@ -287,21 +291,26 @@ impl Partial {
         drop(fifo);
         drop(_write);
         drop(pinned);
-        if map.written.covers(0..map.size())
-            && let Ok(publishing) = self.shelf.fills().get((id, u64::MAX)).try_lock_owned()
-        {
-            let cache = self.clone();
-            tokio::spawn(async move {
-                let _publishing = publishing;
-                if let Err(error) = cache.promote(file).await {
-                    tracing::debug!(%error,"raw cache promotion skipped");
-                }
-            });
+        if map.written.covers(0..map.size()) {
+            self.schedule_promotion();
         }
         Ok(())
     }
 
-    async fn promote(&self, mut file: File) -> Result<()> {
+    fn schedule_promotion(&self) {
+        let Some(work) = self.shelf.promotion(self.source.location_id) else {
+            return;
+        };
+        let cache = self.clone();
+        tokio::spawn(async move {
+            let _work = work;
+            if let Err(error) = cache.promote().await {
+                tracing::debug!(%error,"raw cache promotion skipped");
+            }
+        });
+    }
+
+    async fn promote(&self) -> Result<()> {
         use md5::{Digest, Md5};
         let id = self.source.location_id;
         let files = self.shelf.files();
@@ -309,12 +318,15 @@ impl Partial {
             return Ok(());
         };
         let path = self.path();
-        let identity = file.metadata().await?;
+        let map = Map::load(&path.with_extension("map")).await?;
+        if !map.same(&self.source) || !map.written.covers(0..map.size()) {
+            return Ok(());
+        }
+        let mut file = File::open(&path).await?;
         ensure!(
-            identity.len() == self.source.size as u64,
+            file.metadata().await?.len() == self.source.size as u64,
             IntegrityError::Length
         );
-        file.rewind().await?;
         let mut buf = vec![0; 256 * 1024];
         let mut hash = Md5::new();
         loop {
@@ -430,6 +442,7 @@ impl Partial {
             let range=if strict {requested.start/page*page..requested.end.div_ceil(page).saturating_mul(page).min(size)}else{requested.clone()};
             let id=self.source.location_id;
             let mut pos=range.start;
+            let mut checked_promotion=false;
             while pos<range.end {
                 let window_end=pos.saturating_add(16*raw_segments::SEGMENT).min(range.end);
                 if self.shelf.epoch()!=self.epoch {
@@ -438,6 +451,10 @@ impl Partial {
                     break;
                 }
                 let state=self.state().await?;
+                if !checked_promotion && let Some((map,_))=&state && map.written.covers(0..map.size()) {
+                    self.schedule_promotion();
+                    checked_promotion=true;
+                }
                 let (mut hit,mut until)=state.as_ref().map_or((false,window_end),|(map,_)|map.written.next(pos,window_end));
                 let mut pinned=state.map(|(_,pin)|pin);
                 let mut path=self.path();
@@ -454,7 +471,10 @@ impl Partial {
                     let end=until.min(if strict{pos+page}else{pos+256*1024});
                     let memory=retain((end-pos) as usize).await?;
                     let result=async {
-                        let mut file=File::open(path).await?;file.seek(std::io::SeekFrom::Start(pos)).await?;
+                        let mut file=match File::open(&path).await {
+                            Err(error) if error.kind()==std::io::ErrorKind::NotFound && path==self.path() => File::open(CacheFile::Raw.path(self.shelf.files().root,id)).await?,
+                            result=>result?,
+                        };file.seek(std::io::SeekFrom::Start(pos)).await?;
                         let mut data=vec![0;(end-pos) as usize];file.read_exact(&mut data).await?;
                         if strict {proof.as_ref().context("missing raw page proof")?.check(pos,&data)?;}
                         Ok::<_,anyhow::Error>(Bytes::from(data))

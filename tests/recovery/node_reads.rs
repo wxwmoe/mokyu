@@ -37,6 +37,7 @@ fn request(run: Run) -> read::Query {
         cached: Vec::new(),
         max_items: read::MAX_ITEMS,
         lanes: 1,
+        permits: Default::default(),
         max_bytes: read::TARGET_BYTES,
         body: None,
     }
@@ -468,6 +469,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         cached: Vec::new(),
         max_items: 2,
         lanes: 1,
+        permits: Default::default(),
         max_bytes: read::TARGET_BYTES,
     };
     assert!(
@@ -963,9 +965,6 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         let q = scoped(session.run, "batch");
         let a = backend.open_read(&node, &key, q.clone()).await?;
         let b = backend.open_read(&node, &key, q).await?;
-        let c = backend
-            .open_read(&node, &key, scoped(session.run, "batch"))
-            .await?;
         let ids = |r: &read::Reply| {
             r.grants
                 .iter()
@@ -974,12 +973,17 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
                 .collect::<std::collections::BTreeSet<_>>()
         };
         assert_eq!(ids(&a).len(), cap as usize);
+        let mut next = scoped(session.run, "batch");
+        next.permits.held = ids(&a).into_iter().collect();
+        let c = backend.open_read(&node, &key, next).await?;
         assert_eq!(ids(&a), ids(&b));
         assert_eq!(ids(&a), ids(&c));
         assert_eq!(active(&pool).await?, (2, 2, i64::from(cap)));
+        let mut foreign = scoped(peer_run.run, "batch");
+        foreign.permits.released = ids(&a).into_iter().collect();
         assert!(matches!(
             backend
-                .open_read(&peer, &key, scoped(peer_run.run, "batch"))
+                .open_read(&peer, &key, foreign)
                 .await
                 .err()
                 .as_ref()
@@ -1006,6 +1010,54 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
                 assert_eq!(active(&pool).await?, (1, 1, i64::from(cap)));
             }
         }
+        let prior = backend
+            .open_read(&node, &key, scoped(session.run, "batch"))
+            .await?;
+        let mut follow = scoped(session.run, "batch");
+        follow.permits.released = ids(&prior).into_iter().collect();
+        let replacement = backend.open_read(&node, &key, follow).await?;
+        assert!(ids(&prior).is_disjoint(&ids(&replacement)));
+        assert_eq!(ids(&replacement).len(), cap as usize);
+        backend
+            .pulse_session(
+                &node,
+                &key,
+                session.run,
+                session.epoch,
+                seq,
+                false,
+                read::KeepAlive {
+                    renew: vec![],
+                    release: prior
+                        .grants
+                        .iter()
+                        .filter(|g| g.r#type == read::GrantType::StorageRead)
+                        .map(|g| read::GrantRef {
+                            r#type: g.r#type,
+                            id: g.id,
+                        })
+                        .chain(std::iter::once(reference(&prior, read::GrantType::Read)))
+                        .collect(),
+                },
+            )
+            .await?;
+        seq += 1;
+        assert_eq!(active(&pool).await?, (1, 1, i64::from(cap)));
+        backend
+            .pulse_session(
+                &node,
+                &key,
+                session.run,
+                session.epoch,
+                seq,
+                false,
+                read::KeepAlive {
+                    renew: vec![],
+                    release: vec![reference(&replacement, read::GrantType::Read)],
+                },
+            )
+            .await?;
+        seq += 1;
     }
     let size = 1024i64 * 1024 * 1024;
     let raw: Uuid=sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,payload_type,size,etag,public_read,metadata) VALUES($1,'pages','object','ready','raw',$2,'pages',true,'{}') RETURNING id")
@@ -1076,6 +1128,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
                     max_items: read::MAX_ITEMS,
                     max_bytes: 16 * 1024,
                     lanes: 16,
+                    permits: Default::default(),
                 },
             )
             .await?;

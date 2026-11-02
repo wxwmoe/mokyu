@@ -275,9 +275,11 @@ async fn node_read_permits(
     db: &mut PgConnection,
     node: Uuid,
     read: Uuid,
+    fresh: bool,
     storages: &[read::Storage],
     mapping: &read::Mapping,
     lanes: usize,
+    held: &[Uuid],
     shared: &mut std::collections::BTreeMap<Uuid, read::Grant>,
 ) -> Result<Vec<read::Grant>> {
     use std::collections::{BTreeMap, BTreeSet};
@@ -324,45 +326,46 @@ async fn node_read_permits(
         queries::lock_storage_permits(format!("mokyu:store:{id}:read"))
             .execute(&mut *db)
             .await?;
-        let owned = queries::node_read_permit(read, id)
-            .fetch_all(&mut *db)
-            .await?;
-        let count = queries::node_read_permit_count(read)
-            .fetch_one(&mut *db)
-            .await? as usize;
-        let want = want.min(read::LANES.saturating_sub(count) + owned.len());
-        ensure!(want > 0, Error::NodeReadLimit);
-        let mut tokens = owned;
+        let (mut tokens, want) = if fresh {
+            (Vec::new(), want)
+        } else {
+            let owned = queries::node_read_permit(read, id)
+                .fetch_all(&mut *db)
+                .await?;
+            let count = queries::node_read_permit_count(read)
+                .fetch_one(&mut *db)
+                .await? as usize;
+            let want = want.min(read::LANES.saturating_sub(count) + owned.len());
+            ensure!(want > 0, Error::NodeReadLimit);
+            (owned, want)
+        };
+        tokens.truncate(want);
+        let mut borrowed = Vec::new();
         if tokens.is_empty()
             && let Some(first) = shared.get(&id)
         {
             tokens.push((first.id, first.valid_for_ms as i64));
+            borrowed.push(first.id);
         }
-        tokens.truncate(want);
         if tokens.len() < want {
-            queries::expire_storage_permits(id, "read")
-                .execute(&mut *db)
-                .await?;
-            let used = queries::storage_permit_count(id, "read")
-                .fetch_one(&mut *db)
-                .await?;
-            let count = (i64::from(limits[&id]) - used).max(0) as usize;
-            let new: Vec<_> = (0..count.min(want - tokens.len()))
-                .map(|_| Uuid::new_v4())
-                .collect();
-            if !new.is_empty() {
-                queries::batch_read_permits(node, id, &new)
-                    .execute(&mut *db)
-                    .await?;
-                tokens.extend(new.into_iter().map(|id| (id, 60_000)));
-            }
+            let allocated = queries::allocate_read_permits(
+                read,
+                node,
+                id,
+                i64::from(limits[&id]),
+                (want - tokens.len()) as i64,
+            )
+            .fetch_all(&mut *db)
+            .await?;
+            tokens.extend(allocated.into_iter().map(|token| (token, 60_000)));
         }
-        if tokens.len() < want && lanes > 1 {
-            for item in queries::read_pool(read, id, want as i64)
+        if tokens.len() < want && lanes > 1 && !held.is_empty() {
+            for item in queries::read_pool(read, id, want as i64, held)
                 .fetch_all(&mut *db)
                 .await?
             {
                 if !tokens.iter().any(|&(token, _)| token == item.0) {
+                    borrowed.push(item.0);
                     tokens.push(item);
                 }
                 if tokens.len() == want {
@@ -372,10 +375,11 @@ async fn node_read_permits(
         }
         ensure!(!tokens.is_empty(), Error::NodeReadBusy);
         tokens.sort_unstable_by_key(|pair| pair.0);
-        let ids: Vec<_> = tokens.iter().map(|&(id, _)| id).collect();
-        queries::own_read_permits(read, &ids)
-            .execute(&mut *db)
-            .await?;
+        if !borrowed.is_empty() {
+            queries::own_read_permits(read, &borrowed)
+                .execute(&mut *db)
+                .await?;
+        }
         for (token, remaining) in tokens {
             let grant = read::Grant {
                 r#type: read::GrantType::StorageRead,
@@ -560,6 +564,11 @@ pub(super) async fn protect_node_read(
     queries::lock_staging(format!("mokyu:node-read:{}", state.node_id))
         .execute(&mut **tx)
         .await?;
+    if !input.permits.released.is_empty() {
+        queries::node_read_release_permits(state, input.run, &[], &input.permits.released)
+            .execute(&mut **tx)
+            .await?;
+    }
     let hash = input.digest()?;
     let previous = queries::node_read_existing(state, input.run, input.operation)
         .fetch_optional(&mut **tx)
@@ -654,6 +663,7 @@ pub(super) async fn protect_node_read(
         }
         ensure!(existing.is_none() && mapping.shrink(), Error::NodeReadLimit);
     };
+    let fresh = previous.is_none();
     let (id, remaining) = if let Some(previous) = previous {
         (previous.read_id, previous.valid_for_ms)
     } else {
@@ -672,9 +682,11 @@ pub(super) async fn protect_node_read(
         tx,
         state.node_id,
         id,
+        fresh,
         &storages,
         &mapping,
         input.lanes,
+        &input.permits.held,
         shared,
     )
     .await?;
@@ -839,6 +851,11 @@ pub(in super::super) async fn node_read_window(
     queries::lock_staging(format!("mokyu:node-read:{}", state.node_id))
         .execute(&mut *tx)
         .await?;
+    if !input.permits.released.is_empty() {
+        queries::node_read_release_permits(state, input.run, &[], &input.permits.released)
+            .execute(&mut *tx)
+            .await?;
+    }
     let owned = queries::node_read_owned(state, input.run, input.cursor.lease)
         .fetch_optional(&mut *tx)
         .await?
@@ -927,9 +944,11 @@ pub(in super::super) async fn node_read_window(
         &mut tx,
         state.node_id,
         owned.read_id,
+        false,
         &storages,
         &mapping,
         input.lanes,
+        &input.permits.held,
         &mut Default::default(),
     )
     .await?;

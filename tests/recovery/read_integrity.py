@@ -211,10 +211,11 @@ def main():
             try:
                 response = get(busy, '4', Range='bytes=17-511')
                 assert response.status_code == 206 and response.content == body[17:512]
-                wait(lambda: marker.with_suffix('.hit').exists(), 'Range did not schedule a full-source check')
+                assert not marker.with_suffix('.hit').exists()
+                assert checks(busy)['active'] == 0
             finally:
                 marker.unlink(missing_ok=True)
-            wait(lambda: checks(busy)['verified'] > before, 'Range source was not checked')
+            assert checks(busy)['verified'] == before, 'a partial Range launched a whole-source read'
             settled(busy)
             put(busy, 'cancel', body * 256)
             marker = arm(busy, 'read-integrity-check')

@@ -19,7 +19,10 @@ mod body;
 pub(super) use body::upload_body;
 
 #[derive(Debug, Clone)]
-pub(super) struct Connector(pub reqwest::Client);
+pub(super) struct Connector {
+    pub(super) main: reqwest::Client,
+    pub(super) ahead: reqwest::Client,
+}
 
 impl HttpConnector for Connector {
     fn connect(&self, _: &object_store::ClientOptions) -> object_store::Result<HttpClient> {
@@ -37,7 +40,16 @@ impl HttpService for Connector {
                 .await
                 .map_err(|e| HttpError::new(HttpErrorKind::Unknown, e))?;
         }
-        HttpService::call(&self.0, request).await
+        let client = if request.method() == axum::http::Method::GET
+            && super::read_retry::READ_AHEAD
+                .try_with(|ahead| *ahead)
+                .unwrap_or(false)
+        {
+            &self.ahead
+        } else {
+            &self.main
+        };
+        HttpService::call(client, request).await
     }
 }
 
@@ -143,7 +155,10 @@ mod tests {
             .with_bucket_name("bucket")
             .with_access_key_id("access")
             .with_secret_access_key("secret")
-            .with_http_connector(Connector(client.clone()))
+            .with_http_connector(Connector {
+                main: client.clone(),
+                ahead: client.clone(),
+            })
             .build()
             .unwrap();
         let signer = Arc::new(signer);

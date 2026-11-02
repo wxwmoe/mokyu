@@ -49,6 +49,7 @@ pub(crate) struct Attempt {
 tokio::task_local! {
     pub(crate) static OP:Arc<Attempt>;
     pub(crate) static REQUEST:Arc<Recovery>;
+    pub(crate) static READ_AHEAD:bool;
 }
 
 impl Attempt {
@@ -84,9 +85,6 @@ impl Attempt {
             self.prefix().await?;
         }
         self.sending()
-    }
-    pub(super) fn continuation(&self) {
-        self.sent.store(0, Ordering::Relaxed);
     }
     pub(crate) fn sending(&self) -> io::Result<()> {
         if self.sent.fetch_add(1, Ordering::Relaxed) > 0 {

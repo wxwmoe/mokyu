@@ -245,22 +245,41 @@ pub(in super::super) fn read_capacity(
         .bind(node.node_id).bind(node.credential_generation).bind(run.boot).bind(run.fence).bind(storage)
 }
 
-pub(in super::super) fn read_pool(
+pub(in super::super) fn read_pool<'a>(
     read: Uuid,
     storage: Uuid,
     limit: i64,
-) -> Rows<'static, (Uuid, i64)> {
-    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM node_reads c JOIN storage_permits p ON p.holder_id=c.node_id WHERE c.read_id=$1 AND p.storage_id=$2 AND p.direction='read' AND p.expires_at>clock_timestamp() AND EXISTS(SELECT 1 FROM node_read_permits n JOIN node_reads r ON r.read_id=n.read_id JOIN stream_leases l ON l.id=r.read_id WHERE n.token=p.token AND (r.node_id,r.credential_generation,r.boot_id,r.fence)=(c.node_id,c.credential_generation,c.boot_id,c.fence) AND l.expires_at>clock_timestamp()) ORDER BY EXISTS(SELECT 1 FROM node_read_permits n WHERE n.read_id=c.read_id AND n.token=p.token) DESC,p.token LIMIT $3 FOR SHARE OF p")
-        .bind(read).bind(storage).bind(limit)
+    held: &'a [Uuid],
+) -> Rows<'a, (Uuid, i64)> {
+    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM node_reads c JOIN storage_permits p ON p.holder_id=c.node_id WHERE c.read_id=$1 AND p.storage_id=$2 AND p.token=ANY($4) AND p.direction='read' AND p.expires_at>clock_timestamp() AND EXISTS(SELECT 1 FROM node_read_permits n JOIN node_reads r ON r.read_id=n.read_id JOIN stream_leases l ON l.id=r.read_id WHERE n.token=p.token AND (r.node_id,r.credential_generation,r.boot_id,r.fence)=(c.node_id,c.credential_generation,c.boot_id,c.fence) AND l.expires_at>clock_timestamp()) ORDER BY EXISTS(SELECT 1 FROM node_read_permits n WHERE n.read_id=c.read_id AND n.token=p.token) DESC,p.token LIMIT $3 FOR SHARE OF p")
+        .bind(read).bind(storage).bind(limit).bind(held)
 }
 
-pub(in super::super) fn batch_read_permits<'q>(
+pub(in super::super) fn allocate_read_permits(
+    read: Uuid,
     node: Uuid,
     storage: Uuid,
-    tokens: &'q [Uuid],
-) -> Statement<'q> {
-    sqlx::query("INSERT INTO storage_permits(token,storage_id,direction,holder_id,expires_at) SELECT token,$1,'read',$2,now()+interval '1 minute' FROM unnest($3::uuid[]) token")
-        .bind(storage).bind(node).bind(tokens)
+    limit: i64,
+    wanted: i64,
+) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar(
+        "WITH expired AS (
+            DELETE FROM storage_permits WHERE storage_id=$1 AND direction='read' AND expires_at<=now()
+        ), capacity AS (
+            SELECT LEAST($4::bigint, GREATEST(0, $3::bigint-count(*))) AS slots
+            FROM storage_permits WHERE storage_id=$1 AND direction='read' AND expires_at>now()
+        ), allocated AS (
+            INSERT INTO storage_permits(token,storage_id,direction,holder_id,expires_at)
+            SELECT gen_random_uuid(),$1,'read',$2,now()+interval '1 minute'
+            FROM generate_series(1::bigint,(SELECT slots FROM capacity)) RETURNING token
+        )
+        INSERT INTO node_read_permits(token,read_id) SELECT token,$5 FROM allocated RETURNING token",
+    )
+    .bind(storage)
+    .bind(node)
+    .bind(limit)
+    .bind(wanted)
+    .bind(read)
 }
 
 pub(in super::super) fn own_read_permits(read: Uuid, tokens: &[Uuid]) -> Statement<'_> {

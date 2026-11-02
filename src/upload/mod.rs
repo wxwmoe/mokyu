@@ -397,18 +397,23 @@ impl App {
         }
         if let Some((source, writer)) = raw {
             let digest = hex::decode(&etag)?;
-            pages
-                .unwrap()
-                .finish(self.raw.as_ref(), received, &digest)
-                .await?;
-            let written = writer
-                .finish(
-                    stream,
-                    received as u64,
-                    &digest,
-                    capture.as_ref().map(|capture| capture.bytes.clone()),
-                )
-                .await?;
+            let seal = pages.unwrap().finish(self.raw.as_ref(), received, &digest);
+            let may_reuse = writer.may_reuse_source();
+            let write = writer.finish(
+                stream,
+                received as u64,
+                &digest,
+                capture.as_ref().map(|capture| capture.bytes.clone()),
+            );
+            let written = if may_reuse {
+                // Deduplication can retire this source while adopting another.
+                seal.await?;
+                write.await?
+            } else {
+                let (sealed, written) = tokio::join!(seal, write);
+                sealed?;
+                written?
+            };
             self.finish_raw_received(stream, source, storage, received, &digest, written)
                 .await?;
         } else if upload.is_some() {

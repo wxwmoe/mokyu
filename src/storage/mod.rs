@@ -1581,7 +1581,16 @@ impl Storage {
                         if !file.file_type().await?.is_file() {
                             continue;
                         }
-                        let len = file.metadata().await?.len();
+                        let len = match file.metadata().await {
+                            Ok(m) => m.len(),
+                            Err(e)
+                                if namespace == "cache"
+                                    && e.kind() == std::io::ErrorKind::NotFound =>
+                            {
+                                continue;
+                            }
+                            Err(e) => return Err(e.into()),
+                        };
                         let name = format!(
                             "{}/{}",
                             dir.file_name().to_string_lossy(),
@@ -3076,6 +3085,17 @@ mod tests {
         }
         assert_eq!(q.victim(200), None);
         assert!(q.ghosts.len() <= 1);
+    }
+    #[test]
+    fn pinned_partial_file_does_not_hide_an_evictable_complete_file() {
+        let mut fifo = Fifo::default();
+        let active = Uuid::from_u128(1);
+        let complete = Uuid::from_u128(2);
+        fifo.ghost.insert(complete);
+        fifo.insert(complete, 6, CacheFile::Raw);
+        fifo.insert(active, 2, CacheFile::PartialRaw);
+        fifo.entries[&active].pins.store(1, Ordering::Relaxed);
+        assert_eq!(fifo.victim(9), Some(complete));
     }
     #[test]
     fn fifo_failed_evictions_preserve_candidates_and_ghosts() {

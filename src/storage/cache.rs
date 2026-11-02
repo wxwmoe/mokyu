@@ -385,10 +385,14 @@ impl Fifo {
         Some(e)
     }
     pub(crate) fn victim(&mut self, capacity: u64) -> Option<Uuid> {
-        // A bounded scan also terminates when every candidate is pinned.
+        let mut pinned_small = 0;
+        let mut pinned_main = 0;
         for _ in 0..self.entries.len().saturating_mul(5).max(1) {
-            let small = (self.small_bytes > capacity / 10 || self.main.is_empty())
-                && !self.small.is_empty();
+            let small = pinned_small < self.small.len()
+                && (self.small_bytes > capacity / 10 || pinned_main >= self.main.len());
+            if !small && pinned_main >= self.main.len() {
+                return None;
+            }
             let id = if small {
                 self.small.pop_front()
             } else {
@@ -399,11 +403,18 @@ impl Fifo {
             };
             if e.file.is_pending() || e.pins.load(Ordering::Relaxed) > 0 {
                 if small {
+                    pinned_small += 1;
                     self.small.push_back(id);
                 } else {
+                    pinned_main += 1;
                     self.main.push_back(id);
                 }
                 continue;
+            }
+            if small {
+                pinned_small = 0;
+            } else {
+                pinned_main = 0;
             }
             if small && e.frequency > 1 {
                 e.queue = Queue::Main;

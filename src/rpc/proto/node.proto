@@ -791,6 +791,7 @@ message ReadRequest {
   CachedBody body = 13;
   string image_query = 14;
   uint32 read_lanes = 15;
+  ReadPermits permits = 16;
 }
 
 // The client pins these verified bytes until the request finishes.
@@ -811,6 +812,11 @@ message ReadCursor {
   uint64 end = 5;
 }
 
+message ReadPermits {
+  repeated string held = 1;
+  repeated string released = 2;
+}
+
 message ReadWindowRequest {
   Run run = 1;
   reserved 2;
@@ -819,6 +825,7 @@ message ReadWindowRequest {
   uint32 max_items = 5;
   uint32 max_bytes = 6;
   uint32 read_lanes = 7;
+  ReadPermits permits = 8;
 }
 
 enum ReadOutcome {

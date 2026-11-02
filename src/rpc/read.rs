@@ -85,6 +85,32 @@ pub(super) fn grant_result(result: read::GrantResult) -> wire::GrantResult {
     }
 }
 
+fn permits(value: Option<wire::ReadPermits>) -> Result<read::Permits, Status> {
+    let Some(value) = value else {
+        return Ok(Default::default());
+    };
+    if value.held.len() > read::LANES || value.released.len() > 128 {
+        return Err(invalid());
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut ids = |values: Vec<String>| {
+        values
+            .into_iter()
+            .map(|s| {
+                let id = super::uuid(&s)?;
+                if !seen.insert(id) {
+                    return Err(invalid());
+                }
+                Ok(id)
+            })
+            .collect::<Result<Vec<_>, Status>>()
+    };
+    Ok(read::Permits {
+        held: ids(value.held)?,
+        released: ids(value.released)?,
+    })
+}
+
 fn lanes(value: u32) -> Result<usize, Status> {
     if value as usize > read::LANES {
         return Err(invalid());
@@ -387,6 +413,7 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         max_items,
         max_bytes,
         lanes: lanes(input.read_lanes)?,
+        permits: permits(input.permits)?,
         body,
     })
 }
@@ -468,6 +495,7 @@ pub(super) fn window(input: wire::ReadWindowRequest) -> Result<read::Window, Sta
         max_items,
         max_bytes,
         lanes: lanes(input.read_lanes)?,
+        permits: permits(input.permits)?,
     })
 }
 

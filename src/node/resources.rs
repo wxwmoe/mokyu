@@ -43,6 +43,21 @@ impl Drop for LanePermit {
     }
 }
 
+pub(super) struct ReadOffer {
+    held: Vec<Arc<Grant>>,
+    pub(super) permits: Option<wire::ReadPermits>,
+}
+
+impl Drop for ReadOffer {
+    fn drop(&mut self) {
+        for grant in &self.held {
+            grant
+                .offers
+                .fetch_sub(1, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 pub(crate) struct Grant {
     pub(crate) reference: wire::GrantRef,
     pub(crate) storage: Option<Uuid>,
@@ -51,6 +66,7 @@ pub(crate) struct Grant {
     resources: Weak<Resources>,
     pub(crate) io: Arc<Semaphore>,
     lane: Mutex<Lane>,
+    offers: std::sync::atomic::AtomicUsize,
 }
 
 impl Grant {
@@ -72,7 +88,8 @@ impl Grant {
         matches!(*self.lane.lock().unwrap(), Lane::Returned)
     }
     fn spare_due(&self) -> Option<Instant> {
-        if self.io.available_permits() != 0
+        if self.offers.load(std::sync::atomic::Ordering::Acquire) == 0
+            && self.io.available_permits() != 0
             && let Lane::Spare(next) = *self.lane.lock().unwrap()
         {
             Some(next)
@@ -82,7 +99,8 @@ impl Grant {
     }
     fn take_idle(&self, now: Instant) -> bool {
         let mut lane = self.lane.lock().unwrap();
-        if matches!(*lane,Lane::Spare(next) if next<=now)
+        if self.offers.load(std::sync::atomic::Ordering::Acquire) == 0
+            && matches!(*lane,Lane::Spare(next) if next<=now)
             && let Ok(_unused) = self.io.clone().try_acquire_owned()
         {
             *lane = Lane::Returned;
@@ -172,6 +190,39 @@ fn prune(entries: &mut HashMap<Uuid, Entry>) {
 }
 
 impl Resources {
+    pub(super) fn read_offer(&self, run: &Arc<RunLease>) -> ReadOffer {
+        let mut entries = self.entries.lock().unwrap();
+        prune(&mut entries);
+        let mut pins = Vec::new();
+        let mut permits = wire::ReadPermits::default();
+        for (id, entry) in entries.iter().filter(|(_, entry)| {
+            entry.reference.r#type == wire::GrantType::StorageRead as i32
+                && Arc::ptr_eq(&entry.run, run)
+                && !entry.released
+        }) {
+            if let Some(grant) = entry
+                .held
+                .upgrade()
+                .filter(|g| !entry.retired && !g.returned())
+            {
+                if pins.len() < crate::model::node_read::LANES && grant.check().is_ok() {
+                    grant
+                        .offers
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    permits.held.push(id.to_string());
+                    pins.push(grant);
+                }
+            } else if permits.released.len() < 128 {
+                permits.released.push(id.to_string());
+            }
+        }
+        let used = !pins.is_empty() || !permits.released.is_empty();
+        ReadOffer {
+            held: pins,
+            permits: used.then_some(permits),
+        }
+    }
+
     pub(crate) fn active(&self) -> usize {
         let mut entries = self.entries.lock().unwrap();
         prune(&mut entries);
@@ -291,6 +342,7 @@ impl Resources {
                     resources: Arc::downgrade(self),
                     io: Arc::new(Semaphore::new(1)),
                     lane: Mutex::new(Lane::Unassigned),
+                    offers: 0.into(),
                 });
                 entries.insert(
                     id,

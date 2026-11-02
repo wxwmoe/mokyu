@@ -908,6 +908,13 @@ impl RawWriter<'_> {
         }
     }
 
+    pub fn may_reuse_source(&self) -> bool {
+        !matches!(
+            self,
+            Self::Local(_) | Self::Remote(RemoteWriter { hash: None, .. })
+        )
+    }
+
     pub fn can_assemble(&self) -> bool {
         matches!(self, Self::Local(_) | Self::Pending(_))
     }

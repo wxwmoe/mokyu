@@ -58,6 +58,9 @@ impl crate::storage::raw_partial::Shelf for Cache {
     fn fills(&self) -> &crate::runtime::locks::Locks<(Uuid, u64)> {
         &self.partial_fills
     }
+    fn promotion(&self, id: Uuid) -> Option<CacheWork> {
+        self.work(id, 1)
+    }
 }
 
 impl Cache {
@@ -325,7 +328,11 @@ impl Cache {
                             if !file.file_type().await?.is_file() {
                                 continue;
                             }
-                            let size = file.metadata().await?.len();
+                            let size = match file.metadata().await {
+                                Ok(m) => m.len(),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                                Err(e) => return Err(e.into()),
+                            };
                             let name = format!(
                                 "{}/{}",
                                 directory.file_name().to_string_lossy(),

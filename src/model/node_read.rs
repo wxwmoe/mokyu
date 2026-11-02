@@ -89,6 +89,12 @@ pub(crate) struct Material {
     pub(crate) json: Option<Vec<u8>>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct Permits {
+    pub(crate) held: Vec<Uuid>,
+    pub(crate) released: Vec<Uuid>,
+}
+
 #[derive(Clone)]
 pub(crate) struct Query {
     pub(crate) run: Run,
@@ -106,6 +112,7 @@ pub(crate) struct Query {
     pub(crate) max_items: usize,
     pub(crate) max_bytes: usize,
     pub(crate) lanes: usize,
+    pub(crate) permits: Permits,
     pub(crate) body: Option<CachedBody>,
 }
 
@@ -271,6 +278,7 @@ pub(crate) struct Window {
     pub(crate) max_items: usize,
     pub(crate) max_bytes: usize,
     pub(crate) lanes: usize,
+    pub(crate) permits: Permits,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

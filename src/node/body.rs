@@ -902,7 +902,7 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         }
                     }.map(|result|result.map_err(Arc::new)).boxed().shared();
                     let job=if let Some(group)=group { chunks.entry(group).or_insert(work).clone() } else {work};
-                    tasks.push(async move {(index,segment,job.await)});
+                    tasks.push(async move {(index,segment,crate::storage::read_retry::READ_AHEAD.scope(offset!=0,job).await)});
                 }
                 drop(packs);drop(chunks);
                 let mut ready=futures_util::stream::iter(tasks).buffered(read::LANES);
@@ -975,6 +975,8 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         backend.store.ensure_verified().await?;
                         file=RawFile::remote(backend.store.backend.clone(),source,reads.reader.gets.clone(),reads.reader.diagnostics.clone()).await?;
                         remote=file.remote_source();
+                        reads.reader.diagnostics.cache_invalid.fetch_add(1,Ordering::Relaxed);
+                        reads.reader.diagnostics.cache_fallback.fetch_add(1,Ordering::Relaxed);
                         reads.reader.files.reject(source.location_id).await;
                         continue;
                     }

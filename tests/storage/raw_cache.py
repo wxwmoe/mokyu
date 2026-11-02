@@ -85,11 +85,13 @@ def main():
         with ThreadPoolExecutor(max_workers=2) as pool:
             list(pool.map(lambda _: fixture.read('original', data), range(2)))
         after = status()
-        assert after['backend_gets'] - before['backend_gets'] == 2, (before, after)
+        # Two neighboring range GETs share one fill; each simultaneous reader may issue a HEAD.
+        assert 3 <= after['backend_gets'] - before['backend_gets'] <= 4, (before, after)
         assert after['backend_read_bytes'] - before['backend_read_bytes'] == len(data)
-        assert len(files()) == 1
-        cached = files()[0]
         original_source = source('original')
+        wait(lambda: files() == [cache_path(original_source)], 'raw cache promotion did not finish')
+        cached = files()[0]
+        after = status()
         assert cached == cache_path(original_source)
         assert cached.suffix == '' and stat.S_IMODE(cached.stat().st_mode) == 0o644
         assert cached.read_bytes() == data and after['local_bytes'][1] == len(data)
@@ -128,12 +130,15 @@ def main():
         before = status()
         fixture.read('original', data)
         after = status()
-        assert after['backend_gets'] - before['backend_gets'] == 2
+        assert after['backend_gets'] - before['backend_gets'] == 3
         assert after['io']['diagnostics']['cache']['invalid'] == before['io']['diagnostics']['cache']['invalid'] + 1
         assert after['io']['diagnostics']['content'] == before['io']['diagnostics']['content']
-        assert cached.read_bytes() == data and after['local_bytes'][1] == len(data)
+        wait(cached.exists, 'repaired raw cache was not promoted')
+        idle()
+        assert cached.read_bytes() == data and status()['local_bytes'][1] == len(data)
         cached.unlink()
         fixture.read('original', data)
+        wait(cached.exists, 'repaired raw cache was not promoted')
         assert cached.read_bytes() == data and status()['local_bytes'][1] == len(data)
         print('PASS corrupt and missing cache files fall back without quarantining a healthy source', flush=True)
 
@@ -149,15 +154,18 @@ def main():
                 before = status()
                 fixture.read('other', other)
                 assert cached.exists(), 'a pinned file was evicted'
-                assert status()['local_bytes'][1] == len(data)
-                assert status()['backend_read_bytes'] - before['backend_read_bytes'] == 2 * len(other)
+                assert len(data) <= status()['local_bytes'][1] <= 9 * 1024 * 1024
+                assert status()['backend_read_bytes'] - before['backend_read_bytes'] == len(other)
             finally:
                 marker.unlink(missing_ok=True)
             reading.result(timeout=30)
         fixture.read('other', other)
+        wait(cache_path(source('other')).exists, 'second file was not promoted after unpinning')
+        idle()
         assert not cached.exists() and status()['local_bytes'][1] == len(other)
         fixture.read('original', data)
-        assert cached.exists()
+        wait(cached.exists, 'first file was not promoted after eviction')
+        idle()
         print('PASS raw cache eviction shares the disk budget and keeps active readers valid', flush=True)
 
         # A healthy cached copy must not hide a corrupt backend from a full recheck.
@@ -199,12 +207,15 @@ def main():
         fixture.read('original', changed)
         assert status()['backend_gets'] - before['backend_gets'] == 2
         replacement = source('original')
+        wait(cache_path(replacement).exists, 'replacement did not reach the whole-file cache')
         assert replacement != original_source and cache_path(replacement).read_bytes() == changed
         fixture.client.copy_object(Bucket=fixture.name, Key='copy',
                                    CopySource={'Bucket': fixture.name, 'Key': 'original'})
+        before = status()
         fixture.read('copy', changed)
         copied = source('copy')
-        assert copied != replacement and cache_path(copied).read_bytes() == changed
+        assert copied == replacement and cache_path(copied).read_bytes() == changed
+        assert status()['backend_gets'] == before['backend_gets']
         print('PASS overwrite and CopyObject follow the current source rather than a logical-key cache', flush=True)
 
         configure(deduplication_enabled=True)
@@ -213,6 +224,7 @@ def main():
         fixture.read('shared-a', shared)
         canonical = source('shared-a')
         shared_file = cache_path(canonical)
+        wait(shared_file.exists, 'shared source was not promoted')
         inode = shared_file.stat().st_ino
         before = status()
         fixture.cold_put('shared-b', shared)
@@ -227,11 +239,12 @@ def main():
         print('PASS deduplicated references and profile revisions reuse the backend UUID and the same cached inode', flush=True)
 
         fixture.cold_put('empty', b'')
+        before = status()
         fixture.read('empty', b'')
-        assert any(path.stat().st_size == 0 for path in files())
+        assert status()['backend_read_bytes'] == before['backend_read_bytes']
         interrupted = b'interrupted cache fill' * 8192
         fixture.cold_put('interrupted', interrupted)
-        marker = fixture.arm('raw-cache-written')
+        marker = fixture.arm('raw-part-map')
         with ThreadPoolExecutor(max_workers=1) as pool:
             reading = pool.submit(fixture.read, 'interrupted', interrupted)
             try:
@@ -255,7 +268,7 @@ def main():
         configure(cache_enabled=False)
         before = status()
         fixture.read('original', changed)
-        assert status()['backend_gets'] - before['backend_gets'] == 3
+        assert status()['backend_gets'] - before['backend_gets'] == 2
         configure(cache_enabled=True)
         fixture.cli('storage', 'create', fixture.name + '-overlap', 'local', '--init',
                     '--path', str(data_path / 'cache' / 'raw'), succeeds=False)
@@ -294,6 +307,30 @@ def main():
         assert database.query('SELECT content_hash FROM raw_sources WHERE id=%s', source('background', native=True))[0]['content_hash'] is None
         fixture.client.delete_object(Bucket=fixture.name, Key='background')
         print('PASS background deduplication inspects the backend even when a healthy file is cached', flush=True)
+
+        configure(write_processing='inline', read_integrity='inline', deduplication_enabled=False)
+        page = 1024 * 1024
+        large = bytes(range(256)) * (12 * page // 256)
+        fixture.cold_put('partial', large)
+        for start_byte, end_byte, expected_origin in [(0, 4 * page, 4 * page),
+                                                     (2 * page, 6 * page, 2 * page),
+                                                     (0, 6 * page, 0)]:
+            previous = status()['backend_read_bytes']
+            with fixture.client.get_object(Bucket=fixture.name, Key='partial',
+                    Range=f'bytes={start_byte}-{end_byte - 1}')['Body'] as body:
+                assert body.read() == large[start_byte:end_byte]
+            assert status()['backend_read_bytes'] - previous == expected_origin
+        partial = cache_path(source('partial'))
+        assert partial.with_suffix('.part').is_file() and partial.with_suffix('.map').is_file()
+        assert not partial.exists()
+        stop(crash=True)
+        start()
+        previous = status()['backend_read_bytes']
+        with fixture.client.get_object(Bucket=fixture.name, Key='partial',
+                Range=f'bytes={page - 1}-{page}')['Body'] as body:
+            assert body.read() == large[page - 1:page + 1]
+        assert status()['backend_read_bytes'] == previous
+        print('PASS overlapping ranges of a source larger than cache fill only missing bytes and survive restart', flush=True)
     finally:
         for path in faults.glob('*'):
             if path.is_file() and path.suffix not in ('.hit', '.log'):
