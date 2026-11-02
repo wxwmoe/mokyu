@@ -214,6 +214,18 @@ impl Cache {
             let parsed_version = crate::rpc::read::cached(vec![version.clone()])?.remove(0);
             let key = (version.r#type, version.id.clone());
             ensure!(seen.insert(key.clone()), "duplicate read material");
+            let binary = parsed_version.r#type == read::MaterialType::RawPages;
+            ensure!(
+                match &value.value {
+                    Some(wire::material::Value::Binary(data)) =>
+                        binary
+                            && !data.is_empty()
+                            && data.len().is_multiple_of(crate::content::raw_pages::HASH),
+                    Some(wire::material::Value::Json(_)) => !binary,
+                    _ => true,
+                },
+                "invalid read material encoding"
+            );
             match value.value.context("read material value missing")? {
                 wire::material::Value::Reuse(true) => {
                     let held = declared
@@ -223,7 +235,7 @@ impl Cache {
                     held.referenced.store(true, Ordering::Relaxed);
                     parsed.push((key, version, None, Some(held.clone())));
                 }
-                wire::material::Value::Json(json) => {
+                wire::material::Value::Json(json) | wire::material::Value::Binary(json) => {
                     ensure!(
                         parsed_version
                             == read::Version::new(
@@ -427,6 +439,29 @@ impl Prepared {
         material(&self.materials, version)
     }
 
+    pub(crate) fn page_hashes(&self, segment: &read::Segment) -> Result<Option<&[u8]>> {
+        let Some(revision) = segment.page_revision else {
+            return Ok(None);
+        };
+        let read::Source::Raw { source } = &segment.source else {
+            anyhow::bail!("page proof requires a raw source")
+        };
+        let page = crate::content::raw_pages::PAGE as i64;
+        let first = segment.source_offset / page;
+        let count = (segment.source_offset + segment.length - 1) / page - first + 1;
+        let id = read::Segment::pages_id(source, first, count);
+        let item = self
+            .materials
+            .get(&(wire::MaterialType::RawPages as i32, id))
+            .filter(|value| value.version.revision == revision)
+            .context("raw page material missing")?;
+        ensure!(
+            item.json.len() == count as usize * crate::content::raw_pages::HASH,
+            "invalid raw page proof length"
+        );
+        Ok(Some(&item.json))
+    }
+
     pub(crate) fn memory(&self) -> Arc<OwnedSemaphorePermit> {
         self.memory.clone()
     }
@@ -536,6 +571,13 @@ impl Reads {
         }
         input.cached = cached(&declared);
         let public_route = crate::rpc::read::query(input.clone())?.route;
+        input.read_lanes = self
+            .node
+            .budget
+            .get()
+            .context("node budget missing")?
+            .storage_read_slots
+            .min(read::LANES) as u32;
         let limits = (input.max_items, input.max_bytes);
         let started = Instant::now();
         let mut reply = self.node.client.read(input).await?;
@@ -644,6 +686,13 @@ impl Reads {
                         cached: cached(&declared),
                         max_items: previous.limits.0,
                         max_bytes: previous.limits.1,
+                        read_lanes: self
+                            .node
+                            .budget
+                            .get()
+                            .context("node budget missing")?
+                            .storage_read_slots
+                            .min(read::LANES) as u32,
                     })
                     .await?;
                 reply.http_status = previous.reply.http_status;

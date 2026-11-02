@@ -85,6 +85,13 @@ pub(super) fn grant_result(result: read::GrantResult) -> wire::GrantResult {
     }
 }
 
+fn lanes(value: u32) -> Result<usize, Status> {
+    if value as usize > read::LANES {
+        return Err(invalid());
+    }
+    Ok(value.max(1) as usize)
+}
+
 fn limits(items: u32, bytes: u32) -> Result<(usize, usize), Status> {
     let items = if items == 0 {
         read::MAX_ITEMS
@@ -229,6 +236,7 @@ pub(crate) fn cached(values: Vec<wire::Cached>) -> Result<Vec<read::Version>, St
                 Ok(wire::MaterialType::ReadPolicy) => read::MaterialType::Policy,
                 Ok(wire::MaterialType::ImagePolicy) => read::MaterialType::ImagePolicy,
                 Ok(wire::MaterialType::ImageStyle) => read::MaterialType::ImageStyle,
+                Ok(wire::MaterialType::RawPages) => read::MaterialType::RawPages,
                 _ => return Err(invalid()),
             };
             if value.id.is_empty()
@@ -378,6 +386,7 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         cached: cached(input.cached)?,
         max_items,
         max_bytes,
+        lanes: lanes(input.read_lanes)?,
         body,
     })
 }
@@ -458,6 +467,7 @@ pub(super) fn window(input: wire::ReadWindowRequest) -> Result<read::Window, Sta
         cached: cached(input.cached)?,
         max_items,
         max_bytes,
+        lanes: lanes(input.read_lanes)?,
     })
 }
 
@@ -472,6 +482,7 @@ pub(crate) fn version(value: read::Version) -> wire::Cached {
         read::MaterialType::Policy => wire::MaterialType::ReadPolicy,
         read::MaterialType::ImagePolicy => wire::MaterialType::ImagePolicy,
         read::MaterialType::ImageStyle => wire::MaterialType::ImageStyle,
+        read::MaterialType::RawPages => wire::MaterialType::RawPages,
     };
     wire::Cached {
         r#type: r#type as i32,
@@ -521,9 +532,11 @@ pub(crate) fn reply(input: read::Reply) -> wire::ReadReply {
 }
 
 pub(super) fn material(value: read::Material) -> wire::Material {
+    let binary = value.version.r#type == read::MaterialType::RawPages;
     wire::Material {
         version: Some(version(value.version)),
         value: Some(match value.json {
+            Some(bytes) if binary => wire::material::Value::Binary(bytes),
             Some(json) => wire::material::Value::Json(json),
             None => wire::material::Value::Reuse(true),
         }),

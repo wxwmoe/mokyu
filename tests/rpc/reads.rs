@@ -53,7 +53,7 @@ fn apply(reply: &wire::ReadReply, held: &mut Held) -> Result<()> {
         assert_eq!(version.revision.len(), 32);
         let key = (version.r#type, version.id.clone());
         match material.value.as_ref().context("material value missing")? {
-            wire::material::Value::Json(json) => {
+            wire::material::Value::Json(json) | wire::material::Value::Binary(json) => {
                 held.insert(key, (version.clone(), json.clone()));
             }
             wire::material::Value::Reuse(true) => assert_eq!(

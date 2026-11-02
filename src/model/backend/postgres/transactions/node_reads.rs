@@ -39,7 +39,8 @@ async fn node_read_materials(
     db: &mut PgConnection,
     deployment: Uuid,
     key: &crate::content::codec::Key,
-    mapping: &crate::model::node_read::Mapping,
+    mapping: &mut crate::model::node_read::Mapping,
+    max_bytes: usize,
     cached: &[crate::model::node_read::Version],
     reply: &mut crate::model::node_read::Reply,
 ) -> Result<Vec<crate::model::node_read::Storage>> {
@@ -107,6 +108,48 @@ async fn node_read_materials(
             cached,
         )?;
     }
+    use crate::content::raw_pages::{HASH, PAGE};
+    let page = PAGE as i64;
+    let mut remaining = (max_bytes / HASH).clamp(1, 16384) as i64;
+    let mut end = mapping.end;
+    for segment in &mut mapping.segments {
+        let read::Source::Raw { source } = &segment.source else {
+            continue;
+        };
+        if !materials.iter().any(|s| {
+            s.connection.id == source.storage_id
+                && (s.profile.read_integrity == "inline" || s.profile.cache_enabled)
+        }) {
+            continue;
+        }
+        if remaining == 0 {
+            end = segment.offset;
+            break;
+        }
+        let first = segment.source_offset / page;
+        let last = (segment.source_offset + segment.length - 1) / page;
+        let take = (last - first + 1).min(remaining);
+        remaining -= take;
+        segment.page_revision =
+            super::super::raw_pages::read(db, source.id, source.size, first, take as usize)
+                .await?
+                .map(|bytes| {
+                    read::binary_material(
+                        &mut reply.materials,
+                        deployment,
+                        MaterialType::RawPages,
+                        read::Segment::pages_id(source, first, take),
+                        bytes,
+                        cached,
+                    )
+                    .revision
+                });
+        if take < last - first + 1 {
+            end = segment.offset + ((first + take) * page - segment.source_offset);
+            break;
+        }
+    }
+    mapping.truncate(end);
     reply.mapping = Some(reply.material(
         deployment,
         MaterialType::Mapping,
@@ -128,7 +171,7 @@ async fn node_read_body_matches(
     body: &crate::model::node_read::CachedBody,
 ) -> Result<bool> {
     use crate::model::node_read::{self as read, MaterialType, Outcome, Reply};
-    let mapping = node_read_mapping(
+    let mut mapping = node_read_mapping(
         db,
         node.node_id,
         stream,
@@ -142,7 +185,19 @@ async fn node_read_body_matches(
         return Ok(false);
     }
     let mut probe = Reply::new(Outcome::Ready);
-    node_read_materials(db, node.deployment_id, key, &mapping, &[], &mut probe).await?;
+    node_read_materials(
+        db,
+        node.deployment_id,
+        key,
+        &mut mapping,
+        read::TARGET_BYTES,
+        &[],
+        &mut probe,
+    )
+    .await?;
+    if mapping.end != stream.size {
+        return Ok(false);
+    }
     if !body.verified {
         for material in &probe.materials {
             if material.version.r#type == MaterialType::Storage {
@@ -169,71 +224,165 @@ async fn node_read_body_matches(
             .all(|version| body.storages.contains(version)))
 }
 
+async fn available_prefix(
+    db: &mut PgConnection,
+    node: &NodeState,
+    run: crate::model::session::Run,
+    mapping: &mut read::Mapping,
+    storages: &[read::Storage],
+) -> Result<bool> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let limits: BTreeMap<_, _> = storages
+        .iter()
+        .filter_map(|s| Some((s.connection.id, s.profile.read_concurrency?)))
+        .collect();
+    if limits.len() < 2 {
+        return Ok(false);
+    }
+    let mut available = BTreeSet::new();
+    for (id, limit) in limits {
+        queries::lock_storage_permits(format!("mokyu:store:{id}:read"))
+            .execute(&mut *db)
+            .await?;
+        let (count, local) = queries::read_capacity(node, run, id)
+            .fetch_one(&mut *db)
+            .await?;
+        if local || count < i64::from(limit) {
+            available.insert(id);
+        }
+    }
+    let mut included = BTreeSet::new();
+    for part in &mapping.segments {
+        if let Some(id) = part.source.storage()?
+            && storages
+                .iter()
+                .any(|s| s.connection.id == id && s.profile.read_concurrency.is_some())
+        {
+            included.insert(id);
+            if !available.contains(&id) || included.len() > read::LANES {
+                ensure!(part.offset > mapping.start, Error::NodeReadBusy);
+                mapping.truncate(part.offset);
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
 async fn node_read_permits(
     db: &mut PgConnection,
     node: Uuid,
     read: Uuid,
-    storages: &[crate::model::node_read::Storage],
+    storages: &[read::Storage],
+    mapping: &read::Mapping,
+    lanes: usize,
     shared: &mut std::collections::BTreeMap<Uuid, read::Grant>,
-) -> Result<Vec<crate::model::node_read::Grant>> {
-    use crate::model::{
-        Error,
-        node_read::{Grant, GrantType},
-    };
-    let mut grants = Vec::new();
-    for storage in storages {
-        let Some(limit) = storage.profile.read_concurrency else {
+) -> Result<Vec<read::Grant>> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut demand = BTreeMap::<Uuid, usize>::new();
+    let mut seen = BTreeSet::new();
+    for part in &mapping.segments {
+        let Some(storage) = part.source.storage()? else {
             continue;
         };
-        let id = storage.connection.id;
+        let pin = part.source.pin()?;
+        let count = match &part.source {
+            read::Source::Raw { .. } if part.length > crate::content::raw_pages::PAGE as i64 => {
+                (part.length as usize)
+                    .div_ceil(8 * crate::content::raw_pages::PAGE)
+                    .max(2)
+            }
+            _ if !seen.insert(pin) => 0,
+            _ => 1,
+        };
+        *demand.entry(storage).or_default() += count.min(read::LANES);
+    }
+    let limits: BTreeMap<_, _> = storages
+        .iter()
+        .filter_map(|s| Some((s.connection.id, s.profile.read_concurrency?)))
+        .filter(|(id, _)| demand.contains_key(id))
+        .collect();
+    ensure!(limits.len() <= read::LANES, Error::NodeReadLimit);
+    let mut desired: BTreeMap<_, usize> = limits.keys().map(|id| (*id, 1)).collect();
+    let mut left = lanes.saturating_sub(desired.len());
+    while left > 0 {
+        let before = left;
+        for (id, count) in &mut desired {
+            if left != 0 && *count < demand[id].min(limits[id] as usize) {
+                *count += 1;
+                left -= 1;
+            }
+        }
+        if left == before {
+            break;
+        }
+    }
+    let mut grants = Vec::new();
+    for (id, want) in desired {
         queries::lock_storage_permits(format!("mokyu:store:{id}:read"))
             .execute(&mut *db)
             .await?;
-        let (token, remaining) = if let Some(permit) = queries::node_read_permit(read, id)
-            .fetch_optional(&mut *db)
-            .await?
+        let owned = queries::node_read_permit(read, id)
+            .fetch_all(&mut *db)
+            .await?;
+        let count = queries::node_read_permit_count(read)
+            .fetch_one(&mut *db)
+            .await? as usize;
+        let want = want.min(read::LANES.saturating_sub(count) + owned.len());
+        ensure!(want > 0, Error::NodeReadLimit);
+        let mut tokens = owned;
+        if tokens.is_empty()
+            && let Some(first) = shared.get(&id)
         {
-            permit
-        } else if let Some(grant) = shared.get(&id) {
-            queries::node_read_own_permit(read, grant.id)
-                .execute(&mut *db)
-                .await?;
-            (grant.id, grant.valid_for_ms as i64)
-        } else {
+            tokens.push((first.id, first.valid_for_ms as i64));
+        }
+        tokens.truncate(want);
+        if tokens.len() < want {
             queries::expire_storage_permits(id, "read")
                 .execute(&mut *db)
                 .await?;
-            ensure!(
-                queries::node_read_permit_count(read)
-                    .fetch_one(&mut *db)
-                    .await?
-                    < 16,
-                Error::NodeReadLimit
-            );
-            ensure!(
-                queries::storage_permit_count(id, "read")
-                    .fetch_one(&mut *db)
-                    .await?
-                    < i64::from(limit),
-                Error::NodeReadBusy
-            );
-            let token = Uuid::new_v4();
-            queries::insert_storage_permit(token, id, "read", node)
-                .execute(&mut *db)
+            let used = queries::storage_permit_count(id, "read")
+                .fetch_one(&mut *db)
                 .await?;
-            queries::node_read_own_permit(read, token)
-                .execute(&mut *db)
-                .await?;
-            (token, 60_000)
-        };
-        let grant = Grant {
-            r#type: GrantType::StorageRead,
-            id: token,
-            valid_for_ms: remaining as u64,
-            storage: Some(id),
-        };
-        shared.entry(id).or_insert_with(|| grant.clone());
-        grants.push(grant);
+            let count = (i64::from(limits[&id]) - used).max(0) as usize;
+            let new: Vec<_> = (0..count.min(want - tokens.len()))
+                .map(|_| Uuid::new_v4())
+                .collect();
+            if !new.is_empty() {
+                queries::batch_read_permits(node, id, &new)
+                    .execute(&mut *db)
+                    .await?;
+                tokens.extend(new.into_iter().map(|id| (id, 60_000)));
+            }
+        }
+        if tokens.len() < want && lanes > 1 {
+            for item in queries::read_pool(read, id, want as i64)
+                .fetch_all(&mut *db)
+                .await?
+            {
+                if !tokens.iter().any(|&(token, _)| token == item.0) {
+                    tokens.push(item);
+                }
+                if tokens.len() == want {
+                    break;
+                }
+            }
+        }
+        ensure!(!tokens.is_empty(), Error::NodeReadBusy);
+        let ids: Vec<_> = tokens.iter().map(|&(id, _)| id).collect();
+        queries::own_read_permits(read, &ids)
+            .execute(&mut *db)
+            .await?;
+        for (token, remaining) in tokens {
+            let grant = read::Grant {
+                r#type: read::GrantType::StorageRead,
+                id: token,
+                valid_for_ms: remaining as u64,
+                storage: Some(id),
+            };
+            shared.entry(id).or_insert_with(|| grant.clone());
+            grants.push(grant);
+        }
     }
     Ok(grants)
 }
@@ -486,23 +635,21 @@ pub(super) async fn protect_node_read(
             tx,
             state.deployment_id,
             key,
-            &mapping,
+            &mut mapping,
+            input.max_bytes,
             &input.cached,
             &mut reply,
         )
         .await?;
-        if reply.bytes() + 1024 + storages.len() * 128 <= input.max_bytes {
+        if existing.is_none()
+            && available_prefix(tx, state, input.run, &mut mapping, &storages).await?
+        {
+            continue;
+        }
+        if reply.bytes() + 1024 + read::LANES * 128 <= input.max_bytes {
             break storages;
         }
-        ensure!(
-            existing.is_none() && mapping.segments.len() > 1,
-            Error::NodeReadLimit
-        );
-        mapping
-            .segments
-            .truncate(mapping.segments.len().div_ceil(2));
-        let last = mapping.segments.last().unwrap();
-        mapping.end = last.offset + last.length;
+        ensure!(existing.is_none() && mapping.shrink(), Error::NodeReadLimit);
     };
     let (id, remaining) = if let Some(previous) = previous {
         (previous.read_id, previous.valid_for_ms)
@@ -518,7 +665,16 @@ pub(super) async fn protect_node_read(
     } else {
         node_read_save_window(tx, id, &mapping).await?
     };
-    reply.grants = node_read_permits(tx, state.node_id, id, &storages, shared).await?;
+    reply.grants = node_read_permits(
+        tx,
+        state.node_id,
+        id,
+        &storages,
+        &mapping,
+        input.lanes,
+        shared,
+    )
+    .await?;
     reply.grants.extend([
         Grant {
             r#type: GrantType::Read,
@@ -743,23 +899,21 @@ pub(in super::super) async fn node_read_window(
             &mut tx,
             state.deployment_id,
             key,
-            &mapping,
+            &mut mapping,
+            input.max_bytes,
             &input.cached,
             &mut reply,
         )
         .await?;
-        if reply.bytes() + 1024 + storages.len() * 128 <= input.max_bytes {
+        if existing.is_none()
+            && available_prefix(&mut tx, state, input.run, &mut mapping, &storages).await?
+        {
+            continue;
+        }
+        if reply.bytes() + 1024 + read::LANES * 128 <= input.max_bytes {
             break storages;
         }
-        ensure!(
-            existing.is_none() && mapping.segments.len() > 1,
-            Error::NodeReadLimit
-        );
-        mapping
-            .segments
-            .truncate(mapping.segments.len().div_ceil(2));
-        let last = mapping.segments.last().unwrap();
-        mapping.end = last.offset + last.length;
+        ensure!(existing.is_none() && mapping.shrink(), Error::NodeReadLimit);
     };
     let window = if let Some((id, _)) = existing {
         id
@@ -771,6 +925,8 @@ pub(in super::super) async fn node_read_window(
         state.node_id,
         owned.read_id,
         &storages,
+        &mapping,
+        input.lanes,
         &mut Default::default(),
     )
     .await?;

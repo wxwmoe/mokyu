@@ -236,6 +236,38 @@ pub(in super::super) fn node_read_permit(read: Uuid, storage: Uuid) -> Rows<'sta
         .bind(read).bind(storage)
 }
 
+pub(in super::super) fn read_capacity(
+    node: &crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    storage: Uuid,
+) -> Rows<'static, (i64, bool)> {
+    sqlx::query_as("SELECT count(*),COALESCE(bool_or(p.holder_id=$1 AND EXISTS(SELECT 1 FROM node_read_permits n JOIN node_reads r ON r.read_id=n.read_id JOIN stream_leases l ON l.id=r.read_id WHERE n.token=p.token AND (r.node_id,r.credential_generation,r.boot_id,r.fence)=($1,$2,$3,$4) AND l.expires_at>clock_timestamp())),false) FROM storage_permits p WHERE p.storage_id=$5 AND p.direction='read' AND p.expires_at>clock_timestamp()")
+        .bind(node.node_id).bind(node.credential_generation).bind(run.boot).bind(run.fence).bind(storage)
+}
+
+pub(in super::super) fn read_pool(
+    read: Uuid,
+    storage: Uuid,
+    limit: i64,
+) -> Rows<'static, (Uuid, i64)> {
+    sqlx::query_as("SELECT p.token,GREATEST(0,(extract(epoch FROM (p.expires_at-clock_timestamp()))*1000)::bigint) FROM node_reads c JOIN storage_permits p ON p.holder_id=c.node_id WHERE c.read_id=$1 AND p.storage_id=$2 AND p.direction='read' AND p.expires_at>clock_timestamp() AND EXISTS(SELECT 1 FROM node_read_permits n JOIN node_reads r ON r.read_id=n.read_id JOIN stream_leases l ON l.id=r.read_id WHERE n.token=p.token AND (r.node_id,r.credential_generation,r.boot_id,r.fence)=(c.node_id,c.credential_generation,c.boot_id,c.fence) AND l.expires_at>clock_timestamp()) ORDER BY EXISTS(SELECT 1 FROM node_read_permits n WHERE n.read_id=c.read_id AND n.token=p.token) DESC,p.token LIMIT $3 FOR SHARE OF p")
+        .bind(read).bind(storage).bind(limit)
+}
+
+pub(in super::super) fn batch_read_permits<'q>(
+    node: Uuid,
+    storage: Uuid,
+    tokens: &'q [Uuid],
+) -> Statement<'q> {
+    sqlx::query("INSERT INTO storage_permits(token,storage_id,direction,holder_id,expires_at) SELECT token,$1,'read',$2,now()+interval '1 minute' FROM unnest($3::uuid[]) token")
+        .bind(storage).bind(node).bind(tokens)
+}
+
+pub(in super::super) fn own_read_permits(read: Uuid, tokens: &[Uuid]) -> Statement<'_> {
+    sqlx::query("INSERT INTO node_read_permits(token,read_id) SELECT token,$1 FROM unnest($2::uuid[]) token ON CONFLICT DO NOTHING")
+        .bind(read).bind(tokens)
+}
+
 pub(in super::super) fn node_read_own_permit(read: Uuid, token: Uuid) -> Statement<'static> {
     sqlx::query("INSERT INTO node_read_permits(token,read_id) VALUES($1,$2) ON CONFLICT DO NOTHING")
         .bind(token)

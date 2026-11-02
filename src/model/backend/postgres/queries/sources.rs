@@ -106,6 +106,7 @@ impl Sources {
                     Error::SourceUnavailable
                 );
                 segments.push(Segment {
+                    page_revision: None,
                     offset: row.range.offset_bytes,
                     length: row.range.length,
                     source_offset: row.range.source_offset,
@@ -171,6 +172,7 @@ impl Sources {
                     }
                 };
                 segments.push(Segment {
+                    page_revision: None,
                     offset: row.offset_bytes,
                     length: i64::from(row.length),
                     source_offset: i64::from(row.source_offset),

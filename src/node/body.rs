@@ -231,14 +231,23 @@ impl Reader {
         let local = if let Some(id) = storage {
             let backend = prepared.backend(id)?;
             if backend.profile.read_concurrency.is_some() {
-                let grant = prepared
+                let grants: Vec<_> = prepared
                     .grants
                     .iter()
-                    .find(|grant| grant.storage == Some(id))
-                    .context("storage read grant missing")?;
-                let permit = grant.io.clone().acquire_owned().await?;
-                grant.check()?;
-                Some(permit)
+                    .filter(|grant| grant.storage == Some(id))
+                    .collect();
+                ensure!(!grants.is_empty(), "storage read grant missing");
+                let acquire = |grant: &Arc<super::resources::Grant>| {
+                    let grant = grant.clone();
+                    async move {
+                        let permit = grant.io.clone().acquire_owned().await?;
+                        grant.check()?;
+                        Ok::<_, anyhow::Error>(permit)
+                    }
+                };
+                let mut waiting: futures_util::stream::FuturesUnordered<_> =
+                    grants.into_iter().map(acquire).collect();
+                Some(waiting.next().await.context("no storage read permit")??)
             } else {
                 None
             }
@@ -770,6 +779,9 @@ fn mapping(
             .context("read mapping missing")?,
     )?;
     validate_mapping(&value, stream, revision, start, end)?;
+    for segment in &value.segments {
+        prepared.page_hashes(segment)?;
+    }
     if let Some(cursor) = &prepared.reply.next {
         ensure!(
             cursor.stream_id == stream.to_string()

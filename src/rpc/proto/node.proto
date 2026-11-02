@@ -756,6 +756,7 @@ enum MaterialType {
   READ_POLICY = 7;
   IMAGE_POLICY = 8;
   IMAGE_STYLE = 9;
+  RAW_PAGES = 10;
 }
 
 // Revisions bind deployment, purpose, identity and material; never authorization.
@@ -770,6 +771,7 @@ message Material {
   oneof value {
     bytes json = 2;
     bool reuse = 3;
+    bytes binary = 4;
   }
 }
 
@@ -788,6 +790,7 @@ message ReadRequest {
   repeated ReadHeader overrides = 12;
   CachedBody body = 13;
   string image_query = 14;
+  uint32 read_lanes = 15;
 }
 
 // The client pins these verified bytes until the request finishes.
@@ -815,6 +818,7 @@ message ReadWindowRequest {
   repeated Cached cached = 4;
   uint32 max_items = 5;
   uint32 max_bytes = 6;
+  uint32 read_lanes = 7;
 }
 
 enum ReadOutcome {

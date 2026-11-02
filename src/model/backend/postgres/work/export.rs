@@ -116,6 +116,7 @@ pub(crate) async fn read(
         overrides: Default::default(),
         cached: input.cached,
         max_items: 256,
+        lanes: 1,
         max_bytes: read::TARGET_BYTES,
         body: None,
     };

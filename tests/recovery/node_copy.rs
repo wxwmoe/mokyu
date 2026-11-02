@@ -20,6 +20,7 @@ fn source(run: Run, key: &str) -> read::Query {
         overrides: Default::default(),
         cached: Vec::new(),
         max_items: read::MAX_ITEMS,
+        lanes: 1,
         max_bytes: read::TARGET_BYTES,
         body: None,
     }

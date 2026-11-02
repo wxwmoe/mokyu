@@ -36,6 +36,7 @@ fn request(run: Run) -> read::Query {
         overrides: HeaderMap::new(),
         cached: Vec::new(),
         max_items: read::MAX_ITEMS,
+        lanes: 1,
         max_bytes: read::TARGET_BYTES,
         body: None,
     }
@@ -466,6 +467,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         cursor,
         cached: Vec::new(),
         max_items: 2,
+        lanes: 1,
         max_bytes: read::TARGET_BYTES,
     };
     assert!(
@@ -933,6 +935,166 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             && denied.credential.is_none()
             && denied.object.is_none()
     );
+    sqlx::query("UPDATE s3_credentials SET enabled=true WHERE access_key_id='reader'")
+        .execute(&pool)
+        .await?;
+    let scoped = |run, key: &str| {
+        let mut q = request(run);
+        q.route = model::ReadRoute::Bucket {
+            name: "reads".into(),
+            key: key.into(),
+            alias: None,
+        };
+        q.lanes = read::LANES;
+        q
+    };
+    let batch: Uuid = sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag,public_read,metadata) VALUES($1,'batch','object','ready',65536,'batch',true,'{}') RETURNING id")
+        .bind(bucket).fetch_one(&pool).await?;
+    sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,'batch',$2,uuidv7())").bind(bucket).bind(batch).execute(&pool).await?;
+    sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id) SELECT $1,(row_number() OVER (ORDER BY c.id)-1)*4096,4096,c.id FROM chunks c JOIN chunk_encodings e ON e.chunk_id=c.id AND e.state='ready' WHERE c.state='ready' ORDER BY c.id LIMIT 16")
+        .bind(batch).execute(&pool).await?;
+    let mut seq = 9;
+    for cap in [1i32, 3, 16] {
+        sqlx::query("UPDATE storage_profiles SET read_concurrency=$2 WHERE storage_id=$1")
+            .bind(storage)
+            .bind(cap)
+            .execute(&pool)
+            .await?;
+        let q = scoped(session.run, "batch");
+        let a = backend.open_read(&node, &key, q.clone()).await?;
+        let b = backend.open_read(&node, &key, q).await?;
+        let c = backend
+            .open_read(&node, &key, scoped(session.run, "batch"))
+            .await?;
+        let ids = |r: &read::Reply| {
+            r.grants
+                .iter()
+                .filter(|g| g.r#type == read::GrantType::StorageRead)
+                .map(|g| g.id)
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(ids(&a).len(), cap as usize);
+        assert_eq!(ids(&a), ids(&b));
+        assert_eq!(ids(&a), ids(&c));
+        assert_eq!(active(&pool).await?, (2, 2, i64::from(cap)));
+        assert!(matches!(
+            backend
+                .open_read(&peer, &key, scoped(peer_run.run, "batch"))
+                .await
+                .err()
+                .as_ref()
+                .and_then(model::error),
+            Some(model::Error::NodeReadBusy)
+        ));
+        for (index, r) in [&a, &c].into_iter().enumerate() {
+            backend
+                .pulse_session(
+                    &node,
+                    &key,
+                    session.run,
+                    session.epoch,
+                    seq,
+                    false,
+                    read::KeepAlive {
+                        renew: vec![],
+                        release: vec![reference(r, read::GrantType::Read)],
+                    },
+                )
+                .await?;
+            seq += 1;
+            if index == 0 {
+                assert_eq!(active(&pool).await?, (1, 1, i64::from(cap)));
+            }
+        }
+    }
+    let size = 1024i64 * 1024 * 1024;
+    let raw: Uuid=sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,payload_type,size,etag,public_read,metadata) VALUES($1,'pages','object','ready','raw',$2,'pages',true,'{}') RETURNING id")
+        .bind(bucket).bind(size).fetch_one(&pool).await?;
+    sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,'pages',$2,uuidv7())").bind(bucket).bind(raw).execute(&pool).await?;
+    let src:Uuid=sqlx::query_scalar("INSERT INTO raw_sources(storage_id,state,medium,size,digest,profile_revision,page_count) VALUES($1,'ready','shared_s3',$2,decode(md5('test'),'hex'),1,1024) RETURNING id")
+        .bind(storage).bind(size).fetch_one(&pool).await?;
+    sqlx::query(
+        "INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id) VALUES($1,0,$2,$3)",
+    )
+    .bind(raw)
+    .bind(size)
+    .bind(src)
+    .execute(&pool)
+    .await?;
+    sqlx::query("INSERT INTO raw_page_groups(source_id,group_no,hashes) SELECT $1,g,decode(repeat('ab',8192),'hex') FROM generate_series(0,3) g").bind(src).execute(&pool).await?;
+    sqlx::query("UPDATE storage_profiles SET read_integrity='inline' WHERE storage_id=$1")
+        .bind(storage)
+        .execute(&pool)
+        .await?;
+    let mut q = scoped(session.run, "pages");
+    q.max_bytes = 16 * 1024;
+    let first = backend.open_read(&node, &key, q).await?;
+    let lease = reference(&first, read::GrantType::Read);
+    let mut reply = first;
+    let mut seen = 0;
+    loop {
+        let m: read::Mapping = material(&reply, read::MaterialType::Mapping)?;
+        assert_eq!(m.start, seen);
+        assert_eq!(m.segments.len(), 1);
+        let proof = reply
+            .materials
+            .iter()
+            .find(|v| v.version.r#type == read::MaterialType::RawPages)
+            .unwrap();
+        assert_eq!(m.segments[0].page_revision, Some(proof.version.revision));
+        let hash = proof.json.clone().unwrap();
+        assert_eq!(
+            hash,
+            vec![0xab; ((m.end - m.start) / 1024 / 1024 * 32) as usize]
+        );
+        assert!(m.end > seen && reply.bytes() <= 16 * 1024);
+        seen = m.end;
+        backend
+            .pulse_session(
+                &node,
+                &key,
+                session.run,
+                session.epoch,
+                seq,
+                false,
+                read::KeepAlive {
+                    renew: vec![],
+                    release: vec![reference(&reply, read::GrantType::Window)],
+                },
+            )
+            .await?;
+        seq += 1;
+        let Some(cursor) = reply.next else { break };
+        reply = backend
+            .read_window(
+                &node,
+                &key,
+                read::Window {
+                    run: session.run,
+                    cursor,
+                    cached: vec![],
+                    max_items: read::MAX_ITEMS,
+                    max_bytes: 16 * 1024,
+                    lanes: 16,
+                },
+            )
+            .await?;
+    }
+    assert_eq!(seen, size);
+    backend
+        .pulse_session(
+            &node,
+            &key,
+            session.run,
+            session.epoch,
+            seq,
+            false,
+            read::KeepAlive {
+                renew: vec![],
+                release: vec![lease],
+            },
+        )
+        .await?;
     assert_eq!(active(&pool).await?, (0, 0, 0));
     Ok(())
 }

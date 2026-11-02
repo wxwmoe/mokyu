@@ -12,6 +12,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub(crate) const MAX_ITEMS: usize = 1024;
+pub(crate) const LANES: usize = 16;
 pub(crate) const MAX_CACHED: usize = 256;
 pub(crate) const TARGET_BYTES: usize = 1024 * 1024;
 pub(crate) const READ_SECONDS: i64 = 90;
@@ -35,6 +36,7 @@ pub(crate) enum MaterialType {
     Policy,
     ImagePolicy,
     ImageStyle,
+    RawPages,
 }
 
 impl MaterialType {
@@ -49,6 +51,7 @@ impl MaterialType {
             Self::Policy => "read-policy",
             Self::ImagePolicy => "image-policy",
             Self::ImageStyle => "image-style",
+            Self::RawPages => "raw-pages",
         }
     }
 }
@@ -102,6 +105,7 @@ pub(crate) struct Query {
     pub(crate) cached: Vec<Version>,
     pub(crate) max_items: usize,
     pub(crate) max_bytes: usize,
+    pub(crate) lanes: usize,
     pub(crate) body: Option<CachedBody>,
 }
 
@@ -164,6 +168,7 @@ impl Query {
             self.mapping,
             self.protection,
             self.policy,
+            self.lanes,
             self.route.image(),
             headers(&self.headers),
             headers(&self.overrides),
@@ -265,6 +270,7 @@ pub(crate) struct Window {
     pub(crate) cached: Vec<Version>,
     pub(crate) max_items: usize,
     pub(crate) max_bytes: usize,
+    pub(crate) lanes: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -420,7 +426,24 @@ pub(crate) fn material(
     value: &impl Serialize,
     cached: &[Version],
 ) -> Result<Version> {
-    let json = serde_json::to_vec(value)?;
+    Ok(binary_material(
+        materials,
+        deployment,
+        r#type,
+        id,
+        serde_json::to_vec(value)?,
+        cached,
+    ))
+}
+
+pub(crate) fn binary_material(
+    materials: &mut Vec<Material>,
+    deployment: Uuid,
+    r#type: MaterialType,
+    id: String,
+    json: Vec<u8>,
+    cached: &[Version],
+) -> Version {
     let version = Version::new(deployment, r#type, id, &json);
     if !materials.iter().any(|material| material.version == version) {
         materials.push(Material {
@@ -428,7 +451,7 @@ pub(crate) fn material(
             version: version.clone(),
         });
     }
-    Ok(version)
+    version
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -619,10 +642,18 @@ impl Source {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Segment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) page_revision: Option<[u8; 32]>,
     pub(crate) offset: i64,
     pub(crate) length: i64,
     pub(crate) source_offset: i64,
     pub(crate) source: Source,
+}
+
+impl Segment {
+    pub(crate) fn pages_id(source: &RawSource, first: i64, count: i64) -> String {
+        format!("{}:{}:{first}:{count}", source.location_id, source.revision)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -633,6 +664,42 @@ pub(crate) struct Mapping {
     pub(crate) start: i64,
     pub(crate) end: i64,
     pub(crate) segments: Vec<Segment>,
+}
+
+impl Mapping {
+    pub(crate) fn truncate(&mut self, end: i64) {
+        self.end = self.end.min(end);
+        self.segments.retain(|part| part.offset < self.end);
+        if let Some(last) = self.segments.last_mut() {
+            last.length = last.length.min(self.end - last.offset);
+        }
+    }
+
+    pub(crate) fn shrink(&mut self) -> bool {
+        if self.segments.len() > 1 {
+            let last = &self.segments[self.segments.len().div_ceil(2) - 1];
+            self.truncate(last.offset + last.length);
+            return true;
+        }
+        let Some(part) = self.segments.first() else {
+            return false;
+        };
+        if !matches!(part.source, Source::Raw { .. }) {
+            return false;
+        }
+        let page = crate::content::raw_pages::PAGE as i64;
+        let start = part.source_offset;
+        let end = start + part.length;
+        let middle_page = start / page + (((end - 1) / page) - start / page) / 2 + 1;
+        let Some(mid) = middle_page.checked_mul(page) else {
+            return false;
+        };
+        if mid >= end {
+            return false;
+        }
+        self.truncate(part.offset + mid - start);
+        true
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

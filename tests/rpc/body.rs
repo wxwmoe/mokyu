@@ -4,6 +4,7 @@ use super::*;
 fn mappings_reject_gaps_overflow_and_source_range_escape() {
     let id = Uuid::new_v4();
     let segment = read::Segment {
+        page_revision: None,
         offset: 10,
         length: 3,
         source_offset: 2,
