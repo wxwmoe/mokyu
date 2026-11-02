@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102214049.
+-- Generated from the complete sqlite migration chain through 20261102220116.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -466,10 +466,23 @@ CREATE TABLE node_work (
     PRIMARY KEY (node_id,operation_id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE node_write_batches (
+    node_id BLOB NOT NULL,
+    operation_id BLOB NOT NULL,
+    batch_id INTEGER NOT NULL,
+    request_hash BLOB NOT NULL,
+    end_bytes INTEGER NOT NULL,
+    plan TEXT NOT NULL,
+    ready INTEGER NOT NULL DEFAULT 0,
+    commit_hash BLOB,
+    PRIMARY KEY (node_id,operation_id,batch_id),
+    FOREIGN KEY (node_id,operation_id) REFERENCES node_writes(node_id,operation_id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE node_write_permits (
     token BLOB NOT NULL PRIMARY KEY,
     node_id BLOB NOT NULL,
-    operation_id BLOB NOT NULL,
+    operation_id BLOB NOT NULL, batch_id INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (token) REFERENCES storage_permits(token) ON DELETE CASCADE,
     FOREIGN KEY (node_id,operation_id) REFERENCES node_writes(node_id,operation_id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;

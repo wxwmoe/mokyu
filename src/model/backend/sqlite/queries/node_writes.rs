@@ -90,17 +90,30 @@ pub(in super::super) async fn raw_source(
 pub(in super::super) fn pool_load(storage: Uuid) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT count(*) FROM storage_permits WHERE storage_id=? AND direction='upload' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)").bind(storage)
 }
-pub(in super::super) fn permits(node: Uuid, op: Uuid, storage: Uuid) -> Rows<'static, (Uuid, i64)> {
-    sqlx::query_as("SELECT p.token,max(0,(p.expires_at-CAST(unixepoch('subsec')*1000000 AS INTEGER))/1000) FROM storage_permits p JOIN node_write_permits n ON n.token=p.token WHERE n.node_id=? AND n.operation_id=? AND p.storage_id=? AND p.direction='upload' AND p.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER) ORDER BY p.token").bind(node).bind(op).bind(storage)
+pub(in super::super) fn permits(
+    node: Uuid,
+    op: Uuid,
+    storage: Uuid,
+    batch: i64,
+) -> Rows<'static, (Uuid, i64)> {
+    sqlx::query_as("SELECT p.token,max(0,(p.expires_at-CAST(unixepoch('subsec')*1000000 AS INTEGER))/1000) FROM storage_permits p JOIN node_write_permits n ON n.token=p.token WHERE n.node_id=? AND n.operation_id=? AND n.batch_id=? AND p.storage_id=? AND p.direction='upload' AND p.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER) ORDER BY p.token").bind(node).bind(op).bind(batch).bind(storage)
 }
 pub(in super::super) fn permit(token: Uuid, storage: Uuid, node: Uuid) -> Statement<'static> {
     sqlx::query("INSERT INTO storage_permits(token,storage_id,direction,holder,expires_at) VALUES(?,?,'upload',?,CAST(unixepoch('subsec')*1000000 AS INTEGER)+60000000)").bind(token).bind(storage).bind(node)
 }
-pub(in super::super) fn assign(token: Uuid, node: Uuid, op: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO node_write_permits(token,node_id,operation_id) VALUES(?,?,?)")
-        .bind(token)
-        .bind(node)
-        .bind(op)
+pub(in super::super) fn assign(
+    token: Uuid,
+    node: Uuid,
+    op: Uuid,
+    batch: i64,
+) -> Statement<'static> {
+    sqlx::query(
+        "INSERT INTO node_write_permits(token,node_id,operation_id,batch_id) VALUES(?,?,?,?)",
+    )
+    .bind(token)
+    .bind(node)
+    .bind(op)
+    .bind(batch)
 }
 pub(in super::super) fn release(node: Uuid, op: Uuid) -> Statement<'static> {
     sqlx::query("DELETE FROM storage_permits WHERE token IN (SELECT token FROM node_write_permits WHERE node_id=? AND operation_id=?)").bind(node).bind(op)
@@ -116,4 +129,50 @@ pub(in super::super) fn touch_permit(
 
 pub(in super::super) fn replica(publication: Uuid, node: Uuid, op: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE replica_publications SET intent=json_set(intent,'$.node',json_array(?,?)) WHERE id=? AND phase='preparing'").bind(node.to_string()).bind(op.to_string()).bind(publication)
+}
+
+pub(in super::super) fn release_batch(node: Uuid, op: Uuid, batch: i64) -> Statement<'static> {
+    sqlx::query("DELETE FROM storage_permits WHERE token IN (SELECT token FROM node_write_permits WHERE node_id=? AND operation_id=? AND batch_id=?)").bind(node).bind(op).bind(batch)
+}
+pub(in super::super) fn batch(
+    node: Uuid,
+    op: Uuid,
+    batch: i64,
+) -> Rows<'static, super::super::node_writes::Batch> {
+    sqlx::query_as(
+        "SELECT * FROM node_write_batches WHERE node_id=? AND operation_id=? AND batch_id=?",
+    )
+    .bind(node)
+    .bind(op)
+    .bind(batch)
+}
+pub(in super::super) fn pending(node: Uuid, op: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_write_batches WHERE node_id=? AND operation_id=? AND commit_hash IS NULL").bind(node).bind(op)
+}
+pub(in super::super) fn add_batch<'a>(
+    node: Uuid,
+    op: Uuid,
+    batch: i64,
+    hash: &'a [u8],
+    end: i64,
+    plan: &'a [crate::model::node_chunk::Item],
+    committed: bool,
+) -> Statement<'a> {
+    sqlx::query("INSERT INTO node_write_batches(node_id,operation_id,batch_id,request_hash,end_bytes,plan,ready,commit_hash) VALUES(?,?,?,?,?,?,?,?)").bind(node).bind(op).bind(batch).bind(hash).bind(end).bind(Json(plan)).bind(committed).bind(committed.then_some(hash))
+}
+pub(in super::super) fn activate<'a>(
+    node: Uuid,
+    op: Uuid,
+    batch: i64,
+    plan: &'a [crate::model::node_chunk::Item],
+) -> Statement<'a> {
+    sqlx::query("UPDATE node_write_batches SET ready=TRUE,plan=? WHERE node_id=? AND operation_id=? AND batch_id=? AND NOT ready").bind(Json(plan)).bind(node).bind(op).bind(batch)
+}
+pub(in super::super) fn commit_batch<'a>(
+    node: Uuid,
+    op: Uuid,
+    batch: i64,
+    hash: &'a [u8],
+) -> Statement<'a> {
+    sqlx::query("UPDATE node_write_batches SET commit_hash=? WHERE node_id=? AND operation_id=? AND batch_id=? AND ready AND commit_hash IS NULL").bind(hash).bind(node).bind(op).bind(batch)
 }

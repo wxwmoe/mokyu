@@ -106,24 +106,34 @@ pub(in super::super) async fn reference_chunk(
     size: i32,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    writing_stream(&mut tx, stream).await?;
+    reference_chunk_in(&mut tx, stream, offset, chunk, size).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn reference_chunk_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    stream: Id,
+    offset: i64,
+    chunk: Id,
+    size: i32,
+) -> Result<()> {
+    writing_stream(tx, stream).await?;
     ensure!(
-        queries::lock_chunk(chunk).fetch_one(&mut *tx).await? == "ready",
+        queries::lock_chunk(chunk).fetch_one(&mut **tx).await? == "ready",
         crate::model::Error::OperationAborted
     );
-    require_sources(&mut tx, None, &[chunk]).await?;
+    require_sources(tx, None, &[chunk]).await?;
     queries::insert_chunk_extent(stream, offset, size, chunk)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    queries::changed_references(&mut tx, &[chunk], true).await?;
-    queries::pin_chunk(chunk, stream).execute(&mut *tx).await?;
+    queries::changed_references(tx, &[chunk], true).await?;
+    queries::pin_chunk(chunk, stream).execute(&mut **tx).await?;
     queries::attach_pending_upload(chunk, stream, offset)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::resize_writing_stream(stream, offset + i64::from(size))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -134,18 +144,28 @@ pub(in super::super) async fn complete_chunk_write(
     chunk: &Chunk,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    writing_stream(&mut tx, stream).await?;
+    complete_chunk_write_in(&mut tx, stream, offset, chunk).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn complete_chunk_write_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    stream: Id,
+    offset: i64,
+    chunk: &Chunk,
+) -> Result<()> {
+    writing_stream(tx, stream).await?;
     ensure!(
         queries::allocated_source(stream, chunk)
             .build_query_scalar::<i64>()
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             .is_some(),
         crate::model::Error::OperationAborted
     );
     ensure!(
         queries::complete_chunk(chunk)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
@@ -153,19 +173,18 @@ pub(in super::super) async fn complete_chunk_write(
     );
     ensure!(
         queries::complete_encoding(chunk.encoding_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
         crate::model::Error::OperationAborted
     );
     queries::insert_chunk_extent(stream, offset, chunk.raw_size, chunk.id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     queries::resize_writing_stream(stream, offset + i64::from(chunk.raw_size))
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -212,10 +231,19 @@ pub(in super::super) async fn start_chunk_upload(
     chunk: &Chunk,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    writing_stream(&mut tx, stream).await?;
+    start_chunk_upload_in(&mut tx, stream, chunk).await?;
+    tx.commit().await?;
+    Ok(())
+}
+pub(in super::super) async fn start_chunk_upload_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    stream: Id,
+    chunk: &Chunk,
+) -> Result<()> {
+    writing_stream(tx, stream).await?;
     ensure!(
         queries::mark_chunk_uploading(stream, chunk)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
@@ -223,14 +251,13 @@ pub(in super::super) async fn start_chunk_upload(
     );
     ensure!(
         queries::register_encoding(chunk)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
         crate::model::Error::OperationAborted
     );
-    queries::refresh_encoding_fingerprint(&mut tx, chunk.encoding_id).await?;
-    tx.commit().await?;
+    queries::refresh_encoding_fingerprint(tx, chunk.encoding_id).await?;
     Ok(())
 }
 

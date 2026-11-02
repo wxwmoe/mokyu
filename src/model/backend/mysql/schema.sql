@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102214049.
+-- Generated from the complete mysql migration chain through 20261102220116.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -618,10 +618,24 @@ CREATE TABLE `node_work` (
   CONSTRAINT `node_work_task_fk` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `node_write_batches` (
+  `node_id` binary(16) NOT NULL,
+  `operation_id` binary(16) NOT NULL,
+  `batch_id` bigint NOT NULL,
+  `request_hash` binary(32) NOT NULL,
+  `end_bytes` bigint NOT NULL,
+  `plan` json NOT NULL,
+  `ready` tinyint(1) NOT NULL DEFAULT '0',
+  `commit_hash` binary(32) DEFAULT NULL,
+  PRIMARY KEY (`node_id`,`operation_id`,`batch_id`),
+  CONSTRAINT `node_write_batches_ibfk_1` FOREIGN KEY (`node_id`, `operation_id`) REFERENCES `node_writes` (`node_id`, `operation_id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `node_write_permits` (
   `token` binary(16) NOT NULL,
   `node_id` binary(16) NOT NULL,
   `operation_id` binary(16) NOT NULL,
+  `batch_id` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`token`),
   KEY `node_id` (`node_id`,`operation_id`),
   CONSTRAINT `node_write_permits_ibfk_1` FOREIGN KEY (`token`) REFERENCES `storage_permits` (`token`) ON DELETE CASCADE,

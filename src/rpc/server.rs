@@ -438,9 +438,9 @@ impl NodeWrites for Service {
     ) -> Result<Response<wire::PreparedChunks>, Status> {
         let node = write_identity(&request)?;
         let input = super::write::prepare(write_request(request)?)?;
-        let cluster = self.app.cluster().map_err(failure)?;
+        let writes = &self.app.node_writes;
         let assembly =
-            bounded(cluster.prepare_chunks(&node, &self.app.secrets.credential_key, input.clone()))
+            bounded(writes.prepare_chunks(&node, &self.app.secrets.credential_key, input.clone()))
                 .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-chunks-allocated").await;
@@ -469,13 +469,9 @@ impl NodeWrites for Service {
                 }
             }
         }
-        let reply = bounded(cluster.activate_chunks(
-            &node,
-            &self.app.secrets.credential_key,
-            input,
-            nonces,
-        ))
-        .await?;
+        let reply =
+            bounded(writes.activate_chunks(&node, &self.app.secrets.credential_key, input, nonces))
+                .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-chunks-prepared").await;
         Ok(Response::new(super::write::prepared(reply)?))
@@ -488,7 +484,7 @@ impl NodeWrites for Service {
         let node = write_identity(&request)?;
         let input = super::write::commit(write_request(request)?)?;
         let batch_id = input.batch as u64;
-        let end = bounded(self.app.cluster().map_err(failure)?.commit_chunks(
+        let end = bounded(self.app.node_writes.commit_chunks(
             &node,
             &self.app.secrets.credential_key,
             input,
@@ -509,7 +505,7 @@ impl NodeWrites for Service {
         let node = data_identity(&request)?;
         let input = super::write::copy(write_request(request)?)?;
         let batch_id = input.batch as u64;
-        let end = bounded(self.app.cluster().map_err(failure)?.copy_write_references(
+        let end = bounded(self.app.node_writes.copy_write_references(
             &node,
             &self.app.secrets.credential_key,
             input,

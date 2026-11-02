@@ -767,14 +767,15 @@ pub(super) async fn node_write_permits(
 }
 
 pub(in super::super) async fn prepare_node_chunks(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: chunk::Prepare,
 ) -> Result<chunk::Assembly> {
     let end = input.end()?;
     let hash = input.hash()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     if let Some(batch) = queries::node_write_batch(node.node_id, input.operation, input.batch)
         .fetch_optional(&mut *tx)
@@ -900,14 +901,15 @@ pub(in super::super) async fn prepare_node_chunks(
 }
 
 pub(in super::super) async fn activate_node_chunks(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: chunk::Prepare,
     nonces: Vec<chunk::Nonce>,
 ) -> Result<chunk::Prepared> {
     let hash = input.hash()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     let mut batch = queries::node_write_batch(node.node_id, input.operation, input.batch)
         .fetch_optional(&mut *tx)
@@ -1020,13 +1022,14 @@ pub(in super::super) async fn activate_node_chunks(
 }
 
 pub(in super::super) async fn commit_node_chunks(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     mut input: chunk::Commit,
 ) -> Result<i64> {
     let hash = input.hash()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     let batch = queries::node_write_batch(node.node_id, input.operation, input.batch)
         .fetch_optional(&mut *tx)
@@ -1104,13 +1107,14 @@ pub(in super::super) async fn commit_node_chunks(
 }
 
 pub(in super::super) async fn copy_node_references(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
     input: write::CopyBatch,
 ) -> Result<i64> {
     let hash = input.hash()?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
     if let Some(batch) = queries::node_write_batch(node.node_id, input.operation, input.batch)
         .fetch_optional(&mut *tx)

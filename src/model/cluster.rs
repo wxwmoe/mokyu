@@ -176,6 +176,31 @@ pub(crate) trait StoragePermits: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeWrites: Send + Sync {
+    async fn prepare_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_chunk::Prepare,
+    ) -> Result<super::node_chunk::Assembly>;
+    async fn activate_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_chunk::Prepare,
+        nonces: Vec<super::node_chunk::Nonce>,
+    ) -> Result<super::node_chunk::Prepared>;
+    async fn commit_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_chunk::Commit,
+    ) -> Result<i64>;
+    async fn copy_write_references(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_write::CopyBatch,
+    ) -> Result<i64>;
     async fn begin_write(
         &self,
         node: &NodeState,
@@ -324,31 +349,6 @@ pub(crate) trait ClusterStore:
         key: &Key,
         input: super::node_write::Lookup,
     ) -> Result<super::node_tail::Prepared>;
-    async fn prepare_chunks(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_chunk::Prepare,
-    ) -> Result<super::node_chunk::Assembly>;
-    async fn activate_chunks(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_chunk::Prepare,
-        nonces: Vec<super::node_chunk::Nonce>,
-    ) -> Result<super::node_chunk::Prepared>;
-    async fn commit_chunks(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_chunk::Commit,
-    ) -> Result<i64>;
-    async fn copy_write_references(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::node_write::CopyBatch,
-    ) -> Result<i64>;
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
     async fn begin_remote(
         &self,

@@ -42,6 +42,14 @@ pub(super) struct Write {
     remaining: i64,
 }
 #[derive(sqlx::FromRow)]
+pub(super) struct Batch {
+    request_hash: Vec<u8>,
+    end_bytes: i64,
+    plan: Json<Vec<node_chunk::Item>>,
+    ready: bool,
+    commit_hash: Option<Vec<u8>>,
+}
+#[derive(sqlx::FromRow)]
 pub(super) struct Raw {
     request_hash: Vec<u8>,
     source_id: Id,
@@ -185,6 +193,7 @@ async fn permits(
     row: &Write,
     node: Uuid,
     wanted: usize,
+    batch: i64,
 ) -> Result<Vec<read::Grant>> {
     if wanted == 0 {
         return Ok(Vec::new());
@@ -202,14 +211,14 @@ async fn permits(
         return Ok(Vec::new());
     };
     read_grants::lock_storage(tx, storage, "upload").await?;
-    let mut held = q::permits(node, row.operation_id, storage)
+    let mut held = q::permits(node, row.operation_id, storage, batch)
         .fetch_all(&mut **tx)
         .await?;
     let mut count = q::pool_load(storage).fetch_one(&mut **tx).await?;
     while held.len() < wanted && count < i64::from(limit) {
         let token = Uuid::new_v4();
         q::permit(token, storage, node).execute(&mut **tx).await?;
-        q::assign(token, node, row.operation_id)
+        q::assign(token, node, row.operation_id, batch)
             .execute(&mut **tx)
             .await?;
         held.push((token, 60_000));
@@ -229,6 +238,438 @@ async fn permits(
 }
 #[async_trait::async_trait]
 impl NodeWrites for Backend {
+    async fn prepare_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: node_chunk::Prepare,
+    ) -> Result<node_chunk::Assembly> {
+        use std::collections::{BTreeMap, HashMap};
+        let end = input.end()?;
+        let hash = input.hash()?;
+        let mut tx = start(self, node, key, input.run).await?;
+        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        row.owned(node, input.run)?;
+        if let Some(batch) = q::batch(node.node_id, input.operation, input.batch)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            ensure!(batch.request_hash == hash, Error::NodeOperationConflict);
+            if batch.commit_hash.is_none() {
+                row.active(&mut tx, node, input.run).await?;
+            }
+            return Ok(node_chunk::Assembly {
+                items: batch.plan.0,
+                ready: batch.ready,
+                committed: batch.commit_hash.is_some(),
+            });
+        }
+        let stream = row.active(&mut tx, node, input.run).await?;
+        ensure!(
+            row.profile.cdc_enabled
+                && row.next_offset == input.offset
+                && row.next_batch == input.batch
+                && input.batch < i64::MAX
+                && row.intent.size.is_none_or(|n| end <= n)
+                && q::raw(node.node_id, input.operation)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .is_none(),
+            s3s::s3_error!(InvalidRequest)
+        );
+        ensure!(
+            row.intent.part.is_none() || end <= write::MAX_PART_BYTES,
+            s3s::s3_error!(EntityTooLarge)
+        );
+        ensure!(
+            q::pending(node.node_id, input.operation)
+                .fetch_one(&mut *tx)
+                .await?
+                < node_chunk::MAX_PENDING,
+            Error::NodeWriteBusy
+        );
+        transactions::reserve_quota_in(
+            &mut tx,
+            stream,
+            end,
+            false,
+            row.intent.part.as_ref().map(|p| (p.upload, p.number)),
+        )
+        .await?;
+        let algorithm = if let Some(id) = row.block_key_id {
+            queries::work::block_key(id)
+                .fetch_one(&mut *tx)
+                .await?
+                .algorithm
+        } else {
+            "none".to_owned()
+        };
+        let mut unique = HashMap::new();
+        for (identity, item) in input
+            .items
+            .iter()
+            .map(|i| ((i.hash, i.raw_size), i))
+            .collect::<BTreeMap<_, _>>()
+        {
+            let (mut chunk, reused) = transactions::allocate_chunk_in(
+                &mut tx,
+                crate::model::ChunkCreate {
+                    storage: row.storage_id,
+                    stream,
+                    hash: item.hash,
+                    raw_size: item.raw_size,
+                    algorithm: algorithm.clone(),
+                    key: row.block_key_id,
+                },
+            )
+            .await?;
+            if !reused {
+                chunk.compressed = item.compressed;
+                chunk.stored_size =
+                    Some(item.payload_size + if algorithm == "none" { 0 } else { 16 });
+            }
+            unique.insert(identity, (chunk, reused));
+        }
+        let mut plan = Vec::with_capacity(input.items.len());
+        let mut offset = input.offset;
+        for item in &input.items {
+            let (chunk, reused) = &unique[&(item.hash, item.raw_size)];
+            if *reused {
+                transactions::reference_chunk_in(&mut tx, stream, offset, chunk.id, chunk.raw_size)
+                    .await?;
+            }
+            plan.push(node_chunk::Item {
+                offset,
+                chunk: chunk.clone(),
+                reused: *reused,
+                payload_hash: item.payload_hash,
+            });
+            offset += i64::from(item.raw_size);
+        }
+        q::add_batch(
+            node.node_id,
+            input.operation,
+            input.batch,
+            &hash,
+            end,
+            &plan,
+            false,
+        )
+        .execute(&mut *tx)
+        .await?;
+        q::advance(node.node_id, input.operation, end)
+            .execute(&mut *tx)
+            .await?;
+        node_registry::validate_run(&mut tx, node, input.run).await?;
+        tx.commit().await?;
+        Ok(node_chunk::Assembly {
+            items: plan,
+            ready: false,
+            committed: false,
+        })
+    }
+    async fn activate_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: node_chunk::Prepare,
+        nonces: Vec<node_chunk::Nonce>,
+    ) -> Result<node_chunk::Prepared> {
+        use std::collections::{HashMap, HashSet};
+        let hash = input.hash()?;
+        let mut tx = start(self, node, key, input.run).await?;
+        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        row.owned(node, input.run)?;
+        let mut batch = q::batch(node.node_id, input.operation, input.batch)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NodeOperationMissing)?;
+        ensure!(batch.request_hash == hash, Error::NodeOperationConflict);
+        if batch.commit_hash.is_some() {
+            return Ok(node_chunk::Prepared {
+                packing: None,
+                batch: input.batch,
+                end: batch.end_bytes,
+                committed: true,
+                items: vec![],
+                materials: vec![],
+                storage: None,
+                grants: vec![],
+            });
+        }
+        let stream = row.active(&mut tx, node, input.run).await?;
+        let needed: HashSet<_> = batch
+            .plan
+            .iter()
+            .filter(|i| !i.reused)
+            .map(|i| i.chunk.uuid)
+            .collect();
+        let mut grants = permits(
+            &mut tx,
+            &row,
+            node.node_id,
+            needed.len().min(input.parallelism as usize),
+            input.batch,
+        )
+        .await?;
+        if !batch.ready {
+            let required: HashSet<_> = batch
+                .plan
+                .iter()
+                .filter(|i| !i.reused && i.chunk.algorithm != "none")
+                .map(|i| i.chunk.uuid)
+                .collect();
+            ensure!(nonces.len() == required.len(), Error::OperationAborted);
+            let nonces: HashMap<_, _> = nonces.into_iter().map(|n| (n.chunk, n.value)).collect();
+            ensure!(
+                nonces.len() == required.len() && required.iter().all(|id| nonces.contains_key(id)),
+                Error::OperationAborted
+            );
+            let mut registered = HashSet::new();
+            for item in batch.plan.iter_mut().filter(|i| !i.reused) {
+                if let Some(value) = nonces.get(&item.chunk.uuid) {
+                    let id =
+                        crate::content::nonce::id(Some(value)).ok_or(Error::OperationAborted)?;
+                    ensure!(
+                        value.as_slice()
+                            == crate::content::codec::typed_nonce(
+                                item.chunk.created_at,
+                                id,
+                                crate::content::nonce::CHUNK
+                            )?,
+                        Error::OperationAborted
+                    );
+                    item.chunk.nonce = Some(value.clone());
+                }
+                if registered.insert(item.chunk.uuid) {
+                    transactions::start_chunk_upload_in(&mut tx, stream, &item.chunk).await?;
+                }
+                item.chunk.state = "uploading".into();
+            }
+            ensure!(
+                q::activate(node.node_id, input.operation, input.batch, &batch.plan)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                Error::OperationAborted
+            );
+        }
+        let mut reply = row
+            .reply(&mut tx, node, key, input.run, Some(&input.cached))
+            .await?;
+        grants.extend(reply.grants);
+        let ids: Vec<_> = batch
+            .plan
+            .iter()
+            .filter(|i| !i.reused)
+            .filter_map(|i| i.chunk.block_key_id)
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        let records = queries::node_read_keys(&ids).fetch_all(&mut *tx).await?;
+        ensure!(records.len() == ids.len(), Error::SourceUnavailable);
+        for record in records {
+            let block = read::BlockKey::unprotect(record, key)?;
+            read::material(
+                &mut reply.materials,
+                node.deployment_id,
+                read::MaterialType::Key,
+                block.id.to_string(),
+                &block,
+                &input.cached,
+            )?;
+        }
+        node_registry::validate_run(&mut tx, node, input.run).await?;
+        tx.commit().await?;
+        Ok(node_chunk::Prepared {
+            packing: None,
+            batch: input.batch,
+            end: batch.end_bytes,
+            committed: false,
+            items: batch.plan.0,
+            materials: reply.materials,
+            storage: reply.storage,
+            grants,
+        })
+    }
+    async fn commit_chunks(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        mut input: node_chunk::Commit,
+    ) -> Result<i64> {
+        use std::collections::HashSet;
+        let hash = input.hash()?;
+        let mut tx = start(self, node, key, input.run).await?;
+        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        row.owned(node, input.run)?;
+        let batch = q::batch(node.node_id, input.operation, input.batch)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or(Error::NodeOperationMissing)?;
+        if let Some(prior) = batch.commit_hash {
+            ensure!(prior == hash, Error::NodeOperationConflict);
+            return Ok(batch.end_bytes);
+        }
+        let stream = row.active(&mut tx, node, input.run).await?;
+        ensure!(
+            batch.ready && input.packed.is_none(),
+            Error::NodeOperationConflict
+        );
+        let mut needed: HashSet<_> = batch
+            .plan
+            .iter()
+            .filter(|i| !i.reused)
+            .map(|i| i.chunk.uuid)
+            .collect();
+        ensure!(
+            needed.len() == input.encoded.len()
+                && input.encoded.iter().all(|i| needed.contains(&i.chunk)),
+            Error::OperationAborted
+        );
+        for item in batch.plan.iter().filter(|i| !i.reused) {
+            if needed.remove(&item.chunk.uuid) {
+                transactions::complete_chunk_write_in(&mut tx, stream, item.offset, &item.chunk)
+                    .await?;
+            } else {
+                transactions::reference_chunk_in(
+                    &mut tx,
+                    stream,
+                    item.offset,
+                    item.chunk.id,
+                    item.chunk.raw_size,
+                )
+                .await?;
+            }
+        }
+        transactions::require_sources(&mut tx, Some(stream), &[]).await?;
+        queries::resize_writing_stream(stream, batch.end_bytes)
+            .execute(&mut *tx)
+            .await?;
+        ensure!(
+            q::commit_batch(node.node_id, input.operation, input.batch, &hash)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            Error::OperationAborted
+        );
+        q::release_batch(node.node_id, input.operation, input.batch)
+            .execute(&mut *tx)
+            .await?;
+        node_registry::validate_run(&mut tx, node, input.run).await?;
+        tx.commit().await?;
+        Ok(batch.end_bytes)
+    }
+    async fn copy_write_references(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: write::CopyBatch,
+    ) -> Result<i64> {
+        let hash = input.hash()?;
+        let mut tx = start(self, node, key, input.run).await?;
+        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        row.owned(node, input.run)?;
+        if let Some(batch) = q::batch(node.node_id, input.operation, input.batch)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            ensure!(
+                batch.request_hash == hash && batch.commit_hash.as_deref() == Some(hash.as_slice()),
+                Error::NodeOperationConflict
+            );
+            return Ok(batch.end_bytes);
+        }
+        let stream = row.active(&mut tx, node, input.run).await?;
+        let copy = row
+            .copy_source
+            .as_ref()
+            .filter(|c| c.references)
+            .ok_or_else(|| s3s::s3_error!(InvalidRequest))?;
+        ensure!(
+            read_grants::node_read_owned(node, input.run, copy.read)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some_and(|l| l.stream_id == copy.stream && l.payload_revision == copy.revision),
+            Error::NodeExpired
+        );
+        ensure!(
+            row.next_batch == input.batch
+                && row.next_offset == input.offset
+                && input.offset < copy.size,
+            s3s::s3_error!(InvalidArgument)
+        );
+        let end = if copy.payload == "raw" {
+            let mut ranges = queries::raw_page(copy.stream, input.offset, copy.size)
+                .fetch_all(&mut *tx)
+                .await?;
+            ranges.retain(|r| r.offset_bytes >= input.offset);
+            let (start, end, _) = crate::model::raw::copy_window(copy.storage, &ranges)?;
+            ensure!(
+                start == input.offset && end > start && end <= copy.size,
+                Error::SourceUnavailable
+            );
+            transactions::copy_raw_references_in(
+                &mut tx,
+                stream,
+                copy.stream,
+                copy.storage,
+                row.profile.revision,
+                &ranges,
+            )
+            .await?;
+            end
+        } else {
+            let extents = queries::replication::extents(copy.stream, input.offset)
+                .fetch_all(&mut *tx)
+                .await?;
+            ensure!(!extents.is_empty(), Error::SourceUnavailable);
+            let mut end = input.offset;
+            let mut ids = Vec::with_capacity(extents.len());
+            for (offset, len, id, fragment, _) in extents {
+                ensure!(
+                    offset == end && fragment.is_none() && len > 0,
+                    Error::SourceUnavailable
+                );
+                end = end
+                    .checked_add(i64::from(len))
+                    .ok_or(Error::SourceUnavailable)?;
+                ids.push(id.ok_or(Error::SourceUnavailable)?);
+            }
+            ensure!(end <= copy.size, Error::SourceUnavailable);
+            ids.sort_unstable();
+            ids.dedup();
+            transactions::copy_chunk_references_in(
+                &mut tx,
+                stream,
+                copy.stream,
+                input.offset,
+                end,
+                &ids,
+            )
+            .await?;
+            end
+        };
+        q::add_batch(
+            node.node_id,
+            input.operation,
+            input.batch,
+            &hash,
+            end,
+            &[],
+            true,
+        )
+        .execute(&mut *tx)
+        .await?;
+        q::advance(node.node_id, input.operation, end)
+            .execute(&mut *tx)
+            .await?;
+        node_registry::validate_run(&mut tx, node, input.run).await?;
+        tx.commit().await?;
+        Ok(end)
+    }
     async fn begin_write(
         &self,
         node: &NodeState,
@@ -563,7 +1004,7 @@ impl NodeWrites for Backend {
                 .await?;
             (location, committed)
         };
-        let grants = permits(&mut tx, &row, node.node_id, usize::from(!committed)).await?;
+        let grants = permits(&mut tx, &row, node.node_id, usize::from(!committed), 0).await?;
         node_registry::validate_run(&mut tx, node, input.run).await?;
         tx.commit().await?;
         Ok(node_raw::Prepared {
@@ -681,6 +1122,13 @@ impl NodeWrites for Backend {
             .rows_affected()
                 == 1,
             Error::OperationAborted
+        );
+        ensure!(
+            q::pending(node.node_id, input.operation)
+                .fetch_one(&mut *tx)
+                .await?
+                == 0,
+            s3s::s3_error!(IncompleteBody)
         );
         let mut phase = "published";
         if let Some(part) = &row.intent.part {

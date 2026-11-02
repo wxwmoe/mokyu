@@ -171,7 +171,7 @@ async fn postgres_node_chunks_replay_claims_nonces_and_publication() -> Result<(
     };
     let mut admission = pool.begin().await?;
     queries::lock_quota(bucket).execute(&mut *admission).await?;
-    let preparing = super::transactions::prepare_node_chunks(&pool, &node, &key, first.clone());
+    let preparing = backend.prepare_chunks(&node, &key, first.clone());
     tokio::pin!(preparing);
     let waiting = async {
         loop {

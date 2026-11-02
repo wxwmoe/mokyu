@@ -284,49 +284,6 @@ impl ClusterStore for Backend {
             .map_err(normalize_error)
     }
 
-    async fn prepare_chunks(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_chunk::Prepare,
-    ) -> Result<crate::model::node_chunk::Assembly> {
-        super::super::transactions::prepare_node_chunks(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn activate_chunks(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_chunk::Prepare,
-        nonces: Vec<crate::model::node_chunk::Nonce>,
-    ) -> Result<crate::model::node_chunk::Prepared> {
-        super::super::transactions::activate_node_chunks(&self.pool, node, key, input, nonces)
-            .await
-            .map_err(normalize_error)
-    }
-    async fn commit_chunks(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_chunk::Commit,
-    ) -> Result<i64> {
-        super::super::transactions::commit_node_chunks(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-
-    async fn copy_write_references(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::node_write::CopyBatch,
-    ) -> Result<i64> {
-        transactions::copy_node_references(&self.pool, node, key, input)
-            .await
-            .map_err(normalize_error)
-    }
-
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
         Ok(remote_upload(upload).fetch_optional(&self.pool).await?)
     }
@@ -836,6 +793,47 @@ impl crate::model::cluster::StoragePermits for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWrites for Backend {
+    async fn prepare_chunks(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_chunk::Prepare,
+    ) -> Result<crate::model::node_chunk::Assembly> {
+        super::super::transactions::prepare_node_chunks(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn activate_chunks(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_chunk::Prepare,
+        nonces: Vec<crate::model::node_chunk::Nonce>,
+    ) -> Result<crate::model::node_chunk::Prepared> {
+        super::super::transactions::activate_node_chunks(self, node, key, input, nonces)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn commit_chunks(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_chunk::Commit,
+    ) -> Result<i64> {
+        super::super::transactions::commit_node_chunks(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn copy_write_references(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_write::CopyBatch,
+    ) -> Result<i64> {
+        transactions::copy_node_references(self, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
     async fn begin_write(
         &self,
         node: &crate::cluster::NodeState,
