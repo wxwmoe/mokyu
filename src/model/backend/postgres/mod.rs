@@ -4,6 +4,8 @@ mod connection;
 #[path = "../shared/image.rs"]
 mod image_transactions;
 mod migration;
+#[path = "../shared/notices.rs"]
+mod notices;
 mod queries;
 #[path = "../shared/raw_pages.rs"]
 mod raw_pages;
@@ -176,6 +178,11 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
     crate::model::Stores {
         runtime: backend.clone(),
         integrity_rates: Default::default(),
+        notices: if backend.control_epoch.is_some() {
+            Arc::new(notices::Single(backend.clone()))
+        } else {
+            backend.clone()
+        },
         node_work: backend.clone(),
         node_sessions: backend.clone(),
         cluster: Some(backend.clone()),

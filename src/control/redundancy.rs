@@ -72,7 +72,7 @@ pub(super) async fn create(
                 .create(&actor.principal, bucket, &input, &connections),
         )
         .await?;
-    app.wake_tasks.notify_one();
+    app.work_queued();
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id })))
 }
 
@@ -108,6 +108,6 @@ pub(super) async fn command(
     app.redundancy
         .command(&actor.principal, bucket, id, &input, &connections)
         .await?;
-    app.wake_tasks.notify_one();
+    app.work_queued();
     Ok((StatusCode::ACCEPTED, Json(TaskStarted { task_id: id })))
 }

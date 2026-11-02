@@ -265,7 +265,15 @@ pub(crate) async fn profile(
         .id(&name, None)
         .await?
         .context("storage was not found")?;
-    Ok(Json(app.storage_profiles.load(storage_id).await?))
+    Ok(Json(load_profile(&app, storage_id).await?))
+}
+
+pub(super) async fn load_profile(app: &App, id: Uuid) -> anyhow::Result<StorageProfile> {
+    let mut profile = app.storage_profiles.load(id).await?;
+    if app.shared_storage_only() {
+        profile.write_durability = None;
+    }
+    Ok(profile)
 }
 
 fn validate_profile_mode(app: &App, profile: &StorageProfile) -> anyhow::Result<()> {
@@ -306,7 +314,7 @@ pub(crate) async fn update_profile(
     let id = app.storage_profiles.update(name, profile).await?;
     let _cache = app.public_reads.changing();
     app.storage.refresh_store(id).await?;
-    app.storage_profiles.load(id).await
+    load_profile(app, id).await
 }
 #[utoipa::path(
     put,

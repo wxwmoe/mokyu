@@ -58,6 +58,7 @@ impl Signal {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "scope", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Change {
+    Reset,
     Object { bucket: Uuid, key: String },
     Bucket { bucket: Uuid },
     Storage { storage: Uuid },
@@ -66,6 +67,7 @@ pub(crate) enum Change {
 impl Change {
     pub(crate) fn validate(&self) -> Result<()> {
         let id = match self {
+            Self::Reset => return Ok(()),
             Self::Object { bucket, key } => {
                 ensure!(
                     !key.is_empty() && key.len() <= 1024,

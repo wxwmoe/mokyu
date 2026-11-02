@@ -329,7 +329,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                             .await?
                             .context("storage not found")?;
                         Ok(serde_json::to_value(
-                            app.storage_profiles.load(storage_id).await?,
+                            super::storage::load_profile(app, storage_id).await?,
                         )?)
                     }
                     StorageProfiles::Set { name, document, .. } => {

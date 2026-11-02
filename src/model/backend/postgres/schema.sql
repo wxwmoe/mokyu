@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261102190847.
+-- Generated from the complete postgres migration chain through 20261102201213.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -275,6 +275,18 @@ CREATE FUNCTION public.mokyu_notify_change(change_scope text, resource uuid, obj
 DECLARE
     event uuid;
 BEGIN
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE singleton)='single_control' THEN
+        PERFORM pg_advisory_xact_lock_shared(734922709851088);
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(hashtextextended(resource::text || object_name,0) & 1023)::smallint,c.generation,gen_random_uuid(),change_scope,resource,object_name
+    FROM notification_consumers c WHERE c.expires_at>clock_timestamp() AND (change_scope='storage' OR c.role<>'worker')
+    ON CONFLICT (node_id,slot) DO UPDATE SET scope=CASE WHEN node_notices.generation<>excluded.generation THEN excluded.scope
+        WHEN node_notices.scope=excluded.scope AND node_notices.resource_id=excluded.resource_id AND node_notices.object_key=excluded.object_key THEN excluded.scope
+        WHEN node_notices.scope IN ('object','bucket') AND excluded.scope IN ('object','bucket') AND node_notices.resource_id=excluded.resource_id THEN 'bucket'
+        ELSE 'reset' END,
+        generation=excluded.generation,event_id=excluded.event_id,resource_id=excluded.resource_id,object_key=excluded.object_key,retry_at=NULL;
+        RETURN;
+    END IF;
     IF NOT EXISTS (SELECT 1 FROM mokyu_meta WHERE singleton AND deployment_mode='cluster') THEN
         RETURN;
     END IF;
@@ -369,6 +381,19 @@ BEGIN
         AND (OLD.public_read,OLD.metadata,OLD.etag,OLD.size,OLD.payload_revision)
             IS DISTINCT FROM (NEW.public_read,NEW.metadata,NEW.etag,NEW.size,NEW.payload_revision) THEN
         PERFORM mokyu_notify_change('object',NEW.bucket_id,NEW.object_key);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.mokyu_notify_tier() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        PERFORM mokyu_notify_change('storage',OLD.home_storage);
+    ELSIF TG_OP='INSERT' OR OLD.generation IS DISTINCT FROM NEW.generation THEN
+        PERFORM mokyu_notify_change('storage',NEW.home_storage);
     END IF;
     RETURN NULL;
 END
@@ -1196,6 +1221,19 @@ CREATE TABLE public.node_native_work (
     result_hash bytea,
     created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
     CONSTRAINT node_native_work_result_hash_check CHECK (((result_hash IS NULL) OR (octet_length(result_hash) = 32)))
+);
+
+CREATE TABLE public.node_notices (
+    node_id uuid NOT NULL,
+    slot smallint NOT NULL,
+    generation uuid NOT NULL,
+    event_id uuid NOT NULL,
+    scope text NOT NULL,
+    resource_id uuid NOT NULL,
+    object_key text NOT NULL,
+    retry_at timestamp with time zone,
+    CONSTRAINT node_notices_scope_check CHECK ((scope = ANY (ARRAY['object'::text, 'bucket'::text, 'storage'::text, 'reset'::text]))),
+    CONSTRAINT node_notices_slot_check CHECK (((slot >= 0) AND (slot <= 1023)))
 );
 
 CREATE TABLE public.node_object_changes (
@@ -2703,6 +2741,12 @@ ALTER TABLE ONLY public.node_native_work
 ALTER TABLE ONLY public.node_native_work
     ADD CONSTRAINT node_native_work_token_key UNIQUE (token);
 
+ALTER TABLE ONLY public.node_notices
+    ADD CONSTRAINT node_notices_event_id_key UNIQUE (event_id);
+
+ALTER TABLE ONLY public.node_notices
+    ADD CONSTRAINT node_notices_pkey PRIMARY KEY (node_id, slot);
+
 ALTER TABLE ONLY public.node_object_changes
     ADD CONSTRAINT node_object_changes_pkey PRIMARY KEY (node_id, operation_id);
 
@@ -3449,6 +3493,8 @@ CREATE TRIGGER streams_clear_write_lease AFTER UPDATE OF state ON public.streams
 
 CREATE TRIGGER streams_notify AFTER UPDATE OF public_read, metadata, etag, size, payload_revision ON public.streams FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_stream();
 
+CREATE TRIGGER tier_location_notice AFTER INSERT OR DELETE OR UPDATE OF generation ON public.tier_locations FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_tier();
+
 CREATE TRIGGER token_authorization BEFORE UPDATE OF system, expires_at, revoked_at ON public.api_tokens FOR EACH ROW EXECUTE FUNCTION public.advance_authorization_revision();
 
 CREATE TRIGGER token_grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.token_bucket_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_token_authorization();
@@ -3627,6 +3673,9 @@ ALTER TABLE ONLY public.node_native_work
 
 ALTER TABLE ONLY public.node_native_work
     ADD CONSTRAINT node_native_work_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.node_notices
+    ADD CONSTRAINT node_notices_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.notification_consumers(node_id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_object_changes
     ADD CONSTRAINT node_object_changes_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;

@@ -36,7 +36,7 @@ impl App {
                     },
                 )
                 .await?;
-            self.wake_tasks.notify_one();
+            self.work_queued();
             return Ok(json!({"task_id":id}));
         }
         let parent_task = task.as_ref().is_some_and(|(parent, _, _)| *parent);
@@ -109,7 +109,7 @@ impl App {
                 s3s::s3_error!(OperationAborted, "task not found or cannot change state").into(),
             );
         }
-        self.wake_tasks.notify_one();
+        self.work_queued();
         Ok(json!({"task_id":id,"state":if resume{"queued"}else{"paused"}}))
     }
 }

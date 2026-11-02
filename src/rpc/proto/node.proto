@@ -662,6 +662,7 @@ message Invalidation {
     ObjectChange object = 2;
     string bucket_id = 3;
     string storage_id = 4;
+    bool reset = 5;
   }
 }
 

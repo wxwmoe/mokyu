@@ -41,7 +41,17 @@ pub async fn initialize(app: &App, role: &str) -> Result<()> {
         .heartbeat(&state, role, &app.secrets.credential_key)
         .await?;
     let boot = uuid::Uuid::new_v4();
-    if !embedded {
+    if embedded {
+        app.notices
+            .control_consumer(
+                crate::model::notification::Consumer {
+                    node: state.node_id,
+                    generation: boot,
+                },
+                true,
+            )
+            .await?;
+    } else {
         app.cluster()?
             .begin_report(
                 &state,

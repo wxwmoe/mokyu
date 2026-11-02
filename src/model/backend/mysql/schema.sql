@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102190847.
+-- Generated from the complete mysql migration chain through 20261102201213.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -519,6 +519,22 @@ CREATE TABLE `node_boots` (
   CONSTRAINT `node_boots_node_fk` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `node_notices` (
+  `node_id` binary(16) NOT NULL,
+  `slot` smallint NOT NULL,
+  `generation` binary(16) NOT NULL,
+  `event_id` binary(16) NOT NULL,
+  `scope` varchar(8) COLLATE utf8mb4_bin NOT NULL,
+  `resource_id` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `retry_at` datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`node_id`,`slot`),
+  UNIQUE KEY `event_id` (`event_id`),
+  CONSTRAINT `node_notices_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `notification_consumers` (`node_id`) ON DELETE CASCADE,
+  CONSTRAINT `node_notices_chk_1` CHECK ((`slot` between 0 and 1023)),
+  CONSTRAINT `node_notices_chk_2` CHECK ((`scope` in (_utf8mb4'object',_utf8mb4'bucket',_utf8mb4'storage',_utf8mb4'reset')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `node_work` (
   `node_id` binary(16) NOT NULL,
   `operation_id` binary(16) NOT NULL,
@@ -574,6 +590,22 @@ CREATE TABLE `nonce_observations` (
   PRIMARY KEY (`block_key_id`),
   CONSTRAINT `nonce_observations_key` FOREIGN KEY (`block_key_id`) REFERENCES `managed_keys` (`id`),
   CONSTRAINT `nonce_observations_chk_1` CHECK ((`revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `notice_membership` (
+  `id` tinyint NOT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `notice_membership_single` CHECK ((`id` = 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `notification_consumers` (
+  `node_id` binary(16) NOT NULL,
+  `generation` binary(16) NOT NULL,
+  `role` varchar(8) COLLATE utf8mb4_bin NOT NULL,
+  `expires_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`node_id`),
+  CONSTRAINT `notification_consumers_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `notification_consumers_chk_1` CHECK ((`role` in (_utf8mb4'control',_utf8mb4'data',_utf8mb4'worker',_utf8mb4'node')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `objects` (
@@ -1795,6 +1827,7 @@ INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `up
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('reclaim', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('repack', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('reuse', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
+INSERT INTO `notice_membership` (`id`) VALUES ('1');
 INSERT INTO `projects` (`id`, `name`, `description`, `builtin`, `allow_bucket_create`, `created_at`) VALUES (X'00000000000000000000000000000001', 'Default', '', '1', '0', CURRENT_TIMESTAMP(6));
 INSERT INTO `quota_scopes` (`scope`, `scope_id`, `used_bytes`, `reserved_bytes`, `inflight_bytes`, `object_count`, `bucket_count`, `logical_bytes_limit`, `inflight_bytes_limit`, `bucket_count_limit`) VALUES ('project', X'00000000000000000000000000000001', '0', '0', '0', '0', '0', NULL, NULL, NULL);
 INSERT INTO `redundancy_catalog` (`singleton`) VALUES ('1');
@@ -1811,6 +1844,111 @@ CREATE SQL SECURITY DEFINER VIEW `token_bucket_access` AS select `t`.`id` AS `to
 CREATE SQL SECURITY DEFINER VIEW `token_external_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),31,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_external_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_external_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
 
 CREATE TRIGGER `buckets_change_gate` AFTER INSERT ON `buckets` FOR EACH ROW INSERT INTO bucket_change_gates(bucket_id) VALUES(NEW.id);
+
+CREATE TRIGGER `buckets_notice_delete` AFTER DELETE ON `buckets` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(OLD.id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'bucket',OLD.id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('bucket'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `buckets_notice_update` AFTER UPDATE ON `buckets` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'bucket',NEW.id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('bucket'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `bucket_domains_notice_delete` AFTER DELETE ON `bucket_domains` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(OLD.bucket_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'bucket',OLD.bucket_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('bucket'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `bucket_domains_notice_insert` AFTER INSERT ON `bucket_domains` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.bucket_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'bucket',NEW.bucket_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('bucket'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `bucket_domains_notice_update` AFTER UPDATE ON `bucket_domains` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(OLD.bucket_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'bucket',OLD.bucket_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('bucket'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `bucket_domains_notice_update_destination` AFTER UPDATE ON `bucket_domains` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND (NOT (OLD.bucket_id<=>NEW.bucket_id)) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.bucket_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'bucket',NEW.bucket_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('bucket'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `chunk_encodings_notice_update` AFTER UPDATE ON `chunk_encodings` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND ((NOT (OLD.quarantine_code<=>NEW.quarantine_code) OR NOT (OLD.quarantine_revision<=>NEW.quarantine_revision))) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.storage_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',NEW.storage_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
 
 CREATE TRIGGER `encodings_owner_insert` BEFORE INSERT ON `chunk_encodings` FOR EACH ROW BEGIN
     IF NEW.owner_task IS NOT NULL AND NEW.owner_stream IS NOT NULL THEN
@@ -1887,6 +2025,81 @@ CREATE TRIGGER `objects_capture_update` AFTER UPDATE ON `objects` FOR EACH ROW B
     END IF;
 END;
 
+CREATE TRIGGER `objects_notice_delete` AFTER DELETE ON `objects` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND (OLD.stream_id IS NOT NULL) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(OLD.bucket_id,OLD.object_key)) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'object',OLD.bucket_id,OLD.object_key
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('object'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `objects_notice_insert` AFTER INSERT ON `objects` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND (NEW.stream_id IS NOT NULL) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.bucket_id,NEW.object_key)) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'object',NEW.bucket_id,NEW.object_key
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('object'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `objects_notice_update` AFTER UPDATE ON `objects` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND (NOT (OLD.stream_id<=>NEW.stream_id)) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.bucket_id,NEW.object_key)) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'object',NEW.bucket_id,NEW.object_key
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('object'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `packs_notice_update` AFTER UPDATE ON `packs` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND ((NOT (OLD.quarantine_code<=>NEW.quarantine_code) OR NOT (OLD.quarantine_revision<=>NEW.quarantine_revision))) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.storage_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',NEW.storage_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `raw_sources_notice_update` AFTER UPDATE ON `raw_sources` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND (NOT (OLD.quarantine_code<=>NEW.quarantine_code)) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.storage_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',NEW.storage_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
 CREATE TRIGGER `redundancy_required_delete` AFTER DELETE ON `redundancy_links` FOR EACH ROW BEGIN
     IF OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing') THEN
         UPDATE bucket_change_gates SET required_targets=required_targets-1 WHERE bucket_id=OLD.source_bucket;
@@ -1902,6 +2115,126 @@ END;
 CREATE TRIGGER `redundancy_required_update` AFTER UPDATE ON `redundancy_links` FOR EACH ROW BEGIN
     IF (NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing')) <> (OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing')) THEN
         UPDATE bucket_change_gates SET required_targets=required_targets+IF(NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing'),1,-1) WHERE bucket_id=NEW.source_bucket;
+    END IF;
+END;
+
+CREATE TRIGGER `storages_notice_delete` AFTER DELETE ON `storages` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(OLD.id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',OLD.id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `storages_notice_update` AFTER UPDATE ON `storages` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',NEW.id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `storage_profiles_notice_delete` AFTER DELETE ON `storage_profiles` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(OLD.storage_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',OLD.storage_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `storage_profiles_notice_update` AFTER UPDATE ON `storage_profiles` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.storage_id,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',NEW.storage_id,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `streams_notice_update` AFTER UPDATE ON `streams` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND (NEW.stream_type='object' AND NEW.state='ready' AND (NOT (OLD.public_read<=>NEW.public_read) OR NOT (OLD.etag<=>NEW.etag) OR NOT (OLD.size<=>NEW.size) OR NOT (OLD.metadata<=>NEW.metadata) OR NOT (OLD.payload_revision<=>NEW.payload_revision)) AND EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=NEW.bucket_id AND o.object_key=NEW.object_key AND o.stream_id=NEW.id)) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.bucket_id,NEW.object_key)) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'object',NEW.bucket_id,NEW.object_key
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('object'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `tier_locations_notice_delete` AFTER DELETE ON `tier_locations` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(OLD.home_storage,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',OLD.home_storage,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `tier_locations_notice_insert` AFTER INSERT ON `tier_locations` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.home_storage,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',NEW.home_storage,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `tier_locations_notice_update` AFTER UPDATE ON `tier_locations` FOR EACH ROW BEGIN
+    DECLARE gate TINYINT;
+    IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND (NOT (OLD.generation<=>NEW.generation)) THEN
+        SELECT id INTO gate FROM notice_membership WHERE id=1 LOCK IN SHARE MODE;
+        INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(CRC32(CONCAT(NEW.home_storage,X'')) & 1023),c.generation,UNHEX(REPLACE(UUID(),'-','')),'storage',NEW.home_storage,X''
+    FROM notification_consumers c WHERE c.expires_at>UTC_TIMESTAMP(6) AND ('storage'='storage' OR c.role<>'worker')
+    ON DUPLICATE KEY UPDATE scope=CASE WHEN node_notices.generation<>VALUES(generation) THEN VALUES(scope)
+        WHEN node_notices.scope=VALUES(scope) AND node_notices.resource_id=VALUES(resource_id) AND node_notices.object_key=VALUES(object_key) THEN VALUES(scope)
+        WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
+        ELSE 'reset' END,
+        generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
     END IF;
 END;
 

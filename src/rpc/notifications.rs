@@ -11,6 +11,7 @@ pub(super) fn notice(deliveries: &[Delivery]) -> wire::Notice {
             .map(|delivery| wire::Invalidation {
                 event_id: delivery.id.to_string(),
                 target: Some(match &delivery.change {
+                    Change::Reset => wire::invalidation::Target::Reset(true),
                     Change::Object { bucket, key } => {
                         wire::invalidation::Target::Object(wire::ObjectChange {
                             bucket_id: bucket.to_string(),
@@ -78,7 +79,8 @@ impl Applied {
                 Some(wire::invalidation::Target::StorageId(storage)) => Change::Storage {
                     storage: super::uuid(&storage)?,
                 },
-                None => return Err(Status::data_loss("notification target is missing")),
+                Some(wire::invalidation::Target::Reset(true)) => Change::Reset,
+                _ => return Err(Status::data_loss("notification target is missing")),
             };
             change
                 .validate()
@@ -90,7 +92,7 @@ impl Applied {
                 ids.push(id);
             }
         }
-        apply(notice.reset, &changes);
+        apply(notice.reset || changes.contains(&Change::Reset), &changes);
         for id in &ids {
             if self.ids.insert(*id) {
                 self.order.push_back(*id);
@@ -109,6 +111,34 @@ impl Applied {
 mod tests {
     use super::*;
     use crate::model::notification::Consumer;
+
+    #[test]
+    fn a_coalesced_reset_is_confirmed_after_invalidating_once() {
+        let id = Uuid::new_v4();
+        let batch = notice(&[Delivery {
+            consumer: Consumer {
+                node: Uuid::new_v4(),
+                generation: Uuid::new_v4(),
+            },
+            id,
+            change: Change::Reset,
+        }]);
+        let mut applied = Applied::default();
+        let first = applied
+            .apply(batch.clone(), |reset, changes| {
+                assert!(reset);
+                assert_eq!(changes, &[Change::Reset]);
+            })
+            .unwrap();
+        let retry = applied
+            .apply(batch, |reset, changes| {
+                assert!(!reset);
+                assert!(changes.is_empty());
+            })
+            .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(receipt(first).unwrap(), vec![id]);
+    }
 
     #[test]
     fn receipts_follow_application_and_duplicate_batches_do_not_invalidate_again() {

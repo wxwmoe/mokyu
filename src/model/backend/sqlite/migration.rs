@@ -5,7 +5,7 @@ use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 static MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./src/model/backend/sqlite/migrations");
 const BASELINE_VERSION: i64 = 20261102022127;
-const SCHEMA_VERSION: i64 = 20261102190847;
+const SCHEMA_VERSION: i64 = 20261102201213;
 
 pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
     ensure!(

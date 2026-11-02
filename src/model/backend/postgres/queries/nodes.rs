@@ -68,16 +68,20 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 }
 
 #[async_trait::async_trait]
-impl ClusterStore for Backend {
-    async fn begin_report(
+impl crate::model::cluster::NodeNotices for Backend {
+    async fn control_consumer(
         &self,
-        state: &crate::cluster::NodeState,
-        role: &str,
-        key: &crate::content::codec::Key,
-        boot: Uuid,
-        started: DateTime<Utc>,
+        c: crate::model::notification::Consumer,
+        activate: bool,
     ) -> Result<()> {
-        transactions::begin_report(&self.pool, state, role, key, boot, started).await
+        let mut tx = self.pool.begin().await?;
+        if activate {
+            transactions::notifications::activate(&mut tx, c, "control").await?;
+        } else {
+            notifications::renew(c.node).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
     async fn claim_notifications(
         &self,
@@ -94,6 +98,20 @@ impl ClusterStore for Backend {
     }
     async fn maintain_notifications(&self) -> Result<bool> {
         transactions::notifications::maintain(&self.pool).await
+    }
+}
+
+#[async_trait::async_trait]
+impl ClusterStore for Backend {
+    async fn begin_report(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+        boot: Uuid,
+        started: DateTime<Utc>,
+    ) -> Result<()> {
+        transactions::begin_report(&self.pool, state, role, key, boot, started).await
     }
     async fn task_targets(&self, tasks: &[Uuid]) -> Result<Vec<Option<Uuid>>> {
         anyhow::ensure!(tasks.len() <= 256, "too many task hints");

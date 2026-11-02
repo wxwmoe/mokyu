@@ -129,6 +129,7 @@ mod metrics;
 pub(super) use metrics::*;
 mod source_repair;
 pub(super) use source_repair::*;
+pub(super) mod notices;
 mod raw;
 pub(super) mod raw_pages;
 pub(super) use raw::*;

@@ -8,7 +8,10 @@ pub(crate) async fn activate(db: &mut PgConnection, consumer: Consumer, role: &s
     // Identity/session rows are already locked; publication only reads consumers.
     query::membership().execute(&mut *db).await?;
     query::activate(consumer, role).execute(&mut *db).await?;
-    query::retire_previous(consumer).execute(db).await?;
+    query::retire_previous(consumer).execute(&mut *db).await?;
+    super::super::queries::notices::retire_previous(consumer)
+        .execute(db)
+        .await?;
     Ok(())
 }
 

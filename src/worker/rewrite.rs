@@ -81,7 +81,7 @@ impl App {
         if existing {
             return Ok(json!({"task_id":id,"existing":true}));
         }
-        self.wake_tasks.notify_one();
+        self.work_queued();
         let mut result = json!({"task_id":id,"preview":preview});
         if self.role != "single" {
             result["children"] = json!(shards);

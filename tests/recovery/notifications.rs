@@ -4,7 +4,7 @@ use crate::{
     content::codec::Key,
     model::{
         RuntimeSettingsStore,
-        cluster::{ClusterStore, NodeSessions},
+        cluster::{ClusterStore, NodeNotices, NodeSessions},
         notification::Consumer,
         session::Open,
     },

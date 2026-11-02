@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102190847.
+-- Generated from the complete sqlite migration chain through 20261102201213.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -381,6 +381,19 @@ CREATE TABLE node_boots (
     PRIMARY KEY (node_id,boot_id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE node_notices (
+    node_id BLOB NOT NULL,
+    slot INTEGER NOT NULL CHECK (slot BETWEEN 0 AND 1023),
+    generation BLOB NOT NULL,
+    event_id BLOB NOT NULL UNIQUE,
+    scope TEXT NOT NULL CHECK (scope IN ('object','bucket','storage','reset')),
+    resource_id BLOB NOT NULL,
+    object_key BLOB NOT NULL,
+    retry_at INTEGER,
+    PRIMARY KEY (node_id,slot),
+    FOREIGN KEY (node_id) REFERENCES notification_consumers(node_id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE node_work (
     node_id BLOB NOT NULL REFERENCES nodes(id),
     operation_id BLOB NOT NULL CHECK(length(operation_id)=16),
@@ -421,6 +434,14 @@ CREATE TABLE nonce_observations (
     data TEXT NOT NULL CHECK(json_valid(data)),
     revision INTEGER NOT NULL CHECK(revision > 0)
 ) WITHOUT ROWID;
+
+CREATE TABLE notification_consumers (
+    node_id BLOB NOT NULL PRIMARY KEY,
+    generation BLOB NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('control','data','worker','node')),
+    expires_at INTEGER NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE objects (
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
@@ -1643,13 +1664,100 @@ CREATE INDEX usage_requested ON usage_summary(requested_at,id);
 
 CREATE UNIQUE INDEX web_uploads_client ON web_uploads(user_id,client_id);
 
+CREATE VIEW notice_changes(scope,resource_id,object_key) AS SELECT scope,resource_id,object_key FROM node_notices WHERE FALSE;
+
+CREATE VIEW token_bucket_access AS
+SELECT t.id AS token_id,g.bucket_id,
+    g.actions & IIF(u.role='admin',127,COALESCE(a.actions,0)) AS actions
+FROM api_tokens t JOIN web_users u ON u.id=t.user_id
+JOIN token_bucket_grants g ON g.token_id=t.id
+LEFT JOIN user_bucket_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_id;
+
+CREATE VIEW token_external_access AS
+SELECT t.id AS token_id,g.bucket_id,
+    g.actions & IIF(u.role='admin',31,COALESCE(a.actions,0)) AS actions
+FROM api_tokens t JOIN web_users u ON u.id=t.user_id
+JOIN token_external_grants g ON g.token_id=t.id
+LEFT JOIN user_external_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_id;
+
+CREATE VIEW user_bucket_access AS
+SELECT m.user_id,b.id AS bucket_id,
+    (CASE m.role WHEN 'reader' THEN 67 WHEN 'writer' THEN 95 WHEN 'maintainer' THEN 127 ELSE 0 END)
+    & IIF(m.scope='all',127,COALESCE(g.actions,0)) AS actions
+FROM project_members m JOIN buckets b ON b.project_id=m.project_id
+LEFT JOIN member_bucket_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
+
+CREATE VIEW user_external_access AS
+SELECT m.user_id,b.id AS bucket_id,
+    (CASE m.role WHEN 'reader' THEN 3 WHEN 'writer' THEN 31 WHEN 'maintainer' THEN 31 ELSE 0 END)
+    & IIF(m.scope='all',31,COALESCE(g.actions,0)) AS actions
+FROM project_members m JOIN external_buckets b ON b.project_id=m.project_id
+LEFT JOIN member_external_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
+
+CREATE TRIGGER bucket_domains_notice_delete AFTER DELETE ON bucket_domains
+BEGIN
+    INSERT INTO notice_changes VALUES('bucket',OLD.bucket_id,X'');
+END;
+
+CREATE TRIGGER bucket_domains_notice_insert AFTER INSERT ON bucket_domains
+BEGIN
+    INSERT INTO notice_changes VALUES('bucket',NEW.bucket_id,X'');
+END;
+
+CREATE TRIGGER bucket_domains_notice_update AFTER UPDATE ON bucket_domains
+BEGIN
+    INSERT INTO notice_changes VALUES('bucket',OLD.bucket_id,X'');
+END;
+
+CREATE TRIGGER bucket_domains_notice_update_destination AFTER UPDATE ON bucket_domains
+WHEN OLD.bucket_id IS NOT NEW.bucket_id
+BEGIN
+    INSERT INTO notice_changes VALUES('bucket',NEW.bucket_id,X'');
+END;
+
 CREATE TRIGGER buckets_change_gate AFTER INSERT ON buckets BEGIN
     INSERT INTO bucket_change_gates(bucket_id) VALUES(NEW.id);
+END;
+
+CREATE TRIGGER buckets_notice_delete AFTER DELETE ON buckets
+BEGIN
+    INSERT INTO notice_changes VALUES('bucket',OLD.id,X'');
+END;
+
+CREATE TRIGGER buckets_notice_update AFTER UPDATE ON buckets
+BEGIN
+    INSERT INTO notice_changes VALUES('bucket',NEW.id,X'');
 END;
 
 CREATE TRIGGER chunk_encodings_nonce_insert BEFORE INSERT ON chunk_encodings WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
 
 CREATE TRIGGER chunk_encodings_nonce_update BEFORE UPDATE ON chunk_encodings WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
+
+CREATE TRIGGER chunk_encodings_notice_update AFTER UPDATE ON chunk_encodings
+WHEN (OLD.quarantine_code IS NOT NEW.quarantine_code OR OLD.quarantine_revision IS NOT NEW.quarantine_revision)
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',NEW.storage_id,X'');
+END;
+
+CREATE TRIGGER notice_publish INSTEAD OF INSERT ON notice_changes
+WHEN (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control'
+BEGIN
+    INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key)
+    SELECT c.node_id,(
+        instr('0123456789ABCDEF',substr(hex(NEW.resource_id),-1))*61 +
+        instr('0123456789ABCDEF',substr(hex(NEW.resource_id),-2,1))*17 +
+        length(NEW.object_key)*31 + coalesce(unicode(substr(CAST(NEW.object_key AS TEXT),-1)),0)*7 +
+        coalesce(unicode(substr(CAST(NEW.object_key AS TEXT),-3,1)),0)*53 +
+        coalesce(unicode(substr(CAST(NEW.object_key AS TEXT),1+length(CAST(NEW.object_key AS TEXT))/2,1)),0)
+    ) & 1023,c.generation,randomblob(16),NEW.scope,NEW.resource_id,NEW.object_key
+    FROM notification_consumers c WHERE c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)
+        AND (NEW.scope='storage' OR c.role<>'worker')
+    ON CONFLICT (node_id,slot) DO UPDATE SET scope=CASE WHEN node_notices.generation<>excluded.generation THEN excluded.scope
+        WHEN node_notices.scope=excluded.scope AND node_notices.resource_id=excluded.resource_id AND node_notices.object_key=excluded.object_key THEN excluded.scope
+        WHEN node_notices.scope IN ('object','bucket') AND excluded.scope IN ('object','bucket') AND node_notices.resource_id=excluded.resource_id THEN 'bucket'
+        ELSE 'reset' END,
+        generation=excluded.generation,event_id=excluded.event_id,resource_id=excluded.resource_id,object_key=excluded.object_key,retry_at=NULL;
+END;
 
 CREATE TRIGGER objects_capture_delete AFTER DELETE ON objects
 WHEN OLD.stream_id IS NOT NULL AND EXISTS(SELECT 1 FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id AND subscribers>0)
@@ -1695,9 +1803,39 @@ BEGIN
             snapshot=excluded.snapshot,revision=transfer_changes.revision+1;
 END;
 
+CREATE TRIGGER objects_notice_delete AFTER DELETE ON objects
+WHEN OLD.stream_id IS NOT NULL
+BEGIN
+    INSERT INTO notice_changes VALUES('object',OLD.bucket_id,OLD.object_key);
+END;
+
+CREATE TRIGGER objects_notice_insert AFTER INSERT ON objects
+WHEN NEW.stream_id IS NOT NULL
+BEGIN
+    INSERT INTO notice_changes VALUES('object',NEW.bucket_id,NEW.object_key);
+END;
+
+CREATE TRIGGER objects_notice_update AFTER UPDATE ON objects
+WHEN OLD.stream_id IS NOT NEW.stream_id
+BEGIN
+    INSERT INTO notice_changes VALUES('object',NEW.bucket_id,NEW.object_key);
+END;
+
 CREATE TRIGGER packs_nonce_insert BEFORE INSERT ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
 
 CREATE TRIGGER packs_nonce_update BEFORE UPDATE ON packs WHEN NOT ((NEW.encryption_algorithm='none' AND NEW.nonce_id IS NULL AND NEW.nonce IS NULL AND NEW.block_key_id IS NULL) OR (NEW.encryption_algorithm<>'none' AND NEW.block_key_id IS NOT NULL AND ((NEW.nonce IS NULL AND NEW.nonce_id IS NULL AND NEW.state<>'ready') OR (NEW.nonce IS NOT NULL AND NEW.nonce_id IS NOT NULL AND NEW.nonce_id>0)))) BEGIN SELECT RAISE(ABORT,'invalid nonce metadata'); END;
+
+CREATE TRIGGER packs_notice_update AFTER UPDATE ON packs
+WHEN (OLD.quarantine_code IS NOT NEW.quarantine_code OR OLD.quarantine_revision IS NOT NEW.quarantine_revision)
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',NEW.storage_id,X'');
+END;
+
+CREATE TRIGGER raw_sources_notice_update AFTER UPDATE ON raw_sources
+WHEN OLD.quarantine_code IS NOT NEW.quarantine_code
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',NEW.storage_id,X'');
+END;
 
 CREATE TRIGGER redundancy_required_delete AFTER DELETE ON redundancy_links WHEN OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing')
 BEGIN
@@ -1712,6 +1850,26 @@ END;
 CREATE TRIGGER redundancy_required_update AFTER UPDATE OF synchronous,state ON redundancy_links WHEN (NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing')) <> (OLD.synchronous AND OLD.state NOT IN ('pausing','paused','removing'))
 BEGIN
     UPDATE bucket_change_gates SET required_targets=required_targets+CASE WHEN NEW.synchronous AND NEW.state NOT IN ('pausing','paused','removing') THEN 1 ELSE -1 END WHERE bucket_id=NEW.source_bucket;
+END;
+
+CREATE TRIGGER storage_profiles_notice_delete AFTER DELETE ON storage_profiles
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',OLD.storage_id,X'');
+END;
+
+CREATE TRIGGER storage_profiles_notice_update AFTER UPDATE ON storage_profiles
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',NEW.storage_id,X'');
+END;
+
+CREATE TRIGGER storages_notice_delete AFTER DELETE ON storages
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',OLD.id,X'');
+END;
+
+CREATE TRIGGER storages_notice_update AFTER UPDATE ON storages
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',NEW.id,X'');
 END;
 
 CREATE TRIGGER streams_capture AFTER UPDATE OF public_read,metadata,checksums,etag,size,payload_type ON streams
@@ -1733,6 +1891,28 @@ BEGIN
             snapshot=excluded.snapshot,revision=transfer_changes.revision+1;
 END;
 
+CREATE TRIGGER streams_notice_update AFTER UPDATE ON streams
+WHEN NEW.stream_type='object' AND NEW.state='ready' AND (OLD.public_read IS NOT NEW.public_read OR OLD.etag IS NOT NEW.etag OR OLD.size IS NOT NEW.size OR OLD.metadata IS NOT NEW.metadata OR OLD.payload_revision IS NOT NEW.payload_revision) AND EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=NEW.bucket_id AND o.object_key=NEW.object_key AND o.stream_id=NEW.id)
+BEGIN
+    INSERT INTO notice_changes VALUES('object',NEW.bucket_id,NEW.object_key);
+END;
+
+CREATE TRIGGER tier_locations_notice_delete AFTER DELETE ON tier_locations
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',OLD.home_storage,X'');
+END;
+
+CREATE TRIGGER tier_locations_notice_insert AFTER INSERT ON tier_locations
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',NEW.home_storage,X'');
+END;
+
+CREATE TRIGGER tier_locations_notice_update AFTER UPDATE ON tier_locations
+WHEN OLD.generation IS NOT NEW.generation
+BEGIN
+    INSERT INTO notice_changes VALUES('storage',NEW.home_storage,X'');
+END;
+
 CREATE TRIGGER transfer_changes_backlog_delete AFTER DELETE ON transfer_changes FOR EACH ROW
 BEGIN
     UPDATE redundancy_backlogs SET queued_keys=queued_keys-1 WHERE id=OLD.task_id;
@@ -1742,34 +1922,6 @@ CREATE TRIGGER transfer_changes_backlog_insert AFTER INSERT ON transfer_changes 
 BEGIN
     UPDATE redundancy_backlogs SET queued_keys=queued_keys+1 WHERE id=NEW.task_id;
 END;
-
-CREATE VIEW token_bucket_access AS
-SELECT t.id AS token_id,g.bucket_id,
-    g.actions & IIF(u.role='admin',127,COALESCE(a.actions,0)) AS actions
-FROM api_tokens t JOIN web_users u ON u.id=t.user_id
-JOIN token_bucket_grants g ON g.token_id=t.id
-LEFT JOIN user_bucket_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_id;
-
-CREATE VIEW token_external_access AS
-SELECT t.id AS token_id,g.bucket_id,
-    g.actions & IIF(u.role='admin',31,COALESCE(a.actions,0)) AS actions
-FROM api_tokens t JOIN web_users u ON u.id=t.user_id
-JOIN token_external_grants g ON g.token_id=t.id
-LEFT JOIN user_external_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_id;
-
-CREATE VIEW user_bucket_access AS
-SELECT m.user_id,b.id AS bucket_id,
-    (CASE m.role WHEN 'reader' THEN 67 WHEN 'writer' THEN 95 WHEN 'maintainer' THEN 127 ELSE 0 END)
-    & IIF(m.scope='all',127,COALESCE(g.actions,0)) AS actions
-FROM project_members m JOIN buckets b ON b.project_id=m.project_id
-LEFT JOIN member_bucket_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
-
-CREATE VIEW user_external_access AS
-SELECT m.user_id,b.id AS bucket_id,
-    (CASE m.role WHEN 'reader' THEN 3 WHEN 'writer' THEN 31 WHEN 'maintainer' THEN 31 ELSE 0 END)
-    & IIF(m.scope='all',31,COALESCE(g.actions,0)) AS actions
-FROM project_members m JOIN external_buckets b ON b.project_id=m.project_id
-LEFT JOIN member_external_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
 
 DELETE FROM sqlite_sequence;
 INSERT INTO sqlite_sequence(name,seq) VALUES('audit_events',0);

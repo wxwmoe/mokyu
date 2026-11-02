@@ -3,7 +3,9 @@ use crate::model::notification::{Consumer, LIMIT};
 use uuid::Uuid;
 
 pub(crate) fn membership() -> Statement<'static> {
-    sqlx::query("SELECT pg_advisory_xact_lock(734922709851088)")
+    sqlx::query(
+        "SELECT pg_advisory_xact_lock(734922709851088) FROM mokyu_meta WHERE singleton AND deployment_mode IN ('cluster','single_control')",
+    )
 }
 
 pub(crate) fn activate(consumer: Consumer, role: &str) -> Statement<'_> {

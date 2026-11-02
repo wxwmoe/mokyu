@@ -169,6 +169,10 @@ impl Hub {
         }
     }
 
+    pub(crate) fn committed(&self) {
+        self.wake.notify_one();
+    }
+
     fn reset(&self, connected: bool) {
         if connected {
             self.reconnects.fetch_add(1, Relaxed);
@@ -235,6 +239,9 @@ impl Hub {
 }
 
 pub(crate) async fn run(app: Arc<App>) -> Result<()> {
+    if app.deployment_mode() == "single_control" {
+        return dispatch(&app).await;
+    }
     let listener = async {
         loop {
             let result: Result<()> = async {
@@ -294,11 +301,18 @@ async fn dispatch(app: &App) -> Result<()> {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut maintenance = Instant::now();
+    let mut renewed = Instant::now();
     loop {
         tokio::select! { _ = tick.tick() => {}, _ = app.notifications.wake.notified() => {} }
         // The deadline is anchored at the first wake, even during sustained input.
         tokio::time::sleep(Duration::from_millis(50)).await;
         let result: Result<()> = async {
+            if app.deployment_mode() == "single_control"
+                && renewed.elapsed() >= Duration::from_secs(25)
+            {
+                app.notices.control_consumer(consumer, false).await?;
+                renewed = Instant::now();
+            }
             let tasks: Vec<_> = app.notifications.tasks.lock().unwrap().drain().collect();
             if !tasks.is_empty() {
                 // Scope can change later in the publishing transaction.
@@ -309,7 +323,7 @@ async fn dispatch(app: &App) -> Result<()> {
             for _ in 0..8 {
                 let mut consumers = app.notifications.consumers();
                 consumers.push(consumer);
-                let deliveries = app.cluster()?.claim_notifications(&consumers).await?;
+                let deliveries = app.notices.claim_notifications(&consumers).await?;
                 #[cfg(feature = "fault-injection")]
                 if !deliveries.is_empty() {
                     crate::faults::point("notifications-claimed").await;
@@ -324,8 +338,24 @@ async fn dispatch(app: &App) -> Result<()> {
                     app.notifications.deliver(consumer, group);
                 }
                 let mut applied = Vec::new();
+                if app.deployment_mode() == "single_control" && !local.is_empty() {
+                    let reset = local
+                        .iter()
+                        .any(|delivery| delivery.change == Change::Reset);
+                    let changes: Vec<_> = local
+                        .iter()
+                        .map(|delivery| delivery.change.clone())
+                        .collect();
+                    app.public_reads.notified(reset, &changes);
+                    if reset {
+                        app.storage.refresh_storages().await?;
+                    }
+                }
                 for delivery in local {
                     match &delivery.change {
+                        Change::Reset => app.wake_maintenance.notify_one(),
+                        Change::Object { .. } | Change::Bucket { .. }
+                            if app.deployment_mode() == "single_control" => {}
                         Change::Object { bucket, key } => {
                             drop(app.public_reads.changing_object(*bucket, key))
                         }
@@ -342,7 +372,7 @@ async fn dispatch(app: &App) -> Result<()> {
                 }
                 if !applied.is_empty() {
                     app.notifications.applied(
-                        app.cluster()?
+                        app.notices
                             .acknowledge_notifications(consumer, &applied)
                             .await?,
                     );
@@ -352,7 +382,7 @@ async fn dispatch(app: &App) -> Result<()> {
                 }
             }
             if maintenance.elapsed() >= Duration::from_secs(5) {
-                if app.cluster()?.maintain_notifications().await? {
+                if app.notices.maintain_notifications().await? {
                     app.notifications.wake.notify_one();
                 } else {
                     maintenance = Instant::now();

@@ -168,11 +168,12 @@ pub(crate) async fn set_section_value(
     for profile in app.storage_profiles.enabled_profiles().await? {
         profile.validate_budget(&proposed, &app.budget)?;
     }
-    Ok(app
+    let row = app
         .runtime_settings
         .save(principal, section, revision, value)
-        .await?
-        .value)
+        .await?;
+    notify_revision(app, section, row.revision);
+    Ok(row.value)
 }
 
 pub(crate) async fn reset_section_value(
@@ -186,11 +187,22 @@ pub(crate) async fn reset_section_value(
         .get(section)
         .cloned()
         .context("runtime settings default is unavailable")?;
-    Ok(app
+    let row = app
         .runtime_settings
         .reset(principal, section, value)
-        .await?
-        .value)
+        .await?;
+    notify_revision(app, section, row.revision);
+    Ok(row.value)
+}
+
+fn notify_revision(app: &App, section: &str, revision: i64) {
+    if app.deployment_mode() == "single_control" {
+        app.notifications
+            .hint(&crate::model::notification::Signal::Settings {
+                section: section.into(),
+                revision,
+            });
+    }
 }
 
 fn view(app: &App, control: WebSettings, revision: i64) -> ControlSettingsView {
@@ -276,6 +288,7 @@ pub(super) async fn save_section(
             input.value,
         )
         .await?;
+    notify_revision(&app, &section, row.revision);
     Ok(Json(runtime_view(&app, &section, row.value, row.revision)))
 }
 
@@ -295,5 +308,6 @@ pub(super) async fn reset_section(
         .runtime_settings
         .reset(&actor.principal, &section, value)
         .await?;
+    notify_revision(&app, &section, row.revision);
     Ok(Json(runtime_view(&app, &section, row.value, row.revision)))
 }

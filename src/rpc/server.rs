@@ -1077,7 +1077,7 @@ impl NodeSessions for Service {
                     let ids = super::notifications::receipt(receipt.clone())?;
                     #[cfg(feature = "fault-injection")]
                     crate::faults::point("notification-receipt").await;
-                    let count = bounded(app.cluster().map_err(failure)?.acknowledge_notifications(consumer, &ids)).await?;
+                    let count = bounded(app.notices.acknowledge_notifications(consumer, &ids)).await?;
                     app.notifications.applied(count);
                     for id in ids { outstanding.remove(&id); }
                     continue;
@@ -1093,7 +1093,7 @@ impl NodeSessions for Service {
                     let ids = super::notifications::receipt(wire::Receipt { applied:pulse.applied })?;
                     #[cfg(feature = "fault-injection")]
                     crate::faults::point("notification-receipt").await;
-                    let count = bounded(app.cluster().map_err(failure)?.acknowledge_notifications(consumer,&ids)).await?;
+                    let count = bounded(app.notices.acknowledge_notifications(consumer,&ids)).await?;
                     app.notifications.applied(count);
                     for id in ids { outstanding.remove(&id); }
                 }

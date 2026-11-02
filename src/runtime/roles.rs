@@ -77,6 +77,7 @@ async fn run_single(app: Arc<app::App>) -> Result<()> {
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone(), app.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections.clone(), app.clone()) => result?,
         result = crate::worker::scheduler::recover_remote(app.clone()), if app.deployment_mode() == "single_control" => result?,
+        result = cluster::notifications::run(app.clone()), if app.deployment_mode() == "single_control" => result?,
         result = lifecycle::run(app.clone()) => result?,
         result = maintenance::run(app.clone()) => result?,
         result = stats::run(app.clone()) => result?,

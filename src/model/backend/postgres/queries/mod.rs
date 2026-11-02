@@ -85,6 +85,7 @@ use crate::worker::integrity::Request as IntegrityRequest;
 use sqlx::{PgConnection, QueryBuilder, Row};
 
 pub(super) mod native;
+pub(super) mod notices;
 pub(super) mod notifications;
 pub(super) mod pack_work;
 pub(super) mod work;

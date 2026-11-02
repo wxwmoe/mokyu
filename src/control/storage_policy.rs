@@ -153,7 +153,7 @@ pub(crate) async fn named(app: &App, name: &str) -> Result<IoPresets> {
         .record(name)
         .await?
         .context("storage was not found")?;
-    let profile = app.storage_profiles.load(record.id).await?;
+    let profile = super::storage::load_profile(app, record.id).await?;
     catalog(app, &record.r#type, Some(&profile))
 }
 
@@ -163,7 +163,7 @@ pub(crate) async fn preset(app: &App, name: &str, preset: &str) -> Result<Profil
         .record(name)
         .await?
         .context("storage was not found")?;
-    let profile = app.storage_profiles.load(record.id).await?;
+    let profile = super::storage::load_profile(app, record.id).await?;
     let presets = catalog(app, &record.r#type, Some(&profile))?;
     let preset = presets
         .presets
@@ -185,7 +185,7 @@ pub(crate) async fn preview(
         .record(name)
         .await?
         .context("storage was not found")?;
-    let current = app.storage_profiles.load(record.id).await?;
+    let current = super::storage::load_profile(app, record.id).await?;
     ensure!(
         profile.storage_id == record.id,
         s3s::s3_error!(InvalidArgument, "profile belongs to another storage")

@@ -68,7 +68,7 @@ pub(super) async fn start_test(
             },
         )
         .await?;
-    app.wake_tasks.notify_one();
+    app.work_queued();
     Ok((
         StatusCode::ACCEPTED,
         Json(super::maintenance::TaskStarted { task_id }),

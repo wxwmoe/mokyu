@@ -85,14 +85,11 @@ pub(crate) trait NodeWork: Send + Sync {
 }
 
 #[async_trait]
-pub(crate) trait ClusterStore: NodeSessions + NodeWork {
-    async fn begin_report(
+pub(crate) trait NodeNotices: Send + Sync {
+    async fn control_consumer(
         &self,
-        state: &NodeState,
-        role: &str,
-        key: &Key,
-        boot: Uuid,
-        started: DateTime<Utc>,
+        consumer: super::notification::Consumer,
+        activate: bool,
     ) -> Result<()>;
     async fn claim_notifications(
         &self,
@@ -104,6 +101,18 @@ pub(crate) trait ClusterStore: NodeSessions + NodeWork {
         ids: &[Uuid],
     ) -> Result<u64>;
     async fn maintain_notifications(&self) -> Result<bool>;
+}
+
+#[async_trait]
+pub(crate) trait ClusterStore: NodeSessions + NodeWork + NodeNotices {
+    async fn begin_report(
+        &self,
+        state: &NodeState,
+        role: &str,
+        key: &Key,
+        boot: Uuid,
+        started: DateTime<Utc>,
+    ) -> Result<()>;
     async fn notification_changes(&self) -> Result<Box<dyn NotificationChanges>>;
     async fn task_targets(&self, tasks: &[Uuid]) -> Result<Vec<Option<Uuid>>>;
     async fn read_migration(

@@ -53,7 +53,11 @@ impl App {
         self.writable()?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("source-before-publish").await;
-        let cache_change = self.public_reads.changing_object(object.0, object.1);
+        let cache_change = self.public_reads.object_change(
+            object.0,
+            object.1,
+            self.deployment_mode() == "single_control",
+        );
         let result = {
             let _coord = self.coord.lock().await;
             self.writable()?;
@@ -68,6 +72,9 @@ impl App {
         })
         .await?;
         drop(cache_change);
+        if self.deployment_mode() == "single_control" {
+            self.notifications.committed();
+        }
         if self
             .storage
             .buffered_writes
@@ -80,7 +87,7 @@ impl App {
         crate::faults::point("object-before-seal").await;
         self.seal_uploads(id, true).await?;
         self.wake_raw_uploads.notify_one();
-        self.wake_tasks.notify_one();
+        self.work_queued();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("object-published").await;
         Ok(())
@@ -90,7 +97,7 @@ impl App {
         let Some(pending) = error.downcast_ref::<crate::model::ReplicaPending>() else {
             return Err(error);
         };
-        self.wake_tasks.notify_one();
+        self.work_queued();
         tokio::time::timeout(crate::upload::multipart::completion_timeout(), async {
             let mut interval = std::time::Duration::from_millis(100);
             loop {
@@ -129,7 +136,11 @@ impl App {
         crate::faults::point("management-before-change").await;
         let _coord = self.coord.lock().await;
         self.writable()?;
-        let _cache = self.public_reads.changing_object(bucket, key);
+        let _cache = self.public_reads.object_change(
+            bucket,
+            key,
+            self.deployment_mode() == "single_control",
+        );
         if self
             .objects
             .change(crate::model::ObjectChange {
@@ -143,6 +154,9 @@ impl App {
             .await?
         {
             self.wake_gc.notify_one();
+        }
+        if self.deployment_mode() == "single_control" {
+            self.notifications.committed();
         }
         Ok(())
     }

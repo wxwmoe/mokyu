@@ -189,6 +189,7 @@ impl Active {
     }
 }
 pub struct App {
+    pub(crate) notices: Arc<dyn crate::model::cluster::NodeNotices>,
     pub(crate) node_work: Arc<dyn crate::model::cluster::NodeWork>,
     pub(crate) node_sessions: Arc<dyn crate::model::cluster::NodeSessions>,
     cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
@@ -376,6 +377,7 @@ impl App {
         let (public_reads, public_receiver) =
             public_reads::Cache::new(cors_cache.clone(), &response_cache);
         let app = Arc::new(Self {
+            notices: stores.notices,
             node_work: stores.node_work,
             node_sessions: stores.node_sessions,
             cluster: stores.cluster,
@@ -532,6 +534,15 @@ impl App {
 }
 
 impl App {
+    pub(crate) fn work_queued(&self) {
+        self.wake_tasks.notify_one();
+        if self.deployment_mode() == "single_control" {
+            self.notifications
+                .hint(&crate::model::notification::Signal::Work(None));
+            self.notifications.committed();
+        }
+    }
+
     pub(crate) fn cluster(&self) -> Result<&dyn crate::model::cluster::ClusterStore> {
         self.cluster.as_deref().ok_or_else(|| {
             s3_error!(NotImplemented, "cluster operations require PostgreSQL").into()
@@ -663,7 +674,7 @@ impl App {
         status["read_checks"] = self.read_checks.snapshot();
         status["cors_cache"] = self.cors_cache.snapshot();
         status["public_read_cache"] = self.public_reads.snapshot();
-        if self.role == "control" {
+        if self.shared_storage_only() {
             status["notifications"] = self.notifications.snapshot();
             if let Ok(cluster) = self.cluster() {
                 status["read_refresh"] = cluster.refresh_status();

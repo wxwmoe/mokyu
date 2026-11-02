@@ -144,6 +144,7 @@ fn affected(entry: &Entry, reset: bool, changes: &[crate::model::notification::C
     use crate::model::notification::Change;
     reset
         || changes.iter().any(|change| match change {
+            Change::Reset => true,
             Change::Object { bucket, key } => {
                 entry.snapshot.bucket.id == *bucket
                     && entry
@@ -160,6 +161,7 @@ fn affected(entry: &Entry, reset: bool, changes: &[crate::model::notification::C
 pub(crate) struct Change<'a> {
     cache: &'a Cache,
     object: Option<(Uuid, &'a str)>,
+    retained: Vec<(Key, Arc<Entry>)>,
 }
 impl Drop for Change<'_> {
     fn drop(&mut self) {
@@ -168,6 +170,10 @@ impl Drop for Change<'_> {
         if self.object.is_none() {
             index.changing -= 1;
             self.cache.cors.change(false);
+        }
+        if !self.retained.is_empty() {
+            self.cache
+                .schedule(&mut index, std::mem::take(&mut self.retained));
         }
     }
 }
@@ -341,16 +347,48 @@ impl Cache {
         Change {
             cache: self,
             object: None,
+            retained: Vec::new(),
         }
     }
 
     pub fn changing_object<'a>(&'a self, bucket: Uuid, key: &'a str) -> Change<'a> {
-        // Publishers and cache workers hold coord across both invalidation boundaries.
-        let object = Some((bucket, key));
-        invalidate(&mut self.index.lock().unwrap(), object);
+        self.object_change(bucket, key, false)
+    }
+
+    pub(crate) fn object_change<'a>(
+        &'a self,
+        bucket: Uuid,
+        name: &'a str,
+        refresh: bool,
+    ) -> Change<'a> {
+        let object = Some((bucket, name));
+        let mut index = self.index.lock().unwrap();
+        let retained = if refresh
+            && index
+                .paths
+                .contains_key(&super::responses::path_key(bucket, name))
+        {
+            index
+                .entries
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.snapshot.bucket.id == bucket
+                        && entry
+                            .snapshot
+                            .stream
+                            .as_ref()
+                            .is_some_and(|stream| stream.object_key == name)
+                })
+                .map(|(key, entry)| (*key, entry.clone()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        invalidate(&mut index, object);
         Change {
             cache: self,
             object,
+            retained,
         }
     }
 
@@ -425,26 +463,10 @@ impl Cache {
             .filter(|(_, entry)| affected(entry, reset, changes))
             .map(|(key, entry)| (*key, entry.clone()))
             .collect();
-        let mut jobs = Vec::new();
-        for (key, entry) in entries {
-            index.remove(key);
-            if entry.verified.elapsed() >= entry.age || index.refreshes.contains_key(&key) {
-                continue;
-            }
-            // Candidate snapshots and index slots retain their existing memory permits.
-            if index.refreshes.len() >= index.slots.min(4096) {
-                self.skipped.fetch_add(1, Relaxed);
-                continue;
-            }
-            let job = Refresh::new(entry, generation);
-            index.refreshes.insert(key, Arc::downgrade(&job));
-            jobs.push(job);
+        for (key, _) in &entries {
+            index.remove(*key);
         }
-        for batch in jobs.chunks(crate::model::node_refresh::LIMIT) {
-            if self.sender.try_send(Work::Notify(batch.to_vec())).is_err() {
-                self.skipped.fetch_add(batch.len() as u64, Relaxed);
-            }
-        }
+        self.schedule(&mut index, entries);
         let index = &mut *index;
         index.order.retain(|key| index.entries.contains_key(key));
         let entries = &index.entries;
@@ -455,6 +477,31 @@ impl Cache {
                     .is_some_and(|current| Arc::ptr_eq(current, &entry))
             })
         });
+    }
+
+    fn schedule(&self, index: &mut Index, entries: Vec<(Key, Arc<Entry>)>) {
+        index
+            .refreshes
+            .retain(|_, job| job.upgrade().is_some_and(|job| !*job.done.borrow()));
+        let mut jobs = Vec::new();
+        for (key, entry) in entries {
+            if entry.verified.elapsed() >= entry.age || index.refreshes.contains_key(&key) {
+                continue;
+            }
+            // Candidate snapshots and index slots retain their existing memory permits.
+            if index.refreshes.len() >= index.slots.min(4096) {
+                self.skipped.fetch_add(1, Relaxed);
+                continue;
+            }
+            let job = Refresh::new(entry, index.generation);
+            index.refreshes.insert(key, Arc::downgrade(&job));
+            jobs.push(job);
+        }
+        for batch in jobs.chunks(crate::model::node_refresh::LIMIT) {
+            if self.sender.try_send(Work::Notify(batch.to_vec())).is_err() {
+                self.skipped.fetch_add(batch.len() as u64, Relaxed);
+            }
+        }
     }
 
     pub fn raw_current(&self, entry: &Arc<Entry>, storage: &crate::storage::Storage) -> bool {
@@ -880,10 +927,37 @@ impl App {
 
 pub(crate) async fn run(app: Weak<App>, mut receiver: mpsc::Receiver<Work>) {
     while let Some(work) = receiver.recv().await {
-        if let Work::Notify(jobs) = &work {
-            // Notification refreshes are consumed by API nodes, never the single runtime.
+        if let Work::Notify(jobs) = work {
+            let Some(app) = app.upgrade() else { return };
             for job in jobs {
-                job.done.send_replace(true);
+                let Some(_running) = job.claim() else {
+                    continue;
+                };
+                let result = tokio::time::timeout(Duration::from_secs(2), async {
+                    let _coord = app.coord.lock().await;
+                    let _sources = app.storage.source_gate.read().await;
+                    app.ensure_mode()?;
+                    let requested = job.generation.load(Relaxed);
+                    let generation = app.public_reads.generation();
+                    let started = Instant::now();
+                    let route = &job.entry.route;
+                    let snapshot = app.stream_store.snapshot(route, None).await?;
+                    if job.generation.load(Relaxed) == requested
+                        && let Some(snapshot) = snapshot
+                    {
+                        app.cache_public_read(route, Arc::new(snapshot), started, generation)
+                            .await?;
+                    }
+                    Ok::<_, anyhow::Error>(
+                        app.public_reads.finish_refresh(&job, requested, generation),
+                    )
+                })
+                .await;
+                match result {
+                    Ok(Ok(true)) => app.public_reads.refreshed.fetch_add(1, Relaxed),
+                    Ok(Ok(false)) => app.public_reads.skipped.fetch_add(1, Relaxed),
+                    _ => app.public_reads.failed.fetch_add(1, Relaxed),
+                };
             }
             continue;
         }

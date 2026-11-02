@@ -35,6 +35,7 @@ impl Waiters {
                     } => id == bucket && name == key,
                     Change::Bucket { bucket: id } => id == bucket,
                     Change::Storage { .. } => false,
+                    Change::Reset => true,
                 })
             {
                 waiter.notify_waiters();

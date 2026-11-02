@@ -112,7 +112,7 @@ pub(super) async fn create(
         .await?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("replication-created").await;
-    app.wake_tasks.notify_one();
+    app.work_queued();
     Ok((
         StatusCode::ACCEPTED,
         Json(super::maintenance::TaskStarted { task_id }),
@@ -180,7 +180,7 @@ pub(super) async fn command(
     app.replications
         .command(&actor.principal, id, input)
         .await?;
-    app.wake_tasks.notify_one();
+    app.work_queued();
     Ok((
         StatusCode::ACCEPTED,
         Json(super::maintenance::TaskStarted { task_id: id }),

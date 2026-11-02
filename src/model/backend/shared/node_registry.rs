@@ -248,6 +248,9 @@ impl NodeSessions for Backend {
             .ok_or(Error::NodeInactive)?;
         ensure!(row.role != "control", Error::NodeAuthentication);
         let role = row.role.clone();
+        super::queries::notices::remove(row.id)
+            .execute(&mut *tx)
+            .await?;
         let state = identity(
             &mut tx,
             Some(row),
@@ -271,6 +274,9 @@ impl NodeSessions for Backend {
             .execute(&mut *tx)
             .await?;
         super::queries::work::requeue().execute(&mut *tx).await?;
+        super::queries::notices::remove(row.id)
+            .execute(&mut *tx)
+            .await?;
         q::release(row.id).execute(&mut *tx).await?;
         if matches!(row.role.as_str(), "node" | "worker") {
             q::release_handoff().execute(&mut *tx).await?;
@@ -350,6 +356,17 @@ impl NodeSessions for Backend {
             report_sequence,
         };
         q::save(state.node_id, &lease).execute(&mut *tx).await?;
+        let consumer = crate::model::notification::Consumer {
+            node: state.node_id,
+            generation: input.connection,
+        };
+        super::queries::notices::membership(&mut tx).await?;
+        super::queries::notices::activate(consumer, &state.role)
+            .execute(&mut *tx)
+            .await?;
+        super::queries::notices::retire_previous(consumer)
+            .execute(&mut *tx)
+            .await?;
         let reply = snapshot(&mut tx, &lease).await?;
         tx.commit().await?;
         Ok(reply)
@@ -373,6 +390,9 @@ impl NodeSessions for Backend {
             lease.control == q::epoch(self)? && lease.boot == run.boot && lease.fence == run.fence,
             Error::NodeExpired
         );
+        super::queries::notices::remove(state.node_id)
+            .execute(&mut *tx)
+            .await?;
         lease.closed = true;
         lease.expires = Utc::now();
         q::save(state.node_id, &lease).execute(&mut *tx).await?;
@@ -437,6 +457,12 @@ impl NodeSessions for Backend {
         lease.draining = draining;
         lease.expires = Utc::now() + chrono::Duration::seconds(session::LEASE_SECONDS);
         q::save(state.node_id, &lease).execute(&mut *tx).await?;
+        super::queries::notices::renew(crate::model::notification::Consumer {
+            node: state.node_id,
+            generation: lease.connection,
+        })
+        .execute(&mut *tx)
+        .await?;
         let mut reply = snapshot(&mut tx, &lease).await?;
         reply.grants = super::node_work::grants(&mut tx, state.node_id, run, resources).await?;
         tx.commit().await?;
