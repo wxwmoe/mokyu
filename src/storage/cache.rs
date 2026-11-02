@@ -30,6 +30,7 @@ pub(crate) enum CacheFile {
     Raw,
     PendingChunk(bool),
     PendingRaw,
+    PartialRaw,
 }
 impl CacheFile {
     pub(crate) fn is_pending(self) -> bool {
@@ -37,6 +38,7 @@ impl CacheFile {
     }
     pub(crate) fn pending(self) -> Self {
         match self {
+            Self::PartialRaw => Self::PartialRaw,
             Self::Chunk(compressed) | Self::PendingChunk(compressed) => {
                 Self::PendingChunk(compressed)
             }
@@ -45,9 +47,25 @@ impl CacheFile {
     }
     pub(crate) fn cached(self) -> Self {
         match self {
+            Self::PartialRaw => Self::PartialRaw,
             Self::Chunk(compressed) | Self::PendingChunk(compressed) => Self::Chunk(compressed),
             Self::Raw | Self::PendingRaw => Self::Raw,
         }
+    }
+    pub(crate) async fn remove(path: std::path::PathBuf) -> std::io::Result<()> {
+        if path.extension().is_some_and(|ext| ext == "part") {
+            for ext in ["map", "map.tmp"] {
+                if let Err(error) = tokio::fs::remove_file(path.with_extension(ext)).await
+                    && !matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory
+                    )
+                {
+                    return Err(error);
+                }
+            }
+        }
+        tokio::fs::remove_file(path).await
     }
     pub(crate) fn path(self, root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
         let root = root.join(if self.is_pending() {
@@ -61,6 +79,10 @@ impl CacheFile {
                 .join(super::chunk_name(id))
                 .with_extension(if compressed { "zst" } else { "raw" }),
             Self::Raw | Self::PendingRaw => root.join("raw").join(super::chunk_name(id)),
+            Self::PartialRaw => root
+                .join("raw")
+                .join(super::chunk_name(id))
+                .with_extension("part"),
         }
     }
 }

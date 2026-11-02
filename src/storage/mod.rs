@@ -15,12 +15,14 @@ pub(crate) mod location;
 mod memory;
 pub(crate) mod model;
 mod multipart;
+mod partial_map;
 pub(crate) mod permits;
 pub(crate) mod profile;
 mod rate;
 pub(crate) mod raw;
 pub(crate) mod raw_cache;
 pub(crate) mod raw_manifest;
+pub(crate) mod raw_partial;
 pub(crate) mod raw_request;
 pub(crate) mod raw_segments;
 pub(crate) mod raw_upload;
@@ -132,6 +134,7 @@ pub struct Storage {
     capacity: Option<u64>,
     misses: Mutex<HashMap<(Id, Uuid, bool, bool), std::sync::Weak<FetchResult>>>,
     raw_misses: crate::runtime::locks::Locks<Uuid>,
+    partial_fills: crate::runtime::locks::Locks<(Uuid, u64)>,
     pub backend_gets: Arc<std::sync::atomic::AtomicU64>,
     pub cache_hits: std::sync::atomic::AtomicU64,
     pub backend_puts: std::sync::atomic::AtomicU64,
@@ -507,6 +510,7 @@ impl Storage {
                 .transpose()?,
             misses: Mutex::new(HashMap::new()),
             raw_misses: Default::default(),
+            partial_fills: Default::default(),
             backend_gets: Arc::new(0.into()),
             cache_hits: 0.into(),
             backend_puts: 0.into(),
@@ -1444,7 +1448,7 @@ impl Storage {
             let removal = CacheRemoval::new(&e.pins);
             let path = e.file.path(&self.disk.root, id);
             drop(fifo);
-            let result = tokio::fs::remove_file(path).await;
+            let result = CacheFile::remove(path).await;
             fifo = self.fifo.lock().await;
             match result {
                 Ok(()) => {}
@@ -1475,7 +1479,7 @@ impl Storage {
             drop(fifo);
             #[cfg(feature = "fault-injection")]
             crate::faults::point("cache-delete").await;
-            let result = tokio::fs::remove_file(path).await;
+            let result = CacheFile::remove(path).await;
             fifo = self.fifo.lock().await;
             match result {
                 Ok(()) => {}
@@ -1582,6 +1586,18 @@ impl Storage {
                             dir.file_name().to_string_lossy(),
                             file.file_name().to_string_lossy()
                         );
+                        if namespace == "cache"
+                            && directory == "raw"
+                            && raw_partial::restore_file(
+                                &self.file_cache(),
+                                &name,
+                                &file.path(),
+                                self.max_entries,
+                            )
+                            .await?
+                        {
+                            continue;
+                        }
                         let cached = if directory == "raw" {
                             parse_chunk_name(&name).map(|id| (id, CacheFile::Raw))
                         } else {

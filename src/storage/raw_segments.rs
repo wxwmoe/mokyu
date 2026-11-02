@@ -62,7 +62,10 @@ impl Proof {
         .await?
     }
 
-    fn check(&self, start: u64, bytes: &[u8]) -> Result<()> {
+    pub(super) fn contains(&self, page: u64) -> bool {
+        page >= self.first && page - self.first < (self.hashes.len() / HASH) as u64
+    }
+    pub(super) fn check(&self, start: u64, bytes: &[u8]) -> Result<()> {
         let index = (start / PAGE as u64)
             .checked_sub(self.first)
             .context(IntegrityError::RawMetadata)?;
@@ -87,6 +90,10 @@ impl AsRef<[u8]> for Held {
     fn as_ref(&self) -> &[u8] {
         &self.0
     }
+}
+
+pub(super) fn held(bytes: Bytes, permit: Permit) -> Bytes {
+    Bytes::from_owner(Held(bytes, permit))
 }
 
 struct Job {

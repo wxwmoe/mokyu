@@ -64,7 +64,7 @@ impl Files<'_> {
         drop(fifo);
         #[cfg(feature = "fault-injection")]
         crate::faults::point("cache-delete").await;
-        let result = tokio::fs::remove_file(path).await;
+        let result = CacheFile::remove(path).await;
         fifo = self.fifo.lock().await;
         match result {
             Ok(()) => {}
@@ -113,7 +113,7 @@ impl Files<'_> {
             drop(fifo);
             #[cfg(feature = "fault-injection")]
             crate::faults::point("cache-delete").await;
-            let result = tokio::fs::remove_file(path).await;
+            let result = CacheFile::remove(path).await;
             fifo = self.fifo.lock().await;
             match result {
                 Ok(()) => {}
@@ -288,7 +288,7 @@ impl Files<'_> {
 }
 
 async fn remove(path: &Path) -> Result<()> {
-    match tokio::fs::remove_file(path).await {
+    match CacheFile::remove(path.to_owned()).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),

@@ -83,6 +83,10 @@ pub(crate) async fn append(write: &mut Option<Write>, data: &[u8]) {
 }
 
 impl Storage {
+    pub(crate) async fn reject_raw_cache(&self, id: Uuid) {
+        self.file_cache().reject(id).await;
+    }
+
     pub(crate) fn prepare_raw_file(
         self: &Arc<Self>,
         mut file: super::raw_request::File,

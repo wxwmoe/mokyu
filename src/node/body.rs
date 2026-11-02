@@ -15,7 +15,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
-use futures_util::{FutureExt, StreamExt, stream::BoxStream};
+use futures_util::{FutureExt, StreamExt, TryStreamExt, stream::BoxStream};
 use object_store::{ObjectStoreExt, path::Path};
 use std::{
     collections::BTreeMap,
@@ -912,20 +912,26 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                     let opened=current.guard(&reads.node,reads.reader.raw(&reads.node,&current,source,audit_whole)).await;
                     if let Err(error)=&opened {reads.report_error(current.clone(),index,&segment.source,error).await;}
                     let (mut file,io)=opened?;
-                    let remote=file.remote_source();
-                    let _local_io=if remote.is_some() {drop(io);None} else {Some(io)};
+                    let mut remote=file.remote_source();
+                    let mut local_io=if remote.is_some() {drop(io);None} else {Some(io)};
                     let start=segment.source_offset as u64;
                     let span=start..start+segment.length as u64;
-                    let proof=if strict {
-                        Some(Arc::new(segments::Proof::new(&span,current.page_hashes(segment)?.ok_or(crate::model::Error::SourceUnavailable)?.to_vec(),reads.reader.cpu.clone())?))
-                    } else { None };
+                    let proof=current.page_hashes(segment)?.map(|bytes|segments::Proof::new(&span,bytes.to_vec(),reads.reader.cpu.clone()).map(Arc::new)).transpose()?;
+                    if strict && proof.is_none(){Err(crate::model::Error::SourceUnavailable)?;}
+
                     let from_backend=remote.is_some();
                     let mut audit=reads.check_raw(current.clone(),index,source,start==0 && segment.length==source.size,from_backend)?;
                     let held=current.clone();
                     let retain:segments::Retain=Arc::new(move |n|{
                         let held=held.clone();Box::pin(async move{Ok(Box::new(held.reserve(n).await?) as segments::Permit)})
                     });
-                    let mut output=if let Some(remote)=remote {
+                    let mut received=0;
+                    while received<segment.length {
+                    let at=start+received as u64;
+                    let span=at..start+segment.length as u64;
+                    let proof=proof.clone();let retain=retain.clone();
+                    let cached=matches!(&file,RawFile::Cached{..});let mut rejected=false;
+                    let mut output=if let Some(remote)=remote.clone() {
                         let read=reads.clone();let held=current.clone();let id=source.storage_id;
                         let acquire:segments::Acquire=Arc::new(move || {
                             let read=read.clone();let held=held.clone();Box::pin(async move{
@@ -935,12 +941,17 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         let lanes=if current.backend(id)?.profile.read_concurrency.is_some() {
                             current.grants.iter().filter(|g|g.storage==Some(id) && g.reference.r#type==wire::GrantType::StorageRead as i32).count()
                         }else{read::LANES};
-                        remote.stream(span,proof,lanes,acquire,retain)
-                    }else{segments::local(&mut file,span,source.size as u64,proof,retain)};
-                    let mut received=0;
+                        let profile=&current.backend(source.storage_id)?.profile;
+                        if let Some(cache)=reads.reader.files.partial(source,profile).await {
+                            cache.stream(remote,span,strict,proof,lanes,acquire,retain)
+                        }else{remote.stream(span,if strict {proof}else{None},lanes,acquire,retain).map_ok(|v|(v,true)).boxed()}
+                    }else{segments::local(&mut file,span,source.size as u64,if strict {proof}else{None},retain).map_ok(|v|(v,false)).boxed()};
                     while let Some(result)=current.guard(&reads.node,async {Ok(output.next().await)}).await? {
-                        if let Err(error)=&result {reads.report_error(current.clone(),index,&segment.source,error).await;}
-                        let bytes=result?;received+=bytes.len() as i64;
+                        if let Err(error)=&result {
+                            if cached {rejected=true;break}
+                            reads.report_error(current.clone(),index,&segment.source,error).await;
+                        }
+                        let (bytes,from_backend)=result?;received+=bytes.len() as i64;
                         if let Some(audit)=&mut audit {audit.feed(bytes.clone(),bytes.len());}
                         if received==segment.length && position+received as u64==end {current.finish_source();}
                         if !reads.reader.background && !current.verify {
@@ -948,7 +959,20 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         }
                         yield bytes;
                     }
+                    drop(output);
+                    if rejected {
+                        drop(local_io.take());
+                        let id=source.storage_id;
+                        let backend=current.backend(id)?;
+                        let _io=reads.reader.io(&current,Some(id)).await?;
+                        backend.store.ensure_verified().await?;
+                        file=RawFile::remote(backend.store.backend.clone(),source,reads.reader.gets.clone(),reads.reader.diagnostics.clone()).await?;
+                        remote=file.remote_source();
+                        reads.reader.files.reject(source.location_id).await;
+                        continue;
+                    }
                     if received!=segment.length {Err(codec::IntegrityError::Length)?;}
+                    }
                 } else {
                     if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
                     let (bytes,origin)=result.map_err(|e|Arc::try_unwrap(e).unwrap_or_else(|e|anyhow::anyhow!("{e:#}")))?;

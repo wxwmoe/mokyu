@@ -41,10 +41,23 @@ pub(super) struct Cache {
     memory: Arc<Semaphore>,
     pending: Arc<Mutex<HashSet<Uuid>>>,
     raw_misses: crate::runtime::locks::Locks<Uuid>,
+    partial_fills: crate::runtime::locks::Locks<(Uuid, u64)>,
     hits: AtomicU64,
     lookups: AtomicU64,
     state: tokio::sync::watch::Receiver<super::State>,
     epoch: Arc<AtomicU64>,
+}
+
+impl crate::storage::raw_partial::Shelf for Cache {
+    fn files(&self) -> Files<'_> {
+        self.files()
+    }
+    fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+    fn fills(&self) -> &crate::runtime::locks::Locks<(Uuid, u64)> {
+        &self.partial_fills
+    }
 }
 
 impl Cache {
@@ -97,6 +110,7 @@ impl Cache {
             memory,
             pending: Arc::new(Mutex::new(HashSet::new())),
             raw_misses: Default::default(),
+            partial_fills: Default::default(),
             hits: 0.into(),
             lookups: 0.into(),
             state: node.subscribe(),
@@ -317,6 +331,17 @@ impl Cache {
                                 directory.file_name().to_string_lossy(),
                                 file.file_name().to_string_lossy()
                             );
+                            if area == "raw"
+                                && crate::storage::raw_partial::restore_file(
+                                    &self.files(),
+                                    &name,
+                                    &file.path(),
+                                    self.entries,
+                                )
+                                .await?
+                            {
+                                continue;
+                            }
                             let parsed = if area == "raw" {
                                 crate::storage::parse_chunk_name(&name)
                                     .map(|id| (id, CacheFile::Raw))
@@ -393,6 +418,19 @@ impl Cache {
 
     pub(super) async fn reject(&self, id: Uuid) {
         self.files().reject(id).await;
+    }
+
+    pub(super) async fn partial(
+        self: &Arc<Self>,
+        source: &crate::model::raw::RawSource,
+        profile: &StorageProfile,
+    ) -> Option<crate::storage::raw_partial::Partial> {
+        let policy = self.policy(profile).ok()?;
+        if !policy.enabled {
+            return None;
+        }
+        self.initialize().await.ok()?;
+        crate::storage::raw_partial::Partial::new(self.clone(), source, policy)
     }
 
     pub(super) fn raw_lock(

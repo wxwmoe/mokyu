@@ -2,7 +2,7 @@ use super::{Active, App, StoredStream};
 use crate::model::Id;
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
-use futures_util::StreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use md5::{Digest, Md5};
 use std::{
     sync::{Arc, Mutex},
@@ -205,7 +205,7 @@ impl App {
                 let mut reader=if let Some(first)=first.take(){first}else{
                     _pin.with_read_lease(app.storage.raw_reader(&row.source,false)).await?
                 };
-                let remote=reader.range_source();
+                let mut remote=reader.range_source();let mut partial=remote.as_ref().and_then(|_| app.storage.partial(&row.source));
                 let from_backend=remote.is_some() || (!row.source.pending_upload && matches!(&reader.file,crate::storage::raw::RawFile::Local(_)));
                 let mut check=if mode=="background" && complete {Some(app.read_checks.raw(&row.source,remote.is_some()))} else{None};
                 if let Some(capture)=&capture {
@@ -215,23 +215,27 @@ impl App {
                 let mut digest=capture.as_ref().filter(|_|mode=="inline" && complete).map(|_|Md5::new());
                 let mut offset=physical.start;
                 while offset<physical.end {
-                    let end=if mode=="inline" && physical.end-offset > 128*1024*1024 {
+                    let end=if (mode=="inline" || partial.is_some()) && physical.end-offset > 128*1024*1024 {
                         ((offset/(PAGE as u64))+128)*(PAGE as u64)
                     }else{physical.end};
                     let span=offset..end;
-                    let proof=if mode=="inline" {
-                        let first=(offset/PAGE as u64) as i64;
-                        let count=((end-1)/PAGE as u64-first as u64+1) as usize;
-                        let hashes=app.raw.page_hashes(row.source.id,row.source.size,first,count).await?.ok_or(crate::model::Error::SourceUnavailable)?;
-                        Some(Arc::new(segments::Proof::new(&span,hashes,app.storage.cpu.clone())?))
+                    let strict=mode=="inline";
+                    let proof=if strict || partial.is_some() {
+                        let first=(offset/PAGE as u64) as i64;let count=((end-1)/PAGE as u64-first as u64+1) as usize;
+                        let hashes=app.raw.page_hashes(row.source.id,row.source.size,first,count).await?;
+                        hashes.map(|bytes|segments::Proof::new(&span,bytes,app.storage.cpu.clone()).map(Arc::new)).transpose()?
                     }else{None};
+                    if strict && proof.is_none(){Err(crate::model::Error::SourceUnavailable)?;}
+                    let cached=matches!(&reader.file,crate::storage::raw::RawFile::Cached{..});let mut rejected=false;
                     let mut output=if let Some(remote)=&remote {
-                        remote.clone().stream(span,proof,app.budget.storage_read_slots,app.storage.raw_range_io(row.source.storage_id),retain.clone())
+                        let io=app.storage.raw_range_io(row.source.storage_id);
+                        if let Some(cache)=&partial {cache.clone().stream(remote.clone(),span,strict,proof,app.budget.storage_read_slots,io,retain.clone())}
+                        else {remote.clone().stream(span,proof,app.budget.storage_read_slots,io,retain.clone()).map_ok(|v|(v,true)).boxed()}
                     }else{
-                        segments::local(&mut reader.file,span,row.source.size as u64,proof,retain.clone())
+                        segments::local(&mut reader.file,span,row.source.size as u64,proof,retain.clone()).map_ok(move |v|(v,from_backend)).boxed()
                     };
                     while let Some(bytes)=tokio::time::timeout(idle,_pin.with_read_lease(async {Ok(output.next().await)})).await?? {
-                        let bytes=bytes?;let count=bytes.len();offset+=count as u64;
+                        let (bytes,from_backend)=match bytes {Err(_) if cached=>{rejected=true;break},other=>other?};let count=bytes.len();offset+=count as u64;
                         if offset>end { Err(crate::content::codec::IntegrityError::Length)?; }
                         if from_backend { app.storage.backend_read_bytes.fetch_add(count as u64,std::sync::atomic::Ordering::Relaxed); }
                         else { app.storage.cache_hit_bytes.fetch_add(count as u64,std::sync::atomic::Ordering::Relaxed); }
@@ -243,6 +247,13 @@ impl App {
                         if offset==physical.end && let Some(capture)=&capture {capture.lock().unwrap().finish_source();}
                         app.storage.access.demand(&mut demand,crate::model::tiering::Source::Raw(row.source.location_id),count,from_backend);
                         yield bytes;
+                    }
+                    drop(output);
+                    if rejected {
+                        reader=_pin.with_read_lease(app.storage.raw_reader_uncached(&row.source,false)).await?;
+                        app.storage.reject_raw_cache(row.source.location_id).await;
+                        remote=reader.range_source();partial=remote.as_ref().and_then(|_|app.storage.partial(&row.source));
+                        continue;
                     }
                     if offset!=end { Err(crate::content::codec::IntegrityError::Length)?; }
                 }
