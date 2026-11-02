@@ -112,6 +112,10 @@ pub(in super::super) async fn release_node(
     queries::release_node_tasks(&id).execute(&mut *tx).await?;
     queries::release_raw_uploads(id).execute(&mut *tx).await?;
     queries::release_node_permits(&id).execute(&mut *tx).await?;
+    if backend.control_epoch.is_some() {
+        queries::return_hashes().execute(&mut *tx).await?;
+        queries::retire_hashes().execute(&mut *tx).await?;
+    }
     tx.commit().await?;
     Ok(())
 }

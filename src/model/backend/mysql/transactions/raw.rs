@@ -424,40 +424,51 @@ pub(in super::super) async fn finish_raw_processing(
     hash: &[u8],
     lease: Option<Uuid>,
 ) -> Result<bool> {
-    ensure!(hash.len() == 32, "invalid raw content hash");
     let mut tx = pool.begin().await?;
+    let completed = finish_raw_processing_in(&mut tx, work, source, hash).await?;
+    let _ = lease;
+    tx.commit().await?;
+    Ok(completed)
+}
+pub(in super::super) async fn finish_raw_processing_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    work: &crate::model::raw::RawProcessing,
+    source: &crate::model::raw::RawSource,
+    hash: &[u8],
+) -> Result<bool> {
+    ensure!(hash.len() == 32, "invalid raw content hash");
 
     let current_stream = queries::raw_processing_stream(work)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     ensure!(
         queries::raw_processing_owned(work)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?
             == Some(source.id),
         crate::model::Error::OperationAborted
     );
     if current_stream.is_none() {
         queries::raw_processing_delete(work)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
-        tx.commit().await?;
+
         return Ok(true);
     }
-    let _ = lease;
-    let current = queries::raw_source(source.id).fetch_one(&mut *tx).await?;
+
+    let current = queries::raw_source(source.id).fetch_one(&mut **tx).await?;
     ensure!(current == *source, crate::model::Error::SourceUnavailable);
     current.validate()?;
-    validate_raw(&mut tx, work.stream, current.size).await?;
-    if share_raw(&mut tx, work.stream, &current, hash).await? {
+    validate_raw(tx, work.stream, current.size).await?;
+    if share_raw(tx, work.stream, &current, hash).await? {
         queries::raw_processing_changed(work.stream)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?;
     }
     queries::raw_processing_delete(work)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
+
     Ok(true)
 }
 

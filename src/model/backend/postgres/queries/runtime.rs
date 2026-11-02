@@ -496,3 +496,14 @@ pub(in super::super) fn release_handoff() -> Statement<'static> {
         "UPDATE mokyu_meta SET remote_work=FALSE WHERE singleton AND deployment_mode='single_control' AND remote_work AND NOT EXISTS(SELECT 1 FROM nodes WHERE enabled AND role IN ('worker','node'))",
     )
 }
+
+pub(in super::super) fn return_hashes() -> Statement<'static> {
+    sqlx::query(
+        "UPDATE raw_processing w SET token=NULL,lease_expires_at=NULL FROM tasks t WHERE t.id=w.token AND t.task_type='upload' AND t.detail->>'operation'='deduplicate' AND t.state='queued' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE deployment_mode='single_control' AND NOT remote_work)",
+    )
+}
+pub(in super::super) fn retire_hashes() -> Statement<'static> {
+    sqlx::query(
+        "UPDATE tasks SET state='completed',updated_at=clock_timestamp() WHERE state='queued' AND task_type='upload' AND detail->>'operation'='deduplicate' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE deployment_mode='single_control' AND NOT remote_work)",
+    )
+}

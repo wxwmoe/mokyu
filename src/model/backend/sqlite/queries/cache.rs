@@ -333,7 +333,7 @@ pub(in super::super) fn claim_task_candidate(
         "SELECT t.id FROM tasks t CROSS JOIN mokyu_meta m WHERE t.source_node IS NULL AND (t.state='queued' OR (t.state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=t.id AND rl.state='idle' AND (rl.next_reconcile_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now') OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (t.state='failed' AND (json_extract(t.detail,'$.operation')='cdc' OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=t.id AND rl.state<>'paused')) AND t.updated_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-30000000)) AND NOT EXISTS(SELECT 1 FROM raw_sources r WHERE r.processing_task=t.id AND (r.owner_stream IS NOT NULL OR EXISTS(SELECT 1 FROM raw_ranges e JOIN streams s ON s.id=e.stream_id WHERE e.source_id=r.id AND s.state='writing'))) AND CASE WHEN t.task_type IN ('pack','unpack') THEN 1 WHEN t.task_type IN ('upload','cache_flush','storage_migration','rewrite') THEN 2 ELSE 0 END=",
     );
     query.push_bind(class);
-    query.push(" AND NOT EXISTS(SELECT 1 FROM mokyu_meta m WHERE m.remote_work AND m.deployment_mode='single_control' AND t.task_type IN ('integrity','pack','unpack','storage_migration','rewrite','sweep'))");
+    query.push(" AND NOT EXISTS(SELECT 1 FROM mokyu_meta m WHERE m.remote_work AND m.deployment_mode='single_control' AND (t.task_type IN ('integrity','pack','unpack','storage_migration','rewrite','sweep') OR t.task_type='upload' AND json_extract(t.detail,'$.operation')='deduplicate'))");
     if draining {
         query.push(" AND t.task_type IN ('upload','cache_flush') AND COALESCE(json_extract(t.detail,'$.operation'),'')<>'cdc'");
     }

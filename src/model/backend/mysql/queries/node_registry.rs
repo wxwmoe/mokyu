@@ -122,7 +122,7 @@ pub(in super::super) fn embedded() -> Scalar<'static, Uuid> {
 
 pub(in super::super) fn mode() -> Rows<'static, (bool, String, i64, bool)> {
     sqlx::query_as(
-        "SELECT maintenance,deployment_mode,deployment_mode_revision,(remote_work AND NOT maintenance AND EXISTS(SELECT 1 FROM tasks t WHERE t.state='queued' AND ((t.task_type='integrity' AND (JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test' OR JSON_EXTRACT(t.detail,'$.source_operation') IS NOT NULL)) OR (t.task_type='storage_migration' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='tiering')))) FROM mokyu_meta WHERE id=1",
+        "SELECT maintenance,deployment_mode,deployment_mode_revision,(remote_work AND NOT maintenance AND (EXISTS(SELECT 1 FROM raw_processing w JOIN raw_sources r ON r.id=w.source_id WHERE r.medium='shared_s3' AND NOT r.pending_upload AND w.next_attempt_at<=UTC_TIMESTAMP(6) AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=r.id) AND (w.token IS NULL OR w.lease_expires_at IS NULL OR w.lease_expires_at<UTC_TIMESTAMP(6)) AND NOT EXISTS(SELECT 1 FROM tasks j WHERE j.id=w.token AND j.state IN ('queued','running','paused','failed'))) OR EXISTS(SELECT 1 FROM tasks t WHERE t.state='queued' AND ((t.task_type='integrity' AND (JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test' OR JSON_EXTRACT(t.detail,'$.source_operation') IS NOT NULL)) OR ((t.task_type='storage_migration' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='tiering' OR t.task_type='upload' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='deduplicate')))))) FROM mokyu_meta WHERE id=1",
     )
 }
 

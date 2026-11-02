@@ -402,6 +402,12 @@ impl NodeSessions for Backend {
         q::release(row.id).execute(&mut *tx).await?;
         if matches!(row.role.as_str(), "node" | "worker") {
             q::release_handoff().execute(&mut *tx).await?;
+            super::queries::work::return_hashes()
+                .execute(&mut *tx)
+                .await?;
+            super::queries::work::retire_hashes()
+                .execute(&mut *tx)
+                .await?;
         }
         tx.commit().await?;
         Ok(())

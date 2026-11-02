@@ -496,12 +496,12 @@ async fn raw_processor(
             crate::model::Error::OperationAborted
         );
         ensure!(
-            queries::repair_cluster_mode().fetch_one(db).await?,
+            queries::raw_processor_mode(true).fetch_one(db).await?,
             crate::model::Error::OperationAborted
         );
     } else {
         ensure!(
-            queries::repair_mode().fetch_one(db).await?,
+            queries::raw_processor_mode(false).fetch_one(db).await?,
             crate::model::Error::OperationAborted
         );
     }

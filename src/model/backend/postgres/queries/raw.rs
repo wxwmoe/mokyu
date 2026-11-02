@@ -711,7 +711,7 @@ pub(in super::super) fn raw_enqueue_processing(stream: Id, source: Id) -> Statem
 }
 
 pub(in super::super) fn raw_processing_due(single: bool) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT w.stream_id FROM raw_processing w JOIN streams s ON s.id=w.stream_id WHERE NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=w.source_id) AND s.state<>'writing' AND (s.state<>'ready' OR EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id)) AND w.next_attempt_at<=clock_timestamp() AND ($1 OR w.token IS NULL OR w.lease_expires_at IS NULL OR w.lease_expires_at<clock_timestamp()) ORDER BY w.next_attempt_at,w.stream_id LIMIT 1 FOR UPDATE OF w SKIP LOCKED").bind(single)
+    sqlx::query_scalar("SELECT w.stream_id FROM raw_processing w JOIN streams s ON s.id=w.stream_id WHERE NOT EXISTS(SELECT 1 FROM mokyu_meta m WHERE m.deployment_mode='single_control' AND m.remote_work) AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=w.source_id) AND s.state<>'writing' AND (s.state<>'ready' OR EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id)) AND w.next_attempt_at<=clock_timestamp() AND ($1 OR w.token IS NULL OR w.lease_expires_at IS NULL OR w.lease_expires_at<clock_timestamp()) ORDER BY w.next_attempt_at,w.stream_id LIMIT 1 FOR UPDATE OF w SKIP LOCKED").bind(single)
 }
 
 pub(in super::super) fn raw_processing_claim(
@@ -1128,4 +1128,8 @@ pub(in super::super) fn release_memory_raw(boot: Uuid) -> Statement<'static> {
 
 pub(in super::super) fn release_memory_processing(boot: Uuid) -> Statement<'static> {
     sqlx::query("DELETE FROM raw_processing WHERE source_id IN (SELECT id FROM raw_sources WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL AND medium='memory' AND boot_id<>$1)").bind(boot)
+}
+
+pub(in super::super) fn raw_processor_mode(remote: bool) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT NOT maintenance AND (deployment_mode='single_control' OR deployment_mode=$1) FROM mokyu_meta FOR SHARE").bind(if remote {"cluster"}else{"single"})
 }

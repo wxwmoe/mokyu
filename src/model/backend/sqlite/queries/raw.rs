@@ -723,7 +723,7 @@ pub(in super::super) fn raw_enqueue_processing(stream: Id, source: Id) -> Statem
 }
 
 pub(in super::super) fn raw_processing_due(single: bool) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT w.stream_id FROM raw_processing w JOIN streams s ON s.id=w.stream_id WHERE NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=w.source_id) AND s.state<>'writing' AND (s.state<>'ready' OR EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id)) AND w.next_attempt_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND (? OR w.token IS NULL OR w.lease_expires_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)) ORDER BY w.next_attempt_at,w.stream_id LIMIT 1").bind(single)
+    sqlx::query_scalar("SELECT w.stream_id FROM raw_processing w JOIN streams s ON s.id=w.stream_id WHERE NOT EXISTS(SELECT 1 FROM mokyu_meta m WHERE m.deployment_mode='single_control' AND m.remote_work) AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=w.source_id) AND s.state<>'writing' AND (s.state<>'ready' OR EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id)) AND w.next_attempt_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND (? OR w.token IS NULL OR w.lease_expires_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)) ORDER BY w.next_attempt_at,w.stream_id LIMIT 1").bind(single)
 }
 
 pub(in super::super) fn raw_processing_claim(

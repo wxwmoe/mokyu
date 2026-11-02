@@ -158,6 +158,10 @@ async fn finish(
     };
     let mut issue = None;
     let state = match (offer.plan.map(|p| p.0), result.outcomes.as_slice()) {
+        (Some(work::Plan::HashRaw { items, .. }), outcomes) => {
+            super::work_raw::finish(tx, task, &items, outcomes).await?;
+            "completed"
+        }
         (Some(work::Plan::UploadRaw { items, .. }), [outcome]) if items.len() == 1 => {
             let (next, error) =
                 super::node_files::finish(tx, node, task, &items[0], outcome).await?;
@@ -278,6 +282,13 @@ impl NodeWork for Backend {
             finish(&mut tx, node.node_id, input.run, result).await?;
         }
         let token = Uuid::new_v4();
+        if active
+            && input.max_items > 0
+            && input.class == 2
+            && matches!(node.role.as_str(), "worker" | "node")
+        {
+            super::work_raw::schedule(&mut tx, input.max_items).await?;
+        }
         let next = if active && input.max_items > 0 {
             q::next_task(
                 input.class,
@@ -320,6 +331,7 @@ impl NodeWork for Backend {
                         serde_json::to_vec(&connection)?,
                     ))
                 }
+                Some("deduplicate") => super::work_raw::offer(&mut tx, task, &detail, key).await?,
                 Some("tiering") => tier_plan(&mut tx, task, &detail, key).await?,
                 _ if detail.get("source_operation").is_some() => {
                     let store = serde_json::from_value(detail["storage_id"].clone())?;
