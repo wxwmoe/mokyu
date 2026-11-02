@@ -58,6 +58,8 @@ mod work_migration;
 mod work_raw;
 #[path = "../shared/work_replication.rs"]
 mod work_replication;
+#[path = "../shared/work_rewrite.rs"]
+mod work_rewrite;
 #[path = "../shared/work_sources.rs"]
 mod work_sources;
 #[path = "../shared/work_sweep.rs"]

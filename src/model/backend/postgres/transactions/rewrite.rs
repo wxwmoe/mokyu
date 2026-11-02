@@ -22,7 +22,8 @@ pub(in super::super) async fn start_rewrite(
         .fetch_one(&mut *tx)
         .await?;
     if single {
-        let detail = json!({"execution_mode":"single","storage_id":input.storage_id,"upper_chunk_id":upper,"profile_revision":input.profile_revision,"target_key_id":input.target_key_id,"target_key":input.target_key,"target_algorithm":input.target_algorithm});
+        let mode = queries::replication::mode().fetch_one(&mut *tx).await?;
+        let detail = json!({"execution_mode":mode,"storage_id":input.storage_id,"upper_chunk_id":upper,"profile_revision":input.profile_revision,"target_key_id":input.target_key_id,"target_key":input.target_key,"target_algorithm":input.target_algorithm});
         let id = enqueue_task(&mut tx, "rewrite", None, detail, false).await?;
         if input.shards == 0 {
             queries::complete_empty_rewrite(id)

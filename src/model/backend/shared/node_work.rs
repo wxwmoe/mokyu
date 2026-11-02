@@ -278,6 +278,18 @@ async fn finish(
             .await?;
             return settle(tx, node, task, result.operation, &hash).await;
         }
+        (Some(work::Plan::Rewrite { items, .. }), outcomes) => {
+            let record = queries::task_record(task.id).fetch_one(&mut **tx).await?;
+            issue =
+                super::work_rewrite::finish(tx, task, &record.detail, items, outcomes, key).await?;
+            if issue.is_some_and(|s| s == "backend_io_failed") {
+                "queued"
+            } else if issue.is_some() {
+                "failed"
+            } else {
+                "queued"
+            }
+        }
         (Some(work::Plan::HashRaw { items, .. }), outcomes) => {
             super::work_raw::finish(tx, task, &items, outcomes).await?;
             "completed"
@@ -656,6 +668,9 @@ impl NodeWork for Backend {
                         key,
                     )
                     .await?
+                }
+                _ if task_type == "rewrite" => {
+                    super::work_rewrite::offer(&mut tx, task, &detail, input.max_items, key).await?
                 }
                 _ if matches!(task_type.as_str(), "pack" | "unpack") => {
                     super::work_media::offer(&mut tx, task, &detail, key).await?

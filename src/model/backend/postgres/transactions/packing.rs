@@ -158,7 +158,10 @@ pub(super) async fn enqueue_storage_task(
     mut detail: Value,
     storages: &[(Uuid, String, i64)],
 ) -> Result<Uuid> {
-    detail["execution_mode"] = json!("single");
+    detail["execution_mode"] = queries::replication::mode()
+        .fetch_one(&mut **tx)
+        .await?
+        .into();
     detail["storages"] = json!(
         storages
             .iter()

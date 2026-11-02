@@ -161,5 +161,6 @@ pub(super) mod node_registry;
 pub(super) mod work;
 
 pub(super) mod work_audit;
+pub(super) mod work_rewrite;
 pub(super) mod work_sources;
 pub(super) mod work_sweep;

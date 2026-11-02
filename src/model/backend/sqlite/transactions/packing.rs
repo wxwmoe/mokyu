@@ -94,7 +94,8 @@ pub(in super::super) async fn start_rewrite(
     let upper = queries::rewrite_upper(input.storage_id)
         .fetch_one(&mut *tx)
         .await?;
-    let detail = serde_json::json!({"execution_mode":"single","storage_id":input.storage_id,"upper_chunk_id":upper,"profile_revision":input.profile_revision,"target_key_id":input.target_key_id,"target_key":input.target_key,"target_algorithm":input.target_algorithm});
+    let mode = queries::replication::mode().fetch_one(&mut *tx).await?;
+    let detail = serde_json::json!({"execution_mode":mode,"storage_id":input.storage_id,"upper_chunk_id":upper,"profile_revision":input.profile_revision,"target_key_id":input.target_key_id,"target_key":input.target_key,"target_algorithm":input.target_algorithm});
     let id = enqueue_task(&mut tx, "rewrite", None, detail).await?;
     if input.shards == 0 || !upper.is_valid() {
         queries::complete_task(id).execute(&mut *tx).await?;
@@ -109,17 +110,29 @@ pub(in super::super) async fn commit_rewrite_chunk(
     source: &Chunk,
     physical: &Chunk,
 ) -> Result<()> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let value = commit_rewrite_chunk_in(&mut tx, task, source, physical).await?;
+    tx.commit().await?;
+    Ok(value)
+}
+
+pub(in super::super) async fn commit_rewrite_chunk_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    task: Execution,
+    source: &Chunk,
+    physical: &Chunk,
+) -> Result<()> {
     ensure!(
         source.id == physical.id
             && source.raw_size == physical.raw_size
             && source.hash == physical.hash,
         "rewrite content identity changed"
     );
-    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_execution(&mut tx, task).await?;
+
+    lock_execution(tx, task).await?;
     ensure!(
         super::super::queries::tier::rewrite_source(
-            &mut *tx,
+            &mut **tx,
             crate::model::tiering::Unit::Chunk,
             source.encoding_id,
             source.address(),
@@ -130,16 +143,16 @@ pub(in super::super) async fn commit_rewrite_chunk(
         crate::model::Error::OperationAborted
     );
     let current = queries::lock_rewrite_chunk(source.id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
     ensure!(
         current == Some((None, source.encoding_id)),
         "chunk source changed during rewrite"
     );
-    check_source_inputs(&mut tx, task.id, &[source.id]).await?;
+    check_source_inputs(tx, task.id, &[source.id]).await?;
     let owners: Vec<Uuid> = queries::pack_input_owners(&[source.id])
         .build_query_scalar()
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     ensure!(
         owners == [task.id],
@@ -147,22 +160,22 @@ pub(in super::super) async fn commit_rewrite_chunk(
     );
     ensure!(
         queries::rewrite_encoding_owner(physical.encoding_id, task.id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?,
         "encoding output changed"
     );
     ensure!(
         queries::register_encoding(physical)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
         "encoding output changed"
     );
-    queries::refresh_encoding_fingerprint(&mut tx, physical.encoding_id).await?;
+    queries::refresh_encoding_fingerprint(tx, physical.encoding_id).await?;
     ensure!(
         queries::retire_rewrite_encoding(source.encoding_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
@@ -170,7 +183,7 @@ pub(in super::super) async fn commit_rewrite_chunk(
     );
     ensure!(
         queries::complete_encoding(physical.encoding_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
@@ -178,21 +191,35 @@ pub(in super::super) async fn commit_rewrite_chunk(
     );
     ensure!(
         queries::publish_chunk_encoding(source.id, physical.encoding_id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
         "chunk output changed"
     );
     queries::advance_task(task.id, &source.id.to_string(), 1)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
 pub(in super::super) async fn commit_rewrite_pack(
     pool: &SqlitePool,
+    task: Execution,
+    old: &Pack,
+    new: &Pack,
+    current: &[Id],
+    members: &[Chunk],
+    first: Id,
+) -> Result<()> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    let value = commit_rewrite_pack_in(&mut tx, task, old, new, current, members, first).await?;
+    tx.commit().await?;
+    Ok(value)
+}
+
+pub(in super::super) async fn commit_rewrite_pack_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     task: Execution,
     old: &Pack,
     new: &Pack,
@@ -206,11 +233,11 @@ pub(in super::super) async fn commit_rewrite_pack(
             && members.len() == new.member_count as usize,
         "pack content identity changed"
     );
-    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_execution(&mut tx, task).await?;
+
+    lock_execution(tx, task).await?;
     ensure!(
         super::super::queries::tier::rewrite_source(
-            &mut *tx,
+            &mut **tx,
             crate::model::tiering::Unit::Pack,
             old.id,
             old.address(),
@@ -221,13 +248,13 @@ pub(in super::super) async fn commit_rewrite_pack(
         crate::model::Error::OperationAborted
     );
     let locked = queries::lock_rewrite_members(old.id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     ensure!(locked == current, "pack membership changed during rewrite");
-    check_source_inputs(&mut tx, task.id, current).await?;
+    check_source_inputs(tx, task.id, current).await?;
     let owners: Vec<Uuid> = queries::pack_input_owners(current)
         .build_query_scalar()
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await?;
     ensure!(
         owners.len() == current.len() && owners.iter().all(|id| *id == task.id),
@@ -235,25 +262,28 @@ pub(in super::super) async fn commit_rewrite_pack(
     );
     let member_ids: Vec<_> = members.iter().map(|c| c.id).collect();
     ensure!(
-        queries::pack_member_ids(old.id).fetch_all(&mut *tx).await? == member_ids,
+        queries::pack_member_ids(old.id)
+            .fetch_all(&mut **tx)
+            .await?
+            == member_ids,
         "pack content members changed during rewrite"
     );
     ensure!(
         queries::pack_metadata(new)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
         "new pack changed during rewrite"
     );
-    queries::refresh_pack_fingerprint(&mut tx, new.id).await?;
+    queries::refresh_pack_fingerprint(tx, new.id).await?;
     queries::insert_pack_members(new.id, members.iter())
         .build()
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
     ensure!(
         queries::publish_prepared_pack(new.id, task.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
@@ -261,7 +291,7 @@ pub(in super::super) async fn commit_rewrite_pack(
     );
     ensure!(
         queries::replace_rewrite_pack(old.id, new.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == current.len() as u64,
@@ -269,7 +299,7 @@ pub(in super::super) async fn commit_rewrite_pack(
     );
     ensure!(
         queries::retire_rewrite_pack(old.id)
-            .execute(&mut *tx)
+            .execute(&mut **tx)
             .await?
             .rows_affected()
             == 1,
@@ -277,9 +307,8 @@ pub(in super::super) async fn commit_rewrite_pack(
     );
     // Packs can interleave chunk IDs; advance only past this pack's scan key.
     queries::advance_task(task.id, &first.to_string(), 1)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-    tx.commit().await?;
     Ok(())
 }
 
@@ -364,7 +393,10 @@ pub(super) async fn enqueue_storage_task(
     mut detail: Value,
     storages: &[(Uuid, i64)],
 ) -> Result<Uuid> {
-    detail["execution_mode"] = serde_json::json!("single");
+    detail["execution_mode"] = queries::replication::mode()
+        .fetch_one(&mut *connection)
+        .await?
+        .into();
     detail["storages"] = serde_json::json!(
         storages
             .iter()
@@ -567,19 +599,28 @@ pub(in super::super) async fn prepare_encoding(
     task: Execution,
 ) -> Result<Id> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_execution(&mut tx, task).await?;
+    let value = prepare_encoding_in(&mut tx, physical, task).await?;
+    tx.commit().await?;
+    Ok(value)
+}
+
+pub(in super::super) async fn prepare_encoding_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    physical: &Chunk,
+    task: Execution,
+) -> Result<Id> {
+    lock_execution(tx, task).await?;
     if let Some(key) = physical.block_key_id {
         queries::encoding_key(key, &physical.algorithm)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
     }
     let id = queries::prepare_encoding(physical, task)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .last_insert_rowid()
         .into();
-    queries::refresh_encoding_fingerprint(&mut tx, id).await?;
-    tx.commit().await?;
+    queries::refresh_encoding_fingerprint(tx, id).await?;
     Ok(id)
 }
 
@@ -593,20 +634,33 @@ pub(in super::super) async fn prepare_pack(
     task: Execution,
 ) -> Result<Pack> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_execution(&mut tx, task).await?;
+    let value = prepare_pack_in(&mut tx, storage, algorithm, key, bytes, count, task).await?;
+    tx.commit().await?;
+    Ok(value)
+}
+
+pub(in super::super) async fn prepare_pack_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    storage: Uuid,
+    algorithm: &str,
+    key: Option<Uuid>,
+    bytes: i64,
+    count: i32,
+    task: Execution,
+) -> Result<Pack> {
+    lock_execution(tx, task).await?;
     if let Some(key) = key {
         queries::encoding_key(key, algorithm)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
     }
     let id = queries::prepare_pack(storage, algorithm, key, bytes, count, task)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?
         .last_insert_rowid()
         .into();
-    queries::refresh_pack_fingerprint(&mut tx, id).await?;
-    let pack = queries::pack_record(id).fetch_one(&mut *tx).await?;
-    tx.commit().await?;
+    queries::refresh_pack_fingerprint(tx, id).await?;
+    let pack = queries::pack_record(id).fetch_one(&mut **tx).await?;
     Ok(pack)
 }
 
