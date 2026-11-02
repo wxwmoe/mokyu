@@ -2,7 +2,7 @@ use super::{Backend, migration, queries};
 use crate::{
     content::codec::Key,
     model::{
-        cluster::ClusterStore,
+        cluster::{ClusterStore, NodeSessions},
         metrics::{NodeSample, RuntimeQuery},
         node::NodeReport,
     },

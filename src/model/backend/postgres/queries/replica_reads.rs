@@ -111,7 +111,7 @@ pub(in super::super) async fn node_replica_page(
             .checked_add(i64::from(extent.length))
             .context("replica mapping overflow")?;
         ensure!(
-            extent.stream_id == Id::Uuid(cursor.stream)
+            extent.stream_id == cursor.stream
                 && extent.chunk_id.is_some()
                 && extent.offset_bytes <= position
                 && end > position

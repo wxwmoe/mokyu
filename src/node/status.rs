@@ -38,7 +38,7 @@ impl NodeContext {
         };
         json!({
             "version": env!("CARGO_PKG_VERSION"), "role": self.client.identity.role,
-            "deployment_mode": "cluster", "ready": self.ready(), "phase": state.phase,
+            "deployment_mode": state.deployment_mode, "deployment_mode_revision": state.mode_revision, "ready": self.ready(), "phase": state.phase,
             "maintenance": state.maintenance, "draining": state.draining,
             "node_id": self.client.identity.node_id, "boot_id": self.boot,
             "runtime": runtime, "resources": self.budget.get(),

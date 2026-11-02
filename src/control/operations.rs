@@ -54,9 +54,6 @@ pub async fn password_hash(password: String) -> Result<String> {
     .await?
 }
 pub async fn execute_as(app: &Arc<App>, principal: &Principal, command: Command) -> Result<Value> {
-    if matches!(&command, Command::Cluster(command) if !matches!(command, Cluster::Mode { .. })) {
-        app.cluster()?;
-    }
     if !super::audit::active()
         && let Some(action) = command.audit_action()
     {
@@ -198,14 +195,14 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
         }
         Command::Cluster(command) => match command {
             Cluster::Create { name, role } => Ok(serde_json::to_value(
-                app.cluster()?
+                app.node_sessions
                     .provision_node(principal, &name, &role, &app.secrets.credential_key)
                     .await?,
             )?),
             Cluster::Rotate { name, confirm } => {
                 ensure!(confirm, "node credential rotation requires --confirm");
                 Ok(serde_json::to_value(
-                    app.cluster()?
+                    app.node_sessions
                         .rotate_node(principal, &name, &app.secrets.credential_key)
                         .await?,
                 )?)
@@ -256,7 +253,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     );
                 }
                 ensure!(confirm, "cluster release requires --confirm");
-                app.cluster()?.release(&name).await?;
+                app.node_sessions.release(&name).await?;
                 Ok(json!({"released": name}))
             }
         },

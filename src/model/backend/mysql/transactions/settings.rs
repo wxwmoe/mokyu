@@ -173,6 +173,14 @@ pub(in super::super) async fn change_mode(
             ModeConflict("cluster mode requires an enabled S3 uploads.staging_storage_id")
         );
     }
+    if mode == "single" {
+        ensure!(
+            !queries::node_registry::has_registered_peers()
+                .fetch_one(&mut **tx)
+                .await?,
+            ModeConflict("release all registered remote nodes before returning to single mode")
+        );
+    }
     queries::preserve_task_mode(&current)
         .execute(&mut **tx)
         .await?;

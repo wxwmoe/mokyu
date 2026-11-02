@@ -99,6 +99,8 @@ impl Snapshot {
 
 #[derive(Clone)]
 pub(crate) struct State {
+    deployment_mode: Option<String>,
+    mode_revision: Option<u64>,
     pub(crate) phase: Phase,
     pub(crate) epoch: u64,
     pub(crate) peer: Option<std::net::Ipv4Addr>,
@@ -173,6 +175,8 @@ impl NodeContext {
             serving: AtomicBool::new(false),
             boot: Uuid::new_v4(),
             current: watch::channel(State {
+                deployment_mode: None,
+                mode_revision: None,
                 phase: Phase::Connecting,
                 epoch: 0,
                 peer: None,

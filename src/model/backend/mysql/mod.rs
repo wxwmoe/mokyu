@@ -2,6 +2,8 @@ mod connection;
 #[path = "../shared/image.rs"]
 mod image_transactions;
 mod migration;
+#[path = "../shared/node_registry.rs"]
+mod node_registry;
 mod queries;
 #[path = "../shared/raw_pages.rs"]
 mod raw_pages;

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn mappings_reject_gaps_overflow_and_source_range_escape() {
-    let id = Uuid::new_v4();
+    let id = crate::model::Id::from(Uuid::new_v4());
     let segment = read::Segment {
         page_revision: None,
         offset: 10,
@@ -24,7 +24,7 @@ fn mappings_reject_gaps_overflow_and_source_range_escape() {
         segments: vec![segment],
     };
     validate_mapping(&original, id, 4, 10, 13).unwrap();
-    assert!(validate_mapping(&original, Uuid::new_v4(), 4, 10, 13).is_err());
+    assert!(validate_mapping(&original, Uuid::new_v4().into(), 4, 10, 13).is_err());
     assert!(validate_mapping(&original, id, 5, 10, 13).is_err());
     for change in 0..5 {
         let mut value = original.clone();

@@ -138,6 +138,8 @@ mod tests {
         wire::SyncReply {
             valid_for_ms: 90_000,
             state: Some(wire::NodeState {
+                deployment_mode: "cluster".into(),
+                mode_revision: 1,
                 native_pending: false,
                 work_pending: false,
                 pending_uploads: 0,

@@ -232,7 +232,7 @@ impl NodeContext {
                     force = false;
                 }
                 if let Some(state) = reply.state {
-                    self.publish(&lease, &settings, &state);
+                    self.publish(&lease, &settings, &state)?;
                     if !settings.matches(&state).map_err(invalid_settings)? {
                         session
                             .during(self.synchronize(&lease, &mut settings))
@@ -286,16 +286,30 @@ impl NodeContext {
                 .state
                 .as_ref()
                 .ok_or_else(|| Status::data_loss("control omitted node state"))?,
-        );
+        )?;
         *settings = next;
         Ok(())
     }
 
-    fn publish(&self, lease: &Arc<RunLease>, settings: &Settings, state: &wire::NodeState) {
+    fn publish(
+        &self,
+        lease: &Arc<RunLease>,
+        settings: &Settings,
+        state: &wire::NodeState,
+    ) -> Result<(), Status> {
+        if !matches!(state.deployment_mode.as_str(), "cluster" | "single_control")
+            || state.mode_revision == 0
+        {
+            return Err(Status::data_loss(
+                "control returned an invalid deployment mode",
+            ));
+        }
         if state.native_pending {
             self.native_work.notify_one();
         }
         self.current.send_modify(|current| {
+            current.deployment_mode = Some(state.deployment_mode.clone());
+            current.mode_revision = Some(state.mode_revision);
             current.maintenance = state.maintenance;
             current.work_pending = state.work_pending;
             current.pending_uploads = state.draining.then_some(state.pending_uploads);
@@ -310,6 +324,7 @@ impl NodeContext {
                 settings: settings.clone(),
             }));
         });
+        Ok(())
     }
 }
 

@@ -153,8 +153,7 @@ impl App {
                 timeout,
                 encoding: encoding.as_ref(),
                 node: self
-                    .node
-                    .get()
+                    .processor_node()
                     .map(|node| (node, self.role.as_str(), &self.secrets.credential_key)),
             })
             .await?
@@ -248,7 +247,7 @@ impl App {
                     let owner = if detail["coordinator"] == true {
                         None
                     } else {
-                        self.node.get().map(|n| n.node_id)
+                        self.processor_node().map(|n| n.node_id)
                     };
                     if self.raw.uploads_before(before, owner).await? {
                         if detail["coordinator"] != true {

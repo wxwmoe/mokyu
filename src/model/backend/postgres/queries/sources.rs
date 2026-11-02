@@ -199,11 +199,8 @@ impl Sources {
             position > start && position <= end,
             Error::SourceUnavailable
         );
-        let Id::Uuid(id) = stream.id else {
-            anyhow::bail!("node reads require UUID stream identities");
-        };
         Ok(Mapping {
-            stream: id,
+            stream: stream.id,
             revision: stream.payload_revision,
             start,
             end: position,

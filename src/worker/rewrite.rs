@@ -76,7 +76,7 @@ impl App {
         self.writable()?;
         let (id, existing) = self
             .packing
-            .start_rewrite(&job, self.node.get().map(|n| n.node_id))
+            .start_rewrite(&job, self.processor_node().map(|n| n.node_id))
             .await?;
         if existing {
             return Ok(json!({"task_id":id,"existing":true}));

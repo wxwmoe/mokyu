@@ -552,8 +552,7 @@ impl App {
                     token,
                     parts: &selected,
                     node: self
-                        .node
-                        .get()
+                        .processor_node()
                         .map(|node| (node, self.role.as_str(), &self.secrets.credential_key)),
                 })
                 .await?;
@@ -599,7 +598,7 @@ impl App {
                                         .renew_complete(
                                             u.id,
                                             token,
-                                            app.node.get().map(|node| (
+                                            app.processor_node().map(|node| (
                                                 node,
                                                 app.role.as_str(),
                                                 &app.secrets.credential_key

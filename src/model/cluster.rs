@@ -8,7 +8,81 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 #[async_trait]
-pub(crate) trait ClusterStore: Send + Sync {
+pub(crate) trait NodeSessions: Send + Sync {
+    async fn provision_node(
+        &self,
+        principal: &Principal,
+        name: &str,
+        role: &str,
+        key: &Key,
+    ) -> Result<NodeState>;
+    async fn rotate_node(&self, principal: &Principal, name: &str, key: &Key) -> Result<NodeState>;
+    async fn close_session(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+    ) -> Result<()>;
+    async fn report_session(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        report: &super::node::NodeReport,
+        sample_interval: u64,
+    ) -> Result<bool>;
+    async fn open_session(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::session::Open,
+    ) -> Result<super::session::Snapshot>;
+    async fn sync_node(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+    ) -> Result<super::session::Snapshot>;
+    async fn pulse_session(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        epoch: i64,
+        sequence: i64,
+        draining: bool,
+        resources: super::node_read::KeepAlive,
+    ) -> Result<super::session::Snapshot>;
+    async fn maintain_session(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        epoch: i64,
+        sequence: i64,
+        resources: super::node_read::KeepAlive,
+    ) -> Result<(i64, Vec<super::node_read::GrantResult>)>;
+    async fn release(&self, name: &str) -> Result<()>;
+    async fn register(
+        &self,
+        name: &str,
+        role: &str,
+        credential: String,
+        key: &Key,
+    ) -> Result<Option<NodeState>>;
+    async fn heartbeat(&self, state: &NodeState, role: &str, key: &Key) -> Result<()>;
+}
+
+#[async_trait]
+pub(crate) trait ClusterStore: NodeSessions {
+    async fn begin_report(
+        &self,
+        state: &NodeState,
+        role: &str,
+        key: &Key,
+        boot: Uuid,
+        started: DateTime<Utc>,
+    ) -> Result<()>;
     async fn claim_notifications(
         &self,
         consumers: &[super::notification::Consumer],
@@ -234,59 +308,6 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         input: super::node_read::Window,
     ) -> Result<super::node_read::Reply>;
-    async fn provision_node(
-        &self,
-        principal: &Principal,
-        name: &str,
-        role: &str,
-        key: &Key,
-    ) -> Result<NodeState>;
-    async fn rotate_node(&self, principal: &Principal, name: &str, key: &Key) -> Result<NodeState>;
-    async fn close_session(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        run: super::session::Run,
-    ) -> Result<()>;
-    async fn report_session(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        run: super::session::Run,
-        report: &super::node::NodeReport,
-        sample_interval: u64,
-    ) -> Result<bool>;
-    async fn open_session(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        input: super::session::Open,
-    ) -> Result<super::session::Snapshot>;
-    async fn sync_node(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        run: super::session::Run,
-    ) -> Result<super::session::Snapshot>;
-    async fn pulse_session(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        run: super::session::Run,
-        epoch: i64,
-        sequence: i64,
-        draining: bool,
-        resources: super::node_read::KeepAlive,
-    ) -> Result<super::session::Snapshot>;
-    async fn maintain_session(
-        &self,
-        node: &NodeState,
-        key: &Key,
-        run: super::session::Run,
-        epoch: i64,
-        sequence: i64,
-        resources: super::node_read::KeepAlive,
-    ) -> Result<(i64, Vec<super::node_read::GrantResult>)>;
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<super::multipart::RemoteUpload>>;
     async fn begin_remote(
         &self,
@@ -433,14 +454,6 @@ pub(crate) trait ClusterStore: Send + Sync {
         id: Uuid,
         query: &super::metrics::RuntimeQuery,
     ) -> Result<Vec<super::metrics::NodeRuntimePoint>>;
-    async fn begin_report(
-        &self,
-        state: &NodeState,
-        role: &str,
-        key: &Key,
-        boot: Uuid,
-        started: DateTime<Utc>,
-    ) -> Result<()>;
     async fn report(
         &self,
         state: &NodeState,
@@ -448,17 +461,8 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         report: &super::node::NodeReport,
     ) -> Result<bool>;
-    async fn release(&self, name: &str) -> Result<()>;
     async fn recover(&self, name: &str, role: &str) -> Result<()>;
     async fn credential(&self, id: Uuid) -> Result<Option<(String, Vec<u8>)>>;
-    async fn register(
-        &self,
-        name: &str,
-        role: &str,
-        credential: String,
-        key: &Key,
-    ) -> Result<Option<NodeState>>;
-    async fn heartbeat(&self, state: &NodeState, role: &str, key: &Key) -> Result<()>;
     async fn leader(&self, key: i64) -> Result<Option<Box<dyn Leader>>>;
     async fn maintenance_state(&self) -> Result<(serde_json::Value, bool, DateTime<Utc>)>;
 }

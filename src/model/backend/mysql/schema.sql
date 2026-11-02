@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102175500.
+-- Generated from the complete mysql migration chain through 20261102183444.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -509,6 +509,32 @@ CREATE TABLE `multipart_files` (
   CONSTRAINT `multipart_files_ibfk_2` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
   CONSTRAINT `multipart_files_source` FOREIGN KEY (`source_id`) REFERENCES `raw_sources` (`id`),
   CONSTRAINT `multipart_files_chk_1` CHECK ((`state` in (_ascii'open',_ascii'sealed',_ascii'deleting')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_boots` (
+  `node_id` binary(16) NOT NULL,
+  `boot_id` binary(16) NOT NULL,
+  PRIMARY KEY (`node_id`,`boot_id`),
+  CONSTRAINT `node_boots_node_fk` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `nodes` (
+  `id` binary(16) NOT NULL,
+  `name` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `role` varchar(8) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '1',
+  `credential_generation` bigint NOT NULL,
+  `credential_encrypted` varbinary(256) DEFAULT NULL,
+  `run_state` json DEFAULT NULL,
+  `report` json DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `last_seen_at` datetime(6) DEFAULT NULL,
+  `control_slot` tinyint GENERATED ALWAYS AS (if((`role` = _ascii'control'),1,NULL)) STORED,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `name` (`name`),
+  UNIQUE KEY `control_slot` (`control_slot`),
+  CONSTRAINT `nodes_chk_1` CHECK ((`role` in (_utf8mb4'control',_utf8mb4'data',_utf8mb4'worker',_utf8mb4'node'))),
+  CONSTRAINT `nodes_chk_2` CHECK ((`credential_generation` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `nonce_counters` (

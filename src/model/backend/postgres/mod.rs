@@ -173,6 +173,7 @@ mod node_runtime_tests;
 fn stores(backend: Arc<Backend>) -> crate::model::Stores {
     crate::model::Stores {
         runtime: backend.clone(),
+        node_sessions: backend.clone(),
         cluster: Some(backend.clone()),
         metrics: backend.clone(),
         integrity: backend.clone(),

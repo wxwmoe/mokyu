@@ -134,7 +134,11 @@ impl App {
         self.ensure_mode()?;
         let (task, child_count) = self
             .integrity_store
-            .start(input, bucket, self.node.get().map(|node| node.node_id))
+            .start(
+                input,
+                bucket,
+                self.processor_node().map(|node| node.node_id),
+            )
             .await?;
         self.wake_tasks.notify_waiters();
         let mut result = json!({"task_id":task});

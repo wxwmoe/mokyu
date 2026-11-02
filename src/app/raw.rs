@@ -94,8 +94,7 @@ impl App {
                         deduplicate,
                         background,
                         boot,
-                        self.node
-                            .get()
+                        self.processor_node()
                             .map(|node| (node, self.role.as_str(), &self.secrets.credential_key)),
                     )
                     .await?;

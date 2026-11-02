@@ -732,6 +732,11 @@ impl NodeReads for Service {
             ));
         }
         let input = super::read::window(request.into_inner())?;
+        input
+            .cursor
+            .stream
+            .validate(self.app.config.database.backend)
+            .map_err(|_| Status::invalid_argument("invalid stream identity"))?;
         let limit = input.max_bytes;
         let reply = bounded(self.app.cluster().map_err(failure)?.read_window(
             &node,
@@ -760,6 +765,8 @@ async fn bounded<T>(
 
 fn state(snapshot: &session::Snapshot) -> wire::NodeState {
     wire::NodeState {
+        deployment_mode: snapshot.mode.clone(),
+        mode_revision: snapshot.mode_revision as u64,
         maintenance: snapshot.maintenance,
         native_pending: snapshot.native_pending,
         work_pending: snapshot.work_pending,
@@ -793,11 +800,11 @@ impl NodeControl for Service {
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
         let run = super::read::run(request.into_inner().run)?;
-        bounded(self.app.cluster().map_err(failure)?.close_session(
-            &node,
-            &self.app.secrets.credential_key,
-            run,
-        ))
+        bounded(
+            self.app
+                .node_sessions
+                .close_session(&node, &self.app.secrets.credential_key, run),
+        )
         .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-session-closed").await;
@@ -814,7 +821,7 @@ impl NodeControl for Service {
             .cloned()
             .ok_or_else(|| Status::unauthenticated("node identity is required"))?;
         let (run, report, sample) = super::session::report(request.into_inner())?;
-        let accepted = bounded(self.app.cluster().map_err(failure)?.report_session(
+        let accepted = bounded(self.app.node_sessions.report_session(
             &node,
             &self.app.secrets.credential_key,
             run,
@@ -855,6 +862,11 @@ impl NodeControl for Service {
             ));
         }
         let input = super::read::observations(request.into_inner())?;
+        for item in &input.compression {
+            item.stream
+                .validate(self.app.config.database.backend)
+                .map_err(|_| Status::invalid_argument("invalid stream identity"))?;
+        }
         let compression_written = tokio::time::timeout(
             Duration::from_secs(2),
             bounded(self.app.cluster().map_err(failure)?.report_observations(
@@ -908,9 +920,9 @@ impl NodeControl for Service {
                 return Err(Status::invalid_argument("invalid cached settings"));
             }
         }
-        let cluster = self.app.cluster().map_err(failure)?;
+        let registry = &self.app.node_sessions;
         let snapshot =
-            bounded(cluster.sync_node(&node, &self.app.secrets.credential_key, run)).await?;
+            bounded(registry.sync_node(&node, &self.app.secrets.credential_key, run)).await?;
         let settings = snapshot
             .settings
             .iter()
@@ -974,10 +986,13 @@ impl NodeSessions for Service {
             connection: super::uuid(&hello.connection_id)?,
             previous_epoch: hello.previous_epoch as i64,
         };
-        let cluster = self.app.cluster().map_err(failure)?;
         let app = self.app.clone();
-        let snapshot =
-            bounded(cluster.open_session(&node, &app.secrets.credential_key, open)).await?;
+        let snapshot = bounded(app.node_sessions.open_session(
+            &node,
+            &app.secrets.credential_key,
+            open,
+        ))
+        .await?;
         let consumer = crate::model::notification::Consumer {
             node: node.node_id,
             generation: open.connection,
@@ -1085,11 +1100,11 @@ impl NodeSessions for Service {
                 let resources = super::read::keep_alive(pulse.renew, pulse.release)?;
                 if !pulse.renew_run {
                     if pulse.draining { Err(Status::invalid_argument("draining requires run renewal"))?; }
-                    let (remaining,grants) = bounded(app.cluster().map_err(failure)?.maintain_session(&node,&app.secrets.credential_key,run,epoch,pulse.sequence as i64,resources)).await?;
+                    let (remaining,grants) = bounded(app.node_sessions.maintain_session(&node,&app.secrets.credential_key,run,epoch,pulse.sequence as i64,resources)).await?;
                     yield wire::SessionReply { message:Some(wire::session_reply::Message::Pulse(wire::PulseReply { sequence:pulse.sequence, valid_for_ms:remaining as u64, state:None, grants:grants.into_iter().map(super::read::grant_result).collect() })) };
                     continue;
                 }
-                let snapshot = bounded(app.cluster().map_err(failure)?.pulse_session(&node, &app.secrets.credential_key, run, epoch, pulse.sequence as i64, pulse.draining, resources)).await?;
+                let snapshot = bounded(app.node_sessions.pulse_session(&node, &app.secrets.credential_key, run, epoch, pulse.sequence as i64, pulse.draining, resources)).await?;
                 yield wire::SessionReply { message: Some(wire::session_reply::Message::Pulse(wire::PulseReply {
                     sequence: pulse.sequence, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)),
                     grants: snapshot.grants.into_iter().map(super::read::grant_result).collect(),

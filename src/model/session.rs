@@ -31,6 +31,8 @@ pub(crate) struct Session {
 }
 
 pub(crate) struct Snapshot {
+    pub mode: String,
+    pub mode_revision: i64,
     pub run: Run,
     pub epoch: i64,
     pub valid_for_ms: i64,

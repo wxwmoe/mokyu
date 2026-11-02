@@ -370,7 +370,7 @@ impl App {
         let mut removed = 0;
         let mut compacted = 0;
         {
-            let owner = self.node.get().map(|node| node.node_id);
+            let owner = self.processor_node().map(|node| node.node_id);
             for file in self
                 .multipart
                 .unused_files(storage_id, owner, batch)

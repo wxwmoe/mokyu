@@ -2,7 +2,12 @@ use super::{Backend, migration, queries, transactions};
 use crate::{
     authorization::Principal,
     content::codec::Key,
-    model::{RuntimeSettingsStore, cluster::ClusterStore, notification::Consumer, session::Open},
+    model::{
+        RuntimeSettingsStore,
+        cluster::{ClusterStore, NodeSessions},
+        notification::Consumer,
+        session::Open,
+    },
 };
 use anyhow::Result;
 use sqlx::postgres::PgPoolOptions;

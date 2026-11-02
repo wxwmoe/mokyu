@@ -143,7 +143,7 @@ impl App {
         }
         let (id, existing) = self
             .maintenance_store
-            .start_policy(policy, self.node.get().map(|node| node.node_id))
+            .start_policy(policy, self.processor_node().map(|node| node.node_id))
             .await?;
         if existing {
             return Ok(json!({"task_id":id,"existing":true}));

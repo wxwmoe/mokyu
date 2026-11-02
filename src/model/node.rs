@@ -6,6 +6,26 @@ use serde_json::{Value, json};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PendingFiles {
+    pub(crate) chunks: i64,
+    pub(crate) raw: i64,
+    pub(crate) parts: i64,
+    pub(crate) writes: i64,
+}
+
+impl std::fmt::Display for PendingFiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "resume and drain the node before release ({} pending chunks, {} raw files, {} multipart parts, {} active writes)",
+            self.chunks, self.raw, self.parts, self.writes
+        )
+    }
+}
+
+impl std::error::Error for PendingFiles {}
+
 pub(crate) const REPORT_FORMAT: u32 = 1;
 pub(crate) const CONTACT_SECONDS: i64 = 30;
 

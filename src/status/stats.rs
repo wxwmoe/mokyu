@@ -382,7 +382,7 @@ impl App {
         self.ensure_mode()?;
         let result = self
             .cluster()?
-            .start_usage(self.node.get().map(|state| state.node_id))
+            .start_usage(self.processor_node().map(|state| state.node_id))
             .await?;
         if result["existing"] != true {
             self.wake_tasks.notify_one();

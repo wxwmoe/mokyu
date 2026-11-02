@@ -8,30 +8,14 @@ pub(super) fn verify_node_identity(
 ) -> Result<()> {
     use crate::model::Error;
     ensure!(row.enabled, Error::NodeInactive);
-    ensure!(
-        state.format == 1
-            && row.role == role
-            && state.role == role
-            && row.deployment_id == state.deployment_id
-            && row.credential_generation == state.credential_generation,
-        Error::NodeAuthentication
-    );
-    let expected = crate::content::codec::unprotect(
-        row.credential_encrypted
-            .as_deref()
-            .ok_or(Error::NodeAuthentication)?,
+    ensure!(row.role == role, Error::NodeAuthentication);
+    state.authenticate(
+        &row.role,
+        row.credential_generation,
+        row.deployment_id,
+        row.credential_encrypted.as_deref(),
         key,
-        crate::cluster::credential_binding(state.node_id).as_bytes(),
-    )?;
-    ensure!(
-        aws_lc_rs::constant_time::verify_slices_are_equal(
-            expected.as_bytes(),
-            state.credential.as_bytes()
-        )
-        .is_ok(),
-        Error::NodeAuthentication
-    );
-    Ok(())
+    )
 }
 
 fn check_node_name(name: &str) -> Result<()> {
@@ -77,14 +61,18 @@ async fn replace_node_identity(
 }
 
 pub(in super::super) async fn register_node(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     name: &str,
     role: &str,
     credential: String,
     key: &crate::content::codec::Key,
 ) -> Result<Option<crate::cluster::NodeState>> {
     check_node_name(name)?;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
+    if backend.control_epoch.is_some() && queries::other_control(name).fetch_one(&mut *tx).await? {
+        return Ok(None);
+    }
     queries::node_registration_lock(name)
         .execute(&mut *tx)
         .await?;
@@ -116,7 +104,7 @@ pub(in super::super) async fn register_node(
 }
 
 pub(in super::super) async fn provision_node(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     principal: &Principal,
     name: &str,
     role: Option<&str>,
@@ -127,10 +115,11 @@ pub(in super::super) async fn provision_node(
         role.is_none_or(|role| matches!(role, "data" | "worker" | "node")),
         s3s::s3_error!(InvalidArgument, "node role must be data, worker or node")
     );
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     principal.lock_admin(&mut tx).await?;
     ensure!(
-        queries::node_deployment().fetch_one(&mut *tx).await?.1 == "cluster",
+        queries::node_deployment().fetch_one(&mut *tx).await?.1 != "single",
         crate::model::Error::NodeInactive
     );
     queries::node_registration_lock(name)
@@ -203,7 +192,7 @@ pub(in super::super) async fn authenticate_rpc_node(
         crate::model::Error::NodeAuthentication
     );
     ensure!(
-        row.deployment_mode == "cluster",
+        matches!(row.deployment_mode.as_str(), "cluster" | "single_control"),
         crate::model::Error::NodeInactive
     );
     Ok(())
@@ -216,7 +205,7 @@ async fn node_snapshot(
     let settings = queries::node_settings().fetch_all(&mut *db).await?;
     let native_pending = queries::native::pending(node).fetch_one(&mut *db).await?;
     let work_pending = queries::work::pending(node).fetch_one(&mut *db).await?;
-    let (boot, fence, epoch, valid_for_ms, maintenance, draining) =
+    let (boot, fence, epoch, valid_for_ms, maintenance, draining, mode, mode_revision) =
         queries::node_session_status(node)
             .fetch_optional(&mut *db)
             .await?
@@ -230,6 +219,8 @@ async fn node_snapshot(
         0
     };
     Ok(crate::model::session::Snapshot {
+        mode,
+        mode_revision,
         run: crate::model::session::Run { boot, fence },
         epoch,
         valid_for_ms,
@@ -244,7 +235,7 @@ async fn node_snapshot(
 }
 
 pub(in super::super) async fn open_node_session(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     input: crate::model::session::Open,
@@ -257,7 +248,8 @@ pub(in super::super) async fn open_node_session(
         !input.boot.is_nil() && !input.connection.is_nil() && input.previous_epoch >= 0,
         Error::NodeAuthentication
     );
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, state, key, true).await?;
     let previous = queries::node_session(state.node_id, true)
         .fetch_optional(&mut *tx)
@@ -354,13 +346,14 @@ pub(in super::super) async fn open_node_session(
 }
 
 pub(in super::super) async fn close_node_session(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     run: crate::model::session::Run,
 ) -> Result<()> {
     use crate::model::Error;
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, state, key, true).await?;
     let current = queries::node_session(state.node_id, true)
         .fetch_optional(&mut *tx)
@@ -387,7 +380,7 @@ pub(in super::super) async fn close_node_session(
 }
 
 pub(in super::super) async fn report_node_session(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     run: crate::model::session::Run,
@@ -405,7 +398,8 @@ pub(in super::super) async fn report_node_session(
     if let Some(sample) = &sample {
         sample.validate()?;
     }
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     queries::runtime_diagnostic_limits()
         .execute(&mut *tx)
         .await?;
@@ -448,12 +442,13 @@ pub(in super::super) async fn require_node_run(
 }
 
 pub(in super::super) async fn sync_node(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     run: crate::model::session::Run,
 ) -> Result<crate::model::session::Snapshot> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, state, key, false).await?;
     require_node_run(&mut tx, state, run, false).await?;
     let snapshot = node_snapshot(&mut tx, state.node_id).await?;
@@ -561,7 +556,7 @@ async fn persist_node_access(
 }
 
 pub(in super::super) async fn maintain_node_session(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &NodeState,
     key: &Key,
     run: Run,
@@ -569,7 +564,8 @@ pub(in super::super) async fn maintain_node_session(
     sequence: i64,
     resources: read::KeepAlive,
 ) -> Result<(i64, Vec<read::GrantResult>)> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, state, key, true).await?;
     let session = require_node_run(&mut tx, state, run, true).await?;
     ensure!(
@@ -585,7 +581,7 @@ pub(in super::super) async fn maintain_node_session(
 }
 
 pub(in super::super) async fn pulse_node_session(
-    pool: &PgPool,
+    backend: &super::super::Backend,
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     run: crate::model::session::Run,
@@ -594,7 +590,8 @@ pub(in super::super) async fn pulse_node_session(
     draining: bool,
     resources: crate::model::node_read::KeepAlive,
 ) -> Result<crate::model::session::Snapshot> {
-    let mut tx = pool.begin().await?;
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     authenticate_rpc_node(&mut tx, state, key, true).await?;
     let session = require_node_run(&mut tx, state, run, true).await?;
     ensure!(

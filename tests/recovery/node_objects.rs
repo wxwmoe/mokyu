@@ -4,7 +4,7 @@ use crate::{
     content::codec::{self, Key},
     model::{
         self, RuntimeSettingsStore,
-        cluster::ClusterStore,
+        cluster::{ClusterStore, NodeSessions},
         node_object::{Change, Outcome, Request},
         session::{Open, Run},
     },

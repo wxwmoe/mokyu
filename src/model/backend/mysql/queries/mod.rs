@@ -139,3 +139,5 @@ pub(super) mod replication_remote;
 pub(super) mod tier;
 pub(super) mod tier_reads;
 pub(super) mod transfer;
+
+pub(super) mod node_registry;

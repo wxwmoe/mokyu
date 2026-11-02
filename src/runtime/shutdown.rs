@@ -24,7 +24,7 @@ pub(super) async fn drain(app: Arc<App>, workers: impl Future<Output = Result<()
         {
             return Ok(());
         }
-        let node = app.node.get().map(|node| node.node_id);
+        let node = app.processor_node().map(|node| node.node_id);
         let id = app.upload_cache.flush(node).await?;
         tracing::info!(task_id=%id, "shutdown flush started");
         app.wake_tasks.notify_waiters();
@@ -58,7 +58,7 @@ pub(super) async fn drain(app: Arc<App>, workers: impl Future<Output = Result<()
     if matches!(result, Ok(Ok(()))) {
         tracing::info!("shutdown flush completed");
     } else {
-        let node = app.node.get().map(|node| node.node_id);
+        let node = app.processor_node().map(|node| node.node_id);
         let backlog = tokio::time::timeout(Duration::from_secs(1), async {
             let (uploads, buffered, chunks) =
                 tokio::try_join!(app.upload_cache.backlog(node), app.raw.buffered_status(), app.physical.buffered_status())?;

@@ -757,7 +757,7 @@ impl Reads {
 
 fn mapping(
     prepared: &Prepared,
-    stream: Uuid,
+    stream: crate::model::Id,
     revision: i64,
     start: u64,
     end: u64,
@@ -797,7 +797,7 @@ fn mapping(
 
 fn validate_mapping(
     value: &read::Mapping,
-    stream: Uuid,
+    stream: crate::model::Id,
     revision: i64,
     start: u64,
     end: u64,

@@ -232,7 +232,7 @@ impl App {
                 !self.draining.load(std::sync::atomic::Ordering::Acquire),
                 crate::model::Error::OperationAborted
             );
-            let node = self.node.get().map(|state| RepairNode {
+            let node = self.processor_node().map(|state| RepairNode {
                 state: state.clone(),
                 role: self.role.clone(),
                 key: self.secrets.credential_key.clone(),

@@ -158,7 +158,7 @@ pub(super) fn observations(
             .into_iter()
             .map(|value| {
                 Ok(crate::model::CompressionObservation {
-                    stream: super::uuid(&value.stream_id)?.into(),
+                    stream: super::database_id(&value.stream_id)?,
                     version: value.version.try_into().map_err(|_| invalid())?,
                     size: value.size.try_into().map_err(|_| invalid())?,
                     encoding: match value.encoding.as_str() {
@@ -486,7 +486,7 @@ pub(super) fn window(input: wire::ReadWindowRequest) -> Result<read::Window, Sta
         run: run(input.run)?,
         cursor: read::Cursor {
             lease: super::uuid(&cursor.lease_id)?,
-            stream: super::uuid(&cursor.stream_id)?,
+            stream: super::database_id(&cursor.stream_id)?,
             revision: cursor.payload_revision as i64,
             offset: cursor.offset as i64,
             end: cursor.end as i64,

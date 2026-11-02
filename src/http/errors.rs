@@ -26,6 +26,14 @@ impl IntoResponse for HttpError {
 }
 impl HttpError {
     fn response(self) -> Response {
+        if let Some(pending) = self.0.downcast_ref::<crate::model::node::PendingFiles>() {
+            let mut response = StatusCode::CONFLICT.into_response();
+            response
+                .extensions_mut()
+                .insert(ErrorCode("NodeNotDrained".into()));
+            response.extensions_mut().insert(*pending);
+            return response;
+        }
         if let Some(conflict) = self.0.downcast_ref::<crate::model::runtime::ModeConflict>() {
             let mut response = (
                 StatusCode::CONFLICT,

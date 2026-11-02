@@ -153,7 +153,7 @@ impl App {
         let guard = lock.lock_owned().await;
         let file = self
             .multipart
-            .file(upload, self.node.get().map(|node| node.node_id))
+            .file(upload, self.processor_node().map(|node| node.node_id))
             .await?;
         let (position, _lease, _guard) = self
             .storage

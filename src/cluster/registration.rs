@@ -3,22 +3,30 @@ use crate::app::App;
 use anyhow::{Result, ensure};
 
 pub async fn initialize(app: &App, role: &str) -> Result<()> {
-    if role == "single" {
+    if app.ensure_mode().is_err() || !app.shared_storage_only() {
         return Ok(());
     }
-    let mode = app.cluster()?.mode().await?;
-    if mode != "cluster" {
-        tracing::warn!(role, "service role is waiting for cluster deployment mode");
-        return Ok(());
-    }
-    ensure!(role == "control", "local registration requires control");
+    let embedded = role == "single";
+    ensure!(
+        embedded || role == "control",
+        "local registration requires control"
+    );
+    let role = "control";
     let path = node_state_path(app);
     let state = if let Some(state) = read_state(&path).await? {
         state
     } else {
-        let name = role_name(app)?;
+        let name = if embedded {
+            app.config
+                .instance
+                .name
+                .clone()
+                .unwrap_or_else(|| "control".into())
+        } else {
+            role_name(app)?
+        };
         let Some(state) = app
-            .cluster()?
+            .node_sessions
             .register(&name, role, credential()?, &app.secrets.credential_key)
             .await?
         else {
@@ -29,19 +37,21 @@ pub async fn initialize(app: &App, role: &str) -> Result<()> {
         write_state(&path, &state).await?;
         state
     };
-    app.cluster()?
+    app.node_sessions
         .heartbeat(&state, role, &app.secrets.credential_key)
         .await?;
     let boot = uuid::Uuid::new_v4();
-    app.cluster()?
-        .begin_report(
-            &state,
-            role,
-            &app.secrets.credential_key,
-            boot,
-            serde_json::from_value(app.statistics.runtime()["started_at"].clone())?,
-        )
-        .await?;
+    if !embedded {
+        app.cluster()?
+            .begin_report(
+                &state,
+                role,
+                &app.secrets.credential_key,
+                boot,
+                serde_json::from_value(app.statistics.runtime()["started_at"].clone())?,
+            )
+            .await?;
+    }
     ensure!(
         app.node_boot.set(boot).is_ok(),
         "node boot was already initialized"

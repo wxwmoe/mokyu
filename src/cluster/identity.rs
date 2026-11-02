@@ -17,6 +17,38 @@ pub(crate) struct NodeState {
 }
 
 impl NodeState {
+    pub(crate) fn authenticate(
+        &self,
+        role: &str,
+        generation: i64,
+        deployment: Uuid,
+        encrypted: Option<&[u8]>,
+        key: &crate::content::codec::Key,
+    ) -> Result<()> {
+        use crate::model::Error;
+        ensure!(
+            self.format == 1
+                && self.role == role
+                && self.credential_generation == generation
+                && self.deployment_id == deployment,
+            Error::NodeAuthentication
+        );
+        let secret = crate::content::codec::unprotect(
+            encrypted.ok_or(Error::NodeAuthentication)?,
+            key,
+            credential_binding(self.node_id).as_bytes(),
+        )?;
+        ensure!(
+            aws_lc_rs::constant_time::verify_slices_are_equal(
+                secret.as_bytes(),
+                self.credential.as_bytes()
+            )
+            .is_ok(),
+            Error::NodeAuthentication
+        );
+        Ok(())
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         ensure!(self.format == 1, "unsupported node identity format");
         ensure!(

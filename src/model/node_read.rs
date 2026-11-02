@@ -265,7 +265,7 @@ impl Query {
 #[derive(Clone)]
 pub(crate) struct Cursor {
     pub(crate) lease: Uuid,
-    pub(crate) stream: Uuid,
+    pub(crate) stream: crate::model::Id,
     pub(crate) revision: i64,
     pub(crate) offset: i64,
     pub(crate) end: i64,
@@ -495,7 +495,7 @@ impl TryFrom<&StorageProfile> for Policy {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Object {
-    pub(crate) id: Uuid,
+    pub(crate) id: crate::model::Id,
     pub(crate) bucket: Uuid,
     pub(crate) key: String,
     pub(crate) payload: String,
@@ -512,12 +512,10 @@ pub(crate) struct Object {
 
 impl Object {
     pub(crate) fn from_stream(stream: &StoredStream) -> Result<Self> {
-        let crate::model::Id::Uuid(id) = stream.id else {
-            anyhow::bail!("node reads require UUID stream identities");
-        };
+        let id = stream.id;
         // Pinned readers can outlive replacement of the current object.
         ensure!(
-            !id.is_nil()
+            id.is_valid()
                 && matches!(stream.state.as_str(), "ready" | "retired")
                 && stream.size >= 0,
             "invalid readable stream"
@@ -667,7 +665,7 @@ impl Segment {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Mapping {
-    pub(crate) stream: Uuid,
+    pub(crate) stream: crate::model::Id,
     pub(crate) revision: i64,
     pub(crate) start: i64,
     pub(crate) end: i64,

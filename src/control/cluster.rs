@@ -211,10 +211,13 @@ pub(crate) async fn release(
     Json(input): Json<ReleaseInput>,
 ) -> Result<Json<serde_json::Value>, HttpError> {
     admin(&actor, &app).await?;
+    if app.deployment_mode() == "single_control" {
+        return Err(s3s::s3_error!(AccessDenied, "release nodes using the local CLI").into());
+    }
     if !input.confirm {
         return Err(anyhow::anyhow!("release requires confirm=true").into());
     }
-    app.cluster()?.release(&name).await?;
+    app.node_sessions.release(&name).await?;
     Ok(Json(serde_json::json!({"released": name})))
 }
 

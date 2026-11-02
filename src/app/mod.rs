@@ -189,6 +189,7 @@ impl Active {
     }
 }
 pub struct App {
+    pub(crate) node_sessions: Arc<dyn crate::model::cluster::NodeSessions>,
     cluster: Option<Arc<dyn crate::model::cluster::ClusterStore>>,
     pub(crate) metrics: Arc<dyn crate::model::metrics::MetricsStore>,
     pub(crate) integrity_store: Arc<dyn crate::model::integrity::IntegrityStore>,
@@ -373,6 +374,7 @@ impl App {
         let (public_reads, public_receiver) =
             public_reads::Cache::new(cors_cache.clone(), &response_cache);
         let app = Arc::new(Self {
+            node_sessions: stores.node_sessions,
             cluster: stores.cluster,
             role: role.to_owned(),
             recovery_required: std::sync::atomic::AtomicBool::new(false),
@@ -532,6 +534,15 @@ impl App {
             s3_error!(NotImplemented, "cluster operations require PostgreSQL").into()
         })
     }
+    pub(crate) fn processor_node(&self) -> Option<&crate::cluster::NodeState> {
+        // The exclusive local runtime owns the existing pending files, including across a mode change.
+        if self.role == "single" {
+            None
+        } else {
+            self.node.get()
+        }
+    }
+
     pub(crate) fn deployment_mode(&self) -> &str {
         &self.started_mode
     }

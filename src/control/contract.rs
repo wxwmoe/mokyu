@@ -310,6 +310,12 @@ pub(crate) async fn errors(
                         .extensions()
                         .get::<crate::model::runtime::ModeConflict>()
                         .map(|e| e.0.to_owned())
+                })
+                .or_else(|| {
+                    response
+                        .extensions()
+                        .get::<crate::model::node::PendingFiles>()
+                        .map(ToString::to_string)
                 }),
         }),
     )

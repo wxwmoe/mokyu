@@ -103,6 +103,7 @@ pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinis
 
 pub(crate) struct Stores {
     pub(crate) runtime: Arc<dyn runtime::RuntimeStore>,
+    pub(crate) node_sessions: Arc<dyn cluster::NodeSessions>,
     pub(crate) cluster: Option<Arc<dyn cluster::ClusterStore>>,
     pub(crate) metrics: Arc<dyn metrics::MetricsStore>,
     pub(crate) integrity: Arc<dyn integrity::IntegrityStore>,

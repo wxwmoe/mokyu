@@ -861,7 +861,7 @@ pub(in super::super) async fn node_read_window(
         .await?
         .ok_or(Error::NodeExpired)?;
     ensure!(
-        owned.stream_id == Id::Uuid(input.cursor.stream)
+        owned.stream_id == input.cursor.stream
             && owned.payload_revision == input.cursor.revision
             && input.cursor.end == owned.end_bytes
             && input.cursor.offset >= owned.offset_bytes

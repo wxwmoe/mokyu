@@ -78,12 +78,33 @@ pub(in super::super) async fn set_deployment_mode(
     Ok(())
 }
 
-pub(in super::super) async fn release_node(pool: &PgPool, name: &str) -> Result<()> {
-    let mut tx = pool.begin().await?;
+pub(in super::super) async fn release_node(
+    backend: &super::super::Backend,
+    name: &str,
+) -> Result<()> {
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
     let id: Uuid = queries::release_node_name(&name)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow::anyhow!("node not found or already released"))?;
+    if backend.control_epoch.is_some() {
+        let (role, chunks, raw, parts, writes) =
+            queries::retirement(id).fetch_one(&mut *tx).await?;
+        ensure!(
+            role != "control",
+            crate::model::runtime::ModeConflict("the embedded control cannot be released")
+        );
+        ensure!(
+            chunks + raw + parts + writes == 0,
+            crate::model::node::PendingFiles {
+                chunks,
+                raw,
+                parts,
+                writes
+            }
+        );
+    }
     queries::release_node_tasks(&id).execute(&mut *tx).await?;
     queries::release_raw_uploads(id).execute(&mut *tx).await?;
     queries::release_node_permits(&id).execute(&mut *tx).await?;

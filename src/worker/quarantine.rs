@@ -133,7 +133,7 @@ impl App {
             snapshot,
             code,
             node: if local {
-                self.node.get().map(|node| node.node_id)
+                self.processor_node().map(|node| node.node_id)
             } else {
                 None
             },

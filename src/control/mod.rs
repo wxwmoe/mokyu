@@ -86,7 +86,7 @@ pub fn router(app: Arc<App>) -> Router {
             (app.clone(), 2usize),
             observe,
         ));
-    if app.role != "control" {
+    if app.ensure_mode().is_err() || !app.shared_storage_only() {
         return admin;
     }
     let rpc = crate::rpc::server::router(app);

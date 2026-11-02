@@ -108,7 +108,7 @@ impl Observations {
                         std::time::Duration::from_secs(2),
                         app.stream_store.learn_compression(
                             observation,
-                            app.node.get().map(|node| node.node_id),
+                            app.processor_node().map(|node| node.node_id),
                         ),
                     )
                     .await

@@ -41,6 +41,13 @@ pub(in super::super) fn node_deployment() -> Rows<'static, (Uuid, String)> {
     sqlx::query_as("SELECT deployment_id,deployment_mode FROM mokyu_meta WHERE singleton")
 }
 
+pub(in super::super) fn other_control(name: &str) -> Scalar<'_, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM nodes WHERE enabled AND role='control' AND name<>$1)",
+    )
+    .bind(name)
+}
+
 pub(in super::super) fn new_node_id() -> Scalar<'static, Uuid> {
     sqlx::query_scalar("SELECT uuidv7()")
 }
@@ -195,8 +202,8 @@ pub(in super::super) fn maintain_node_session(node: Uuid, sequence: i64) -> Scal
 
 pub(in super::super) fn node_session_status(
     node: Uuid,
-) -> Rows<'static, (Uuid, Uuid, i64, i64, bool, bool)> {
-    sqlx::query_as("SELECT s.boot_id,s.fence,s.epoch,GREATEST(0,(extract(epoch FROM (s.expires_at-clock_timestamp()))*1000)::bigint),m.maintenance,s.draining FROM node_sessions s CROSS JOIN mokyu_meta m WHERE s.node_id=$1 AND m.singleton AND m.deployment_mode='cluster'").bind(node)
+) -> Rows<'static, (Uuid, Uuid, i64, i64, bool, bool, String, i64)> {
+    sqlx::query_as("SELECT s.boot_id,s.fence,s.epoch,GREATEST(0,(extract(epoch FROM (s.expires_at-clock_timestamp()))*1000)::bigint),m.maintenance,s.draining,m.deployment_mode,m.deployment_mode_revision FROM node_sessions s CROSS JOIN mokyu_meta m WHERE s.node_id=$1 AND m.singleton AND m.deployment_mode IN ('cluster','single_control')").bind(node)
 }
 
 pub(in super::super) fn node_settings() -> Rows<'static, (String, Value, i64)> {

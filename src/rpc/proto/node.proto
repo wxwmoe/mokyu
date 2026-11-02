@@ -632,6 +632,8 @@ message NodeState {
   bool native_pending = 4;
   bool work_pending = 5;
   uint64 pending_uploads = 6;
+  string deployment_mode = 7;
+  uint64 mode_revision = 8;
 }
 
 message Welcome {

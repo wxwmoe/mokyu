@@ -69,6 +69,16 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for NodeView {
 
 #[async_trait::async_trait]
 impl ClusterStore for Backend {
+    async fn begin_report(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+        boot: Uuid,
+        started: DateTime<Utc>,
+    ) -> Result<()> {
+        transactions::begin_report(&self.pool, state, role, key, boot, started).await
+    }
     async fn claim_notifications(
         &self,
         consumers: &[crate::model::notification::Consumer],
@@ -427,84 +437,6 @@ impl ClusterStore for Backend {
         input: crate::model::node_read::Window,
     ) -> Result<crate::model::node_read::Reply> {
         transactions::node_read_window(&self.pool, self.replica.as_ref(), node, key, input).await
-    }
-    async fn provision_node(
-        &self,
-        principal: &Principal,
-        name: &str,
-        role: &str,
-        key: &crate::content::codec::Key,
-    ) -> Result<crate::cluster::NodeState> {
-        transactions::provision_node(&self.pool, principal, name, Some(role), key).await
-    }
-    async fn rotate_node(
-        &self,
-        principal: &Principal,
-        name: &str,
-        key: &crate::content::codec::Key,
-    ) -> Result<crate::cluster::NodeState> {
-        transactions::provision_node(&self.pool, principal, name, None, key).await
-    }
-    async fn close_session(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        run: crate::model::session::Run,
-    ) -> Result<()> {
-        transactions::close_node_session(&self.pool, node, key, run).await
-    }
-    async fn report_session(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        run: crate::model::session::Run,
-        report: &NodeReport,
-        sample_interval: u64,
-    ) -> Result<bool> {
-        transactions::report_node_session(&self.pool, node, key, run, report, sample_interval).await
-    }
-    async fn open_session(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        input: crate::model::session::Open,
-    ) -> Result<crate::model::session::Snapshot> {
-        transactions::open_node_session(&self.pool, node, key, input).await
-    }
-    async fn sync_node(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        run: crate::model::session::Run,
-    ) -> Result<crate::model::session::Snapshot> {
-        transactions::sync_node(&self.pool, node, key, run).await
-    }
-    async fn pulse_session(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        run: crate::model::session::Run,
-        epoch: i64,
-        sequence: i64,
-        draining: bool,
-        resources: crate::model::node_read::KeepAlive,
-    ) -> Result<crate::model::session::Snapshot> {
-        transactions::pulse_node_session(
-            &self.pool, node, key, run, epoch, sequence, draining, resources,
-        )
-        .await
-    }
-    async fn maintain_session(
-        &self,
-        node: &crate::cluster::NodeState,
-        key: &crate::content::codec::Key,
-        run: crate::model::session::Run,
-        epoch: i64,
-        sequence: i64,
-        resources: crate::model::node_read::KeepAlive,
-    ) -> Result<(i64, Vec<crate::model::node_read::GrantResult>)> {
-        transactions::maintain_node_session(&self.pool, node, key, run, epoch, sequence, resources)
-            .await
     }
 
     async fn remote_upload(&self, upload: Uuid) -> Result<Option<RemoteUpload>> {
@@ -867,16 +799,6 @@ impl ClusterStore for Backend {
     async fn node_tasks(&self, id: Uuid) -> Result<Vec<crate::model::metrics::WorkSummary>> {
         Ok(sqlx::query_as("SELECT id,task_type,state,processed::text,updated_at FROM tasks WHERE lease_node_id=$1 AND state='running' ORDER BY updated_at DESC,id LIMIT 21").bind(id).fetch_all(&self.pool).await?)
     }
-    async fn begin_report(
-        &self,
-        state: &crate::cluster::NodeState,
-        role: &str,
-        key: &crate::content::codec::Key,
-        boot: Uuid,
-        started: DateTime<Utc>,
-    ) -> Result<()> {
-        transactions::begin_report(&self.pool, state, role, key, boot, started).await
-    }
     async fn report(
         &self,
         state: &crate::cluster::NodeState,
@@ -889,25 +811,96 @@ impl ClusterStore for Backend {
     async fn credential(&self, id: Uuid) -> Result<Option<(String, Vec<u8>)>> {
         Ok(sqlx::query_as("SELECT role,credential_encrypted FROM nodes WHERE id=$1 AND role='control' AND enabled AND credential_encrypted IS NOT NULL").bind(id).fetch_optional(&self.pool).await?)
     }
-    async fn release(&self, name: &str) -> Result<()> {
-        transactions::release_node(&self.pool, name).await
-    }
     async fn recover(&self, name: &str, role: &str) -> Result<()> {
         transactions::recover_node(&self.pool, name, role).await
-    }
-    async fn heartbeat(
-        &self,
-        state: &crate::cluster::NodeState,
-        role: &str,
-        key: &crate::content::codec::Key,
-    ) -> Result<()> {
-        transactions::heartbeat(&self.pool, state, role, key).await
     }
     async fn leader(&self, key: i64) -> Result<Option<Box<dyn Leader>>> {
         transactions::cluster_leader(&self.pool, key).await
     }
     async fn maintenance_state(&self) -> Result<(Value, bool, DateTime<Utc>)> {
         Ok(maintenance_state().fetch_one(&self.pool).await?)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::model::cluster::NodeSessions for Backend {
+    async fn provision_node(
+        &self,
+        principal: &Principal,
+        name: &str,
+        role: &str,
+        key: &crate::content::codec::Key,
+    ) -> Result<crate::cluster::NodeState> {
+        transactions::provision_node(self, principal, name, Some(role), key).await
+    }
+    async fn rotate_node(
+        &self,
+        principal: &Principal,
+        name: &str,
+        key: &crate::content::codec::Key,
+    ) -> Result<crate::cluster::NodeState> {
+        transactions::provision_node(self, principal, name, None, key).await
+    }
+    async fn close_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+    ) -> Result<()> {
+        transactions::close_node_session(self, node, key, run).await
+    }
+    async fn report_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        report: &NodeReport,
+        sample_interval: u64,
+    ) -> Result<bool> {
+        transactions::report_node_session(self, node, key, run, report, sample_interval).await
+    }
+    async fn open_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::session::Open,
+    ) -> Result<crate::model::session::Snapshot> {
+        transactions::open_node_session(self, node, key, input).await
+    }
+    async fn sync_node(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+    ) -> Result<crate::model::session::Snapshot> {
+        transactions::sync_node(self, node, key, run).await
+    }
+    async fn pulse_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        epoch: i64,
+        sequence: i64,
+        draining: bool,
+        resources: crate::model::node_read::KeepAlive,
+    ) -> Result<crate::model::session::Snapshot> {
+        transactions::pulse_node_session(self, node, key, run, epoch, sequence, draining, resources)
+            .await
+    }
+    async fn maintain_session(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        epoch: i64,
+        sequence: i64,
+        resources: crate::model::node_read::KeepAlive,
+    ) -> Result<(i64, Vec<crate::model::node_read::GrantResult>)> {
+        transactions::maintain_node_session(self, node, key, run, epoch, sequence, resources).await
+    }
+    async fn release(&self, name: &str) -> Result<()> {
+        transactions::release_node(self, name).await
     }
     async fn register(
         &self,
@@ -916,6 +909,14 @@ impl ClusterStore for Backend {
         credential: String,
         key: &crate::content::codec::Key,
     ) -> Result<Option<crate::cluster::NodeState>> {
-        transactions::register_node(&self.pool, name, role, credential, key).await
+        transactions::register_node(self, name, role, credential, key).await
+    }
+    async fn heartbeat(
+        &self,
+        state: &crate::cluster::NodeState,
+        role: &str,
+        key: &crate::content::codec::Key,
+    ) -> Result<()> {
+        transactions::heartbeat(&self.pool, state, role, key).await
     }
 }

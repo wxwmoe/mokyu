@@ -65,7 +65,6 @@ async fn mysql_runtime_and_migration_recovery() -> Result<()> {
     );
     let tables = queries::tables().fetch_all(&backend.pool).await?;
     for excluded in [
-        "nodes",
         "stream_leases",
         "storage_permits",
         "storage_rate_state",

@@ -383,6 +383,10 @@ pub(in super::super) fn update_deployment_mode<'q>(mode: &'q str) -> Statement<'
     sqlx::query("UPDATE mokyu_meta SET deployment_mode=$1,deployment_mode_revision=deployment_mode_revision+1 WHERE singleton").bind(mode)
 }
 
+pub(in super::super) fn retirement(id: Uuid) -> Rows<'static, (String, i64, i64, i64, i64)> {
+    sqlx::query_as("SELECT role,(SELECT count(*) FROM pending_uploads WHERE node_id=$1 AND staging_storage_id IS NULL),(SELECT count(*) FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.node_id=$1 AND r.pending_upload AND r.medium IN ('local','memory')),(SELECT count(*) FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.remote_node_id=$1 AND p.remote_etag IS NULL AND u.state IN ('active','completing')),(SELECT count(*) FROM node_writes WHERE node_id=$1 AND state='active') FROM nodes WHERE id=$1").bind(id)
+}
+
 pub(in super::super) fn release_node_name<'q>(name: &'q str) -> Scalar<'q, Uuid> {
     sqlx::query_scalar("UPDATE nodes SET enabled=false,credential_encrypted=NULL,last_seen_at=NULL,status='released',recovery_required=false,updated_at=now() WHERE name=$1 AND enabled RETURNING id").bind(name)
 }
@@ -407,7 +411,7 @@ pub(in super::super) fn maintenance_state() -> Rows<'static, (Value, bool, DateT
 
 pub(in super::super) fn claim_control_epoch() -> Rows<'static, (i64, i32)> {
     sqlx::query_as(
-        "UPDATE mokyu_meta SET control_epoch=control_epoch+1 WHERE singleton AND deployment_mode='single_control' RETURNING control_epoch,pg_backend_pid()",
+        "WITH claimed AS (UPDATE mokyu_meta SET control_epoch=control_epoch+1 WHERE singleton AND deployment_mode='single_control' RETURNING control_epoch), expired AS (UPDATE node_sessions SET expires_at=clock_timestamp() WHERE expires_at>clock_timestamp() AND EXISTS (SELECT FROM claimed)) SELECT control_epoch,pg_backend_pid() FROM claimed",
     )
 }
 

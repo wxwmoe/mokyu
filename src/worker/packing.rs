@@ -75,7 +75,7 @@ impl App {
             .start_pack(
                 policy,
                 automatic,
-                self.node.get().map(|state| state.node_id),
+                self.processor_node().map(|state| state.node_id),
             )
             .await?;
         self.wake_tasks.notify_one();
@@ -143,7 +143,7 @@ impl App {
         }
         let result = self
             .packing
-            .start_unpack(pack, all, self.node.get().map(|state| state.node_id))
+            .start_unpack(pack, all, self.processor_node().map(|state| state.node_id))
             .await?;
         self.wake_tasks.notify_one();
         Ok(result)
