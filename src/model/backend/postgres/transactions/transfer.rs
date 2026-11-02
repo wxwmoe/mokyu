@@ -820,6 +820,14 @@ pub(in super::super) async fn raw_progress(
     }
     ensure!(unit.state == "copying", Error::OperationAborted);
     match progress {
+        RawProgress::Pages { index, hashes } => {
+            let group = crate::content::raw_pages::Group {
+                index: *index,
+                hashes: hashes.clone(),
+            };
+            group.validate_size(plan.target.size)?;
+            super::super::raw_pages::put(db, plan.target.id, &group).await?;
+        }
         RawProgress::Started { upload } => {
             ensure!(
                 plan.target.medium == "shared_s3" && !plan.parts.is_empty(),
@@ -921,6 +929,7 @@ pub(in super::super) async fn raw_progress(
                     == 1,
                 Error::OperationAborted
             );
+            super::super::raw_pages::seal(db, plan.target.id, plan.target.size, digest).await?;
             base::raw_attach(plan.candidate, plan.target.id, plan.target.size)
                 .execute(&mut **db)
                 .await?;

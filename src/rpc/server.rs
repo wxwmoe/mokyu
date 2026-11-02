@@ -77,7 +77,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     )
     .add_service(
         NodeWritesServer::new(service.clone())
-            .max_decoding_message_size(model::node_write::REQUEST_LIMIT)
+            .max_decoding_message_size(model::node_raw::PREPARE_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
@@ -341,7 +341,7 @@ impl NodeWrites for Service {
         request: Request<wire::LocalFilesRequest>,
     ) -> Result<Response<wire::FilesReply>, Status> {
         let node = data_identity(&request)?;
-        let input = super::native::inventory(request.into_inner())?;
+        let input = super::native::inventory(write_request(request)?)?;
         let reply = bounded(self.app.cluster().map_err(failure)?.check_raw_files(
             &node,
             &self.app.secrets.credential_key,
@@ -358,7 +358,7 @@ impl NodeWrites for Service {
         request: Request<wire::PrepareLocalPartRequest>,
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = data_identity(&request)?;
-        let input = super::native::local(request.into_inner())?;
+        let input = super::native::local(write_request(request)?)?;
         let reply = bounded(self.app.cluster().map_err(failure)?.prepare_local_part(
             &node,
             &self.app.secrets.credential_key,
@@ -372,7 +372,7 @@ impl NodeWrites for Service {
         request: Request<wire::PrepareTailRequest>,
     ) -> Result<Response<wire::PreparedTail>, Status> {
         let node = data_identity(&request)?;
-        let input = super::write::prepare_tail(request.into_inner())?;
+        let input = super::write::prepare_tail(write_request(request)?)?;
         let reply = bounded(self.app.cluster().map_err(failure)?.prepare_tail(
             &node,
             &self.app.secrets.credential_key,
@@ -388,7 +388,7 @@ impl NodeWrites for Service {
         request: Request<wire::WriteRequest>,
     ) -> Result<Response<wire::PreparedTail>, Status> {
         let node = data_identity(&request)?;
-        let input = super::write::lookup(request.into_inner())?;
+        let input = super::write::lookup(write_request(request)?)?;
         let reply = bounded(self.app.cluster().map_err(failure)?.commit_tail(
             &node,
             &self.app.secrets.credential_key,
@@ -421,7 +421,7 @@ impl NodeWrites for Service {
         request: Request<wire::CommitRawRequest>,
     ) -> Result<Response<wire::PreparedRaw>, Status> {
         let node = write_identity(&request)?;
-        let input = super::write::commit_raw(request.into_inner())?;
+        let input = super::write::commit_raw(write_request(request)?)?;
         let reply = bounded(self.app.cluster().map_err(failure)?.commit_raw(
             &node,
             &self.app.secrets.credential_key,
@@ -437,7 +437,7 @@ impl NodeWrites for Service {
         request: Request<wire::PrepareChunksRequest>,
     ) -> Result<Response<wire::PreparedChunks>, Status> {
         let node = write_identity(&request)?;
-        let input = super::write::prepare(request.into_inner())?;
+        let input = super::write::prepare(write_request(request)?)?;
         let cluster = self.app.cluster().map_err(failure)?;
         let assembly =
             bounded(cluster.prepare_chunks(&node, &self.app.secrets.credential_key, input.clone()))
@@ -486,7 +486,7 @@ impl NodeWrites for Service {
         request: Request<wire::CommitChunksRequest>,
     ) -> Result<Response<wire::WriteBatchReply>, Status> {
         let node = write_identity(&request)?;
-        let input = super::write::commit(request.into_inner())?;
+        let input = super::write::commit(write_request(request)?)?;
         let batch_id = input.batch as u64;
         let end = bounded(self.app.cluster().map_err(failure)?.commit_chunks(
             &node,
@@ -507,7 +507,7 @@ impl NodeWrites for Service {
         request: Request<wire::CopyReferencesRequest>,
     ) -> Result<Response<wire::WriteBatchReply>, Status> {
         let node = data_identity(&request)?;
-        let input = super::write::copy(request.into_inner())?;
+        let input = super::write::copy(write_request(request)?)?;
         let batch_id = input.batch as u64;
         let end = bounded(self.app.cluster().map_err(failure)?.copy_write_references(
             &node,
@@ -528,7 +528,7 @@ impl NodeWrites for Service {
         request: Request<wire::PublishWriteRequest>,
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = write_identity(&request)?;
-        let input = super::write::publish(request.into_inner())?;
+        let input = super::write::publish(write_request(request)?)?;
         let reply = bounded(self.app.cluster().map_err(failure)?.publish_write(
             &node,
             &self.app.secrets.credential_key,
@@ -548,7 +548,7 @@ impl NodeWrites for Service {
         request: Request<wire::BeginWriteRequest>,
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = data_identity(&request)?;
-        let input = super::write::begin(request.into_inner())?;
+        let input = super::write::begin(write_request(request)?)?;
         let reply = bounded(self.app.cluster().map_err(failure)?.begin_write(
             &node,
             &self.app.secrets.credential_key,
@@ -587,6 +587,15 @@ fn write_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
         ));
     }
     Ok(node)
+}
+
+fn write_request<T: prost::Message>(request: Request<T>) -> Result<T, Status> {
+    if request.get_ref().encoded_len() > model::node_write::REQUEST_LIMIT {
+        return Err(Status::resource_exhausted(
+            "node write exceeds message budget",
+        ));
+    }
+    Ok(request.into_inner())
 }
 
 fn data_identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
@@ -1093,6 +1102,20 @@ impl NodeSessions for Service {
 
 #[tonic::async_trait]
 impl NodeMultipart for Service {
+    async fn stage_native_pages(
+        &self,
+        request: Request<wire::StageNativePagesRequest>,
+    ) -> Result<Response<wire::NativeFinishReply>, Status> {
+        let node = data_identity(&request)?;
+        let input = super::native::pages(request.into_inner())?;
+        bounded(self.app.cluster().map_err(failure)?.stage_native_pages(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(wire::NativeFinishReply {}))
+    }
     async fn adopt_native_complete(
         &self,
         request: Request<wire::AdoptNativeRequest>,
@@ -1306,6 +1329,42 @@ mod tests {
 
 #[tonic::async_trait]
 impl NodeWork for Service {
+    async fn checkpoint_raw_pages(
+        &self,
+        request: Request<wire::RawPagesCheckpoint>,
+    ) -> Result<Response<wire::TransferCheckpointReply>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let group = match input.group {
+            Some(index) => {
+                let group = crate::content::raw_pages::Group {
+                    index: index
+                        .try_into()
+                        .map_err(|_| Status::invalid_argument("invalid page index"))?,
+                    hashes: input.hashes,
+                };
+                group
+                    .validate()
+                    .map_err(|_| Status::invalid_argument("invalid page hashes"))?;
+                Some(group)
+            }
+            None if input.hashes.is_empty() => None,
+            _ => return Err(Status::invalid_argument("unexpected page hashes")),
+        };
+        let input = model::node_work::RawPages {
+            run: super::read::run(input.run)?,
+            operation: super::uuid(&input.operation_id)?,
+            source: super::uuid(&input.source_id)?,
+            group,
+        };
+        bounded(self.app.cluster().map_err(failure)?.checkpoint_raw_pages(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(wire::TransferCheckpointReply {}))
+    }
     async fn checkpoint_transfer(
         &self,
         request: Request<wire::TransferCheckpointRequest>,

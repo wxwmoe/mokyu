@@ -121,6 +121,14 @@ impl ClusterStore for Backend {
     )> {
         transactions::work::export::read(&self.pool, node, key, input).await
     }
+    async fn checkpoint_raw_pages(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_work::RawPages,
+    ) -> Result<()> {
+        transactions::work::checkpoint_raw_pages(&self.pool, node, key, input).await
+    }
     async fn checkpoint_transfer(
         &self,
         node: &NodeState,
@@ -189,6 +197,16 @@ impl ClusterStore for Backend {
         input: crate::model::node_native::Complete,
     ) -> Result<crate::model::node_native::PreparedCompletion> {
         transactions::native::complete(&self.pool, node, key, input)
+            .await
+            .map_err(normalize_error)
+    }
+    async fn stage_native_pages(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Pages,
+    ) -> Result<()> {
+        transactions::native::stage_pages(&self.pool, node, key, input)
             .await
             .map_err(normalize_error)
     }

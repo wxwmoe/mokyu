@@ -493,6 +493,7 @@ impl Worker {
                                     *snapshot,
                                     members,
                                     crate::worker::integrity::Mode::Full,
+                                    None,
                                 )
                                 .await?;
                             fills.extend(candidates);
@@ -549,6 +550,11 @@ impl Worker {
                                                 *source,
                                                 item.members,
                                                 mode,
+                                                item.raw_pages.then_some((
+                                                    &self.node,
+                                                    &snapshot.lease.run,
+                                                    operation,
+                                                )),
                                             )
                                             .await?;
                                         fills.extend(candidates);

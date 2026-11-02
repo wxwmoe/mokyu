@@ -300,6 +300,9 @@ impl App {
         } else {
             None
         };
+        let mut pages = raw
+            .as_ref()
+            .map(|(source, _)| crate::model::raw::PageWrite::new(*source));
         if capture.is_some()
             && let Some((_, writer)) = &mut raw
         {
@@ -348,6 +351,11 @@ impl App {
                 touch = Instant::now();
             }
             if let Some((_, writer)) = raw.as_mut() {
+                pages
+                    .as_mut()
+                    .unwrap()
+                    .feed(self.raw.as_ref(), &data)
+                    .await?;
                 writer.write(&data).await?;
                 continue;
             }
@@ -389,6 +397,10 @@ impl App {
         }
         if let Some((source, writer)) = raw {
             let digest = hex::decode(&etag)?;
+            pages
+                .unwrap()
+                .finish(self.raw.as_ref(), received, &digest)
+                .await?;
             let written = writer
                 .finish(
                     stream,

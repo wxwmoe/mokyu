@@ -290,6 +290,7 @@ async fn share_raw(
             && !current.pending_upload
             && candidate.medium == current.medium
         {
+            super::super::raw_pages::inherit(db, current.id, &candidate).await?;
             ensure!(
                 queries::raw_share(stream, current.id, candidate.id, current.size)
                     .execute(&mut *db)
@@ -741,6 +742,7 @@ pub(in super::super) async fn reuse_raw(
         tx.commit().await?;
         return Ok(false);
     };
+    super::super::raw_pages::inherit(&mut tx, source, &candidate).await?;
     queries::raw_attach(stream, candidate.id, size)
         .execute(&mut *tx)
         .await?;
@@ -836,6 +838,7 @@ pub(in super::super) async fn reuse_raw_upload(
     }) else {
         return Ok(false);
     };
+    super::super::raw_pages::inherit(&mut tx, work.source.id, &candidate).await?;
     for stream in streams {
         if queries::raw_upload_share(*stream, work.source.id, candidate.id)
             .execute(&mut *tx)

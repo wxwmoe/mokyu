@@ -699,6 +699,8 @@ impl Writes {
         {
             return Box::pin(self.chunks(operation, body, check, trailers, length)).await;
         }
+        let mut pages = Box::<crate::content::raw_pages::Builder>::default();
+        let mut page_hashes = Vec::new();
         let mut file = files.raw_request(&operation.backend.profile).await?;
         let idle = Duration::from_secs(crate::config::seconds(
             &node
@@ -730,6 +732,10 @@ impl Writes {
                     hash.update(bytes);
                 }
                 files.append_request(&mut file, bytes).await?;
+                let mut piece = bytes;
+                while let Some(group) = pages.feed(&mut piece) {
+                    page_hashes.extend(group.hashes);
+                }
             }
         }
         ensure!(
@@ -769,9 +775,13 @@ impl Writes {
         // Acquire local IO before reserving shared storage capacity.
         let io = Arc::new(self.reads.reader.acquire(&self.io, 1).await?);
         let started = Instant::now();
+        if let Some(group) = pages.finish() {
+            page_hashes.extend(group.hashes);
+        }
         let plan = node
             .client
             .prepare_raw(wire::PrepareRawRequest {
+                page_hashes,
                 local: charge.is_some(),
                 run: Some(operation.request.run.run.clone()),
                 operation_id: operation.id.clone(),

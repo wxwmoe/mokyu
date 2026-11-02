@@ -117,6 +117,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
                 .try_into()
                 .unwrap(),
             hash: Some(*blake3::hash(b"abc").as_bytes()),
+            page_hashes: blake3::hash(b"abc").as_bytes().to_vec(),
         },
     };
     let replies = futures_util::future::try_join_all(
@@ -128,6 +129,11 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
         && reply.size == 3
         && !reply.committed
         && reply.grants.len() == 1));
+    assert!(
+        model::raw::RawStore::page_hashes(&backend, source.into(), 3, 0, 1)
+            .await
+            .is_err()
+    );
     let mut changed = first.clone();
     changed.input.size = 4;
     assert_eq!(
@@ -235,6 +241,13 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
 
     assert!(backend.commit_raw(&node, &key, commit()).await?.committed);
     assert!(backend.commit_raw(&node, &key, commit()).await?.committed);
+    assert_eq!(
+        model::raw::RawStore::page_hashes(&backend, source.into(), 3, 0, 1).await?,
+        Some(blake3::hash(b"abc").as_bytes().to_vec())
+    );
+    let mut conflict = first.clone();
+    conflict.input.page_hashes[0] ^= 1;
+    assert!(backend.prepare_raw(&node, &key, conflict).await.is_err());
     assert!(
         backend
             .prepare_raw(&node, &key, first.clone())
@@ -296,6 +309,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
                 .try_into()
                 .unwrap(),
             hash: Some(*blake3::hash(b"").as_bytes()),
+            page_hashes: Vec::new(),
         },
         ..first.clone()
     };

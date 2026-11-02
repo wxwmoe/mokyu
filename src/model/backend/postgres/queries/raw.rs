@@ -1,5 +1,9 @@
 use super::*;
 
+pub(in super::super) fn missing_raw_pages(source: Id) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT page_count IS NULL FROM raw_sources WHERE id=$1").bind(source)
+}
+
 const RAW_COPY_READY: &str = "r.state='ready' AND r.quarantine_code IS NULL AND r.durability='durable' AND NOT r.pending_upload AND r.medium IN ('local','shared_s3') AND r.size>=0 AND length(r.digest)=16";
 
 pub(in super::super) fn raw_page(stream: Id, start: i64, end: i64) -> Rows<'static, RawRange> {
@@ -151,6 +155,38 @@ pub(in super::super) fn raw_detach(stream: Id, end: i64) -> Statement<'static> {
 
 #[async_trait::async_trait]
 impl RawStore for Backend {
+    async fn put_pages(&self, source: Id, group: &crate::content::raw_pages::Group) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        super::super::raw_pages::put(&mut tx, source, group).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn seal_pages(
+        &self,
+        source: Id,
+        size: i64,
+        digest: &[u8],
+        tail: Option<&crate::content::raw_pages::Group>,
+    ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        if let Some(group) = tail {
+            super::super::raw_pages::put(&mut tx, source, group).await?;
+        }
+        super::super::raw_pages::seal(&mut tx, source, size, digest).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn page_hashes(
+        &self,
+        source: Id,
+        size: i64,
+        first: i64,
+        count: usize,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut conn = self.pool.acquire().await?;
+        super::super::raw_pages::read(&mut conn, source, size, first, count).await
+    }
+
     async fn recover_memory(&self, boot: Uuid) -> Result<()> {
         transactions::recover_raw_memory(&self.pool, boot).await
     }

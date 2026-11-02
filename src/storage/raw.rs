@@ -481,6 +481,39 @@ impl Storage {
             .inspect_err(|error| self.diagnostics.content(error))
     }
 
+    pub(crate) async fn raw_reader_for_check(
+        self: &Arc<Self>,
+        source: &RawSource,
+        full: bool,
+    ) -> Result<RawReader> {
+        if !full
+            || self
+                .raw_store
+                .page_hashes(source.id, source.size, 0, usize::from(source.size > 0))
+                .await?
+                .is_some()
+        {
+            return self.raw_reader_uncached(source, full).await;
+        }
+        let mut reader = self.raw_reader_uncached(source, false).await?;
+        let _cpu = self.cpu.acquire().await?;
+        let mut pages = verify_manifest(&mut reader.file, source, None, &self.disk.root).await?;
+        drop(_cpu);
+        while let Some(group) = pages.next().await? {
+            self.raw_store.put_pages(source.id, &group).await?;
+        }
+        self.raw_store
+            .seal_pages(
+                source.id,
+                source.size,
+                source.digest.as_deref().context("raw digest missing")?,
+                None,
+            )
+            .await?;
+        reader.file.rewind().await?;
+        Ok(reader)
+    }
+
     pub(crate) async fn raw_reader_uncached(
         self: &Arc<Self>,
         source: &RawSource,
@@ -740,7 +773,27 @@ impl Storage {
 pub(crate) async fn verify_file(
     file: &mut RawFile,
     source: &RawSource,
+    cache: Option<&mut Option<super::raw_cache::Write>>,
+) -> Result<u64> {
+    verify(file, source, cache, None).await
+}
+
+pub(crate) async fn verify_manifest(
+    file: &mut RawFile,
+    source: &RawSource,
+    cache: Option<&mut Option<super::raw_cache::Write>>,
+    root: &Path,
+) -> Result<super::raw_manifest::Verified> {
+    let mut spool = super::raw_manifest::Spool::new(root);
+    verify(file, source, cache, Some(&mut spool)).await?;
+    spool.finish().await
+}
+
+async fn verify(
+    file: &mut RawFile,
+    source: &RawSource,
     mut cache: Option<&mut Option<super::raw_cache::Write>>,
+    mut pages: Option<&mut super::raw_manifest::Spool<'_>>,
 ) -> Result<u64> {
     let mut digest = Md5::new();
     let mut buffer = vec![0; BUFFER];
@@ -753,6 +806,9 @@ pub(crate) async fn verify_file(
         size += count as u64;
         ensure!(size <= source.size as u64, IntegrityError::Length);
         digest.update(&buffer[..count]);
+        if let Some(pages) = pages.as_deref_mut() {
+            pages.feed(&buffer[..count]).await?;
+        }
         if let Some(cache) = cache.as_deref_mut() {
             super::raw_cache::append(cache, &buffer[..count]).await;
         }

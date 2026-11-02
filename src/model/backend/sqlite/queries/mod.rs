@@ -130,6 +130,7 @@ pub(super) use metrics::*;
 mod source_repair;
 pub(super) use source_repair::*;
 mod raw;
+pub(super) mod raw_pages;
 pub(super) use raw::*;
 pub(super) mod external;
 pub(super) mod image;

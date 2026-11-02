@@ -161,6 +161,10 @@ impl RawCopy {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RawProgress {
+    Pages {
+        index: i64,
+        hashes: Vec<u8>,
+    },
     Started {
         upload: String,
     },
@@ -193,6 +197,11 @@ impl RawProgress {
                     (1..=10000).contains(number)
                         && valid(etag)
                         && upload.as_ref().is_none_or(|value| valid(value)),
+                Self::Pages { index, hashes } =>
+                    *index >= 0
+                        && !hashes.is_empty()
+                        && hashes.len() <= 8192
+                        && hashes.len().is_multiple_of(32),
                 Self::Finished { digest } => digest.len() == 16,
             },
             "invalid raw transfer checkpoint"

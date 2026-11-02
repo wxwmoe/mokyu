@@ -5,6 +5,8 @@ mod connection;
 mod image_transactions;
 mod migration;
 mod queries;
+#[path = "../shared/raw_pages.rs"]
+mod raw_pages;
 mod refresh;
 #[path = "../shared/replica.rs"]
 mod replica_transactions;

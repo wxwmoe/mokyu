@@ -1718,6 +1718,23 @@ pub(in super::super) async fn prepare_node_raw(
         .fetch_one(&mut *tx)
         .await?
     };
+    for (index, bytes) in input
+        .input
+        .page_hashes
+        .chunks(crate::content::raw_pages::GROUP * 32)
+        .enumerate()
+    {
+        super::super::raw_pages::put(
+            &mut tx,
+            source.into(),
+            &crate::content::raw_pages::Group {
+                index: index as i64,
+                hashes: bytes.to_vec(),
+            },
+        )
+        .await?;
+    }
+    super::super::raw_pages::seal(&mut tx, source.into(), size, &input.input.digest).await?;
     queries::insert_node_raw_write(node.node_id, &input, &hash, source, committed)
         .execute(&mut *tx)
         .await?;

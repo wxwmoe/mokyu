@@ -51,9 +51,18 @@ service NodeSessions {
 
 service NodeWork {
   rpc Exchange(WorkRequest) returns (WorkReply);
+  rpc CheckpointRawPages(RawPagesCheckpoint) returns (TransferCheckpointReply);
   rpc CheckpointTransfer(TransferCheckpointRequest) returns (TransferCheckpointReply);
   rpc ReadMigration(ReadMigrationRequest) returns (ReadReply);
   rpc ReadTransfer(ReadTransferRequest) returns (ReadTransferReply);
+}
+
+message RawPagesCheckpoint {
+  Run run = 1;
+  string operation_id = 2;
+  string source_id = 3;
+  optional uint64 group = 4;
+  bytes hashes = 5;
 }
 
 message TransferCheckpointRequest {
@@ -157,6 +166,7 @@ service NodeMultipart {
   rpc FinishNative(NativeFinishRequest) returns (NativeFinishReply);
   rpc CheckLocalFiles(LocalFilesRequest) returns (FilesReply);
   rpc PrepareNativeComplete(NativeCompleteRequest) returns (NativeCompleteReply);
+  rpc StageNativePages(StageNativePagesRequest) returns (NativeFinishReply);
   rpc AdoptNativeComplete(AdoptNativeRequest) returns (WriteReply);
 }
 
@@ -216,11 +226,19 @@ message NativeCompleteReply {
   repeated Grant grants = 2;
 }
 
+message StageNativePagesRequest {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 group = 3;
+  bytes hashes = 4;
+}
+
 message AdoptNativeRequest {
   Run run = 1;
   string operation_id = 2;
   bytes digest = 3;
   bytes content_hash = 4;
+  bytes page_tail = 5;
 }
 
 message CompleteStatusRequest {
@@ -323,6 +341,7 @@ message PrepareRawRequest {
   bytes digest = 4;
   bytes content_hash = 5;
   bool local = 6;
+  bytes page_hashes = 7;
 }
 
 message FilesReply {

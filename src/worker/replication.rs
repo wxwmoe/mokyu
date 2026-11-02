@@ -383,6 +383,7 @@ impl App {
             Target::Local(root.join(crate::storage::chunk_name(plan.target.location_id)))
         } else {
             Target::Remote {
+                scratch: &self.storage.disk.root,
                 backend: target.backend.clone(),
                 streaming: target
                     .streaming

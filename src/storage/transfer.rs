@@ -14,6 +14,7 @@ use tokio::{
 pub(crate) enum Target<'a> {
     Local(PathBuf),
     Remote {
+        scratch: &'a std::path::Path,
         backend: Arc<dyn ObjectStore>,
         streaming: &'a Streaming,
         multipart: &'a dyn MultipartStore,
@@ -75,7 +76,34 @@ fn replay<'a>(
     })
 }
 
-async fn verify_local(path: &std::path::Path, size: u64, expected: &[u8]) -> Result<bool> {
+async fn finish_pages<F, Fut>(spool: super::raw_manifest::Spool<'_>, checkpoint: &F) -> Result<()>
+where
+    F: Fn(RawProgress) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut verified = spool.finish().await?;
+    while let Some(group) = verified.next().await? {
+        checkpoint(RawProgress::Pages {
+            index: group.index,
+            hashes: group.hashes,
+        })
+        .await?;
+    }
+    Ok(())
+}
+
+async fn verify_local<F, Fut>(
+    path: &std::path::Path,
+    size: u64,
+    expected: &[u8],
+    checkpoint: &F,
+) -> Result<bool>
+where
+    F: Fn(RawProgress) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut pages =
+        super::raw_manifest::Spool::new(path.parent().context("raw destination has no parent")?);
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -94,21 +122,30 @@ async fn verify_local(path: &std::path::Path, size: u64, expected: &[u8]) -> Res
             break;
         }
         hash.update(&bytes[..count]);
+        pages.feed(&bytes[..count]).await?;
     }
     ensure!(
         hash.finalize().as_slice() == expected,
         "raw destination checksum differs"
     );
+    finish_pages(pages, checkpoint).await?;
     Ok(true)
 }
 
-async fn verify_remote(
+async fn verify_remote<F, Fut>(
+    scratch: &std::path::Path,
     backend: &dyn ObjectStore,
     key: &object_store::path::Path,
     size: u64,
     expected: &[u8],
     fill: &mut Option<super::raw_cache::Write>,
-) -> Result<bool> {
+    checkpoint: &F,
+) -> Result<bool>
+where
+    F: Fn(RawProgress) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut pages = super::raw_manifest::Spool::new(scratch);
     let head = match backend.head(key).await {
         Ok(value) => value,
         Err(object_store::Error::NotFound { .. }) => return Ok(false),
@@ -125,12 +162,14 @@ async fn verify_remote(
             .context("raw destination size overflow")?;
         ensure!(read <= size, "raw destination exceeds expected length");
         hash.update(&bytes);
+        pages.feed(&bytes).await?;
         super::raw_cache::append(fill, &bytes).await;
     }
     ensure!(
         read == size && hash.finalize().as_slice() == expected,
         "raw destination checksum differs"
     );
+    finish_pages(pages, checkpoint).await?;
     Ok(true)
 }
 
@@ -162,7 +201,7 @@ where
     };
     match target {
         Target::Local(destination) => {
-            if !verify_local(&destination, size, &digest).await? {
+            if !verify_local(&destination, size, &digest, &checkpoint).await? {
                 let parent = destination
                     .parent()
                     .context("raw destination has no parent")?;
@@ -237,18 +276,29 @@ where
                 file.set_len(size).await?;
                 file.sync_all().await?;
                 drop(file);
-                verify_local(&partial, size, &digest).await?;
+                verify_local(&partial, size, &digest, &checkpoint).await?;
                 tokio::fs::rename(&partial, &destination).await?;
                 super::raw::sync_directory(parent).await?;
             }
         }
         Target::Remote {
+            scratch,
             backend,
             streaming,
             multipart,
         } => {
             let key = super::raw::remote_path(plan.target.location_id);
-            if !verify_remote(backend.as_ref(), &key, size, &digest, fill).await? {
+            if !verify_remote(
+                scratch,
+                backend.as_ref(),
+                &key,
+                size,
+                &digest,
+                fill,
+                &checkpoint,
+            )
+            .await?
+            {
                 let written = if plan.parts.is_empty() {
                     let result = streaming
                         .put(&key, size, &digest, || replay(&input, 0, size, digest))
@@ -372,7 +422,17 @@ where
                         })
                 };
                 // A lost response can follow a durable write; verify its bytes before publishing.
-                if !verify_remote(backend.as_ref(), &key, size, &digest, fill).await? {
+                if !verify_remote(
+                    scratch,
+                    backend.as_ref(),
+                    &key,
+                    size,
+                    &digest,
+                    fill,
+                    &checkpoint,
+                )
+                .await?
+                {
                     written?;
                     anyhow::bail!("raw destination missing after write");
                 }
@@ -492,7 +552,9 @@ mod tests {
                 ensure!(
                     matches!(
                         progress,
-                        RawProgress::Part { number: 2, .. } | RawProgress::Finished { .. }
+                        RawProgress::Part { number: 2, .. }
+                            | RawProgress::Pages { .. }
+                            | RawProgress::Finished { .. }
                     ),
                     "confirmed part was replayed"
                 );
@@ -514,7 +576,10 @@ mod tests {
             &mut None,
             |progress| async move {
                 ensure!(
-                    matches!(progress, RawProgress::Finished { .. }),
+                    matches!(
+                        progress,
+                        RawProgress::Finished { .. } | RawProgress::Pages { .. }
+                    ),
                     "completed output was replayed"
                 );
                 Ok(())

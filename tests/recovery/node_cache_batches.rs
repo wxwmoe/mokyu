@@ -341,6 +341,7 @@ async fn cached(
         size,
         digest: [index + 32; 16],
         hash: Some([index + 32; 32]),
+        page_hashes: vec![index + 32; crate::content::raw_pages::count(size)? as usize * 32],
     };
     let source = backend
         .prepare_raw(

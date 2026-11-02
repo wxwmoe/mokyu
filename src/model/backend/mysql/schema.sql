@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261102022127.
+-- Generated from the complete mysql migration chain through 20261102105753.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -810,6 +810,16 @@ CREATE TABLE `quota_writes` (
   CONSTRAINT `quota_writes_bytes` CHECK (((`allocated_bytes` >= 0) and (`contribution_bytes` >= 0)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `raw_page_groups` (
+  `source_id` bigint NOT NULL,
+  `group_no` bigint NOT NULL,
+  `hashes` varbinary(8192) NOT NULL,
+  PRIMARY KEY (`source_id`,`group_no`),
+  CONSTRAINT `raw_page_groups_source_fk` FOREIGN KEY (`source_id`) REFERENCES `raw_sources` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `raw_page_groups_chk_1` CHECK ((`group_no` >= 0)),
+  CONSTRAINT `raw_page_groups_chk_2` CHECK (((length(`hashes`) between 32 and 8192) and ((length(`hashes`) % 32) = 0)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `raw_processing` (
   `stream_id` bigint NOT NULL,
   `source_id` bigint NOT NULL,
@@ -864,6 +874,7 @@ CREATE TABLE `raw_sources` (
   `unreferenced_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `pending_upload` tinyint(1) NOT NULL DEFAULT '0',
   `processing_task` binary(16) DEFAULT NULL,
+  `page_count` bigint DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `raw_sources_location` (`location_id`),
   UNIQUE KEY `raw_sources_content` (`storage_id`,`content_hash`,`size`),
@@ -881,7 +892,8 @@ CREATE TABLE `raw_sources` (
   CONSTRAINT `raw_sources_chk_5` CHECK ((`revision` > 0)),
   CONSTRAINT `raw_sources_chk_6` CHECK ((`profile_revision` > 0)),
   CONSTRAINT `raw_sources_chk_7` CHECK (((`state` <> _ascii'ready') or (`digest` is not null))),
-  CONSTRAINT `raw_sources_chk_8` CHECK (((`medium` = _ascii'memory') = (`boot_id` is not null)))
+  CONSTRAINT `raw_sources_chk_8` CHECK (((`medium` = _ascii'memory') = (`boot_id` is not null))),
+  CONSTRAINT `raw_sources_chk_9` CHECK ((`page_count` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `raw_uploads` (

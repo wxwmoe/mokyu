@@ -159,8 +159,51 @@ pub(crate) fn copy_window(storage: Uuid, rows: &[RawRange]) -> Result<(i64, i64,
     Ok((start, end, sources))
 }
 
+pub(crate) struct PageWrite {
+    source: Id,
+    builder: Box<crate::content::raw_pages::Builder>,
+}
+
+impl PageWrite {
+    pub fn new(source: Id) -> Self {
+        Self {
+            source,
+            builder: Default::default(),
+        }
+    }
+
+    pub async fn feed(&mut self, store: &dyn RawStore, mut bytes: &[u8]) -> Result<()> {
+        while let Some(group) = self.builder.feed(&mut bytes) {
+            store.put_pages(self.source, &group).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn finish(self, store: &dyn RawStore, size: i64, digest: &[u8]) -> Result<()> {
+        store
+            .seal_pages(self.source, size, digest, self.builder.finish().as_ref())
+            .await
+    }
+}
+
 #[async_trait]
 pub(crate) trait RawStore: Send + Sync {
+    async fn put_pages(&self, source: Id, group: &crate::content::raw_pages::Group) -> Result<()>;
+    async fn seal_pages(
+        &self,
+        source: Id,
+        size: i64,
+        digest: &[u8],
+        tail: Option<&crate::content::raw_pages::Group>,
+    ) -> Result<()>;
+    async fn page_hashes(
+        &self,
+        source: Id,
+        size: i64,
+        first: i64,
+        count: usize,
+    ) -> Result<Option<Vec<u8>>>;
+
     async fn recover_memory(&self, boot: Uuid) -> Result<()>;
     async fn buffer(&self, source: Id) -> Result<()>;
     async fn buffered_status(&self) -> Result<serde_json::Value>;

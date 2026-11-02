@@ -77,8 +77,22 @@ pub(super) fn complete(input: wire::NativeCompleteRequest) -> Result<native::Com
     })
 }
 
+pub(super) fn pages(input: wire::StageNativePagesRequest) -> Result<native::Pages, Status> {
+    let group = crate::content::raw_pages::Group {
+        index: input.group.try_into().map_err(|_| invalid())?,
+        hashes: input.hashes,
+    };
+    group.validate().map_err(|_| invalid())?;
+    Ok(native::Pages {
+        group,
+        run: read::run(input.run)?,
+        operation: super::uuid(&input.operation_id)?,
+    })
+}
+
 pub(super) fn adopt(input: wire::AdoptNativeRequest) -> Result<native::Adopt, Status> {
     Ok(native::Adopt {
+        page_tail: input.page_tail,
         run: read::run(input.run)?,
         operation: super::uuid(&input.operation_id)?,
         digest: input.digest.try_into().map_err(|_| invalid())?,

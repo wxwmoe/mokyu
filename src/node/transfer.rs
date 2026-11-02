@@ -89,6 +89,7 @@ impl Reader {
         .and_then(Result::ok)
         .flatten();
         let destination = crate::storage::transfer::Target::Remote {
+            scratch: &self.files.disk.root,
             backend: target.store.backend.clone(),
             streaming: target
                 .store

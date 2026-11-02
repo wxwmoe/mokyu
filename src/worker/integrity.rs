@@ -479,7 +479,7 @@ impl App {
                         };
                         let _reader = self
                             .storage
-                            .raw_reader_uncached(source, detail.mode == Mode::Full)
+                            .raw_reader_for_check(source, detail.mode == Mode::Full)
                             .await?;
                         if detail.mode == Mode::Full {
                             detail.bytes_checked += source.size as u64;

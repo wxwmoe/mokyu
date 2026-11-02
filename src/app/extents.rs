@@ -340,16 +340,19 @@ impl App {
                 .storage
                 .raw_replay_writer(storage, id, location, size, &[])
                 .await?;
+            let mut pages = crate::model::raw::PageWrite::new(id);
             let mut digest = Md5::new();
             while let Some(data) = input.next().await {
                 let data = data?;
                 self.renew_write_lease(destination).await?;
                 digest.update(&data);
+                pages.feed(self.raw.as_ref(), &data).await?;
                 writer.write(&data).await?;
                 offset += data.len() as i64;
             }
             ensure!(offset == size, "copy length mismatch");
             let digest = digest.finalize();
+            pages.finish(self.raw.as_ref(), size, &digest).await?;
             let written = writer
                 .finish_replay(destination, offset as u64, &digest, replay)
                 .await?;

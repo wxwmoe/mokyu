@@ -254,6 +254,7 @@ impl App {
         self.complete_quota(u.id, id, total).await?;
         let mut full = Integrity::new(&hyper::HeaderMap::new(), u.checksum_algorithm.as_deref())?;
         let mut content = blake3::Hasher::new();
+        let mut pages = crate::model::raw::PageWrite::new(remote.source.into());
         let mut body = self.storage.remote_body(&remote);
         let mut rest = Bytes::new();
         let mut renew = tokio::time::Instant::now();
@@ -270,6 +271,7 @@ impl App {
                 }
                 let count = rest.len().min((part.size - received) as usize);
                 md5.update(&rest[..count]);
+                pages.feed(self.raw.as_ref(), &rest[..count]).await?;
                 full.update(&rest[..count]);
                 content.update(&rest[..count]);
                 received += count as i64;
@@ -291,6 +293,7 @@ impl App {
         drop(body);
         let (digest, sums) = completion_checksums(full, u, parts, headers)?;
         let digest = hex::decode(digest)?;
+        pages.finish(self.raw.as_ref(), total, &digest).await?;
         let content = *content.finalize().as_bytes();
         let profile = self.storage.profile(remote.storage)?;
         let background = profile.deduplication_enabled && profile.write_processing == "background";

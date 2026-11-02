@@ -329,6 +329,13 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn checkpoint_raw_pages(
+        &self,
+        input: wire::RawPagesCheckpoint,
+    ) -> Result<wire::TransferCheckpointReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWork/CheckpointRawPages")
+            .await
+    }
     pub(crate) async fn checkpoint_transfer(
         &self,
         input: wire::TransferCheckpointRequest,
@@ -374,6 +381,14 @@ impl Client {
         input: wire::NativeCompleteRequest,
     ) -> Result<wire::NativeCompleteReply, Status> {
         self.unary(input, "/mokyu.node.v1.NodeMultipart/PrepareNativeComplete")
+            .await
+    }
+
+    pub(crate) async fn stage_native_pages(
+        &self,
+        input: wire::StageNativePagesRequest,
+    ) -> Result<wire::NativeFinishReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeMultipart/StageNativePages")
             .await
     }
 
@@ -562,7 +577,9 @@ impl Client {
         I: prost::Message + Default + Clone + 'static,
         O: prost::Message + Default + 'static,
     {
-        let limit = if path == "/mokyu.node.v1.NodeMultipart/BeginComplete" {
+        let limit = if path == "/mokyu.node.v1.NodeWrites/PrepareRaw" {
+            crate::model::node_raw::PREPARE_LIMIT
+        } else if path == "/mokyu.node.v1.NodeMultipart/BeginComplete" {
             crate::model::node_complete::REQUEST_LIMIT
         } else if path == "/mokyu.node.v1.NodeObjects/ChangeObjects" {
             crate::model::node_object::REQUEST_LIMIT

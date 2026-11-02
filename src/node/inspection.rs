@@ -13,6 +13,7 @@ impl Reader {
         snapshot: SourceSnapshot,
         members: Vec<Member>,
         mode: crate::worker::integrity::Mode,
+        pages: Option<(&NodeContext, &crate::rpc::wire::Run, Uuid)>,
     ) -> Result<(Outcome, crate::storage::cache::Fills)> {
         let _io = self.acquire(&self.io, 1).await?;
         let timeout = crate::config::seconds(&backend.profile.integrity_batch_timeout)?;
@@ -50,7 +51,35 @@ impl Reader {
                     .ok()
                     .and_then(Result::ok)
                     .flatten();
-                    crate::storage::raw::verify_file(&mut file, &raw, Some(&mut cache)).await?;
+                    if let Some((node, run, operation)) = pages {
+                        let mut verified = crate::storage::raw::verify_manifest(
+                            &mut file,
+                            &raw,
+                            Some(&mut cache),
+                            &self.files.disk.root,
+                        )
+                        .await?;
+                        loop {
+                            let group = verified.next().await?;
+                            let done = group.is_none();
+                            let (index, hashes) = group
+                                .map_or((None, Vec::new()), |g| (Some(g.index as u64), g.hashes));
+                            node.client
+                                .checkpoint_raw_pages(crate::rpc::wire::RawPagesCheckpoint {
+                                    run: Some(run.clone()),
+                                    operation_id: operation.to_string(),
+                                    source_id: raw.location_id.to_string(),
+                                    group: index,
+                                    hashes,
+                                })
+                                .await?;
+                            if done {
+                                break;
+                            }
+                        }
+                    } else {
+                        crate::storage::raw::verify_file(&mut file, &raw, Some(&mut cache)).await?;
+                    }
                     if let Some(cache) = cache {
                         fills.extend(self.files.prepare_raw(cache, &raw));
                     }

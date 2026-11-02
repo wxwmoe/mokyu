@@ -54,9 +54,18 @@ pub(crate) enum AuditTarget {
     },
 }
 
+pub(crate) struct RawPages {
+    pub run: super::session::Run,
+    pub operation: Uuid,
+    pub source: Uuid,
+    pub group: Option<crate::content::raw_pages::Group>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Inspection {
+    #[serde(default)]
+    pub raw_pages: bool,
     pub location: Uuid,
     pub snapshot: Option<Box<super::source::SourceSnapshot>>,
     pub members: Vec<Member>,

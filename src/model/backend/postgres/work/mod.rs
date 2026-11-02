@@ -1660,6 +1660,98 @@ pub(crate) async fn exchange(
     Ok(value)
 }
 
+async fn checkpoint_owner(
+    db: &mut Transaction<'_, Postgres>,
+    node: &NodeState,
+    key: &Key,
+    run: Run,
+    operation: Uuid,
+) -> Result<(work::Plan, Execution)> {
+    authenticate_rpc_node(db, node, key, false).await?;
+    require_node_run(db, node, run, true).await?;
+    ensure!(
+        matches!(node.role.as_str(), "worker" | "node"),
+        Error::NodeInactive
+    );
+    let row = q::batch(node.node_id, operation)
+        .fetch_optional(&mut **db)
+        .await?
+        .ok_or(Error::NodeExpired)?;
+    owned(node, run, &row)?;
+    ensure!(
+        row.valid_for_ms > 0 && row.result_hash.is_none(),
+        Error::NodeExpired
+    );
+    let plan = row.plan.context("work plan missing")?.0;
+    let mut tokens = vec![row.token, row.maintenance_token];
+    tokens.extend_from_slice(plan.source_permits());
+    ensure!(
+        q::live_permits(&tokens).fetch_one(&mut **db).await?,
+        Error::NodeExpired
+    );
+    let task = Execution {
+        id: row.task_id.context("work task missing")?,
+        token: row.token,
+    };
+    ensure!(
+        q::task(task.id, task.token, node.node_id)
+            .fetch_optional(&mut **db)
+            .await?
+            .is_some(),
+        Error::NodeExpired
+    );
+    Ok((plan, task))
+}
+
+pub(crate) async fn checkpoint_raw_pages(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: work::RawPages,
+) -> Result<()> {
+    let mut db = pool.begin().await?;
+    let (plan, _) = checkpoint_owner(&mut db, node, key, input.run, input.operation).await?;
+    let work::Plan::Audit {
+        mode: crate::worker::integrity::Mode::Full,
+        items,
+        ..
+    } = plan
+    else {
+        anyhow::bail!(Error::NodeOperationConflict)
+    };
+    let raw = items
+        .iter()
+        .filter(|item| item.raw_pages && item.previous.is_none())
+        .filter_map(|item| item.snapshot.as_deref())
+        .find_map(|snapshot| match &snapshot.physical {
+            crate::model::PhysicalSource::Raw(raw) if raw.location_id == input.source => Some(raw),
+            _ => None,
+        })
+        .ok_or(Error::NodeOperationConflict)?;
+    let current = queries::raw_source(raw.id).fetch_one(&mut *db).await?;
+    ensure!(
+        current.size == raw.size
+            && current.digest == raw.digest
+            && current.quarantine_code.is_none()
+            && current.state == "ready",
+        Error::OperationAborted
+    );
+    if let Some(group) = input.group {
+        group.validate_size(raw.size)?;
+        super::super::raw_pages::put(&mut db, raw.id, &group).await?;
+    } else {
+        super::super::raw_pages::seal(
+            &mut db,
+            raw.id,
+            raw.size,
+            raw.digest.as_deref().context("missing raw digest")?,
+        )
+        .await?;
+    }
+    db.commit().await?;
+    Ok(())
+}
+
 pub(crate) async fn checkpoint_transfer(
     pool: &sqlx::PgPool,
     node: &NodeState,
@@ -1674,42 +1766,10 @@ pub(crate) async fn checkpoint_transfer(
         q::writable().fetch_one(&mut *db).await?,
         Error::OperationAborted
     );
-    authenticate_rpc_node(&mut db, node, key, false).await?;
-    require_node_run(&mut db, node, run, true).await?;
-    ensure!(
-        matches!(node.role.as_str(), "worker" | "node"),
-        Error::NodeInactive
-    );
-    let row = q::batch(node.node_id, operation)
-        .fetch_optional(&mut *db)
-        .await?
-        .ok_or(Error::NodeExpired)?;
-    owned(node, run, &row)?;
-    ensure!(
-        row.valid_for_ms > 0 && row.result_hash.is_none(),
-        Error::NodeExpired
-    );
-    let plan = row.plan.context("work plan missing")?.0;
-    let mut tokens = vec![row.token, row.maintenance_token];
-    tokens.extend_from_slice(plan.source_permits());
-    ensure!(
-        q::live_permits(&tokens).fetch_one(&mut *db).await?,
-        Error::NodeExpired
-    );
+    let (plan, task) = checkpoint_owner(&mut db, node, key, run, operation).await?;
     let work::Plan::RawTransfer { transfer: plan, .. } = plan else {
         anyhow::bail!(Error::NodeOperationConflict)
     };
-    let task = Execution {
-        id: row.task_id.context("work task missing")?,
-        token: row.token,
-    };
-    ensure!(
-        q::task(task.id, task.token, node.node_id)
-            .fetch_optional(&mut *db)
-            .await?
-            .is_some(),
-        Error::NodeExpired
-    );
     let run = super::super::transactions::replication::owned(&mut db, task).await?;
     super::super::transactions::transfer::raw_progress(&mut db, task, &run, &plan, progress)
         .await?;

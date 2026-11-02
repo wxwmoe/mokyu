@@ -141,7 +141,14 @@ pub(crate) struct PreparedCompletion {
     pub grants: Vec<node_read::Grant>,
 }
 
+pub(crate) struct Pages {
+    pub run: Run,
+    pub operation: Uuid,
+    pub group: crate::content::raw_pages::Group,
+}
+
 pub(crate) struct Adopt {
+    pub page_tail: Vec<u8>,
     pub run: Run,
     pub operation: Uuid,
     pub digest: [u8; 16],

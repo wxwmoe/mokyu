@@ -42,6 +42,12 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         input: super::node_work::Exchange,
     ) -> Result<super::node_work::Reply>;
+    async fn checkpoint_raw_pages(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_work::RawPages,
+    ) -> Result<()>;
     async fn checkpoint_transfer(
         &self,
         node: &NodeState,
@@ -86,6 +92,12 @@ pub(crate) trait ClusterStore: Send + Sync {
         key: &Key,
         input: super::node_native::Complete,
     ) -> Result<super::node_native::PreparedCompletion>;
+    async fn stage_native_pages(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Pages,
+    ) -> Result<()>;
     async fn adopt_native_complete(
         &self,
         node: &NodeState,

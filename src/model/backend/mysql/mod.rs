@@ -3,6 +3,8 @@ mod connection;
 mod image_transactions;
 mod migration;
 mod queries;
+#[path = "../shared/raw_pages.rs"]
+mod raw_pages;
 #[path = "../shared/replica.rs"]
 mod replica_transactions;
 #[path = "../shared/tier_access.rs"]

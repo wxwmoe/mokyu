@@ -761,6 +761,9 @@ impl App {
         } else {
             None
         };
+        let mut pages = raw_writer
+            .as_ref()
+            .map(|(source, _)| crate::model::raw::PageWrite::new(*source));
         let mut window = if raw_revision.is_some() {
             Vec::new()
         } else {
@@ -807,6 +810,11 @@ impl App {
                 pos += data.len() as i64;
                 if let Some((_, writer)) = raw_writer.as_mut() {
                     self.renew_write_lease(id).await?;
+                    pages
+                        .as_mut()
+                        .unwrap()
+                        .feed(self.raw.as_ref(), &data)
+                        .await?;
                     writer.write(&data).await?;
                     offset += data.len() as i64;
                     continue;
@@ -841,6 +849,10 @@ impl App {
         let (payload_digest, sums) = completion_checksums(full, u, parts, headers)?;
         if let Some((source, writer)) = raw_writer {
             let digest = hex::decode(payload_digest)?;
+            pages
+                .unwrap()
+                .finish(self.raw.as_ref(), total, &digest)
+                .await?;
             let written = writer
                 .finish_replay(id, total as u64, &digest, |range| {
                     self.replay_payload(id, parts, range)

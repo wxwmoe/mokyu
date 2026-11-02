@@ -20,6 +20,7 @@ pub(crate) mod profile;
 mod rate;
 pub(crate) mod raw;
 pub(crate) mod raw_cache;
+pub(crate) mod raw_manifest;
 pub(crate) mod raw_request;
 pub(crate) mod raw_upload;
 pub(crate) mod resource_gate;

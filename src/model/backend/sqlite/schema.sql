@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261102022127.
+-- Generated from the complete sqlite migration chain through 20261102105753.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -624,6 +624,13 @@ CREATE TABLE quota_writes (
     CONSTRAINT quota_writes_bytes CHECK (allocated_bytes>=0 AND contribution_bytes>=0)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE raw_page_groups (
+    source_id INTEGER NOT NULL REFERENCES raw_sources(id) ON DELETE CASCADE,
+    group_no INTEGER NOT NULL CHECK (group_no >= 0),
+    hashes BLOB NOT NULL CHECK (length(hashes) BETWEEN 32 AND 8192 AND length(hashes) % 32 = 0),
+    PRIMARY KEY (source_id, group_no)
+) WITHOUT ROWID;
+
 CREATE TABLE raw_processing (
     stream_id INTEGER PRIMARY KEY REFERENCES streams(id) ON DELETE CASCADE,
     source_id INTEGER NOT NULL REFERENCES raw_sources(id) ON DELETE CASCADE,
@@ -664,7 +671,7 @@ CREATE TABLE raw_sources (
     quarantined_at INTEGER,
     quarantine_code TEXT,
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    unreferenced_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), pending_upload INTEGER NOT NULL DEFAULT false, processing_task BLOB REFERENCES tasks(id) ON DELETE SET NULL,
+    unreferenced_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), pending_upload INTEGER NOT NULL DEFAULT false, processing_task BLOB REFERENCES tasks(id) ON DELETE SET NULL, page_count INTEGER CHECK (page_count >= 0),
     CHECK (state<>'ready' OR digest IS NOT NULL),
     CHECK ((medium='memory')=(boot_id IS NOT NULL))
 ) STRICT;

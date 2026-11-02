@@ -144,6 +144,7 @@ pub(super) use rows::*;
 mod source_repair;
 pub(super) use source_repair::*;
 mod raw;
+pub(super) mod raw_pages;
 pub(super) use raw::*;
 mod node_sessions;
 pub(super) use node_sessions::*;

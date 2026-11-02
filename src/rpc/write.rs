@@ -44,6 +44,7 @@ pub(super) fn prepare_raw(
 ) -> Result<crate::model::node_raw::Prepare, Status> {
     let value = crate::model::node_raw::Input {
         local: input.local,
+        page_hashes: input.page_hashes,
         size: input.size.try_into().map_err(|_| invalid())?,
         digest: input.digest.try_into().map_err(|_| invalid())?,
         hash: if input.content_hash.is_empty() {
@@ -307,6 +308,7 @@ mod tests {
             size: 0,
             digest: vec![0; 16],
             content_hash: vec![1; 32],
+            page_hashes: Vec::new(),
         };
         assert!(prepare_raw(input.clone()).is_ok());
         input.size = 5 * 1024 * 1024 * 1024 + 1;

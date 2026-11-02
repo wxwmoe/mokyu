@@ -587,6 +587,32 @@ pub(crate) async fn complete(
     Ok(native::PreparedCompletion { value, grants })
 }
 
+pub(crate) async fn stage_pages(
+    pool: &PgPool,
+    node: &NodeState,
+    key: &Key,
+    input: native::Pages,
+) -> Result<()> {
+    use crate::content::raw_pages::{self, GROUP, HASH};
+    let mut tx = pool.begin().await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    require_node_write(&mut tx, &row).await?;
+    let upload = row.completion_upload.ok_or(Error::NodeOperationConflict)?;
+    let source = queries::remote_output_lock(upload, input.operation)
+        .fetch_one(&mut *tx)
+        .await?;
+    let record = queries::node_completion(upload).fetch_one(&mut *tx).await?;
+    ensure!(
+        input.group.hashes.len() == GROUP * HASH
+            && (0..raw_pages::count(record.summary.size)? / GROUP as i64)
+                .contains(&input.group.index),
+        Error::NodeOperationConflict
+    );
+    super::super::raw_pages::put(&mut tx, source.into(), &input.group).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(crate) async fn adopt(
     pool: &PgPool,
     node: &NodeState,
@@ -609,8 +635,28 @@ pub(crate) async fn adopt(
             size: record.summary.size,
             digest: input.digest,
             hash: row.profile.deduplication_enabled.then_some(input.hash),
+            page_hashes: input.page_tail.clone(),
         },
     };
+    let pages = crate::content::raw_pages::count(record.summary.size)?;
+    let group_size = crate::content::raw_pages::GROUP as i64;
+    ensure!(
+        input.page_tail.len() == (pages % group_size) as usize * 32,
+        Error::NodeOperationConflict
+    );
+    if !input.page_tail.is_empty() {
+        super::super::raw_pages::put(
+            &mut tx,
+            source.into(),
+            &crate::content::raw_pages::Group {
+                index: pages / group_size,
+                hashes: input.page_tail,
+            },
+        )
+        .await?;
+    }
+    super::super::raw_pages::seal(&mut tx, source.into(), record.summary.size, &input.digest)
+        .await?;
     let hash = chunk::hash(&prepare.input)?;
     if let Some(previous) = queries::node_raw_write(node.node_id, input.operation)
         .fetch_optional(&mut *tx)

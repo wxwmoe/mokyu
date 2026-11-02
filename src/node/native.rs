@@ -534,13 +534,14 @@ impl Writes {
             }
             #[cfg(feature = "fault-injection")]
             crate::faults::point("node-native-completed").await;
-            let (digest, hash, sums) = operation
+            let (digest, hash, sums, page_tail) = operation
                 .guard(node, &grants, async {
                     let _read = self.reads.reader.acquire(&self.reads.reader.io, 1).await?;
                     let mut body = backend.store.backend.get(&path).await?.into_stream();
                     let mut full =
                         Integrity::new(&hyper::HeaderMap::new(), value.algorithm.as_deref())?;
                     let mut hash = blake3::Hasher::new();
+                    let mut pages = Box::<crate::content::raw_pages::Builder>::default();
                     let mut rest = Bytes::new();
                     for part in &plan.parts {
                         let mut size = 0i64;
@@ -556,6 +557,17 @@ impl Writes {
                             let count = rest.len().min((part.size - size) as usize);
                             md5.update(&rest[..count]);
                             full.update(&rest[..count]);
+                            let mut piece = &rest[..count];
+                            while let Some(group) = pages.feed(&mut piece) {
+                                node.client
+                                    .stage_native_pages(wire::StageNativePagesRequest {
+                                        run: Some(operation.request.run.run.clone()),
+                                        operation_id: operation.id.clone(),
+                                        group: group.index as u64,
+                                        hashes: group.hashes,
+                                    })
+                                    .await?;
+                            }
                             hash.update(&rest[..count]);
                             size += count as i64;
                             rest = rest.slice(count..);
@@ -574,11 +586,13 @@ impl Writes {
                         hex::decode(digest)?,
                         hash.finalize().as_bytes().to_vec(),
                         sums,
+                        pages.finish().map(|group| group.hashes).unwrap_or_default(),
                     ))
                 })
                 .await?;
             node.client
                 .adopt_native_complete(wire::AdoptNativeRequest {
+                    page_tail,
                     run: Some(operation.request.run.run.clone()),
                     operation_id: operation.id.clone(),
                     digest,

@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261102022127.
+-- Generated from the complete postgres migration chain through 20261102105753.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1715,6 +1715,15 @@ CREATE TABLE public.quota_writes (
     CONSTRAINT quota_writes_contribution_bytes_check CHECK ((contribution_bytes >= 0))
 );
 
+CREATE TABLE public.raw_page_groups (
+    source_id uuid NOT NULL,
+    group_no bigint NOT NULL,
+    hashes bytea NOT NULL,
+    CONSTRAINT raw_page_groups_group_no_check CHECK ((group_no >= 0)),
+    CONSTRAINT raw_page_groups_hashes_check CHECK (((length(hashes) >= 32) AND (length(hashes) <= 8192))),
+    CONSTRAINT raw_page_groups_hashes_check1 CHECK (((length(hashes) % 32) = 0))
+);
+
 CREATE TABLE public.raw_processing (
     stream_id uuid NOT NULL,
     source_id uuid NOT NULL,
@@ -1760,12 +1769,14 @@ CREATE TABLE public.raw_sources (
     unreferenced_at timestamp with time zone DEFAULT now() NOT NULL,
     pending_upload boolean DEFAULT false NOT NULL,
     processing_task uuid,
+    page_count bigint,
     CONSTRAINT raw_sources_check CHECK (((state <> 'ready'::text) OR (digest IS NOT NULL))),
     CONSTRAINT raw_sources_check1 CHECK (((medium = 'memory'::text) = (boot_id IS NOT NULL))),
     CONSTRAINT raw_sources_content_hash_check CHECK (((content_hash IS NULL) OR (octet_length(content_hash) = 32))),
     CONSTRAINT raw_sources_digest_check CHECK (((digest IS NULL) OR (octet_length(digest) = 16))),
     CONSTRAINT raw_sources_durability_check CHECK ((durability = ANY (ARRAY['durable'::text, 'buffered'::text, 'volatile'::text]))),
     CONSTRAINT raw_sources_medium_check CHECK ((medium = ANY (ARRAY['local'::text, 'memory'::text, 'shared_s3'::text]))),
+    CONSTRAINT raw_sources_page_count_check CHECK ((page_count >= 0)),
     CONSTRAINT raw_sources_profile_revision_check CHECK ((profile_revision > 0)),
     CONSTRAINT raw_sources_revision_check CHECK ((revision > 0)),
     CONSTRAINT raw_sources_size_check CHECK ((size >= 0)),
@@ -2845,6 +2856,9 @@ ALTER TABLE ONLY public.quota_reservations
 ALTER TABLE ONLY public.quota_writes
     ADD CONSTRAINT quota_writes_pkey PRIMARY KEY (stream_id);
 
+ALTER TABLE ONLY public.raw_page_groups
+    ADD CONSTRAINT raw_page_groups_pkey PRIMARY KEY (source_id, group_no);
+
 ALTER TABLE ONLY public.raw_processing
     ADD CONSTRAINT raw_processing_pkey PRIMARY KEY (stream_id);
 
@@ -3790,6 +3804,9 @@ ALTER TABLE ONLY public.quota_writes
 
 ALTER TABLE ONLY public.quota_writes
     ADD CONSTRAINT quota_writes_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.raw_page_groups
+    ADD CONSTRAINT raw_page_groups_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.raw_sources(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.raw_processing
     ADD CONSTRAINT raw_processing_source_id_fkey FOREIGN KEY (source_id) REFERENCES public.raw_sources(id) ON DELETE CASCADE;

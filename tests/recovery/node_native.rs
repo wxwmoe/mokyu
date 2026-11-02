@@ -316,6 +316,7 @@ pub(super) async fn check(
         .await?;
     assert!(renewed.grants.iter().all(|grant| grant.accepted));
     let adopt = || native::Adopt {
+        page_tail: blake3::hash(b"abc").as_bytes().to_vec(),
         run,
         operation: completion,
         digest: hex::decode(etag).unwrap().try_into().unwrap(),

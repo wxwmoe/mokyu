@@ -177,6 +177,7 @@ pub(super) async fn prepare(
     let mut keys = std::collections::BTreeMap::new();
     for (target, scope) in rows {
         let mut item = Inspection {
+            raw_pages: false,
             location: Uuid::nil(),
             snapshot: None,
             members: vec![],
@@ -197,6 +198,14 @@ pub(super) async fn prepare(
             }
             match queries::source_snapshot(tx, &scope, true).await {
                 Ok(snapshot) => {
+                    if let PhysicalSource::Raw(source) = &snapshot.physical
+                        && detail.mode == Mode::Full
+                        && source.quarantine_code.is_none()
+                    {
+                        item.raw_pages = queries::missing_raw_pages(source.id)
+                            .fetch_one(&mut **tx)
+                            .await?;
+                    }
                     let (size, block) = match &snapshot.physical {
                         PhysicalSource::Chunk(c) => (
                             i64::from(c.stored_size.unwrap_or(c.raw_size)),
