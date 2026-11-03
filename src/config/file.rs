@@ -82,6 +82,10 @@ impl Config {
             }
         }
         let base = path.parent().unwrap_or(Path::new("."));
+        Self::resolve(c, base)
+    }
+
+    pub(crate) fn resolve(c: Config, base: &Path) -> Result<(Self, Secrets, Budget)> {
         c.validate()?;
         let credential_material = c
             .instance

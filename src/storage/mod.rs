@@ -997,22 +997,27 @@ impl Storage {
         target.initialize().await
     }
     pub(crate) async fn verify_store_record(&self, record: StoreRecord) -> Result<()> {
+        let profile = self
+            .profile_store
+            .load(record.id)
+            .await
+            .with_context(|| format!("storage profile is missing for {}", record.id))?;
+        self.verify_store_with_profile(record, &profile).await
+    }
+
+    pub(crate) async fn verify_store_with_profile(
+        &self,
+        record: StoreRecord,
+        profile: &StorageProfile,
+    ) -> Result<()> {
         if let Some(path) = &record.path {
             local::validate_storage_path(
                 &self.disk.root,
                 &PathBuf::from(path).join(record.prefix.trim_matches('/')),
             )?;
         }
-        let profile = self
-            .profile_store
-            .load(record.id)
-            .await
-            .with_context(|| format!("storage profile is missing for {}", record.id))?;
-        let target = VerifiedStore::build(
-            &record,
-            StoreOptions::from_profile(&profile)?,
-            &self.secrets,
-        )?;
+        let target =
+            VerifiedStore::build(&record, StoreOptions::from_profile(profile)?, &self.secrets)?;
         let _permit = crate::storage::resource_gate::PRIORITY
             .scope(
                 crate::storage::resource_gate::MAINTENANCE,

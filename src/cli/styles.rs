@@ -36,7 +36,7 @@ impl Drop for Spool {
         let _ = std::fs::remove_file(&self.path);
     }
 }
-pub(super) async fn execute(config: &Path, cmd: Styles) -> Result<()> {
+pub(super) async fn execute(config: Option<&Path>, cmd: Styles) -> Result<()> {
     let target = cli_target(config)?;
     match cmd {
         Styles::Import(args) => import(&target, args).await,

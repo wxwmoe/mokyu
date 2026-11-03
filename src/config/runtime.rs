@@ -11,6 +11,8 @@ use uuid::Uuid;
 #[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Instance {
+    #[serde(skip)]
+    pub(crate) testing: bool,
     pub deployment_key: Option<String>,
     pub control_url: Option<String>,
     pub name: Option<String>,
@@ -40,6 +42,7 @@ pub struct Instance {
 impl Default for Instance {
     fn default() -> Self {
         Self {
+            testing: false,
             deployment_key: None,
             control_url: None,
             name: None,

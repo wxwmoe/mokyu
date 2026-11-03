@@ -30,14 +30,13 @@ Rust 构建还需要 `protoc`，由 `src/rpc/proto/node.proto` 生成 gRPC 类�
 
 以下步骤用于首次部署；已有部署使用[升级流程](#升级与数据库迁移)。
 
-1. 创建配置、密钥和数据目录：
+1. 在仅管理员可进入的宿主机目录内准备配置和密钥。Compose 会创建缺失的 `./data`，Mokyu 首次启动时初始化空数据目录。
 
    ```sh
-   mkdir -p config/secrets data
-   chmod 700 config config/secrets data
+   mkdir -p config/secrets
    cp config.example.toml config/config.toml
    docker run --rm wxwmoe/mokyu tool keygen > config/secrets/postgres-password
-   docker run --rm wxwmoe/mokyu tool keygen > config/secrets/deployment-key
+   docker run --rm wxwmoe/mokyu tool keygen
    ```
 
 2. 编辑 `config/config.toml`：
@@ -45,20 +44,18 @@ Rust 构建还需要 `protoc`，由 `src/rpc/proto/node.proto` 生成 gRPC 类�
    | 配置 | 填写内容 |
    | --- | --- |
    | `database` | 主机、端口、数据库和用户；删除示例 `password`，启用 `password_file = "secrets/postgres-password"`，与 Compose 共用密码文件 |
-   | `instance` | 监听地址、数据目录、资源预算和固定 `deployment_key`；单容器/control 使用同一部署密钥 |
+   | `instance` | 将上一步输出的部署密钥填入 `deployment_key`，按需调整监听地址、数据目录和资源预算 |
    `instance.deployment_key` 仅配置在单容器/control，同一部署保持不变；data/worker/node 使用独立节点配置，见[群集部署](cluster-deployment.md)。首次启动后用 `cli key create NAME block` 创建区块密钥，并用 `cli storage key set STORE KEY` 绑定；密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。
 
-3. 设置权限并启动：
+3. 确认容器可以读取配置和密码文件后启动。`./config` 只读挂载，宿主机上传的 `root:root` 配置文件可用 `0644`，其目录须允许运行用户进入。普通部署缺少配置或所需密钥时会报告错误并退出。
 
    ```sh
-   chmod 600 config/config.toml config/secrets/*
-   chown -R 10001:10001 config data
    docker compose up -d
    docker compose ps
    docker exec mokyu mokyu cli status
    ```
 
-Compose 将配置只读挂载、数据目录可写挂载；PostgreSQL 在独立容器中使用命名卷。网关以 UID/GID 10001 运行。CLI 通过本机 control HTTP 入口执行。
+网关以非 root 用户运行，已有数据目录须保持可写。PostgreSQL 在独立容器中使用命名卷，CLI 通过本机 control HTTP 入口执行。
 
 ### MySQL / MariaDB 单容器模式
 

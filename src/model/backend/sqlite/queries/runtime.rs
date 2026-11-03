@@ -4,6 +4,16 @@ pub(in super::super) const BEGIN_WRITE: &str = "BEGIN IMMEDIATE";
 
 pub(in super::super) const SCHEMA: &str = include_str!("../schema.sql");
 
+pub(in super::super) const TESTING_ID: i64 = 0x4d4b5954;
+
+pub(in super::super) fn application_id() -> Scalar<'static, i64> {
+    sqlx::query_scalar("PRAGMA application_id")
+}
+
+pub(in super::super) fn mark_testing() -> Statement<'static> {
+    sqlx::query("PRAGMA application_id=0x4d4b5954")
+}
+
 pub(in super::super) fn flush_time() -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)")
 }
@@ -11,6 +21,12 @@ pub(in super::super) fn flush_time() -> Scalar<'static, i64> {
 pub(in super::super) fn schema_empty() -> Scalar<'static, bool> {
     sqlx::query_scalar(
         "SELECT NOT EXISTS(SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*')",
+    )
+}
+
+pub(in super::super) fn has_deployment_table() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='mokyu_meta')",
     )
 }
 

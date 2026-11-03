@@ -55,6 +55,9 @@ pub(super) async fn run_role(app: Arc<app::App>, role: Role) -> Result<()> {
 }
 
 async fn run_single(app: Arc<app::App>) -> Result<()> {
+    if app.config.instance.testing {
+        return run_testing(app).await;
+    }
     if app.mode_mismatch().await? || app.recovery_required() {
         return run_single_mismatch(app).await;
     }
@@ -88,6 +91,31 @@ async fn run_single(app: Arc<app::App>) -> Result<()> {
         _ = shutdown_signal() => tracing::info!(role="single", "stopping listeners; draining active operations"),
     }
     drain(app, background).await
+}
+
+async fn run_testing(app: Arc<app::App>) -> Result<()> {
+    let s3 = TcpListener::bind(&app.config.instance.listen_s3)
+        .await
+        .context("S3 listener")?;
+    let cli = TcpListener::bind(&app.config.instance.listen_control)
+        .await
+        .context("testing CLI listener")?;
+    let connections = Arc::new(Semaphore::new(app.budget.request_connections));
+    let background = async {
+        tokio::select! {
+            result = crate::worker::scheduler::run(app.clone()) => result,
+            result = crate::worker::sync::run(app.clone()) => result,
+            result = lifecycle::run(app.clone()) => result,
+        }
+    };
+    tokio::pin!(background);
+    tokio::select! {
+        result = &mut background => { result?; anyhow::bail!("testing storage workers stopped"); },
+        result = serve_s3(s3, build_s3(app.clone())?, connections.clone(), app.clone()) => result?,
+        result = serve_router(cli, control::testing_router(app.clone()), connections, app.clone()) => result?,
+        _ = shutdown_signal() => (),
+    }
+    drain(app.clone(), background).await
 }
 
 async fn run_control(app: Arc<app::App>) -> Result<()> {

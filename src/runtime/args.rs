@@ -5,13 +5,8 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(version, about = "S3-compatible media gateway")]
 pub(super) struct Args {
-    #[arg(
-        short = 'c',
-        long,
-        global = true,
-        default_value = "/config/config.toml"
-    )]
-    pub(super) config: PathBuf,
+    #[arg(short = 'c', long, global = true)]
+    pub(super) config: Option<PathBuf>,
     /// Start in maintenance mode before recovering uploads and tasks.
     #[arg(long)]
     pub(super) maintenance: bool,
@@ -90,6 +85,8 @@ mod tests {
 }
 #[derive(Subcommand)]
 pub(super) enum Command {
+    /// Start a standalone test bucket with local storage.
+    Testing,
     /// Run the management/control role.
     Control {
         #[arg(long)]

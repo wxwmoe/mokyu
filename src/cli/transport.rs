@@ -39,8 +39,15 @@ pub(super) async fn rpc(target: &CliTarget, command: &Command) -> Result<Value> 
     Ok(reply["result"].clone())
 }
 
-pub(super) fn cli_target(path: &Path) -> Result<CliTarget> {
-    let text = std::fs::read_to_string(path).context("cannot read configuration")?;
+pub(super) fn cli_target(explicit: Option<&Path>) -> Result<CliTarget> {
+    let path = explicit.unwrap_or_else(|| Path::new("/config/config.toml"));
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if explicit.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
+            String::new()
+        }
+        Err(error) => return Err(error).context("cannot read configuration"),
+    };
     #[derive(serde::Deserialize)]
     struct Local {
         #[serde(default)]
@@ -50,10 +57,12 @@ pub(super) fn cli_target(path: &Path) -> Result<CliTarget> {
         toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?;
     let instance = if local.instance.control_url.is_some() {
         crate::config::node::NodeConfig::parse(&text, "data")?.instance
-    } else {
+    } else if toml::from_str::<toml::Table>(&text)?.contains_key("database") {
         toml::from_str::<crate::config::FileConfig>(&text)
             .map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?
             .instance
+    } else {
+        crate::runtime::testing::cli_instance(&text)?
     };
     let control: std::net::SocketAddr = instance
         .listen_control
@@ -81,11 +90,11 @@ mod tests {
             directory.display()
         );
         std::fs::write(&path, &value)?;
-        let target = cli_target(&path)?;
+        let target = cli_target(Some(&path))?;
         assert_eq!(target.base, "http://127.0.0.1:19002");
         assert!(target.deployment_key.is_none());
         std::fs::write(&path, format!("{value}[database]\ntype='postgres'\n"))?;
-        assert!(cli_target(&path).is_err());
+        assert!(cli_target(Some(&path)).is_err());
         std::fs::remove_dir_all(directory)?;
         Ok(())
     }

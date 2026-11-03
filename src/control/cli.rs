@@ -36,6 +36,23 @@ pub(super) async fn cli(
             anyhow::anyhow!("node recovery is required before this command can run").into(),
         );
     }
+    if app.config.instance.testing {
+        use crate::cli::{Cache, Command, Tasks};
+        match &command {
+            Command::Status { .. } | Command::Cache(Cache::Status | Cache::Flush { .. }) => (),
+            Command::Task(Tasks::Show { id }) => {
+                let mut task = app
+                    .task_control
+                    .raw(*id)
+                    .await?
+                    .filter(|task| task["task_type"] == "cache_flush")
+                    .ok_or_else(unauthorized)?;
+                crate::model::task::present(&mut task);
+                return Ok(Json(json!({"ok":true,"result":task})));
+            }
+            _ => return Err(unauthorized()),
+        }
+    }
     let result = operations::execute_as(&app, &principal, command).await?;
     Ok(Json(json!({"ok": true, "result": result})))
 }

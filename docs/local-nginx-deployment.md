@@ -9,14 +9,11 @@
 以下文件保存在同一目录，宿主需要 Docker Compose 和 `jq`。Nginx 使用 1.30.6+ 或 1.31.7+，启用 HTTP/2 模块；普通请求和失败回退均以 h2c 回源。示例保留可靠写入与 SQLite FULL，仅关闭普通读取的额外摘要复核；对象接收完整性、元数据事务和文件长度检查仍保留。额外摘要关闭后，尚未发现的同长度文件损坏可能直接返回客户端。
 
 ```sh
-mkdir -p config data
-chmod 755 data
-chmod 700 config
-docker run --rm wxwmoe/mokyu tool keygen > config/deployment-key
-chmod 600 config/deployment-key
+mkdir -p config
+docker run --rm wxwmoe/mokyu tool keygen
 ```
 
-创建 `config/config.toml`，将 `deployment_key` 替换为上一步输出：
+在仅管理员可进入的宿主机目录内创建 `config/config.toml`，将 `deployment_key` 替换为上一步输出。容器需要能进入 `config` 并读取配置文件，例如目录为 `0755`、文件为 `0644`。
 
 ```toml
 [database]
@@ -67,8 +64,6 @@ services:
 先启动 Mokyu 并通过 CLI 初始化，创建存储后再启动 Nginx，避免 Docker 预先创建挂载目录而使空存储初始化失败：
 
 ```sh
-chmod 600 config/config.toml
-chown -R 10001:10001 config data
 docker compose up -d mokyu
 docker compose exec mokyu mokyu cli status --ready
 docker compose exec mokyu mokyu cli init admin

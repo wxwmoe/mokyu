@@ -48,6 +48,13 @@ pub fn schema() -> utoipa::openapi::OpenApi {
     contract::routes().1
 }
 
+pub(crate) fn testing_router(app: Arc<App>) -> Router {
+    Router::new()
+        .route("/api/v1/cli", axum::routing::post(cli::cli))
+        .layer(DefaultBodyLimit::max(16 * 1024))
+        .with_state(app)
+}
+
 pub fn router(app: Arc<App>) -> Router {
     let avatar_origin = app
         .config

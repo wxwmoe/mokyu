@@ -218,6 +218,44 @@ pub(super) async fn open(
     let (path, owner, lock_path) = claim(&path)?;
     // Inspect the path without opening another database descriptor and disturbing POSIX locks.
     let database_metadata = path.metadata()?;
+    let testing = config.instance.testing;
+    let mut mark_testing = testing;
+    if database_metadata.len() != 0 {
+        let mut probe = SqliteConnection::connect_with(
+            &SqliteConnectOptions::new().filename(&path).read_only(true),
+        )
+        .await?;
+        let id = queries::application_id().fetch_one(&mut probe).await?;
+        if testing {
+            if id == queries::TESTING_ID {
+                mark_testing = false;
+                if queries::has_deployment_table()
+                    .fetch_one(&mut probe)
+                    .await?
+                    && let Some(saved) = queries::fingerprint()
+                        .fetch_optional(&mut probe)
+                        .await?
+                        .flatten()
+                {
+                    ensure!(
+                        saved == blake3::hash(&secrets.credential_key.material).as_bytes(),
+                        "testing database identity mismatch"
+                    );
+                }
+            } else {
+                ensure!(
+                    id == 0 && queries::schema_empty().fetch_one(&mut probe).await?,
+                    "existing database does not belong to testing"
+                );
+            }
+        } else {
+            ensure!(
+                id != queries::TESTING_ID,
+                "this SQLite database belongs to a testing installation"
+            );
+        }
+        probe.close().await?;
+    }
     let options = SqliteConnectOptions::new()
         .filename(&path)
         .create_if_missing(false)
@@ -233,6 +271,9 @@ pub(super) async fn open(
     let mut synchronous = SqliteSynchronous::Full;
     let mut control_epoch = None;
     let initialized: Result<crate::model::runtime::DatabaseInfo> = async {
+        if mark_testing {
+            queries::mark_testing().execute(&mut connection).await?;
+        }
         let version = queries::version().fetch_one(&mut connection).await?;
         let numbers: Vec<u64> = version
             .split('.')

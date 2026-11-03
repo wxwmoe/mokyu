@@ -4,6 +4,7 @@ pub(crate) mod locks;
 mod node;
 mod roles;
 mod shutdown;
+pub(crate) mod testing;
 
 use self::{
     args::{Args, Command, ToolCommand},
@@ -45,14 +46,17 @@ pub(crate) fn run() -> Result<()> {
         Some(Command::Node { .. }) => Role::Node,
         _ => Role::Single,
     };
-    set_process_title(role.title());
+    let testing = matches!(args.command, Some(Command::Testing));
+    let explicit = args.config.as_deref();
+    let path = explicit.unwrap_or_else(|| std::path::Path::new("/config/config.toml"));
+    set_process_title(if testing { "testing" } else { role.title() });
     let start_maintenance = args.maintenance || role.maintenance(args.command.as_ref());
     if let Some(Command::Cli { command }) = args.command {
         set_process_title("cli");
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?
-            .block_on(cli::client(&args.config, command));
+            .block_on(cli::client(explicit, command));
     }
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
@@ -62,7 +66,7 @@ pub(crate) fn run() -> Result<()> {
             !start_maintenance,
             "set deployment maintenance on control before starting nodes"
         );
-        let (config, budget) = config::node::NodeConfig::load(&args.config, role.title())?;
+        let (config, budget) = config::node::NodeConfig::load(path, role.title())?;
         return tokio::runtime::Builder::new_multi_thread()
             .worker_threads(budget.available_cpus)
             .max_blocking_threads((budget.cpu_jobs * 2).max(8))
@@ -70,7 +74,17 @@ pub(crate) fn run() -> Result<()> {
             .build()?
             .block_on(node::run(config, role));
     }
-    let (config, secrets, budget) = config::Config::load(&args.config)?;
+    let (settings, installation) = if testing {
+        anyhow::ensure!(
+            !start_maintenance,
+            "testing does not support maintenance startup"
+        );
+        let (settings, installation) = testing::prepare(explicit)?;
+        (settings, Some(installation))
+    } else {
+        (config::Config::load(path)?, None)
+    };
+    let (config, secrets, budget) = settings;
     config.validate_role(role.title())?;
     tracing::info!(version=env!("CARGO_PKG_VERSION"),resources=%serde_json::to_string(&budget)?,"starting Mokyu");
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -79,13 +93,18 @@ pub(crate) fn run() -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let (app, mut owner) = app::App::new(
+        let (lock, mut installation) = match installation {
+            Some((lock, state)) => (lock, Some(state)),
+            None => (lock_directory(&config.instance.data_path)?, None),
+        };
+        let (app, mut owner) = app::App::from_directory(
             config,
             secrets,
             budget,
             start_maintenance,
             role.uses_storage(),
             role.title(),
+            lock,
         )
         .await?;
         cluster::initialize(&app, role.title()).await?;
@@ -100,10 +119,17 @@ pub(crate) fn run() -> Result<()> {
             }
         });
         let startup_blocked = app.mode_mismatch().await? || app.recovery_required();
+        if let Some(state) = installation.as_mut() {
+            anyhow::ensure!(
+                !startup_blocked && !app.shared_storage_only(),
+                "testing installation requires single mode"
+            );
+            state.seed(&app).await?;
+        }
         if matches!(role, Role::Single) && !startup_blocked {
             app.recover().await?;
         }
-        if matches!(role, Role::Single | Role::Control) {
+        if installation.is_none() && matches!(role, Role::Single | Role::Control) {
             control::account::initialize(&app).await?;
         }
         run_role(app.clone(), role).await?;
@@ -112,14 +138,41 @@ pub(crate) fn run() -> Result<()> {
 }
 
 pub(crate) fn lock_directory(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    let lock = claim_directory(path)?;
+    anyhow::ensure!(
+        !testing::marked(path)?,
+        "this data directory belongs to a testing installation"
+    );
+    Ok(lock)
+}
+
+fn claim_directory(path: &std::path::Path) -> anyhow::Result<std::fs::File> {
     use anyhow::Context;
-    std::fs::create_dir_all(path)?;
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(path.join("gateway.lock"))?;
+    let open = || {
+        std::fs::create_dir_all(path)?;
+        std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path.join("gateway.lock"))
+    };
+    let lock = match open() {
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                && path.starts_with("/data")
+                && !path
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir)
+                && std::process::Command::new("/opt/mokyu/bin/mokyu-init-data")
+                    .status()
+                    .is_ok_and(|status| status.success()) =>
+        {
+            open()
+        }
+        result => result,
+    }
+    .with_context(|| format!("cannot write data directory {}", path.display()))?;
     fs2::FileExt::try_lock_exclusive(&lock).context("another gateway owns this data directory")?;
     Ok(lock)
 }

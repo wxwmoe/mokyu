@@ -22,6 +22,8 @@ COPY src/processing/image/native/hdr.sh ./
 RUN sh hdr.sh
 COPY src/processing/image/native/build.sh src/processing/image/native/image.c src/processing/image/native/source.h src/processing/image/native/encode.h src/processing/image/native/hdr.h src/processing/image/native/io.h src/processing/image/native/jpeg.cc ./
 RUN sh build.sh
+RUN --mount=type=bind,source=src/runtime/init_data.c,target=/tmp/init_data.c \
+    cc -Os -Wall -Wextra -Werror /tmp/init_data.c -o /opt/mokyu/bin/mokyu-init-data
 
 FROM rust:1.96.0-bookworm AS build
 ARG WEB_UI=true
@@ -42,7 +44,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM debian:bookworm-slim AS image-runtime
 COPY --from=image-codecs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update && apt-get install -y --no-install-recommends libvips42 libjxl0.7 libavif15 \
+    && apt-get update && apt-get install -y --no-install-recommends libvips42 libjxl0.7 libavif15 libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=image-tools /opt/mokyu /opt/mokyu
 
@@ -50,7 +52,8 @@ FROM image-runtime
 ENV MALLOC_MMAP_THRESHOLD_=131072
 COPY --from=build /mokyu /usr/local/bin/mokyu
 RUN mkdir -p /data /config \
-    && chown -R 10001:10001 /data
+    && chown 10001:10001 /data \
+    && setcap cap_chown,cap_dac_override=ep /opt/mokyu/bin/mokyu-init-data
 USER 10001:10001
 EXPOSE 9000 9001 9002
 STOPSIGNAL SIGTERM

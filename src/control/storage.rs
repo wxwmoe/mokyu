@@ -340,6 +340,15 @@ pub(crate) async fn update_profile_route(
 }
 
 pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Result<StorageView> {
+    create_installation_store(app, input, Uuid::new_v4(), None).await
+}
+
+pub(crate) async fn create_installation_store(
+    app: &App,
+    input: StorageInput,
+    id: Uuid,
+    marker: Option<serde_json::Value>,
+) -> anyhow::Result<StorageView> {
     let mut profiles = app.storage_profiles.enabled_profiles().await?;
     let crate::model::storage::StorageCreation {
         deployment: deployment_id,
@@ -356,7 +365,26 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
         !(mode != "single" && input.storage_type == "local"),
         "local storages are unavailable in cluster mode"
     );
-    let id = Uuid::new_v4();
+    let resume = marker.is_some()
+        && app.config.instance.testing
+        && app
+            .config
+            .instance
+            .data_path
+            .join("storage/meta.json")
+            .try_exists()?;
+    let marker = match marker {
+        Some(marker) => {
+            anyhow::ensure!(
+                app.config.instance.testing
+                    && marker["deployment_id"] == serde_json::json!(deployment_id)
+                    && marker["storage_id"] == serde_json::json!(id),
+                "testing database identity mismatch"
+            );
+            marker
+        }
+        None => storage_identity_marker(deployment_id, id)?,
+    };
     let record = build_record(
         app,
         id,
@@ -369,7 +397,7 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
         normalize_prefix(input.prefix)?,
         input.access_key,
         input.secret_key,
-        storage_identity_marker(deployment_id, id)?,
+        marker,
     )?;
     if let Some(profile) = &input.profile {
         validate_profile_mode(app, profile)?;
@@ -403,9 +431,19 @@ pub(crate) async fn create_record(app: &App, input: StorageInput) -> anyhow::Res
     profile_for_init
         .validate_budget(&app.config, &budget)
         .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}"))?;
-    app.storage
-        .initialize_store_with_profile(record.clone(), &profile_for_init)
-        .await?;
+    if resume {
+        app.storage
+            .verify_store_with_profile(record.clone(), &profile_for_init)
+            .await?;
+    } else {
+        app.storage
+            .initialize_store_with_profile(record.clone(), &profile_for_init)
+            .await?;
+    }
+    #[cfg(feature = "fault-injection")]
+    if app.config.instance.testing {
+        crate::faults::point("testing-store").await;
+    }
     writer.finish().await?;
     let _cache = app.public_reads.changing();
     app.storage.refresh_store(record.id).await?;

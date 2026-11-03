@@ -21,7 +21,7 @@ fn read_json(path: &Path, limit: usize, label: &str) -> Result<Value> {
     ensure!(bytes.len() <= limit, "{label} too large");
     Ok(serde_json::from_slice(&bytes)?)
 }
-pub async fn client(path: &Path, mut command: Command) -> Result<()> {
+pub async fn client(path: Option<&Path>, mut command: Command) -> Result<()> {
     if let Command::Styles(styles) = command {
         return super::styles::execute(path, styles).await;
     }

@@ -277,15 +277,37 @@ pub struct App {
     _file_lock: std::fs::File,
 }
 impl App {
+    #[cfg(test)]
     pub async fn new(
-        mut config: Config,
-        mut secrets: Secrets,
+        config: Config,
+        secrets: Secrets,
         budget: Budget,
         start_maintenance: bool,
         use_storage: bool,
         role: &str,
     ) -> Result<(Arc<Self>, Box<dyn crate::model::runtime::Owner>)> {
         let lock = crate::runtime::lock_directory(&config.instance.data_path)?;
+        Self::from_directory(
+            config,
+            secrets,
+            budget,
+            start_maintenance,
+            use_storage,
+            role,
+            lock,
+        )
+        .await
+    }
+
+    pub(crate) async fn from_directory(
+        mut config: Config,
+        mut secrets: Secrets,
+        budget: Budget,
+        start_maintenance: bool,
+        use_storage: bool,
+        role: &str,
+        lock: std::fs::File,
+    ) -> Result<(Arc<Self>, Box<dyn crate::model::runtime::Owner>)> {
         let (stores, owner) = crate::model::connect(&config, &mut secrets, &budget, role).await?;
         let defaults = crate::model::runtime_defaults(&config);
         stores.runtime_settings.ensure(&defaults).await?;
@@ -678,7 +700,10 @@ impl App {
                 .restart_required
                 .load(std::sync::atomic::Ordering::Acquire);
         let mut status = json!({"version":env!("CARGO_PKG_VERSION"),"role":self.role,"deployment_mode":state.mode,"deployment_mode_revision":state.mode_revision,"started_mode":self.started_mode,"started_mode_revision":self.started_mode_revision,"mode_mismatch":mismatch,"node_registered":self.node.get().is_some(),"resources":self.budget,"local_bytes":self.storage.disk.used(),"gc_paused":state.gc_paused,"maintenance":state.maintenance,"backend_gets":self.storage.backend_gets.load(std::sync::atomic::Ordering::Relaxed),"cache_hits":self.storage.cache_hits.load(std::sync::atomic::Ordering::Relaxed),"backend_puts":self.storage.backend_puts.load(std::sync::atomic::Ordering::Relaxed),"backend_deletes":self.storage.backend_deletes.load(std::sync::atomic::Ordering::Relaxed),"backend_read_bytes":self.storage.backend_read_bytes.load(std::sync::atomic::Ordering::Relaxed),"backend_write_bytes":self.storage.backend_write_bytes.load(std::sync::atomic::Ordering::Relaxed),"cache_hit_bytes":self.storage.cache_hit_bytes.load(std::sync::atomic::Ordering::Relaxed),"db_pool_size":pool_size,"db_pool_idle":pool_idle,"data_slots_available":self.slots.available_permits(),"active_streams":self.active_operations()});
-        status["supported_modes"] = if self.config.database.backend.supports_cluster() {
+        status["supported_modes"] = if self.config.instance.testing {
+            status["installation"] = json!("testing");
+            json!(["single"])
+        } else if self.config.database.backend.supports_cluster() {
             json!(["single", "single_control", "cluster"])
         } else {
             json!(["single", "single_control"])
