@@ -224,13 +224,18 @@ impl App {
             self.storage.physical_pin(source.location_id)
         };
         let Some(current) = self.raw.buffered_source(source.id).await? else {
+            self.storage.forget_local_body(source.location_id);
             return Ok(());
         };
-        self.storage.sync_raw(&current, verify).await?;
+        self.storage
+            .sync_raw(&current, verify)
+            .await
+            .inspect_err(|error| self.storage.sync_failed(current.storage_id, error))?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("buffered-file-synced").await;
         let _cache = self.public_reads.changing();
         self.raw.synced(&current, None).await?;
+        self.storage.forget_local_body(current.location_id);
         Ok(())
     }
 }

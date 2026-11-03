@@ -310,11 +310,33 @@ pub(crate) async fn update_profile(
     profile: StorageProfile,
 ) -> anyhow::Result<StorageProfile> {
     validate_profile_capacity(app, &profile).await?;
+    let _writes = drain_local_writes(app, &name).await?;
     let _cache = app.public_reads.changing();
     let id = app.storage_profiles.update(name, profile).await?;
     let _cache = app.public_reads.changing();
     app.storage.refresh_store(id).await?;
     load_profile(app, id).await
+}
+
+async fn drain_local_writes(
+    app: &App,
+    name: &str,
+) -> anyhow::Result<Option<tokio::sync::OwnedRwLockWriteGuard<()>>> {
+    let Some(row) = app.storage_records.record(name).await? else {
+        return Ok(None);
+    };
+    let Some(gate) = app.storage.local_write_gate(row.id) else {
+        return Ok(None);
+    };
+    let guard = gate.write_owned().await;
+    for (location, id) in app.storage.local_sources(row.id) {
+        if let Some(source) = app.raw.buffered_source(id).await? {
+            app.sync_raw_source(&source, false).await?;
+        } else {
+            app.storage.forget_local_body(location);
+        }
+    }
+    Ok(Some(guard))
 }
 #[utoipa::path(
     put,
@@ -470,6 +492,7 @@ pub(crate) async fn update_record(
     name: String,
     input: StoragePatch,
 ) -> anyhow::Result<StorageView> {
+    let _writes = drain_local_writes(app, &name).await?;
     let changing_type = if let Some(requested) = &input.storage_type {
         validate_storage_type(requested)?;
         app.storage_records

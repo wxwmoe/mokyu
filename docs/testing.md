@@ -47,4 +47,6 @@ aws --endpoint-url http://localhost:9000 s3 cp s3://test/example.txt received.tx
 
 保留同一个 `./data`，重启或重建容器后即可继续读取已持久化的对象、续传未完成的分片上传。首次启动请使用专属空目录。
 
+已知长度且不超过 8 MiB 的普通 PUT 可以在正文进入内存后返回。默认写内存额度最多 64 MiB，额度不足时改写文件。进程被强杀可能丢失尚未落盘的正文。需要确认本批写入已持久化时，执行 `mokyu cli cache flush --wait` 并检查退出状态。
+
 在容器内执行 `mokyu cli status --ready` 检查就绪状态，管理入口仅监听容器内的 `127.0.0.1:9002`。需要自定义数据路径、S3 监听或资源预算时，可以提供只含 `[instance]` 的配置，并给服务和 CLI 传相同的 `--config FILE`。例如使用 `/config/lab.toml` 时，健康检查命令为 `mokyu --config /config/lab.toml cli status --ready`。

@@ -340,7 +340,7 @@ pub(crate) trait RawStore: Send + Sync {
         stream: Id,
         storage: Uuid,
         profile_revision: i64,
-        buffered: bool,
+        durability: &'static str,
     ) -> Result<(Id, Uuid)>;
     async fn finish(&self, stream: Id, source: Id, size: i64, digest: &[u8]) -> Result<()>;
     async fn set_upload(&self, source: Id, upload: &str) -> Result<()>;

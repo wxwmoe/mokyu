@@ -72,7 +72,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `instance.cache_size` | 自动 | cache 与 pending 的 chunks/raw 文件共用字节上限 |
 | `instance.cache_entries` | 自动 | 本地缓存索引条目上限 |
 | `instance.response_cache_size` | `0B` | 对象响应缓存的内存额度，包含正文、索引和公开元数据的扩充份额；公共读取与已授权的签名 S3 共用，示例显式设为 `64MiB`，省略或 `0B` 关闭；启用至少 `4MiB`，需要重启 |
-| `instance.write_memory_size` | `0B` | 单容器 S3 volatile 写缓存的共享内存额度；示例 `64MiB`，最少 `4KiB`，按 `4KiB` 向下取整，需重启 |
+| `instance.write_memory_size` | `0B` | 单容器本地 raw 与 S3 volatile 写缓存共享的内存额度。示例 `64MiB`，最少 `4KiB`，按 `4KiB` 向下取整，需重启 |
 | `instance.upload_cache_size` | 自动 | 本地待上传暂存上限 |
 | `instance.image_cache_size` | `256MiB` | 管理预览与公共图片处理共用的派生图像缓存上限 |
 | `instance.request_connections` | 自动 | 本节点 HTTP/S3 请求连接池上限 |
@@ -126,7 +126,8 @@ profile 是类型化字段，不是任意 JSON。字段包括：
 
 - `file_delivery` 默认 `application`；仅 local 可选 `x_accel_redirect` / `x_sendfile`，同时必须提供 `file_delivery_prefix`。前缀是代理内部 URI 或所见绝对目录，规范化为尾部 `/`，仅接受 3–512 字节的安全 ASCII 路径，拒绝根目录、点段、重复斜杠、编码字符及查询串。application 的前缀必须为 null；S3 不接受代理交付。开启后该存储不使用正文读缓存，回退请求仍流式读取，其他存储的缓存不受影响；预设不改变交付配置。条件、响应头、只读挂载与回收回退见[代理文件交付](local-nginx-deployment.md)
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
-- `write_durability` 仅单容器可选，默认 `durable`；`buffered` 允许 local chunks/raw 和 S3 chunks/raw 写缓存完整写入文件后响应，再由后台同步文件及目录；`volatile` 仅允许开启写缓存的 S3，接收完整内容到有界 RAM 后可响应，额度为零或不足时回退到 buffered 文件。buffered 在断电或系统崩溃时、volatile 在进程结束前尚未排空时，都可能丢失最近已确认的数据。Multipart 分片、复制、迁移和显式排空仍要求持久来源；无写缓存的 S3 请求及缓存满额 fallback 等待最终 S3 完成。重启核验未同步文件并隔离丢失的 RAM 来源，不返回旧对象代替已确认的新版本；这与 SQLite 的数据库同步策略分别生效。
+- `write_durability` 仅单容器可选，默认 `durable`。`buffered` 等待 local chunks/raw 或 S3 写缓存写完文件并提交映射，后台再同步磁盘。`volatile` 可用于本地 raw 和开启写缓存的 S3。普通部署通过 `instance.write_memory_size` 分配额度，testing 默认使用预算内最多 64 MiB。本地 raw 的普通 PUT 在关闭去重、已知长度且不超过 8 MiB 时可从 RAM 确认，正文与文件余量均计费。其他请求及额度不足时走文件。普通预设的取值见下表。
+- 最近的 buffered 写可能在系统故障时丢失，只在 RAM 中的 volatile 写可能在进程异常退出时丢失。SQLite 的同步设置独立生效。重启按原映射核验文件并隔离缺失来源。Multipart 分片、复制、迁移及显式排空沿用持久屏障。查看 `cli cache status` 的 `buffered_files.volatile`、`write_memory` 和 `fallbacks`，使用 `cli cache flush --wait` 等待排空。保存本地 volatile 策略的变更时会先等待在途接收并同步该后端的内存正文。
 - `cors_cache_enabled` 默认 `false`，可在公共读严格验证时独立开启 CORS 后台缓存；`public_cache_validation=background` 时 CORS 缓存强制生效，沿用 `public_cache_refresh_interval` / `public_cache_max_age`，不额外同步查询确认。可靠预设关闭独立 CORS 后台缓存，缓存与吞吐预设开启。
 - `public_cache_validation` 默认 `strict`，公开 Web 与匿名 S3 读取逐请求验证权限；设为 `background` 后可复用已验证的公开元数据，完整正文命中无需前台数据库查询。签名请求仍实时鉴权，条件请求、`Cache-Control: no-cache`、`Pragma: no-cache` 与校验和读取绕过权限快照。
 - `public_cache_refresh_interval` 默认 `1s`，范围 `1s..60s`；`public_cache_max_age` 默认 `5s`，范围 `1s..5m`，刷新间隔不得超过最大有效期。期限以本次权威验证发起时间为基准，只有成功验证才能更新；访问、队列满和刷新失败均不能续期，过期必须前台验证。本机对象发布、权限和删除变更在确认前使该对象及路由别名的快照失效，其他对象与 CORS 桶关联继续复用；桶、域名、后端配置和来源变更会扩大失效范围。群集通过 NodeSession 通知使旧快照提前失效，并批量刷新仍驻留的元数据；通知不延长缓存期限，复查与硬过期仍按配置执行。其他节点在收到通知前仍可能返回期限内的旧权限或旧版本，需逐请求确认公开访问的存储应保留 `strict`。刷新间隔等于最大有效期时，普通命中不在到期前触发周期复查，通知仍可主动刷新；到期后的读取必须等待权威验证。
@@ -168,7 +169,7 @@ Web 存储编辑中的“读写策略”提供三套服务端模板，先预览�
 | 写入处理 / 合并等待 | inline / 0s | inline / 0s | background / 1s |
 | 后台调度 | balanced | foreground | foreground |
 
-三套模板的公共快照刷新间隔均为 1s，积压期限均为 300s；S3 开启写缓存且满额时 fallback，local 始终禁用写缓存。群集模板不包含 `write_durability`，节点本地写缓存仍需持久化。吞吐优先允许权限撤销延迟、未复核内容及崩溃丢失；S3 的 volatile 需要实例显式配置写入内存，预算为零时回退普通持久缓存。
+三套模板的公共快照刷新间隔均为 1s，积压期限均为 300s。S3 开启上传缓存且满额时使用 fallback，本地后端的 `upload_cache` 始终关闭。群集模板不包含 `write_durability`，节点本地写缓存仍需持久化。吞吐优先允许权限撤销延迟、未复核内容及崩溃丢失。普通单容器的 volatile 需要实例显式配置写入内存，预算为零时回退文件路径。
 
 预览显示实际 SQLite 同步模式和单容器内存额度，但不会修改它们。选择可靠性优先不会自动把 SQLite NORMAL/OFF 改回 FULL，也不会更改进程关闭等待。群集各数据节点的实际内存额度在节点运行配置查看。CLI 的预览和保存步骤见[CLI 参考](cli-reference.md#存储)。
 

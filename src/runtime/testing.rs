@@ -217,7 +217,7 @@ impl Installation {
             p.compression_enabled = false;
             p.deduplication_enabled = false;
             p.read_integrity = "off".into();
-            p.write_durability = Some("buffered".into());
+            p.write_durability = Some("volatile".into());
             update_profile(app, "local".into(), p).await?;
         }
         let bucket = match app.buckets.by_name(BUCKET, false).await? {

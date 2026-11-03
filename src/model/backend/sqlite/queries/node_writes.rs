@@ -82,7 +82,7 @@ pub(in super::super) async fn raw_source(
     revision: i64,
     medium: &'static str,
 ) -> anyhow::Result<Id> {
-    let done = super::raw_insert(location, stream, storage, revision, medium, false)
+    let done = super::raw_insert(location, stream, storage, revision, medium, "durable")
         .execute(&mut **tx)
         .await?;
     Ok(done.last_insert_rowid().into())

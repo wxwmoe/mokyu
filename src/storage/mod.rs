@@ -11,6 +11,7 @@ pub(crate) mod external;
 pub(crate) mod external_test;
 pub(crate) mod file_cache;
 pub(crate) mod local;
+pub(crate) mod local_memory;
 pub(crate) mod location;
 mod memory;
 pub(crate) mod model;
@@ -75,6 +76,7 @@ pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
 pub(crate) const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub struct Storage {
+    local_memory: Mutex<HashMap<Uuid, local_memory::Body>>,
     write_backlog: Mutex<backlog::Backlog>,
     pub(crate) write_memory: memory::Pool,
     pub(crate) boot_id: Uuid,
@@ -212,6 +214,7 @@ async fn build_store(
         None
     };
     let backend = StoreBackend {
+        local_write_policy: Default::default(),
         buffered_backend,
         profile: Arc::new(profile.clone()),
         backend: target.backend,
@@ -444,6 +447,7 @@ impl Storage {
             profile_store,
             wake_sync: Default::default(),
             write_memory: memory::Pool::new(budget.write_memory_bytes),
+            local_memory: Default::default(),
             boot_id: Uuid::new_v4(),
             buffered_writes: (!raw_store
                 .buffered(Id::default(), None, None, false, &[])
@@ -798,6 +802,9 @@ impl Storage {
             );
         }
         if let Some(mut backend) = backend {
+            if let Some(previous) = targets.get(&storage_id) {
+                backend.local_write_policy = previous.local_write_policy.clone();
+            }
             backend.reuse_gates(&mut self.store_gates.lock().unwrap());
             if let Some(root) = &backend.raw_root {
                 assembly::probe(self, root.clone());

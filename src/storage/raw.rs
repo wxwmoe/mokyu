@@ -43,7 +43,7 @@ pub(super) async fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn directory(path: &Path) -> Result<()> {
+pub(super) async fn directory(path: &Path) -> Result<()> {
     match tokio::fs::create_dir(path).await {
         Ok(()) => sync_directory(path.parent().context("directory has no parent")?).await?,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -164,6 +164,10 @@ impl Storage {
 
 impl Storage {
     pub(crate) async fn sync_raw(self: &Arc<Self>, source: &RawSource, verify: bool) -> Result<()> {
+        if let Some(data) = self.local_bytes(source.location_id) {
+            self.persist_local_body(source, data).await?;
+            return Ok(());
+        }
         if let Some(data) = self.raw_memory(source.location_id) {
             let mut policy = self.local_cache(Some(source.storage_id))?;
             policy.upload_capacity = None;
@@ -672,7 +676,13 @@ impl Storage {
         self.verify_raw_target(&target).await?;
         let global = self.reads.acquire().await?;
         let permit = target.reads.acquire().await?;
-        let mut file = if target.is_local {
+        let mut file = if target.is_local
+            && target.profile.write_durability.as_deref() == Some("volatile")
+            && let Some(data) = self.local_bytes(source.location_id)
+        {
+            ensure!(data.len() as i64 == source.size, IntegrityError::Length);
+            RawFile::Memory { data, offset: 0 }
+        } else if target.is_local {
             ensure!(source.medium == "local", "raw source medium changed");
             let root = target
                 .raw_root
@@ -742,6 +752,10 @@ impl Storage {
     }
 
     pub(crate) async fn remove_raw(&self, source: &RawSource) -> Result<()> {
+        self.local_memory
+            .lock()
+            .unwrap()
+            .remove(&source.location_id);
         let target = self.store_backend(source.storage_id)?;
         self.verify_raw_target(&target).await?;
         if !target.is_local {
@@ -895,6 +909,7 @@ pub(crate) fn remote_path(id: Uuid) -> ObjectPath {
 }
 
 pub(crate) enum RawWriter<'a> {
+    Memory(Uuid, super::local_memory::Writer),
     Local(LocalWriter<'a>),
     Pending(super::raw_upload::Writer),
     Remote(RemoteWriter<'a>),
@@ -903,15 +918,17 @@ pub(crate) enum RawWriter<'a> {
 
 impl RawWriter<'_> {
     pub fn receive_external(&mut self) {
-        if let Self::Pending(writer) = self {
-            writer.receive_external();
+        match self {
+            Self::Memory(_, writer) => writer.external = true,
+            Self::Pending(writer) => writer.receive_external(),
+            _ => (),
         }
     }
 
     pub fn may_reuse_source(&self) -> bool {
         !matches!(
             self,
-            Self::Local(_) | Self::Remote(RemoteWriter { hash: None, .. })
+            Self::Local(_) | Self::Memory(..) | Self::Remote(RemoteWriter { hash: None, .. })
         )
     }
 
@@ -1039,7 +1056,7 @@ impl RawWriter<'_> {
         let writer = match self {
             Self::Remote(writer) => writer,
             Self::Replay(replay) => &replay.writer,
-            Self::Local(_) | Self::Pending(_) => return Ok(false),
+            Self::Local(_) | Self::Memory(..) | Self::Pending(_) => return Ok(false),
         };
         let Some(hash) = &writer.hash else {
             return Ok(false);
@@ -1071,6 +1088,12 @@ impl RawWriter<'_> {
 
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         match self {
+            Self::Memory(_, writer) => {
+                if !writer.external {
+                    writer.buffer.append(data)?;
+                }
+                Ok(())
+            }
             Self::Local(writer) => writer.write(data).await,
             Self::Pending(writer) => writer.write(data).await,
             Self::Replay(replay) => {
@@ -1163,6 +1186,21 @@ impl RawWriter<'_> {
         received: Option<Bytes>,
     ) -> Result<super::raw_upload::Written> {
         match self {
+            Self::Memory(location, writer) => {
+                let data = if writer.external {
+                    writer
+                        .buffer
+                        .retain(received.context("received raw body is missing")?)?
+                } else {
+                    writer.buffer.finish()
+                };
+                ensure!(data.len() as u64 == expected, IntegrityError::Length);
+                Ok(super::raw_upload::Written::LocalMemory(
+                    location,
+                    data,
+                    writer.space,
+                ))
+            }
             Self::Local(writer) => Ok(super::raw_upload::Written::Final(
                 writer.finish(expected).await?,
                 None,

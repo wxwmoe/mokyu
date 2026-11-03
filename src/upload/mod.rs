@@ -260,6 +260,10 @@ impl App {
             .reserve_quota(stream, declared.unwrap_or(0), false, upload)
             .await?;
         let mut offset = 0i64;
+        let _local_write = match self.storage.local_write_gate(storage) {
+            Some(gate) if upload.is_none() => Some(gate.read_owned().await),
+            _ => None,
+        };
         let profile = self.storage.profile(storage)?;
         let convert =
             upload.is_none() && profile.cdc_enabled && profile.write_processing == "background";
@@ -272,6 +276,11 @@ impl App {
                 profile.write_durability.as_deref(),
                 Some("buffered" | "volatile")
             ) && self.storage.raw_buffered(storage)?;
+            let memory = if _local_write.is_some() && !convert {
+                self.storage.reserve_local_body(storage, declared).await?
+            } else {
+                None
+            };
             let (source, location) = if convert {
                 let (algorithm, block_key_id) = self.store_encoding(storage).await?;
                 let encoding = crate::model::cache::EncodingPolicy {
@@ -287,15 +296,29 @@ impl App {
                     .begin_conversion(stream, storage, revision, &encoding, buffered)
                     .await?
             } else {
-                self.raw.begin(stream, storage, revision, buffered).await?
+                let durability = if memory.is_some() {
+                    "volatile"
+                } else if buffered {
+                    "buffered"
+                } else {
+                    "durable"
+                };
+                self.raw
+                    .begin(stream, storage, revision, durability)
+                    .await?
             };
             #[cfg(feature = "fault-injection")]
             crate::faults::point("raw-before-writer").await;
             Some((
                 source,
-                self.storage
-                    .raw_writer(storage, source, location, declared, buffered)
-                    .await?,
+                match memory {
+                    Some(writer) => crate::storage::raw::RawWriter::Memory(location, writer),
+                    None => {
+                        self.storage
+                            .raw_writer(storage, source, location, declared, buffered)
+                            .await?
+                    }
+                },
             ))
         } else {
             None

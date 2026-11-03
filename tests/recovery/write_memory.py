@@ -95,7 +95,7 @@ def main():
     def path(row, chunk=False):
         identity = row['file_uuid']
         identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-        return Path(database.config['instance']['data_path']) / ('chunks' if chunk else 'raw') / identity.hex[-2:] / (identity.hex + ('.raw' if chunk else ''))
+        return Path(database.config['instance']['data_path']) / 'pending' / ('chunks' if chunk else 'raw') / identity.hex[-2:] / (identity.hex + ('.raw' if chunk else ''))
 
     def used():
         return remote.cli('cache', 'status')['write_memory']['used']

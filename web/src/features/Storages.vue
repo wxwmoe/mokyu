@@ -33,7 +33,8 @@ const profileDraft = ref<Record<ProfileKey, string | number | boolean | null> | 
 const originalProfile = ref<typeof profileDraft.value>(null)
 const form = ref<HTMLFormElement | null>(null)
 const draft = reactive({ name: '', type: 's3', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', block_key_id: '', enabled: true, initialize: true })
-const durabilityOptions = computed(() => (draft.type === 's3' && profileDraft.value?.upload_cache ? ['durable', 'buffered', 'volatile'] : ['durable', 'buffered']).map(value => ({ value, label: t('storeDurability_' + value) })))
+const canBufferInMemory = computed(() => draft.type === 'local' ? profileDraft.value?.cdc_enabled === false : Boolean(profileDraft.value?.upload_cache))
+const durabilityOptions = computed(() => (canBufferInMemory.value ? ['durable', 'buffered', 'volatile'] : ['durable', 'buffered']).map(value => ({ value, label: t('storeDurability_' + value) })))
 const types = computed(() => (single.value ? ['local', 's3'] : ['s3']).map(value => ({ value, label: t('storeType_' + value) })))
 const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
 const profileFields: ProfileField[] = [
@@ -141,7 +142,8 @@ watch(() => draft.type, value => {
   else {
     profileDraft.value.min_free_space = value === 'local' ? profileDraft.value.min_free_space || '1GiB' : null
     if (value !== 'local') Object.assign(profileDraft.value, { file_delivery: 'application', file_delivery_prefix: null })
-    if (value === 'local') Object.assign(profileDraft.value, { write_durability: profileDraft.value.write_durability === 'volatile' ? 'durable' : profileDraft.value.write_durability, cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
+    if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
+    if (!canBufferInMemory.value && profileDraft.value.write_durability === 'volatile') profileDraft.value.write_durability = 'durable'
   }
 })
 watch([() => route.query.edit, () => storages.data.value], async ([name, rows]) => {
@@ -169,7 +171,7 @@ function setDelivery(value: string) {
 function setProfileBoolean(key: ProfileKey, value: boolean) {
   if (!profileDraft.value) return
   profileDraft.value[key] = value
-  if (key === 'upload_cache' && !value && profileDraft.value.write_durability === 'volatile') profileDraft.value.write_durability = 'durable'
+  if (!canBufferInMemory.value && profileDraft.value.write_durability === 'volatile') profileDraft.value.write_durability = 'durable'
   if (key === 'cdc_enabled' && !value) {
     Object.assign(profileDraft.value, { compression_enabled: false, pack_enabled: false, pack_range_enabled: false })
     draft.block_key_id = ''

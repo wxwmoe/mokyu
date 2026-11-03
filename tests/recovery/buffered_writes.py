@@ -68,7 +68,7 @@ def main():
         assert fixture.cli('storage', 'profile', 'show', fixture.name)['write_durability'] == 'durable'
         configure(fixture, cdc_enabled=False, deduplication_enabled=True, pack_range_enabled=False)
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        for value in ['volatile', 'unknown', 'BUFFERED']:
+        for value in ['unknown', 'BUFFERED']:
             fixture.cli('storage', 'profile', 'set', fixture.name, '-',
                         value={**profile, 'write_durability': value}, succeeds=False)
         assert fixture.cli('storage', 'profile', 'show', fixture.name)['revision'] == profile['revision']

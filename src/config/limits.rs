@@ -419,19 +419,27 @@ impl Budget {
                     * (maximum / crate::content::codec::MIN as u64 + 1);
             (payload * 4 + workspace).div_ceil(1024 * 1024) * 1024 * 1024
         };
+        let write_capacity = remaining
+            .saturating_sub(pack_required.saturating_mul(2))
+            .min(memory / 4);
         let write_memory_bytes = instance
             .write_memory_size
             .as_deref()
             .map(cache_bytes)
             .transpose()?
-            .unwrap_or(0);
+            .unwrap_or_else(|| {
+                if instance.testing {
+                    (64 << 20).min(write_capacity) / 4096 * 4096
+                } else {
+                    0
+                }
+            });
         ensure!(
             write_memory_bytes == 0 || write_memory_bytes >= 4096,
             "write_memory_size must be 0B or at least 4KiB"
         );
         ensure!(
-            write_memory_bytes <= remaining.saturating_sub(pack_required.saturating_mul(2))
-                && write_memory_bytes <= memory / 4
+            write_memory_bytes <= write_capacity
                 && write_memory_bytes / 4096 <= u64::from(u32::MAX),
             "write_memory_size must fit alongside stream, response cache and pack budgets"
         );

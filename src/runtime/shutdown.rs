@@ -74,6 +74,9 @@ pub(super) async fn drain(app: Arc<App>, workers: impl Future<Output = Result<()
             active_operations = app.active_operations(),
             "shutdown flush incomplete; pending sources remain for recovery"
         );
+        if app.config.instance.testing || app.storage.needs_local_drain() {
+            result.context("shutdown flush timed out")??;
+        }
     }
     Ok(())
 }

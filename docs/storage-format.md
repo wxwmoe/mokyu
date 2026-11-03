@@ -4,6 +4,8 @@
 
 ## 原始文件
 
+单容器本地 raw 可选 `write_durability=volatile`。普通 PUT 可在共享内存额度内保留一份正文，并为最终文件预留空间。读取直接使用这份正文。后台将正文写入同目录的 `.partial` 文件，同步后发布到原始物理 UUID，再同步目录并更新来源状态。恢复时核验已经发布的文件，只有 RAM 副本的来源会被隔离。运行与恢复共用原有对象映射。适用条件见[后端配置](configuration.md)。
+
 单容器的 `write_durability=buffered` 允许本地 chunks/raw 及 S3 写缓存文件完整写入后省略请求期的文件与发布目录同步。来源记录保留缓冲状态，由后台同步后标记持久；`cache status` 的 `buffered_files` 和 `buffered_chunks` 分别提供 raw 与区块待同步条目、字节与最早创建时间，`cache flush` 和正常退出也包含这些来源。可靠写入、复制和迁移引用缓冲来源前先同步。重启先核验未同步文件的长度和摘要，缺失或损坏的来源被隔离，运行中临时 I/O 故障保留重试，启动核验无法完成则终止启动并保留来源；这不能保证断电后最近写入不丢失，SQLite 元数据同步策略仍独立生效。
 
 单容器 S3 写缓存可选 `write_durability=volatile`，在 `instance.write_memory_size` 内保留 raw 或完整区块，以相同物理 UUID 供读取和最终上传。RAM 中不会创建替代缓存文件或缓存 UUID；额度不足改用 buffered 文件并沿用满额策略。来源同时保存本次进程 boot_id，强引用和排空先转成持久文件或完成最终上传再解除标记。进程重启后尚未落盘的 RAM 来源进入隔离，保留对象映射供诊断和重传恢复，不回退旧版本；已发布最终 S3 的来源不受影响。`cache status` 的 `write_memory` 显示容量与在用字节，`buffered_files` / `buffered_chunks` 的 `volatile` 显示待处理 RAM 来源数；已丢失来源保留在来源隔离列表，并在启动日志报告。

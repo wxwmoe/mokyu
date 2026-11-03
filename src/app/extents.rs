@@ -334,7 +334,7 @@ impl App {
         if let Some(revision) = revision {
             let (id, location) = self
                 .raw
-                .begin(destination, storage, revision, false)
+                .begin(destination, storage, revision, "durable")
                 .await?;
             let mut writer = self
                 .storage

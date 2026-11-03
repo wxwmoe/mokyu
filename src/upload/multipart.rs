@@ -746,7 +746,7 @@ impl App {
             .context("bucket has no storage")?;
         let raw_revision = self.storage.raw_policy(storage)?;
         let mut raw_writer = if let Some(revision) = raw_revision {
-            let (source, location) = self.raw.begin(id, storage, revision, false).await?;
+            let (source, location) = self.raw.begin(id, storage, revision, "durable").await?;
             Some((
                 source,
                 self.storage

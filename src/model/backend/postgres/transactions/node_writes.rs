@@ -1735,7 +1735,7 @@ pub(in super::super) async fn prepare_node_raw(
             } else {
                 "shared_s3"
             },
-            false,
+            "durable",
         )
         .fetch_one(&mut *tx)
         .await?

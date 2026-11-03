@@ -23,6 +23,16 @@ impl App {
     ) -> Result<()> {
         use crate::storage::raw_upload::Written;
         match written {
+            Written::LocalMemory(location, bytes, space) => {
+                let lock = self.operation_locks.get(location);
+                let sync = lock.lock().await;
+                self.raw.finish(stream, source, size, digest).await?;
+                self.storage
+                    .remember_local_body(location, source, storage, bytes, space);
+                drop(sync);
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("local-memory-ready").await;
+            }
             Written::Chunks(mut file) => {
                 use crate::content::codec::{self, MAX};
                 use tokio::io::AsyncReadExt;

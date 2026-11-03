@@ -38,10 +38,14 @@ impl Pool {
     pub fn buffer(&self, size: usize) -> Option<Buffer> {
         let permit = self.claim(size)?;
         Some(Buffer {
-            data: Vec::with_capacity(size),
+            data: Vec::new(),
             limit: size,
             _permit: permit,
         })
+    }
+
+    pub fn can_fit(&self, size: usize) -> bool {
+        size.max(1).div_ceil(UNIT) <= self.units as usize
     }
 
     pub fn retain(&self, data: Bytes) -> Option<Bytes> {
@@ -78,6 +82,9 @@ impl Buffer {
             data.len() <= self.limit - self.data.len(),
             "write memory length exceeded"
         );
+        if !data.is_empty() && self.data.capacity() == 0 {
+            self.data.try_reserve_exact(self.limit)?;
+        }
         self.data.extend_from_slice(data);
         Ok(())
     }
@@ -111,6 +118,7 @@ mod tests {
         incoming.append(b"raw").unwrap();
         let cached = incoming.finish();
         let mut reservation = writes.buffer(3).unwrap();
+        assert_eq!(reservation.data.capacity(), 0);
         reservation.receive_external();
         assert_eq!(reservation.data.capacity(), 0);
         let pending = reservation.retain(cached.clone()).unwrap();

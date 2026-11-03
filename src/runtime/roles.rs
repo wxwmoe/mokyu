@@ -105,6 +105,7 @@ async fn run_testing(app: Arc<app::App>) -> Result<()> {
         tokio::select! {
             result = crate::worker::scheduler::run(app.clone()) => result,
             result = crate::worker::sync::run(app.clone()) => result,
+            result = app.storage.watch_write_backlog() => result,
             result = lifecycle::run(app.clone()) => result,
         }
     };

@@ -3,6 +3,7 @@ use object_store::ObjectStore;
 use std::sync::Arc;
 
 pub(crate) struct StoreBackend {
+    pub(crate) local_write_policy: Arc<tokio::sync::RwLock<()>>,
     pub profile: Arc<crate::storage::profile::StorageProfile>,
     pub(crate) backend: Arc<dyn ObjectStore>,
     pub(crate) buffered_backend: Option<Arc<dyn ObjectStore>>,

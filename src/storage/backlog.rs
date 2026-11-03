@@ -10,6 +10,7 @@ pub(super) struct Backlog {
     oldest: HashMap<Uuid, DateTime<Utc>>,
     pressure: HashMap<Uuid, Instant>,
     refreshed: Instant,
+    last_sync_error: Option<(DateTime<Utc>, Uuid, String)>,
 }
 impl Backlog {
     pub(super) fn new(rows: Vec<(Uuid, DateTime<Utc>)>) -> Self {
@@ -17,6 +18,7 @@ impl Backlog {
             oldest: rows.into_iter().collect(),
             pressure: HashMap::new(),
             refreshed: Instant::now(),
+            last_sync_error: None,
         }
     }
 }
@@ -62,6 +64,12 @@ impl Storage {
     }
     pub(crate) fn write_backlog_status(&self) -> serde_json::Value {
         let state = self.write_backlog.lock().unwrap();
-        serde_json::json!({"refreshed_seconds_ago":state.refreshed.elapsed().as_secs(),"oldest":state.oldest})
+        serde_json::json!({"refreshed_seconds_ago":state.refreshed.elapsed().as_secs(),"oldest":state.oldest,
+            "last_sync_error":state.last_sync_error.as_ref().map(|(at,storage,error)| serde_json::json!({"at":at,"storage":storage,"detail":error}))})
+    }
+
+    pub(crate) fn sync_failed(&self, storage: Uuid, error: &anyhow::Error) {
+        self.write_backlog.lock().unwrap().last_sync_error =
+            Some((Utc::now(), storage, error.to_string()));
     }
 }

@@ -7,6 +7,7 @@ use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
 pub(crate) enum Written {
+    LocalMemory(Uuid, bytes::Bytes, super::local::Space),
     Final(Option<[u8; 32]>, Option<tokio::sync::oneshot::Sender<()>>),
     Chunks(super::raw_request::File),
     Cached {

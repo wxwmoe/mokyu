@@ -403,8 +403,12 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
     );
     anyhow::ensure!(
         profile.write_durability.as_deref() != Some("volatile")
+            || (storage_type == "local" && !profile.cdc_enabled)
             || (storage_type == "s3" && profile.upload_cache),
-        s3s::s3_error!(InvalidArgument, "volatile writes require S3 upload cache")
+        s3s::s3_error!(
+            InvalidArgument,
+            "volatile writes require local raw storage or S3 upload cache"
+        )
     );
     match (storage_type, profile.min_free_space.as_deref()) {
         ("local", Some(floor)) => {

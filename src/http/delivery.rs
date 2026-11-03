@@ -77,7 +77,11 @@ pub(crate) async fn prepare(
     }
     row.validate()?;
     // This checks location, file type and length without reading the body; the proxy opens its own fd.
-    let _reader = app.storage.raw_reader(&row.source, false).await?;
+    let reader = app.storage.raw_reader(&row.source, false).await?;
+    if matches!(reader.file, crate::storage::raw::RawFile::Memory { .. }) {
+        app.file_delivery.fallback.fetch_add(1, Relaxed);
+        return Ok(false);
+    }
     app.storage.check_delivery_directory(&row.source).await?;
     if app.storage.profile(row.source.storage_id)?.revision != profile.revision {
         return Err(

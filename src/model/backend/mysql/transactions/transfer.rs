@@ -706,7 +706,7 @@ pub(in super::super) async fn prepare_raw(
                 run.storage()?,
                 run.profile_revision()?,
                 medium,
-                false,
+                "durable",
             )
             .execute(&mut **db)
             .await?

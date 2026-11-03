@@ -2,6 +2,8 @@
 
 `testing_install.py write|read --endpoint URL --state FILE` exercises a fresh testing installation with boto3. Set `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`, run the write phase, restart the server on the same data directory and run the read phase with the same state file.
 
+`local_write_memory.py` starts and kills its own fault-injection binary. Set the same isolation guard, `MOKYU_TEST_BINARY` and a writable `MOKYU_TEST_WORKDIR`. It checks budget fallback, source quarantine, interrupted disk sync, explicit flush and clean shutdown.
+
 [Test guide](../README.md) · Run commands from the repository root. Short test paths such as `fixtures/` are relative to `tests/`.
 
 ## Single control status

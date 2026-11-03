@@ -101,7 +101,7 @@ pub(in super::super) fn raw_insert(
     storage: Uuid,
     revision: i64,
     medium: &'static str,
-    buffered: bool,
+    durability: &'static str,
 ) -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
         "INSERT INTO raw_sources(owner_stream,storage_id,profile_revision,medium,durability) VALUES($1,$2,$3,$4,$5) RETURNING id",
@@ -109,7 +109,7 @@ pub(in super::super) fn raw_insert(
 
     .bind(stream)
     .bind(storage)
-    .bind(revision).bind(medium).bind(if buffered { "buffered" } else { "durable" })
+    .bind(revision).bind(medium).bind(durability)
 }
 
 pub(in super::super) fn raw_finish(
@@ -191,7 +191,7 @@ impl RawStore for Backend {
         transactions::recover_raw_memory(&self.pool, boot).await
     }
     async fn buffered_status(&self) -> Result<serde_json::Value> {
-        let (pending, bytes, oldest, volatile): (i64,i64,Option<chrono::DateTime<chrono::Utc>>,i64) = sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(size),0) AS BIGINT),MIN(created_at),CAST(COALESCE(SUM(CASE WHEN medium='memory' THEN 1 ELSE 0 END),0) AS BIGINT) FROM raw_sources WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL").fetch_one(&self.pool).await?;
+        let (pending, bytes, oldest, volatile): (i64,i64,Option<chrono::DateTime<chrono::Utc>>,i64) = sqlx::query_as("SELECT COUNT(*),CAST(COALESCE(SUM(size),0) AS BIGINT),MIN(created_at),CAST(COALESCE(SUM(CASE WHEN durability='volatile' THEN 1 ELSE 0 END),0) AS BIGINT) FROM raw_sources WHERE durability IN ('buffered','volatile') AND state='ready' AND quarantine_code IS NULL").fetch_one(&self.pool).await?;
         Ok(serde_json::json!({"pending":pending,"bytes":bytes,"oldest":oldest,"volatile":volatile}))
     }
 
@@ -269,7 +269,7 @@ impl RawStore for Backend {
             storage,
             revision,
             Some(encoding),
-            buffered,
+            if buffered { "buffered" } else { "durable" },
         )
         .await
     }
@@ -534,7 +534,7 @@ impl RawStore for Backend {
         stream: Id,
         storage: Uuid,
         profile_revision: i64,
-        buffered: bool,
+        durability: &'static str,
     ) -> Result<(Id, Uuid)> {
         transactions::begin_raw(
             &self.pool,
@@ -542,7 +542,7 @@ impl RawStore for Backend {
             storage,
             profile_revision,
             None,
-            buffered,
+            durability,
         )
         .await
     }
@@ -844,7 +844,7 @@ pub(in super::super) fn raw_upload_mode(cluster: bool) -> Scalar<'static, bool> 
 }
 
 pub(in super::super) fn raw_upload_abandon(source: Id) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET state='deleting',revision=revision+1 WHERE id=$1 AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=raw_sources.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=raw_sources.id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source)
+    sqlx::query("UPDATE raw_sources SET state='deleting',pending_upload=false,revision=revision+1 WHERE id=$1 AND owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=raw_sources.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.task_type='integrity' AND t.state='running' AND t.detail->>'operation' IN ('recheck','verify') AND t.detail->>'source_location'=raw_sources.id::text AND ((t.lease_node_id IS NULL AND t.lease_expires_at IS NULL) OR t.lease_expires_at>clock_timestamp())) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=raw_sources.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=raw_sources.id)").bind(source)
 }
 
 pub(in super::super) fn raw_upload_owned(

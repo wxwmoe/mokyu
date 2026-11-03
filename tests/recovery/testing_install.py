@@ -39,6 +39,25 @@ def run(args):
         etag = result["ETag"]
         assert api.get_object(Bucket=bucket, Key=key, IfMatch=etag)["Body"].read() == data
         assert api.get_object(Bucket=bucket, Key=key, Range="bytes=13-87")["Body"].read() == data[13:88]
+        api.put_object_acl(Bucket=bucket, Key=key, ACL="public-read")
+        grants = api.get_object_acl(Bucket=bucket, Key=key)["Grants"]
+        assert any(g["Permission"] == "READ" and g["Grantee"].get("URI","").endswith("/AllUsers") for g in grants)
+        api.put_object_acl(Bucket=bucket, Key=key, ACL="private")
+        live = {"Bucket": bucket, "Key": key+"-live"}
+        earlier = secrets.token_bytes(3*1024*1024)
+        first = api.put_object(**live, Body=earlier)
+        stream = api.get_object(**live)["Body"]
+        assert stream.read(37) == earlier[:37]
+        api.put_object(**live, Body=data, IfMatch=first["ETag"])
+        assert stream.read() == earlier[37:]
+        stream.close()
+        cancelled = api.get_object(**live)["Body"]
+        cancelled.read(1)
+        cancelled.close()
+        assert api.get_object(**live)["Body"].read() == data
+        listing = api.list_objects_v2(Bucket=bucket, Prefix=live["Key"])
+        assert [entry["Key"] for entry in listing["Contents"]] == [live["Key"]]
+        api.delete_object(**live)
         check_error(lambda: api.get_object(Bucket=bucket, Key=key, IfNoneMatch=etag), {304})
         check_error(lambda: client(args.endpoint, secret="invalid").head_object(Bucket=bucket, Key=key), {400, 403})
         check_error(lambda: client(args.endpoint, region="ap-northeast-1").head_object(Bucket=bucket, Key=key), {400, 403})
