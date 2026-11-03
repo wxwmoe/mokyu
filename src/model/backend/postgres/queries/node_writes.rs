@@ -148,7 +148,19 @@ pub(in super::super) fn node_write_limit(id: Uuid) -> Scalar<'static, Option<i32
 }
 
 pub(in super::super) fn node_write_cleanup(node: Uuid) -> Statement<'static> {
-    sqlx::query("DELETE FROM node_writes WHERE node_id=$1 AND operation_id IN (SELECT w.operation_id FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND (w.state<>'active' OR w.publish_hash IS NULL) AND COALESCE(w.completed_at,w.created_at)<clock_timestamp()-interval '1 day' AND (l.id IS NULL OR l.expires_at<=clock_timestamp()) ORDER BY w.created_at LIMIT 64)").bind(node)
+    sqlx::query(
+        "WITH expired AS MATERIALIZED (
+            SELECT w.operation_id FROM node_writes w
+            LEFT JOIN stream_leases l ON l.id=w.lease_id
+            WHERE w.node_id=$1 AND (w.state<>'active' OR w.publish_hash IS NULL)
+              AND COALESCE(w.completed_at,w.created_at)<clock_timestamp()-interval '1 day'
+              AND (l.id IS NULL OR l.expires_at<=clock_timestamp())
+            ORDER BY w.created_at LIMIT 64
+        )
+        DELETE FROM node_writes w USING expired
+        WHERE w.node_id=$1 AND w.operation_id=expired.operation_id",
+    )
+    .bind(node)
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -419,6 +419,15 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
 
     let stale = dated(chrono::Utc::now().timestamp_millis() - 2 * 86_400_000);
     sqlx::query("UPDATE node_writes SET operation_id=$2,created_at=clock_timestamp()-interval '2 days',completed_at=clock_timestamp()-interval '2 days' WHERE operation_id=$1").bind(operation).bind(stale).execute(&pool).await?;
+    sqlx::query(
+        "INSERT INTO node_writes(node_id,operation_id,credential_generation,boot_id,fence,request_hash,profile,state,created_at,completed_at)
+         SELECT node_id,gen_random_uuid(),credential_generation,boot_id,fence,request_hash,profile,'aborted',now()-interval '36 hours',now()-interval '36 hours'
+         FROM node_writes CROSS JOIN generate_series(1,64) WHERE node_id=$1 AND operation_id=$2",
+    )
+    .bind(node.node_id)
+    .bind(stale)
+    .execute(&pool)
+    .await?;
     let revision = queries::node_write_credential("writer")
         .fetch_one(&pool)
         .await?;
@@ -431,6 +440,13 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
     let second = backend
         .begin_write(&node, &key, request(session.run, second_id))
         .await?;
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM node_writes WHERE node_id=$1 AND completed_at<now()-interval '1 day'",
+    )
+    .bind(node.node_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(remaining, 1);
     for id in [stale, dated(chrono::Utc::now().timestamp_millis() + 60_000)] {
         assert_eq!(
             model::error(
