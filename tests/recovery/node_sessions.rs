@@ -522,6 +522,43 @@ async fn postgres_node_sessions_recover_across_controls_and_fence_old_runs() -> 
             .await
             .is_ok()
     );
+    for exclusive in [false, true] {
+        sqlx::query("UPDATE node_sessions SET expires_at=clock_timestamp()+interval '1 second' WHERE node_id=$1")
+            .bind(reporting.node_id).execute(&pool).await?;
+        let mut holder = pool.begin().await?;
+        sqlx::query("SELECT 1 FROM node_sessions WHERE node_id=$1 FOR UPDATE")
+            .bind(reporting.node_id)
+            .execute(&mut *holder)
+            .await?;
+        let mut waiter = pool.acquire().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *waiter)
+            .await?;
+        let release = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while !sqlx::query_scalar::<_, bool>("SELECT cardinality(pg_blocking_pids($1))>0")
+                    .bind(pid).fetch_one(&pool).await? {
+                    tokio::task::yield_now().await;
+                }
+                sqlx::query("SELECT pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM expires_at-clock_timestamp()))::float8+0.01) FROM node_sessions WHERE node_id=$1")
+                    .bind(reporting.node_id).execute(&mut *holder).await?;
+                holder.commit().await?;
+                Ok::<_, anyhow::Error>(())
+            }).await?
+        };
+        let (checked, released) = tokio::join!(
+            super::transactions::require_node_run(&mut waiter, &reporting, rebooted.run, exclusive),
+            release
+        );
+        released?;
+        assert_eq!(
+            checked.err().as_ref().and_then(crate::model::error),
+            Some(crate::model::Error::NodeExpired)
+        );
+    }
+    sqlx::query("UPDATE node_sessions SET expires_at=clock_timestamp()+interval '90 seconds' WHERE node_id=$1")
+        .bind(reporting.node_id).execute(&pool).await?;
+    second.sync_node(&reporting, &key, rebooted.run).await?;
     first.release("reporting").await?;
     report.boot_id = rebooted.run.boot;
     assert!(

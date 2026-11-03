@@ -1089,6 +1089,8 @@ pub(in super::super) async fn publish_import_in(
     lock_media_scope(tx, &authority).await?;
     super::super::transactions::redundancy::writable(tx, bucket, key, Some(task.id)).await?;
     let old = selected_object(tx, bucket, key, expected).await?;
+    // Cleanup takes project and bucket quota before it updates chunk references.
+    lock_quota(tx, bucket).await?;
     let crate::model::PublishingStream {
         stream,
         publication_id,

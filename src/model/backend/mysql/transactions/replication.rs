@@ -1227,8 +1227,7 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
             )
             .await?;
         }
-    }
-    if end < item.snapshot.0.size {
+        // Release the projected sources before publication locks the objects and their quotas.
         q::advance(item.id, "copying", end)
             .execute(&mut **db)
             .await?;

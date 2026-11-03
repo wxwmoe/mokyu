@@ -289,13 +289,18 @@ impl Gateway {
         if !head && request.prepared.reply.outcome == wire::ReadOutcome::Pending as i32 {
             let credential = request.prepared.reply.credential.clone();
             let bucket = request.prepared.reply.bucket.clone();
-            drop(request.prepared);
-            tokio::time::sleep_until(request.deadline).await;
-            request.prepared = self.reads.open(request.input).await?;
-            if request.prepared.reply.credential != credential
-                || request.prepared.reply.bucket != bucket
-            {
-                return Err(crate::app::readiness::pending());
+            for at in crate::app::readiness::probes(request.deadline) {
+                drop(request.prepared);
+                tokio::time::sleep_until(at).await;
+                request.prepared = self.reads.open(request.input.clone()).await?;
+                if request.prepared.reply.credential != credential
+                    || request.prepared.reply.bucket != bucket
+                {
+                    return Err(crate::app::readiness::pending());
+                }
+                if request.prepared.reply.outcome != wire::ReadOutcome::Pending as i32 {
+                    break;
+                }
             }
         }
         delivery::response(
@@ -318,8 +323,11 @@ impl Gateway {
     ) -> Result<Response> {
         drop(request.compression.take());
         request.prepared.check()?;
-        if request.prepared.reply.outcome == wire::ReadOutcome::Pending as i32 {
-            tokio::time::sleep_until(request.deadline).await;
+        for at in crate::app::readiness::probes(request.deadline) {
+            if request.prepared.reply.outcome != wire::ReadOutcome::Pending as i32 {
+                break;
+            }
+            tokio::time::sleep_until(at).await;
             let next = self
                 .reads
                 .open_memory(request.input.clone(), Some(request.prepared.memory()))
@@ -332,6 +340,9 @@ impl Gateway {
                 s3s::s3_error!(OperationAborted)
             );
             request.prepared = next;
+        }
+        if request.prepared.reply.outcome == wire::ReadOutcome::Pending as i32 {
+            return Err(crate::app::readiness::pending());
         }
         if request.prepared.reply.outcome != wire::ReadOutcome::Ready as i32 {
             let response = self.finish(request, &HeaderMap::new()).await?;

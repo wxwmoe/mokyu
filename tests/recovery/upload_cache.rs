@@ -73,6 +73,34 @@ async fn postgres_upload_preparation_is_atomic() -> Result<()> {
         .bind(ids[1])
         .execute(&pool)
         .await?;
+    let mut held = pool.begin().await?;
+    sqlx::query("SELECT chunk_id FROM pending_uploads WHERE chunk_id=$1 FOR UPDATE")
+        .bind(ids[0])
+        .fetch_one(&mut *held)
+        .await?;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            super::transactions::cache_enqueue(&pool, &[storage]),
+        )
+        .await??
+    );
+    let owners: Vec<Option<Uuid>> = sqlx::query_scalar(
+        "SELECT owner_task FROM pending_uploads WHERE stream_id=$1 ORDER BY offset_bytes",
+    )
+    .bind(stream)
+    .fetch_all(&mut *held)
+    .await?;
+    assert!(matches!(owners.as_slice(), [None, Some(_)]));
+    held.rollback().await?;
+    let queued = owners[1].unwrap();
+    super::queries::unclaim_uploads(queued)
+        .execute(&pool)
+        .await?;
+    sqlx::query("DELETE FROM tasks WHERE id=$1")
+        .bind(queued)
+        .execute(&pool)
+        .await?;
     let first = Execution {
         id: Uuid::new_v4(),
         token: Uuid::new_v4(),

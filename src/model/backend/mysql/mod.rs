@@ -71,11 +71,15 @@ use sqlx::{MySqlConnection, MySqlPool};
 
 pub(crate) use connection::connect;
 
-pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
-    let error = source
+fn server_error(source: &anyhow::Error) -> Option<&sqlx::mysql::MySqlDatabaseError> {
+    source
         .downcast_ref::<sqlx::Error>()?
         .as_database_error()?
-        .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()?;
+        .try_downcast_ref()
+}
+
+pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
+    let error = server_error(source)?;
     match error.number() {
         3819 | 4025
             if error

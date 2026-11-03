@@ -190,7 +190,7 @@ pub(in super::super) async fn cache_enqueue(pool: &PgPool, urgent: &[Uuid]) -> R
     if !ids.contains(&first) {
         ids = vec![first];
     }
-    queries::claim_pending_uploads(&ids, id)
+    queries::claim_upload_segment(&ids, first, id)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;

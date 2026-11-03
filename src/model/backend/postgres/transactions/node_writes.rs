@@ -493,7 +493,7 @@ pub(in super::super) async fn node_write_status(
         matches!(state.role.as_str(), "data" | "worker" | "node"),
         Error::NodeAuthentication
     );
-    require_node_run(&mut tx, state, input.run, true).await?;
+    require_node_run(&mut tx, state, input.run, abort).await?;
     let mut owned = queries::node_write(state.node_id, input.operation)
         .fetch_optional(&mut *tx)
         .await?
@@ -1499,11 +1499,7 @@ pub(in super::super) async fn prepare_node_tail(
             .transpose()?
             .unwrap_or(crate::storage::DEFAULT_STAGING_LIMIT);
         let fragment = Uuid::now_v7();
-        let path = format!(
-            "{}fragment/{}",
-            crate::storage::STAGING_PREFIX,
-            fragment.simple()
-        );
+        let path = crate::storage::fragment_key(fragment);
         claim_staging_in(&mut tx, storage, &path, input.size as u64, limit).await?;
         queries::insert_fragment(&StreamTail {
             fragment,

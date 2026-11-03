@@ -114,7 +114,9 @@ impl ClusterStore for Backend {
     }
 
     async fn pending_read(&self, streams: &[Id], node: Uuid) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges rr JOIN raw_sources r ON r.id=rr.source_id JOIN raw_uploads u ON u.source_id=r.id WHERE rr.stream_id=ANY($1) AND r.pending_upload AND u.node_id IS DISTINCT FROM $2) OR EXISTS(SELECT 1 FROM extents e JOIN pending_uploads u ON u.chunk_id=e.chunk_id JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=ANY($1) AND u.node_id IS DISTINCT FROM $2 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=c.id AND l.state='ready'))").bind(streams).bind(node).fetch_one(&self.pool).await?)
+        Ok(super::pending_sources(streams, Some(node))
+            .fetch_one(&self.pool)
+            .await?)
     }
     async fn prioritize_uploads(&self, streams: &[Id]) -> Result<()> {
         sqlx::query("UPDATE pending_uploads SET next_retry_at=LEAST(next_retry_at,clock_timestamp()) WHERE owner_task IS NULL AND chunk_id IN (SELECT chunk_id FROM extents WHERE stream_id=ANY($1) AND chunk_id IS NOT NULL)").bind(streams).execute(&self.pool).await?;

@@ -75,6 +75,10 @@ use uuid::Uuid;
 pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
 pub(crate) const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
+pub(crate) fn fragment_key(id: Uuid) -> String {
+    format!("{STAGING_PREFIX}fragment/{}", id.simple())
+}
+
 pub struct Storage {
     local_memory: Mutex<HashMap<Uuid, local_memory::Body>>,
     write_backlog: Mutex<backlog::Backlog>,
@@ -1275,7 +1279,7 @@ impl Storage {
             return Ok((None, None, Some(self.disk.write_fragment(id, data).await?)));
         }
         let storage_id = self.shared_staging_id()?;
-        let key = format!("{STAGING_PREFIX}fragment/{}", id.simple());
+        let key = fragment_key(id);
         self.put_staged(storage_id, &key, Bytes::copy_from_slice(data))
             .await?;
         Ok((Some(storage_id), Some(key), None))

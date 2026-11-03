@@ -433,20 +433,10 @@ pub(in super::super) async fn require_node_run(
     run: crate::model::session::Run,
     exclusive: bool,
 ) -> Result<crate::model::session::Session> {
-    use crate::model::Error;
-    let session = queries::node_session(state.node_id, exclusive)
-        .fetch_optional(&mut *db)
+    queries::active_node_session(state.node_id, state.credential_generation, run, exclusive)
+        .fetch_optional(db)
         .await?
-        .ok_or(Error::NodeExpired)?;
-    let now = queries::node_clock().fetch_one(db).await?;
-    ensure!(
-        session.credential_generation == state.credential_generation
-            && session.boot_id == run.boot
-            && session.fence == run.fence
-            && session.expires_at > now,
-        Error::NodeExpired
-    );
-    Ok(session)
+        .ok_or_else(|| crate::model::Error::NodeExpired.into())
 }
 
 pub(in super::super) async fn sync_node(
@@ -569,7 +559,7 @@ pub(in super::super) async fn maintain_node_session(
 ) -> Result<(i64, Vec<read::GrantResult>)> {
     let mut tx = backend.pool.begin().await?;
     backend.fence_control(&mut tx).await?;
-    authenticate_rpc_node(&mut tx, state, key, true).await?;
+    authenticate_rpc_node(&mut tx, state, key, false).await?;
     let session = require_node_run(&mut tx, state, run, true).await?;
     ensure!(
         session.epoch == epoch && sequence > session.sequence,
@@ -626,7 +616,8 @@ pub(super) async fn node_write_owned(
         matches!(node.role.as_str(), "data" | "worker" | "node"),
         Error::NodeAuthentication
     );
-    require_node_run(db, node, run, true).await?;
+    // The operation row serializes replays. Keep the run fenced while other operations advance.
+    require_node_run(db, node, run, false).await?;
     let row = queries::node_write(node.node_id, operation)
         .fetch_optional(db)
         .await?

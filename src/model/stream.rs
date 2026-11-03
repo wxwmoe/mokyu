@@ -53,6 +53,20 @@ pub(crate) struct StreamTail {
     pub(crate) file_offset: Option<i64>,
 }
 
+impl StreamTail {
+    pub(crate) fn validate_staging(&self) -> Result<()> {
+        match (self.staging_storage, self.staging_key.as_deref()) {
+            (None, None) => Ok(()),
+            (Some(_), Some(key))
+                if self.file.is_none() && key == crate::storage::fragment_key(self.fragment) =>
+            {
+                Ok(())
+            }
+            _ => anyhow::bail!("invalid fragment staging location"),
+        }
+    }
+}
+
 #[derive(sqlx::FromRow)]
 pub(crate) struct CachedExtent {
     pub cache_offset: Option<i64>,
@@ -154,6 +168,7 @@ impl CompressionObservation {
 
 #[async_trait]
 pub(crate) trait StreamStore: Send + Sync {
+    async fn remote_pending(&self, stream: Id) -> Result<bool>;
     async fn snapshot(
         &self,
         route: &ReadRoute,

@@ -127,6 +127,24 @@ pub(in super::super) fn claim_pending_uploads<'q>(ids: &'q [Id], task: Uuid) -> 
         .bind(task)
 }
 
+pub(in super::super) fn claim_upload_segment(ids: &[Id], first: Id, task: Uuid) -> Statement<'_> {
+    if ids.len() == 1 {
+        return claim_pending_uploads(ids, task);
+    }
+    // Each scheduler already owns its first row. Keep just that row when another owns part of the batch.
+    sqlx::query(
+        "WITH available AS MATERIALIZED (
+            SELECT chunk_id FROM pending_uploads WHERE chunk_id=ANY($1) AND owner_task IS NULL
+            ORDER BY chunk_id FOR UPDATE SKIP LOCKED
+        )
+        UPDATE pending_uploads p SET owner_task=$2 FROM available a
+        WHERE p.chunk_id=a.chunk_id AND (a.chunk_id=$3 OR (SELECT count(*) FROM available)=cardinality($1))",
+    )
+    .bind(ids)
+    .bind(task)
+    .bind(first)
+}
+
 pub(in super::super) fn pause_upload_task(task: Execution) -> Statement<'static> {
     sqlx::query("UPDATE tasks SET state='paused',updated_at=now() WHERE id=$1 AND lease_token=$2 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp())").bind(task.id)
         .bind(task.token)

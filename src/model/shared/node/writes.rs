@@ -454,7 +454,7 @@ impl NodeWrites for Backend {
                 .transpose()?
                 .unwrap_or(crate::storage::DEFAULT_STAGING_LIMIT);
             let id = Uuid::now_v7();
-            let path = format!("{}fragment/{}", crate::storage::STAGING_PREFIX, id.simple());
+            let path = crate::storage::fragment_key(id);
             super::staging::reserve(&mut tx, storage, &path, input.size as u64, limit).await?;
             let value = crate::model::StreamTail {
                 fragment: id,

@@ -180,6 +180,11 @@ pub(in super::super) async fn read_snapshot<'e>(
 
 #[async_trait::async_trait]
 impl StreamStore for Backend {
+    async fn remote_pending(&self, stream: Id) -> Result<bool> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id JOIN raw_uploads u ON u.source_id=r.id WHERE e.stream_id=? AND r.pending_upload AND u.node_id IS NOT NULL)
+            OR EXISTS(SELECT 1 FROM extents e JOIN pending_uploads u ON u.chunk_id=e.chunk_id JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=? AND u.node_id IS NOT NULL AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=c.id AND l.state='ready'))").bind(stream).bind(stream).fetch_one(&self.pool).await?)
+    }
+
     async fn snapshot(
         &self,
         route: &crate::model::ReadRoute,

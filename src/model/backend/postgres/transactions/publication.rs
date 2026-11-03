@@ -555,6 +555,12 @@ pub(in super::super) async fn change_node_objects(
 
 #[async_trait::async_trait]
 impl StreamStore for Backend {
+    async fn remote_pending(&self, stream: Id) -> Result<bool> {
+        Ok(queries::pending_sources(&[stream], None)
+            .fetch_one(&self.pool)
+            .await?)
+    }
+
     async fn snapshot(
         &self,
         route: &crate::model::ReadRoute,
@@ -578,6 +584,7 @@ impl StreamStore for Backend {
     }
 
     async fn append_tail(&self, tail: StreamTail) -> Result<()> {
+        tail.validate_staging()?;
         queries::insert_fragment(&tail).execute(&self.pool).await?;
         let mut tx = self.pool.begin().await?;
         #[cfg(feature = "fault-injection")]

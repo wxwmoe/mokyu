@@ -448,6 +448,38 @@ async fn mysql_quota_and_publication_contract() -> Result<()> {
     );
     abandon(&backend, bucket, overflow).await?;
     usage(&backend, bucket, 96, 0, 0, 3).await?;
+
+    let task = crate::model::task::Execution {
+        id: Uuid::new_v4(),
+        token: Uuid::new_v4(),
+    };
+    queries::insert_task(task.id, "storage_migration", Some(bucket), json!({}), None)
+        .execute(db)
+        .await?;
+    queries::claim_task(task.id, task.token).execute(db).await?;
+    let imported = backend
+        .create(StreamCreate {
+            authority: Permit::system(),
+            bucket,
+            key: "import".into(),
+            purpose: crate::model::StreamPurpose::Copy,
+            metadata: json!({}),
+            public: false,
+            completion: None,
+            owner: Some((task.id, task.token)),
+        })
+        .await?;
+    backend.reference(imported, 0, physical.id, 32).await?;
+    backend.finish(imported, 32, "imported", json!({})).await?;
+    with_quota_contention(&backend, bucket, physical.id, async {
+        let mut tx = db.begin().await?;
+        transactions::publish_import_in(&mut tx, task, imported, bucket, "import", None, false)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    })
+    .await?;
+    usage(&backend, bucket, 128, 0, 0, 4).await?;
     backend.check_owner().await?;
     backend.pool.close().await;
     Ok(())

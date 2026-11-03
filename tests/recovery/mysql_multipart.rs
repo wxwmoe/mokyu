@@ -388,6 +388,47 @@ async fn mysql_multipart_contract() -> Result<()> {
             )
             .await?
     );
+    // The fixture counter must survive a rolled-back publication.
+    sqlx::query("CREATE TABLE publish_conflicts (attempts INT NOT NULL, failures INT NOT NULL) ENGINE=MyISAM")
+        .execute(db)
+        .await?;
+    sqlx::query("INSERT INTO publish_conflicts VALUES (0,3)")
+        .execute(db)
+        .await?;
+    sqlx::raw_sql(
+        "CREATE TRIGGER publish_conflict BEFORE UPDATE ON objects FOR EACH ROW BEGIN
+        UPDATE publish_conflicts SET attempts=attempts+1;
+        IF (SELECT attempts<=failures FROM publish_conflicts) THEN
+            SIGNAL SQLSTATE 'HY000' SET MYSQL_ERRNO=1020, MESSAGE_TEXT='isolated record change';
+        END IF;
+    END",
+    )
+    .execute(db)
+    .await?;
+    let err = backend
+        .publish(
+            output,
+            None,
+            None,
+            Some((
+                completed,
+                "manifest".into(),
+                json!({"etag":"complete"}),
+                completion_token,
+            )),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(super::server_error(&err).unwrap().number(), 1020);
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT attempts FROM publish_conflicts")
+            .fetch_one(db)
+            .await?,
+        3
+    );
+    sqlx::query("UPDATE publish_conflicts SET attempts=0, failures=2")
+        .execute(db)
+        .await?;
     assert!(
         backend
             .publish(
@@ -403,6 +444,18 @@ async fn mysql_multipart_contract() -> Result<()> {
             )
             .await?
     );
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT attempts FROM publish_conflicts")
+            .fetch_one(db)
+            .await?,
+        3
+    );
+    sqlx::raw_sql("DROP TRIGGER publish_conflict")
+        .execute(db)
+        .await?;
+    sqlx::query("DROP TABLE publish_conflicts")
+        .execute(db)
+        .await?;
     usage(&backend, bucket, 0, 0).await?;
     let (rows, more) = backend
         .transfers(

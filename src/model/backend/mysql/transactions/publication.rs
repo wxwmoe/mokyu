@@ -8,24 +8,43 @@ pub(in super::super) async fn publish(
     completion: Option<(uuid::Uuid, String, serde_json::Value, Uuid)>,
 ) -> Result<bool> {
     let pool = &backend.pool;
-    let mut tx = pool.begin().await?;
-    backend.fence_control(&mut tx).await?;
-    let result = publish_in(&mut tx, id, if_match, if_none, completion).await;
-    if matches!(&result, Ok(true))
-        || result
+    let mut retries = 2;
+    loop {
+        let mut tx = pool.begin().await?;
+        backend.fence_control(&mut tx).await?;
+        let result = publish_in(
+            &mut tx,
+            id,
+            if_match.clone(),
+            if_none.clone(),
+            completion.clone(),
+        )
+        .await;
+        if let Err(err) = &result
+            && retries > 0
+            && super::super::server_error(err).is_some_and(|e| e.number() == 1020)
+        {
+            // MariaDB can invalidate a locking read while another writer changes a shared chunk.
+            tx.rollback().await?;
+            retries -= 1;
+            continue;
+        }
+        if matches!(&result, Ok(true))
+            || result
+                .as_ref()
+                .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+        {
+            tx.commit().await?;
+        } else if let Some(reason) = result
             .as_ref()
-            .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
-    {
-        tx.commit().await?;
-    } else if let Some(reason) = result
-        .as_ref()
-        .err()
-        .and_then(crate::model::replica_rejection)
-    {
-        tx.rollback().await?;
-        reject_admission(pool, id, reason).await?;
+            .err()
+            .and_then(crate::model::replica_rejection)
+        {
+            tx.rollback().await?;
+            reject_admission(pool, id, reason).await?;
+        }
+        return result;
     }
-    result
 }
 
 pub(in super::super) async fn publish_in(

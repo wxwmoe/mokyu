@@ -243,6 +243,7 @@ pub(in super::super) async fn create_stream_in(
 }
 
 pub(in super::super) async fn append_tail(pool: &sqlx::MySqlPool, tail: StreamTail) -> Result<()> {
+    tail.validate_staging()?;
     let fragment = Id::try_from(
         queries::insert_fragment(&tail)
             .execute(pool)

@@ -30,14 +30,17 @@ pub(crate) fn pending() -> anyhow::Error {
 
 impl App {
     pub(crate) async fn wait_read(&self, stream: &StoredStream, deadline: Instant) -> Result<bool> {
-        if self.role == "single" {
+        if !self.shared_storage_only() {
             return Ok(false);
         }
-        let Some(cluster) = &self.cluster else {
-            return Ok(false);
-        };
-        let Some(node) = self.node.get() else {
-            return Err(pending());
+        let pending_source = async || {
+            if self.role == "single" {
+                return self.stream_store.remote_pending(stream.id).await;
+            }
+            let node = self.node.get().ok_or_else(pending)?;
+            self.cluster()?
+                .pending_read(&[stream.id], node.node_id)
+                .await
         };
         let key = (stream.id, stream.payload_revision);
         let check = {
@@ -54,15 +57,16 @@ impl App {
         let result = check
             .get_or_init(|| async {
                 let result: Result<bool> = async {
-                    if !cluster.pending_read(&[stream.id], node.node_id).await? {
+                    if !pending_source().await? {
                         return Ok(false);
                     }
-                    // Share both probes without retaining a connection or a backend permit.
-                    tokio::time::sleep_until(deadline).await;
-                    if cluster.pending_read(&[stream.id], node.node_id).await? {
-                        return Err(pending());
+                    for at in probes(deadline) {
+                        tokio::time::sleep_until(at).await;
+                        if !pending_source().await? {
+                            return Ok(true);
+                        }
                     }
-                    Ok(true)
+                    Err(pending())
                 }
                 .await;
                 result.map_err(|error| {
@@ -80,6 +84,14 @@ impl App {
 
 pub(crate) fn deadline() -> Instant {
     Instant::now() + Duration::from_secs(3)
+}
+
+pub(crate) fn probes(deadline: Instant) -> impl Iterator<Item = Instant> {
+    // Skip intermediate probes already overtaken by a slow control request.
+    [2750, 2000, 0].into_iter().filter_map(move |remaining| {
+        let at = deadline - Duration::from_millis(remaining);
+        (remaining == 0 || at > Instant::now()).then_some(at)
+    })
 }
 
 #[cfg(test)]

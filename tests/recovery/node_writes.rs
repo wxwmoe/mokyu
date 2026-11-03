@@ -440,6 +440,24 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
     let second = backend
         .begin_write(&node, &key, request(session.run, second_id))
         .await?;
+    let mut reader = pool.begin().await?;
+    queries::node_session(node.node_id, false)
+        .fetch_one(&mut *reader)
+        .await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        backend.write_status(
+            &node,
+            &key,
+            write::Lookup {
+                run: session.run,
+                operation: second_id,
+            },
+            false,
+        ),
+    )
+    .await??;
+    reader.rollback().await?;
     let remaining: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM node_writes WHERE node_id=$1 AND completed_at<now()-interval '1 day'",
     )

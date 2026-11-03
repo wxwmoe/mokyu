@@ -1,6 +1,7 @@
 use super::*;
 
 pub(in super::super) async fn append_tail(pool: &sqlx::SqlitePool, tail: StreamTail) -> Result<()> {
+    tail.validate_staging()?;
     let fragment = Id::from(
         queries::insert_fragment(&tail)
             .execute(pool)

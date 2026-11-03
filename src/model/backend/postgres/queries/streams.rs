@@ -1,5 +1,9 @@
 use super::*;
 
+pub(in super::super) fn pending_sources(streams: &[Id], node: Option<Uuid>) -> Scalar<'_, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM raw_ranges rr JOIN raw_sources r ON r.id=rr.source_id JOIN raw_uploads u ON u.source_id=r.id WHERE rr.stream_id=ANY($1) AND r.pending_upload AND u.node_id IS DISTINCT FROM $2) OR EXISTS(SELECT 1 FROM extents e JOIN pending_uploads u ON u.chunk_id=e.chunk_id JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=ANY($1) AND u.node_id IS DISTINCT FROM $2 AND c.pack_id IS NULL AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=c.id AND l.state='ready'))").bind(streams).bind(node)
+}
+
 pub(super) type TaskFenceRow = (String, Option<Uuid>, Option<Uuid>, String, Value);
 
 pub(in super::super) fn storage_for_stream(stream: Id) -> Scalar<'static, Option<Uuid>> {

@@ -625,12 +625,7 @@ impl Writes {
         ensure!(
             !fragment.is_nil()
                 && reply.end == offset + u64::from(size)
-                && reply.object_key
-                    == format!(
-                        "{}fragment/{}",
-                        crate::storage::STAGING_PREFIX,
-                        fragment.simple()
-                    ),
+                && reply.object_key == crate::storage::fragment_key(fragment),
             "invalid tail plan"
         );
         if !reply.committed {

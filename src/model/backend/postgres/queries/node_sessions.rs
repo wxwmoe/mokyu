@@ -85,6 +85,33 @@ pub(in super::super) fn node_session(
     sqlx::query_as(sql).bind(node)
 }
 
+pub(in super::super) fn active_node_session(
+    node: Uuid,
+    generation: i64,
+    run: crate::model::session::Run,
+    exclusive: bool,
+) -> Rows<'static, crate::model::session::Session> {
+    // Check expiry after acquiring the row lock, even if the lock wait outlasts the lease.
+    macro_rules! active {
+        ($lock:literal) => {
+            concat!(
+                "WITH held AS MATERIALIZED (SELECT * FROM node_sessions WHERE node_id=$1 FOR ",
+                $lock,
+                ") SELECT * FROM held WHERE credential_generation=$2 AND boot_id=$3 AND fence=$4 AND expires_at>clock_timestamp()"
+            )
+        };
+    }
+    sqlx::query_as(if exclusive {
+        active!("UPDATE")
+    } else {
+        active!("SHARE")
+    })
+    .bind(node)
+    .bind(generation)
+    .bind(run.boot)
+    .bind(run.fence)
+}
+
 pub(in super::super) fn demand_clock() -> Rows<'static, (DateTime<Utc>, bool)> {
     sqlx::query_as("SELECT clock_timestamp(),EXISTS(SELECT 1 FROM bucket_tiering)")
 }

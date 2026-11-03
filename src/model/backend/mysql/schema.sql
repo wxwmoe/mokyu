@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261103033436.
+-- Generated from the complete mysql migration chain through 20261103205120.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -2263,10 +2263,10 @@ CREATE TRIGGER `objects_capture_delete` AFTER DELETE ON `objects` FOR EACH ROW B
             INSERT INTO transfer_changes(task_id,object_key,source_version,snapshot)
                 SELECT task_id,CAST(OLD.object_key AS CHAR CHARACTER SET utf8mb4),NULL,NULL FROM transfer_subscriptions
                 WHERE bucket_id=OLD.bucket_id AND active AND (
-                    JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection'))='all'
-                    OR JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection'))='prefix' AND
+                    CAST(JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection')) AS BINARY)='all'
+                    OR CAST(JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection')) AS BINARY)='prefix' AND
                         LEFT(OLD.object_key,OCTET_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(scope,'$.prefix'))))=CAST(JSON_UNQUOTE(JSON_EXTRACT(scope,'$.prefix')) AS BINARY)
-                    OR JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection'))='objects' AND
+                    OR CAST(JSON_UNQUOTE(JSON_EXTRACT(scope,'$.selection')) AS BINARY)='objects' AND
                         JSON_CONTAINS(JSON_EXTRACT(scope,'$.keys'),JSON_QUOTE(CAST(OLD.object_key AS CHAR CHARACTER SET utf8mb4))))
                 ON DUPLICATE KEY UPDATE object_key=IF(BINARY transfer_changes.object_key=BINARY VALUES(object_key),transfer_changes.object_key,NULL),
                     source_version=NULL,snapshot=NULL,revision=transfer_changes.revision+1;
@@ -2285,10 +2285,10 @@ CREATE TRIGGER `objects_capture_insert` AFTER INSERT ON `objects` FOR EACH ROW B
                         'public',JSON_EXTRACT(IF(s.public_read,'true','false'),'$'),'size',s.size,'etag',s.etag,'payload',s.payload_type)
                 FROM transfer_subscriptions t JOIN streams s ON s.id=NEW.stream_id
                 WHERE t.bucket_id=NEW.bucket_id AND t.active AND (
-                    JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='all'
-                    OR JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='prefix' AND
+                    CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection')) AS BINARY)='all'
+                    OR CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection')) AS BINARY)='prefix' AND
                         LEFT(NEW.object_key,OCTET_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.prefix'))))=CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.prefix')) AS BINARY)
-                    OR JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='objects' AND
+                    OR CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection')) AS BINARY)='objects' AND
                         JSON_CONTAINS(JSON_EXTRACT(t.scope,'$.keys'),JSON_QUOTE(CAST(NEW.object_key AS CHAR CHARACTER SET utf8mb4))))
                 ON DUPLICATE KEY UPDATE object_key=IF(BINARY transfer_changes.object_key=BINARY VALUES(object_key),transfer_changes.object_key,NULL),
                     source_version=VALUES(source_version),snapshot=VALUES(snapshot),revision=transfer_changes.revision+1;
@@ -2307,10 +2307,10 @@ CREATE TRIGGER `objects_capture_update` AFTER UPDATE ON `objects` FOR EACH ROW B
                         'public',JSON_EXTRACT(IF(s.public_read,'true','false'),'$'),'size',s.size,'etag',s.etag,'payload',s.payload_type))
                 FROM transfer_subscriptions t LEFT JOIN streams s ON s.id=NEW.stream_id
                 WHERE t.bucket_id=NEW.bucket_id AND t.active AND (
-                    JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='all'
-                    OR JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='prefix' AND
+                    CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection')) AS BINARY)='all'
+                    OR CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection')) AS BINARY)='prefix' AND
                         LEFT(NEW.object_key,OCTET_LENGTH(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.prefix'))))=CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.prefix')) AS BINARY)
-                    OR JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection'))='objects' AND
+                    OR CAST(JSON_UNQUOTE(JSON_EXTRACT(t.scope,'$.selection')) AS BINARY)='objects' AND
                         JSON_CONTAINS(JSON_EXTRACT(t.scope,'$.keys'),JSON_QUOTE(CAST(NEW.object_key AS CHAR CHARACTER SET utf8mb4))))
                 ON DUPLICATE KEY UPDATE object_key=IF(BINARY transfer_changes.object_key=BINARY VALUES(object_key),transfer_changes.object_key,NULL),
                     source_version=VALUES(source_version),snapshot=VALUES(snapshot),revision=transfer_changes.revision+1;
