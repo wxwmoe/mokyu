@@ -83,7 +83,7 @@ impl Writes {
                 );
                 let check = Integrity::new(&hyper::HeaderMap::new(), None)?;
                 let (received, _, _) = self
-                    .write_body(&operation, body, check, None, Some(size))
+                    .write_body(&operation, body, check, None, Some(size), None)
                     .await?;
                 ensure!(received == size, s3s::s3_error!(IncompleteBody));
                 protection.check()?;
@@ -94,8 +94,7 @@ impl Writes {
                     size,
                     &object.etag,
                     &object.checksums,
-                    None,
-                    None,
+                    Default::default(),
                 )
                 .await?;
                 #[cfg(feature = "fault-injection")]

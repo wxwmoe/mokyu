@@ -135,7 +135,14 @@ impl Writes {
                 );
                 let check = Integrity::new(&headers, None)?;
                 let (size, _, _) = self
-                    .write_body(&operation, body, check, None, Some(source.size as u64))
+                    .write_body(
+                        &operation,
+                        body,
+                        check,
+                        None,
+                        Some(source.size as u64),
+                        None,
+                    )
                     .await?;
                 operation.check()?;
                 if let Ok(Some(cache)) = cache.try_recv()
@@ -146,7 +153,7 @@ impl Writes {
                 drop(io);
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("node-conversion-before-seal").await;
-                self.publish(&operation, size, &etag, &checksums, None, None)
+                self.publish(&operation, size, &etag, &checksums, Default::default())
                     .await?;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("node-conversion-sealed").await;

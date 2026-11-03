@@ -62,12 +62,12 @@ impl Writes {
                 );
                 let check = Integrity::new(&hyper::HeaderMap::new(), Some("SHA256"))?;
                 let (size, etag, sums) = self
-                    .write_body(&operation, body, check, None, Some(incoming.size))
+                    .write_body(&operation, body, check, None, Some(incoming.size), None)
                     .await?;
                 ensure!(size == incoming.size, s3s::s3_error!(IncompleteBody));
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("import-part-written").await;
-                self.publish(&operation, size, &etag, &sums, None, None)
+                self.publish(&operation, size, &etag, &sums, Default::default())
                     .await?;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("import-part-sealed").await;

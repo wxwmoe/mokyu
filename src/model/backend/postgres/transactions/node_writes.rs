@@ -51,9 +51,6 @@ pub(in super::super) async fn begin_node_write(
         !session.draining && queries::node_read_admission().fetch_one(&mut *tx).await?,
         Error::NodeInactive
     );
-    queries::node_write_cleanup(state.node_id)
-        .execute(&mut *tx)
-        .await?;
     ensure!(
         queries::node_write_count(state.node_id)
             .fetch_one(&mut *tx)

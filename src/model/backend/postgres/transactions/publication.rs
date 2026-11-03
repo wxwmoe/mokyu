@@ -111,6 +111,8 @@ pub(in super::super) async fn publish_in(
         None
     };
     check_write_conditions(previous.as_deref(), if_match.as_ref(), if_none.as_ref())?;
+    // Reservation locks quota before shared sources. Publication must use the same order.
+    queries::lock_quota(bucket).execute(&mut **tx).await?;
     if payload_type == "raw" {
         validate_raw(tx, id, size).await?;
     } else {

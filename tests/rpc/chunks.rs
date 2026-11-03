@@ -355,6 +355,7 @@ async fn node_chunk_batches_upload_once_replay_and_publish_over_rpc() -> Result<
         operation_id: operation.clone(),
         size: body.len() as u64,
         etag: format!("{:x}", Md5::digest(&body)),
+        raw_source_id: None,
         checksums_json: b"{}".to_vec(),
         if_match: None,
         if_none: Some("*".into()),

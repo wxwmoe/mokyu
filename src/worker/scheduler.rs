@@ -412,6 +412,21 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
     Ok(ready)
 }
 
+pub(crate) async fn prune_write_receipts(app: &App) -> Result<()> {
+    const BATCH: i64 = 256;
+    loop {
+        match app.node_writes.prune_write_receipts(BATCH).await {
+            Ok(count) if count == BATCH as u64 => {
+                tokio::task::yield_now().await;
+                continue;
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "write receipt cleanup will retry"),
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+
 pub(crate) async fn recover_remote(app: Arc<App>) -> Result<()> {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;

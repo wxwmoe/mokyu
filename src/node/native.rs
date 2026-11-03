@@ -604,7 +604,13 @@ impl Writes {
                 })
                 .await?;
             return self
-                .publish(operation, value.size as u64, &value.etag, &sums, None, None)
+                .publish(
+                    operation,
+                    value.size as u64,
+                    &value.etag,
+                    &sums,
+                    Default::default(),
+                )
                 .await;
         }
     }

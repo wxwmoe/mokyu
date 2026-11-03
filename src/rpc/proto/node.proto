@@ -430,6 +430,7 @@ message PublishWriteRequest {
   bytes checksums_json = 5;
   optional string if_match = 6;
   optional string if_none = 7;
+  optional string raw_source_id = 8;
 }
 
 message PublishedWrite {

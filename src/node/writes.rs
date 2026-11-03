@@ -52,6 +52,11 @@ pub(crate) struct Writes {
 
 pub(crate) use super::request::Request;
 
+struct PutPublication {
+    request: wire::PublishWriteRequest,
+    cache: Option<(crate::storage::raw_request::File, Uuid, u64)>,
+}
+
 struct Operation {
     id: String,
     stream: String,
@@ -305,11 +310,35 @@ impl Writes {
         let operation = self.begin(request, input).await?;
         let _cache = self.reads.public.changing_object(operation.bucket, &key);
         let result = async {
+            let mut publication = PutPublication {
+                request: wire::PublishWriteRequest {
+                    if_match,
+                    if_none,
+                    ..Default::default()
+                },
+                cache: None,
+            };
             let (size, etag, sums) = self
-                .write_body(&operation, body, check, trailers, length)
+                .write_body(
+                    &operation,
+                    body,
+                    check,
+                    trailers,
+                    length,
+                    Some(&mut publication),
+                )
                 .await?;
-            self.publish(&operation, size, &etag, &sums, if_match, if_none)
+            self.publish(&operation, size, &etag, &sums, publication.request)
                 .await?;
+            if let Some((file, source, epoch)) = publication.cache {
+                self.reads.reader.files.fill_request(
+                    file,
+                    source,
+                    &operation.backend.profile,
+                    operation.request.run.clone(),
+                    epoch,
+                );
+            }
             Ok((etag, sums))
         }
         .await;
@@ -332,9 +361,9 @@ impl Writes {
         let result = async {
             let check = Integrity::new(headers, operation.checksum_algorithm.as_deref())?;
             let (size, etag, sums) = self
-                .write_body(&operation, body, check, trailers, length)
+                .write_body(&operation, body, check, trailers, length, None)
                 .await?;
-            self.publish(&operation, size, &etag, &sums, None, None)
+            self.publish(&operation, size, &etag, &sums, Default::default())
                 .await?;
             if !operation.backend.profile.cdc_enabled {
                 self.reads.node.native_work.notify_one();
@@ -361,6 +390,7 @@ impl Writes {
         check: Integrity,
         trailers: Option<s3s::TrailingHeaders>,
         length: Option<u64>,
+        publication: Option<&mut PutPublication>,
     ) -> Result<(u64, String, serde_json::Value)> {
         let profile = &operation.backend.profile;
         if profile.cdc_enabled && profile.upload_cache
@@ -370,7 +400,7 @@ impl Writes {
                 .guard(
                     &self.reads.node,
                     &[],
-                    self.raw(operation, body, check, trailers, length),
+                    self.raw(operation, body, check, trailers, length, publication),
                 )
                 .await;
         }
@@ -390,7 +420,7 @@ impl Writes {
                 .guard(
                     &self.reads.node,
                     &[],
-                    self.raw(operation, body, check, trailers, length),
+                    self.raw(operation, body, check, trailers, length, publication),
                 )
                 .await
         }
@@ -439,8 +469,7 @@ impl Writes {
         size: u64,
         etag: &str,
         sums: &serde_json::Value,
-        if_match: Option<String>,
-        if_none: Option<String>,
+        publication: wire::PublishWriteRequest,
     ) -> Result<wire::WriteReply> {
         operation.check()?;
         let mut reply = self
@@ -453,8 +482,7 @@ impl Writes {
                 size,
                 etag: etag.to_owned(),
                 checksums_json: serde_json::to_vec(sums)?,
-                if_match,
-                if_none,
+                ..publication
             })
             .await?;
         if reply.phase == wire::WritePhase::WritePreparing as i32 {
@@ -574,7 +602,14 @@ impl Writes {
                 let body = crate::http::object::blob(body.map_err(std::io::Error::other).boxed());
                 let check = Integrity::new(&hyper::HeaderMap::new(), None)?;
                 let (size, _, _) = self
-                    .write_body(&operation, body, check, None, Some(object.size as u64))
+                    .write_body(
+                        &operation,
+                        body,
+                        check,
+                        None,
+                        Some(object.size as u64),
+                        None,
+                    )
                     .await?;
                 ensure!(size == object.size as u64, s3s::s3_error!(IncompleteBody));
             }
@@ -591,8 +626,11 @@ impl Writes {
                 object.size as u64,
                 &object.etag,
                 &object.checksums,
-                if_match,
-                if_none,
+                wire::PublishWriteRequest {
+                    if_match,
+                    if_none,
+                    ..Default::default()
+                },
             )
             .await
             .map(|_| ())
@@ -690,6 +728,7 @@ impl Writes {
         mut check: Integrity,
         trailers: Option<s3s::TrailingHeaders>,
         length: Option<u64>,
+        publication: Option<&mut PutPublication>,
     ) -> Result<(u64, String, serde_json::Value)> {
         let node = &self.reads.node;
         let files = &self.reads.reader.files;
@@ -871,18 +910,25 @@ impl Writes {
                 crate::faults::point("node-raw-uploaded").await;
             }
             operation.check()?;
-            let reply = node
-                .client
-                .commit_raw(wire::CommitRawRequest {
-                    run: Some(operation.request.run.run.clone()),
-                    operation_id: operation.id.clone(),
-                    source_id: plan.source_id.clone(),
-                })
-                .await?;
-            ensure!(
-                reply.committed && reply.source_id == plan.source_id && reply.size == size,
-                "invalid raw commit receipt"
-            );
+            if let Some(publication) = publication {
+                publication.request.raw_source_id = Some(plan.source_id);
+                if operation.backend.profile.cache_enabled {
+                    publication.cache = file.take().map(|file| (file, source, epoch));
+                }
+            } else {
+                let reply = node
+                    .client
+                    .commit_raw(wire::CommitRawRequest {
+                        run: Some(operation.request.run.run.clone()),
+                        operation_id: operation.id.clone(),
+                        source_id: plan.source_id.clone(),
+                    })
+                    .await?;
+                ensure!(
+                    reply.committed && reply.source_id == plan.source_id && reply.size == size,
+                    "invalid raw commit receipt"
+                );
+            }
         }
         if let Some(file) = file {
             files.fill_request(

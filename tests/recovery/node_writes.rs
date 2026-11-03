@@ -464,7 +464,37 @@ async fn postgres_node_writes_bind_intent_quota_and_run_ownership() -> Result<()
     .bind(node.node_id)
     .fetch_one(&pool)
     .await?;
-    assert_eq!(remaining, 1);
+    assert_eq!(remaining, 65);
+    sqlx::query("UPDATE node_writes SET created_at=now()-interval '2 days' WHERE operation_id=$1")
+        .bind(second_id)
+        .execute(&pool)
+        .await?;
+    let lease = second.grants[0].id;
+    sqlx::query("UPDATE stream_leases SET expires_at=now()-interval '1 second' WHERE id=$1")
+        .bind(lease)
+        .execute(&pool)
+        .await?;
+    let mut renewal = pool.begin().await?;
+    sqlx::query("UPDATE stream_leases SET expires_at=now()+interval '1 minute' WHERE id=$1")
+        .bind(lease)
+        .execute(&mut *renewal)
+        .await?;
+    let mut busy = pool.begin().await?;
+    sqlx::query("SELECT 1 FROM node_writes WHERE operation_id=$1 FOR UPDATE")
+        .bind(stale)
+        .execute(&mut *busy)
+        .await?;
+    let cleaned = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        backend.prune_write_receipts(64),
+    )
+    .await??;
+    assert_eq!(cleaned, 64);
+    assert_eq!(backend.prune_write_receipts(64).await?, 0);
+    busy.rollback().await?;
+    assert_eq!(backend.prune_write_receipts(64).await?, 1);
+    renewal.commit().await?;
+    assert_eq!(backend.prune_write_receipts(64).await?, 0);
     for id in [stale, dated(chrono::Utc::now().timestamp_millis() + 60_000)] {
         assert_eq!(
             model::error(

@@ -521,6 +521,16 @@ impl crate::model::cluster::NodeWrites for Backend {
             .await
             .map_err(normalize_error)
     }
+    async fn prune_write_receipts(&self, limit: i64) -> Result<u64> {
+        let mut tx = self.pool.begin().await?;
+        self.fence_control(&mut tx).await?;
+        let count = expired_node_writes(limit)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        tx.commit().await?;
+        Ok(count)
+    }
     async fn prepare_raw(
         &self,
         node: &crate::cluster::NodeState,

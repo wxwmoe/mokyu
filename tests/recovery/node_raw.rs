@@ -267,13 +267,37 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
     let mut bad = publication();
     bad.etag = "00000000000000000000000000000000".into();
     assert!(backend.publish_write(&node, &key, bad).await.is_err());
-    assert_eq!(
-        backend
-            .publish_write(&node, &key, publication())
-            .await?
-            .phase,
-        write::Phase::Published
-    );
+    let mut reservation = pool.begin().await?;
+    queries::lock_quota(bucket)
+        .execute(&mut *reservation)
+        .await?;
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *reservation)
+        .await?;
+    let reserve_source = async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)))")
+                .bind(pid).fetch_one(&pool).await?;
+            if waiting {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        sqlx::query("SELECT id FROM raw_sources WHERE id=$1 FOR UPDATE NOWAIT")
+            .bind(source)
+            .fetch_one(&mut *reservation)
+            .await?;
+        reservation.commit().await?;
+        anyhow::Ok(())
+    };
+    let (published, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::try_join!(
+            backend.publish_write(&node, &key, publication()),
+            reserve_source
+        )
+    })
+    .await??;
+    assert_eq!(published.phase, write::Phase::Published);
     assert_eq!(
         backend
             .publish_write(&node, &key, publication())
@@ -314,22 +338,63 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
         ..first.clone()
     };
     let plan = backend.prepare_raw(&node, &key, request.clone()).await?;
-    backend
-        .commit_raw(
-            &node,
-            &key,
-            raw::Commit {
-                run: session.run,
-                operation: empty_id,
-                source: plan.source,
-            },
-        )
-        .await?;
-    let mut publish = publication();
-    publish.operation = empty_id;
-    publish.size = 0;
-    publish.etag = hex::encode(request.input.digest);
-    backend.publish_write(&node, &key, publish).await?;
+    let publish = || {
+        let mut input = publication();
+        input.operation = empty_id;
+        input.size = 0;
+        input.etag = hex::encode(request.input.digest);
+        input.if_none = Some("*".into());
+        input
+    };
+    assert_eq!(
+        model::error(
+            &backend
+                .publish_raw(&node, &key, publish(), Uuid::new_v4())
+                .await
+                .err()
+                .unwrap()
+        ),
+        Some(model::Error::NodeOperationConflict)
+    );
+    let mut stale = publish();
+    stale.run.fence = Uuid::new_v4();
+    assert!(
+        backend
+            .publish_raw(&node, &key, stale, plan.source)
+            .await
+            .is_err()
+    );
+    let replies = futures_util::future::try_join_all(
+        (0..4).map(|_| backend.publish_raw(&node, &key, publish(), plan.source)),
+    )
+    .await?;
+    assert!(
+        replies
+            .iter()
+            .all(|reply| reply.phase == write::Phase::Published)
+    );
+    assert_eq!(
+        model::error(
+            &backend
+                .publish_raw(&node, &key, publish(), Uuid::new_v4())
+                .await
+                .err()
+                .unwrap()
+        ),
+        Some(model::Error::NodeOperationConflict)
+    );
+    let mut changed = publish();
+    changed.if_none = None;
+    assert_eq!(
+        model::error(
+            &backend
+                .publish_raw(&node, &key, changed, plan.source)
+                .await
+                .err()
+                .unwrap()
+        ),
+        Some(model::Error::NodeOperationConflict)
+    );
 
     // A request admitted without a limit must obey a subsequently tightened cap.
     sqlx::query("UPDATE storage_profiles SET upload_concurrency=NULL WHERE storage_id=$1")

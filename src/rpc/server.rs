@@ -524,13 +524,19 @@ impl NodeWrites for Service {
         request: Request<wire::PublishWriteRequest>,
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = write_identity(&request)?;
-        let input = super::write::publish(write_request(request)?)?;
-        let reply = bounded(self.app.node_writes.publish_write(
-            &node,
-            &self.app.secrets.credential_key,
-            input,
-        ))
-        .await?;
+        let request = write_request(request)?;
+        let source = request
+            .raw_source_id
+            .as_deref()
+            .map(super::uuid)
+            .transpose()?;
+        let input = super::write::publish(request)?;
+        let writes = &self.app.node_writes;
+        let key = &self.app.secrets.credential_key;
+        let reply = match source {
+            Some(source) => bounded(writes.publish_raw(&node, key, input, source)).await?,
+            None => bounded(writes.publish_write(&node, key, input)).await?,
+        };
         self.app.wake_gc.notify_one();
         self.app.wake_raw_uploads.notify_one();
         self.app.wake_tasks.notify_one();

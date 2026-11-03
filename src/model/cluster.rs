@@ -401,6 +401,26 @@ pub(crate) trait NodeWrites: NativeParts + RemoteParts + Send + Sync {
         key: &Key,
         input: super::node_write::Publish,
     ) -> Result<super::node_write::Reply>;
+    async fn prune_write_receipts(&self, _limit: i64) -> Result<u64> {
+        Ok(0)
+    }
+    async fn publish_raw(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_write::Publish,
+        source: Uuid,
+    ) -> Result<super::node_write::Reply> {
+        let raw = super::node_raw::Commit {
+            run: input.run,
+            operation: input.operation,
+            source,
+        };
+        self.commit_raw(node, key, raw).await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("node-raw-committed").await;
+        self.publish_write(node, key, input).await
+    }
     async fn prepare_raw(
         &self,
         node: &NodeState,

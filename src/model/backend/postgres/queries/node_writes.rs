@@ -35,7 +35,7 @@ pub(in super::super) fn node_write(node: Uuid, operation: Uuid) -> Rows<'static,
 }
 
 pub(in super::super) fn node_write_count(node: Uuid) -> Scalar<'static, i64> {
-    sqlx::query_scalar("SELECT count(*) FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND w.state='active' AND l.expires_at>clock_timestamp()").bind(node)
+    sqlx::query_scalar("SELECT count(*) FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND w.state='active' AND w.lease_id IS NOT NULL AND l.expires_at>clock_timestamp()").bind(node)
 }
 
 #[derive(sqlx::FromRow)]
@@ -147,20 +147,27 @@ pub(in super::super) fn node_write_limit(id: Uuid) -> Scalar<'static, Option<i32
     .bind(id)
 }
 
-pub(in super::super) fn node_write_cleanup(node: Uuid) -> Statement<'static> {
+pub(in super::super) fn expired_node_writes(limit: i64) -> Statement<'static> {
     sqlx::query(
         "WITH expired AS MATERIALIZED (
-            SELECT w.operation_id FROM node_writes w
-            LEFT JOIN stream_leases l ON l.id=w.lease_id
-            WHERE w.node_id=$1 AND (w.state<>'active' OR w.publish_hash IS NULL)
-              AND COALESCE(w.completed_at,w.created_at)<clock_timestamp()-interval '1 day'
-              AND (l.id IS NULL OR l.expires_at<=clock_timestamp())
-            ORDER BY w.created_at LIMIT 64
+            SELECT n.id, old.operation_id FROM nodes n
+            CROSS JOIN LATERAL (
+                SELECT w.operation_id FROM node_writes w
+                WHERE w.node_id=n.id AND w.created_at<statement_timestamp()-interval '1 day'
+                  AND (w.state<>'active' OR w.publish_hash IS NULL)
+                  AND COALESCE(w.completed_at,w.created_at)<statement_timestamp()-interval '1 day'
+                  AND (w.lease_id IS NULL OR EXISTS (
+                      SELECT 1 FROM stream_leases l WHERE l.id=w.lease_id
+                      AND l.expires_at<=statement_timestamp() FOR UPDATE SKIP LOCKED
+                  ))
+                ORDER BY w.created_at LIMIT $1 FOR UPDATE OF w SKIP LOCKED
+            ) old
+            LIMIT $1
         )
         DELETE FROM node_writes w USING expired
-        WHERE w.node_id=$1 AND w.operation_id=expired.operation_id",
+        WHERE w.node_id=expired.id AND w.operation_id=expired.operation_id",
     )
-    .bind(node)
+    .bind(limit)
 }
 
 #[allow(clippy::too_many_arguments)]

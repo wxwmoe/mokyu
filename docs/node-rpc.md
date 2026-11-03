@@ -45,7 +45,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | `NodeWork/ReadTransfer` | Unary；worker/node 取得当前导出来源或导入对比目标的窗口、缺少的材料和读取保护；raw 附带持久化分段证明，响应窗口可短于请求长度 |
 | `NodeWrites/PrepareTail` | Unary；为 chunks 分片的未闭合尾部预留共享 staging、配额和上传许可 |
 | `NodeWrites/CommitTail` | Unary；确认尾部持久化并建立片段映射，重复确认复用同一结果 |
-| `NodeWrites/PublishWrite` | Unary；核对完整性、条件和配额，原子发布对象并保存终态回执 |
+| `NodeWrites/PublishWrite` | Unary；可携带 `raw_source_id` 一并确认已准备的来源，核对完整性、条件和配额，原子发布对象并保存终态回执 |
 | `NodeWrites/WriteStatus` | Unary；按节点与操作身份查询写入状态，不返回存储凭据 |
 | `NodeWrites/AbortWrite` | Unary；取消当前运行权持有的写入，同事务释放写租约和预留配额 |
 
@@ -169,9 +169,9 @@ CommitChunks 携带本批新增物理编码的 ID 和密文字节摘要，省略
 
 HTTP PUT 的可靠 chunks 接收按 CDC 边界流式形成最多 8 MiB 的批次，同时保留两个批次；上传受节点额度和实际返回的存储许可共同限制。完整正文、流式签名尾块和校验和通过后才调用 PublishWrite；零字节对象不调用区块接口。发布使本节点对应对象及其别名的公共快照失效。已经确认的发布回执不因写租约随后结束而改判失败。
 
-inline raw 普通 PUT 先使用节点本地请求暂存空间接收并校验完整文件，上限 5 GiB。PrepareRaw 包含长度、16 字节 MD5、按 1 MiB 页顺序排列的 `page_hashes`、`local`，以及 inline 整文件去重需要的 32 字节 BLAKE3；同一操作必须重放相同输入。去重命中直接建立引用并返回已确认状态，不上传对象、不占存储上传许可。未命中且 `local=false` 时，control 先持久化最终 raw 身份，再返回上传许可；节点流式 PUT 到最终 S3 key，成功后调用 CommitRaw，最后 PublishWrite。该流式 PUT 将存储的 `request_timeout` 用作无传输进展或等待响应的超时，持续传输不受整文件总时长限制；失败重试从本地文件重新发送，仍受重试次数和期限限制。PrepareRaw 与 CommitRaw 都可重试，上传许可同样通过 NodeSession 续期；取消或过期不会抹去外部上传的清理记录。请求暂存与本地缓存共享磁盘容量和最低剩余空间约束，暂存空间不足返回可重试错误。
+inline raw 普通 PUT 先使用节点本地请求暂存空间接收并校验完整文件，上限 5 GiB。PrepareRaw 包含长度、16 字节 MD5、按 1 MiB 页顺序排列的 `page_hashes`、`local`，以及 inline 整文件去重需要的 32 字节 BLAKE3；同一操作必须重放相同输入。去重命中直接建立引用并返回已确认状态，不上传对象、不占存储上传许可。未命中且 `local=false` 时，control 先持久化最终 raw 身份，再返回上传许可；节点流式 PUT 到最终 S3 key，成功后在 PublishWrite 中携带已分配的 `raw_source_id`，一次往返确认来源和发布结果。响应丢失时沿用相同操作、来源和条件重试，可以从其他 control 取回持久回执。该流式 PUT 将存储的 `request_timeout` 用作无传输进展或等待响应的超时，持续传输不受整文件总时长限制；失败重试从本地文件重新发送，仍受重试次数和期限限制。PrepareRaw 和带来源的 PublishWrite 均可按原操作重试，上传许可同样通过 NodeSession 续期；取消或过期不会抹去外部上传的清理记录。请求暂存与本地缓存共享磁盘容量和最低剩余空间约束，暂存空间不足返回可重试错误。
 
-普通 PUT 启用写缓存时使用 `local=true`，节点先同步本地文件和目录，再调用 CommitRaw 保存来源、所属节点和必须完成的排空任务，最后发布对象。raw 后台去重先计算摘要并查询重复来源，再上传；chunks 按接受时的编码策略在原节点执行 CDC，可直接生成最终区块包。唯一缓存只能由所属节点处理，同节点读取校验本地文件，其他节点沿用短暂等待和可重试响应。节点本地持久化不提供节点丢失冗余。
+普通 PUT 启用写缓存时使用 `local=true`，节点先同步本地文件和目录，再通过 PublishWrite 一并确认来源、所属节点、排空任务和发布结果。raw 后台去重先计算摘要并查询重复来源，再上传；chunks 按接受时的编码策略在原节点执行 CDC，可直接生成最终区块包。唯一缓存只能由所属节点处理，同节点读取校验本地文件，其他节点沿用短暂等待和可重试响应。节点本地持久化不提供节点丢失冗余。
 
 写缓存遵守节点总容量和存储的 `upload_cache_size`。满额使用 `fallback` 时关闭此次提前确认；已知长度的 inline chunks 请求直接走有界内存流水线。`reject` 返回 503、`Retry-After: 60` 和 `Cache-Control: no-store`，不覆盖原对象。原节点的排空在停止准入后仍可推进；任务结果、任务保护和上传许可通过 Exchange 与 NodeSession 恢复，过期的执行结果不能发布。
 

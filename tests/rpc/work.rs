@@ -220,6 +220,7 @@ async fn node_import_parts_reject_stale_runs_and_changed_seals() -> Result<()> {
             .as_u64()
             .ok_or_else(|| anyhow::anyhow!("import size missing"))?,
         etag: string("etag")?,
+        raw_source_id: None,
         checksums_json: serde_json::to_vec(&value["checksums"])?,
         if_match: None,
         if_none: None,

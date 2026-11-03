@@ -165,14 +165,21 @@ impl Writes {
                                 value.algorithm.as_deref(),
                             )?;
                             let received = writes
-                                .write_body(&operation, body, check, None, Some(value.size as u64))
+                                .write_body(
+                                    &operation,
+                                    body,
+                                    check,
+                                    None,
+                                    Some(value.size as u64),
+                                    None,
+                                )
                                 .await;
                             if let Some(error) = source_error.lock().unwrap().take() {
                                 return Err(error);
                             }
                             let (size, _, sums) = received?;
                             let reply = writes
-                                .publish(&operation, size, &value.etag, &sums, None, None)
+                                .publish(&operation, size, &value.etag, &sums, Default::default())
                                 .await?;
                             summary(&reply)
                         }

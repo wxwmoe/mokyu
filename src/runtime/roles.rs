@@ -79,6 +79,7 @@ async fn run_single(app: Arc<app::App>) -> Result<()> {
         result = serve_s3(s3_listener, s3, connections.clone(), app.clone()) => result?,
         result = serve_router(web_listener, http::public_router(app.clone()), connections.clone(), app.clone()) => result?,
         result = serve_router(control_listener, control::router(app.clone()), connections.clone(), app.clone()) => result?,
+        result = crate::worker::scheduler::prune_write_receipts(&app), if app.deployment_mode() == "single_control" && app.config.database.backend == crate::config::DatabaseType::Postgres => result?,
         result = crate::worker::scheduler::recover_remote(app.clone()), if app.deployment_mode() == "single_control" => result?,
         result = cluster::report::run(app.clone(), false), if app.deployment_mode() == "single_control" => result?,
         result = cluster::report::aggregate(app.clone()), if app.deployment_mode() == "single_control" => result?,
@@ -130,6 +131,7 @@ async fn run_control(app: Arc<app::App>) -> Result<()> {
     tokio::select! {
         result = cluster::report::run(app.clone(), false) => result?,
         result = cluster::control_loop(app.clone()) => result?,
+        result = crate::worker::scheduler::prune_write_receipts(&app) => result?,
         result = cluster::notifications::run(app.clone()) => result?,
         result = cluster::report::aggregate(app.clone()) => result?,
         result = access::run(app.clone()) => result?,
