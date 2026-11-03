@@ -272,7 +272,7 @@ pub(in super::super) fn report_window(
 }
 pub(in super::super) fn verification_count() -> Scalar<'static, i64> {
     sqlx::query_scalar(
-        "SELECT count(*) FROM tasks WHERE state IN ('queued','running','paused') AND task_type='integrity' AND JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation'))='verify'",
+        "SELECT count(*) FROM tasks WHERE state IN ('queued','running','paused') AND task_type='integrity' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')) AS BINARY)='verify'",
     )
 }
 pub(in super::super) fn reported(task: Uuid) -> Scalar<'static, bool> {

@@ -85,7 +85,7 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
         {
             Some(crate::model::Error::RedundancyBacklog)
         }
-        1205 | 1213 => Some(crate::model::Error::OperationAborted),
+        1020 | 1205 | 1213 => Some(crate::model::Error::OperationAborted),
         1317 | 1969 | 3024 => Some(crate::model::Error::QueryCancelled),
         _ => None,
     }

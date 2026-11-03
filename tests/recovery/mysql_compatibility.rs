@@ -1,6 +1,6 @@
 use super::{connection, queries};
 use crate::config::Config;
-use crate::model::TaskControlStore;
+use crate::model::{TaskControlStore, maintenance::MaintenanceStore};
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -16,7 +16,29 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
     let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
     let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
     let backend = connection::open(&config, &secrets, &budget, "single").await?;
+    backend.recover(false).await?;
     let db = &backend.pool;
+    let node = Uuid::new_v4();
+    queries::node_registry::insert(node, "pulse-race", "data", &[1])
+        .execute(db)
+        .await?;
+    let mut pulse = db.begin().await?;
+    queries::node_registry::seen(node)
+        .execute(&mut *pulse)
+        .await?;
+    let mut request = db.begin().await?;
+    let mut lookup = Box::pin(queries::node_registry::node(node).fetch_one(&mut *request));
+    tokio::select! {
+        _ = &mut lookup => anyhow::bail!("node lookup did not wait for the active pulse"),
+        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+    }
+    pulse.commit().await?;
+    tokio::time::timeout(Duration::from_secs(2), lookup).await??;
+    request.rollback().await?;
+    sqlx::query("DELETE FROM nodes WHERE id=?")
+        .bind(node)
+        .execute(db)
+        .await?;
     for name in ["Case", "case", "case ", "\u{732b}", "\u{732b} "] {
         sqlx::query("INSERT INTO projects(id,name) VALUES(?,?)")
             .bind(Uuid::new_v4())

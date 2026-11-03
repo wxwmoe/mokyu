@@ -603,11 +603,6 @@ impl App {
             mode != "cluster" || self.config.database.backend.supports_cluster(),
             ModeConflict("cluster mode requires PostgreSQL")
         );
-        #[cfg(not(any(test, feature = "fault-injection")))]
-        ensure!(
-            mode != "single_control",
-            ModeConflict("single control is not available in this build")
-        );
         let _coord = self.coord.lock().await;
         let current = self.runtime.state().await?.mode;
         if current == mode {

@@ -239,7 +239,7 @@ impl TaskControlStore for Backend {
             .transpose()
     }
     async fn other_integrity(&self, id: Uuid) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND JSON_EXTRACT(detail,'$.source_operation') IS NULL AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')),'')<>'external_test' AND state IN ('queued','running') AND id<>?)").bind(id).fetch_one(&self.pool).await?)
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tasks WHERE task_type='integrity' AND JSON_EXTRACT(detail,'$.source_operation') IS NULL AND NOT (CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')) AS BINARY) <=> 'external_test') AND state IN ('queued','running') AND id<>?)").bind(id).fetch_one(&self.pool).await?)
     }
     async fn enqueue(&self, task_type: &str, bucket: Option<Uuid>, detail: Value) -> Result<Uuid> {
         transactions::enqueue_task(&mut *self.pool.acquire().await?, task_type, bucket, detail)
@@ -288,7 +288,7 @@ impl TaskControlStore for Backend {
     async fn change_state(&self, id: Uuid, parent: bool, resume: bool) -> Result<bool> {
         ensure!(!parent, "MySQL does not support child tasks");
         let query = if resume {
-            "UPDATE tasks t LEFT JOIN storage_profiles p ON p.storage_id=UNHEX(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.storage_id')),'-','')) SET t.state='queued',t.error=NULL,t.updated_at=CURRENT_TIMESTAMP(6),t.detail=IF(p.storage_id IS NOT NULL AND JSON_CONTAINS_PATH(t.detail,'one','$.profile_revision'),JSON_SET(t.detail,'$.profile_revision',p.revision),t.detail) WHERE t.id=? AND t.state IN ('paused','failed') AND COALESCE(t.error,'') NOT IN ('replica_pending','replica_drain') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')),'false')<>'true'"
+            "UPDATE tasks t LEFT JOIN storage_profiles p ON p.storage_id=UNHEX(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.storage_id')),'-','')) SET t.state='queued',t.error=NULL,t.updated_at=CURRENT_TIMESTAMP(6),t.detail=IF(p.storage_id IS NOT NULL AND JSON_CONTAINS_PATH(t.detail,'one','$.profile_revision'),JSON_SET(t.detail,'$.profile_revision',p.revision),t.detail) WHERE t.id=? AND t.state IN ('paused','failed') AND COALESCE(t.error,'') NOT IN ('replica_pending','replica_drain') AND NOT (CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')) AS BINARY) <=> 'true')"
         } else {
             "UPDATE tasks SET state='paused',updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND state IN ('queued','running')"
         };

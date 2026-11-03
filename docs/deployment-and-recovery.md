@@ -64,6 +64,8 @@ Compose 将配置只读挂载、数据目录可写挂载；PostgreSQL 在独立�
 
 设置 `[database]` 的 `type = "mysql"`，复用 `host`、`port`（默认 `3306`）、`name`、`user`、密码和 SSL 字段。自行准备 MySQL 8.0.19+ 或 MariaDB 10.6.3+ 空库与具备建表、索引和迁移权限的用户；程序自动识别服务器，数据表由 Mokyu 初始化。示例 Compose 使用 PostgreSQL 18，选择 MySQL/MariaDB 时替换数据库服务及其持久卷。`innodb_flush_log_at_trx_commit` 必须为 `1`。新部署建议使用仍在维护的稳定版或 LTS 的最新补丁。
 
+MySQL 启用 binlog 时，初始化和涉及触发器的迁移需要符合服务器的触发器创建权限。请在维护窗口由 DBA 授权，建表完成后收回临时权限。日常连接可限定在本部署的库和主容器来源地址。[MySQL 触发器权限](https://dev.mysql.com/doc/refman/8.4/en/create-trigger.html)
+
 一个 MySQL 或 MariaDB 库由一个主容器独占。主容器启动时取得连接级锁，锁连接丢失时退出。单容器可使用 local 或 S3。在单主控群集内使用共享 S3，远端 data、worker 和 node 通过 gRPC 接入。
 
 ### SQLite 单容器模式

@@ -43,10 +43,10 @@ impl TestRow {
     }
 }
 pub(in super::super) fn test(id: Uuid) -> Rows<'static, TestRow> {
-    sqlx::query_as("SELECT e.id,e.external_id,e.revision,e.connection_encrypted,e.node_id,e.attempts,e.report,e.cleanup_required,CAST(UNIX_TIMESTAMP(e.created_at)*1000000 AS SIGNED) AS created_at,CAST(UNIX_TIMESTAMP(e.updated_at)*1000000 AS SIGNED) AS updated_at,t.state,COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')),'false')='true' AS stopped FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.id=?").bind(id)
+    sqlx::query_as("SELECT e.id,e.external_id,e.revision,e.connection_encrypted,e.node_id,e.attempts,e.report,e.cleanup_required,CAST(UNIX_TIMESTAMP(e.created_at)*1000000 AS SIGNED) AS created_at,CAST(UNIX_TIMESTAMP(e.updated_at)*1000000 AS SIGNED) AS updated_at,t.state,(CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')) AS BINARY) <=> 'true') AS stopped FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.id=?").bind(id)
 }
 pub(in super::super) fn latest_test(id: Uuid) -> Rows<'static, TestRow> {
-    sqlx::query_as("SELECT e.id,e.external_id,e.revision,e.connection_encrypted,e.node_id,e.attempts,e.report,e.cleanup_required,CAST(UNIX_TIMESTAMP(e.created_at)*1000000 AS SIGNED) AS created_at,CAST(UNIX_TIMESTAMP(e.updated_at)*1000000 AS SIGNED) AS updated_at,t.state,COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')),'false')='true' AS stopped FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.external_id=? ORDER BY e.created_at DESC,e.id DESC LIMIT 1").bind(id)
+    sqlx::query_as("SELECT e.id,e.external_id,e.revision,e.connection_encrypted,e.node_id,e.attempts,e.report,e.cleanup_required,CAST(UNIX_TIMESTAMP(e.created_at)*1000000 AS SIGNED) AS created_at,CAST(UNIX_TIMESTAMP(e.updated_at)*1000000 AS SIGNED) AS updated_at,t.state,(CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')) AS BINARY) <=> 'true') AS stopped FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.external_id=? ORDER BY e.created_at DESC,e.id DESC LIMIT 1").bind(id)
 }
 pub(in super::super) fn insert_test(
     id: Uuid,
@@ -57,7 +57,7 @@ pub(in super::super) fn insert_test(
         .bind(Json(crate::model::external_test::State { report: input.report.clone(), started: false }))
 }
 pub(in super::super) fn test_owned(task: crate::model::task::Execution) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT t.id FROM tasks t STRAIGHT_JOIN external_tests e ON e.id=t.id WHERE t.id=? AND t.execution_token=? AND t.state='running' AND t.task_type='integrity' AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test' FOR UPDATE").bind(task.id).bind(task.token)
+    sqlx::query_scalar("SELECT t.id FROM tasks t STRAIGHT_JOIN external_tests e ON e.id=t.id WHERE t.id=? AND t.execution_token=? AND t.state='running' AND t.task_type='integrity' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation')) AS BINARY)='external_test' FOR UPDATE").bind(task.id).bind(task.token)
 }
 pub(in super::super) fn test_dispatched(
     id: Uuid,
@@ -164,7 +164,7 @@ pub(in super::super) fn update(input: &Save) -> Statement<'_> {
         .bind(&input.name).bind(Json(&input.connection)).bind(&input.access_encrypted).bind(&input.secret_encrypted).bind(input.enabled).bind(input.id).bind(input.project_id).bind(input.expected)
 }
 pub(in super::super) fn referenced(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM redundancy_links WHERE external_bucket=?) OR EXISTS(SELECT 1 FROM transfer_connections WHERE external_id=?) OR EXISTS(SELECT 1 FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.external_id=? AND (e.cleanup_required OR t.state<>'completed') AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')),'false')<>'true')").bind(id).bind(id).bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM redundancy_links WHERE external_bucket=?) OR EXISTS(SELECT 1 FROM transfer_connections WHERE external_id=?) OR EXISTS(SELECT 1 FROM external_tests e JOIN tasks t ON t.id=e.id WHERE e.external_id=? AND (e.cleanup_required OR t.state<>'completed') AND NOT (CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.test_stopped')) AS BINARY) <=> 'true'))").bind(id).bind(id).bind(id)
 }
 pub(in super::super) fn delete(id: Uuid, revision: i64) -> Statement<'static> {
     sqlx::query("DELETE FROM external_buckets WHERE id=? AND revision=?")
@@ -213,7 +213,7 @@ pub(in super::super) fn token_grant(
 }
 
 pub(in super::super) fn test_stop(id: Uuid, external: Uuid) -> Statement<'static> {
-    sqlx::query(r#"UPDATE tasks t SET t.state='failed',t.error='external test recovery was stopped',t.execution_token=NULL,t.detail=JSON_SET(t.detail,'$.test_stopped',JSON_EXTRACT('true','$')),t.updated_at=CURRENT_TIMESTAMP(6) WHERE t.id=? AND t.state IN ('queued','paused','failed') AND JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation'))='external_test' AND EXISTS(SELECT 1 FROM external_tests e WHERE e.id=t.id AND e.external_id=?)"#).bind(id).bind(external)
+    sqlx::query(r#"UPDATE tasks t SET t.state='failed',t.error='external test recovery was stopped',t.execution_token=NULL,t.detail=JSON_SET(t.detail,'$.test_stopped',JSON_EXTRACT('true','$')),t.updated_at=CURRENT_TIMESTAMP(6) WHERE t.id=? AND t.state IN ('queued','paused','failed') AND CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.operation')) AS BINARY)='external_test' AND EXISTS(SELECT 1 FROM external_tests e WHERE e.id=t.id AND e.external_id=?)"#).bind(id).bind(external)
 }
 
 pub(in super::super) fn test_forget_secret(id: Uuid) -> Statement<'static> {
