@@ -287,17 +287,50 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
             .bind(source)
             .fetch_one(&mut *reservation)
             .await?;
+        sqlx::query("UPDATE raw_sources SET quarantine_code='digest_mismatch' WHERE id=$1")
+            .bind(source)
+            .execute(&mut *reservation)
+            .await?;
         reservation.commit().await?;
         anyhow::Ok(())
     };
-    let (published, ()) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        tokio::try_join!(
+    let (published, reserved) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(
             backend.publish_write(&node, &key, publication()),
             reserve_source
         )
     })
-    .await??;
-    assert_eq!(published.phase, write::Phase::Published);
+    .await?;
+    reserved?;
+    assert_eq!(
+        model::error(&published.err().unwrap()),
+        Some(model::Error::SourceUnavailable)
+    );
+    sqlx::query("UPDATE raw_sources SET quarantine_code=NULL WHERE id=$1")
+        .bind(source)
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE raw_ranges SET source_offset=1 WHERE stream_id=$1")
+        .bind(stream)
+        .execute(&pool)
+        .await?;
+    assert!(
+        backend
+            .publish_write(&node, &key, publication())
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE raw_ranges SET source_offset=0 WHERE stream_id=$1")
+        .bind(stream)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        backend
+            .publish_write(&node, &key, publication())
+            .await?
+            .phase,
+        write::Phase::Published
+    );
     assert_eq!(
         backend
             .publish_write(&node, &key, publication())

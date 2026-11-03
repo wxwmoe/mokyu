@@ -131,12 +131,41 @@ pub(in super::super) fn raw_attach(stream: Id, source: Id, size: i64) -> Stateme
     .bind(source)
 }
 
-pub(in super::super) fn raw_sources_lock(stream: Id) -> Rows<'static, RawSource> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id IN (SELECT source_id FROM raw_ranges WHERE stream_id=$1) ORDER BY r.id FOR UPDATE").bind(stream)
+#[derive(sqlx::FromRow)]
+pub(in super::super) struct CheckedRawSource {
+    #[sqlx(flatten)]
+    pub source: RawSource,
+    pub covered: bool,
 }
 
-pub(in super::super) fn raw_continuity(stream: Id) -> Rows<'static, (i64, bool)> {
-    sqlx::query_as("SELECT COALESCE(MAX(e.offset_bytes+e.length),0),COALESCE(bool_and(e.offset_bytes=e.previous_end AND e.source_offset+e.length<=r.size),TRUE) AND NOT EXISTS(SELECT 1 FROM extents WHERE stream_id=$1) FROM (SELECT *,LAG(offset_bytes+length,1,0) OVER(ORDER BY offset_bytes) AS previous_end FROM raw_ranges WHERE stream_id=$2) e JOIN raw_sources r ON r.id=e.source_id").bind(stream).bind(stream)
+pub(in super::super) fn raw_sources_lock(
+    stream: Id,
+    size: i64,
+    quota: Option<Uuid>,
+) -> Rows<'static, CheckedRawSource> {
+    sqlx::query_as(
+        "WITH ranges AS MATERIALIZED (
+             SELECT source_id, source_offset+length AS source_end, offset_bytes+length AS stream_end,
+                    offset_bytes=lag(offset_bytes+length,1,0) OVER (ORDER BY offset_bytes) AS contiguous
+             FROM raw_ranges WHERE stream_id=$1
+         ), layout AS MATERIALIZED (
+             SELECT max(stream_end)=$2 AND bool_and(contiguous)
+                        AND NOT EXISTS (SELECT 1 FROM extents WHERE stream_id=$1) AS valid,
+                    CASE WHEN $3::uuid IS NOT NULL THEN quota_lock($3) END AS project
+             FROM ranges
+         )
+         SELECT r.id AS raw_id, r.id AS raw_location, r.storage_id AS raw_storage, r.size AS raw_size,
+                r.digest AS raw_digest, r.state AS raw_state, r.medium AS raw_medium,
+                r.pending_upload AS raw_pending, r.revision AS raw_revision, r.quarantine_code AS raw_quarantine,
+                layout.valid AND bounds.source_end<=r.size AS covered
+         FROM (SELECT source_id,max(source_end) AS source_end FROM ranges GROUP BY source_id) bounds
+         JOIN raw_sources r ON r.id=bounds.source_id CROSS JOIN layout
+         WHERE $3::uuid IS NULL OR layout.project IS NOT NULL
+         ORDER BY r.id FOR UPDATE OF r",
+    )
+    .bind(stream)
+    .bind(size)
+    .bind(quota)
 }
 
 pub(in super::super) fn raw_cleanup_ranges(stream: Id, batch: i64) -> Rows<'static, (i64, Id)> {

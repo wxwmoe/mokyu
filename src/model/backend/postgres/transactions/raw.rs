@@ -229,16 +229,24 @@ pub(in super::super) async fn finish_raw(
 }
 
 pub(super) async fn validate_raw(db: &mut sqlx::PgConnection, stream: Id, size: i64) -> Result<()> {
-    let sources = queries::raw_sources_lock(stream)
-        .fetch_all(&mut *db)
+    validate_raw_mapping(db, stream, size, None).await
+}
+
+pub(super) async fn validate_raw_mapping(
+    db: &mut sqlx::PgConnection,
+    stream: Id,
+    size: i64,
+    quota: Option<Uuid>,
+) -> Result<()> {
+    let sources = queries::raw_sources_lock(stream, size, quota)
+        .fetch_all(db)
         .await?;
     ensure!(!sources.is_empty(), "raw generation has no source");
-    for source in sources {
-        source.validate()?;
+    for row in &sources {
+        row.source.validate()?;
     }
-    let (end, contiguous) = queries::raw_continuity(stream).fetch_one(db).await?;
     ensure!(
-        end == size && contiguous,
+        sources.iter().all(|row| row.covered),
         "cannot publish an incomplete raw generation"
     );
     Ok(())

@@ -111,11 +111,11 @@ pub(in super::super) async fn publish_in(
         None
     };
     check_write_conditions(previous.as_deref(), if_match.as_ref(), if_none.as_ref())?;
-    // Reservation locks quota before shared sources. Publication must use the same order.
-    queries::lock_quota(bucket).execute(&mut **tx).await?;
     if payload_type == "raw" {
-        validate_raw(tx, id, size).await?;
+        // Check the locked stream's layout, then lock quota before any shared source.
+        validate_raw_mapping(tx, id, size, Some(bucket)).await?;
     } else {
+        queries::lock_quota(bucket).execute(&mut **tx).await?;
         let invalid: bool = queries::incomplete_extents(id).fetch_one(&mut **tx).await?;
         anyhow::ensure!(!invalid, "cannot publish an incomplete generation");
         let (end, contiguous): (i64, bool) =
