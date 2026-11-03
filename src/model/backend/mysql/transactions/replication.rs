@@ -493,7 +493,7 @@ impl ReplicationStore for Backend {
     }
 }
 
-#[path = "../../shared/replication_step.rs"]
+#[path = "../../../shared/replication_step.rs"]
 mod steps;
 pub(in super::super) use steps::step_in;
 

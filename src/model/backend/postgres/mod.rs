@@ -1,35 +1,35 @@
 pub(crate) const USER_LOCK: i64 = 734922709851002;
 
 mod connection;
-#[path = "../shared/image.rs"]
+#[path = "../../shared/image.rs"]
 mod image_transactions;
 mod migration;
-#[path = "../shared/node_reads.rs"]
+#[path = "../../shared/node/reads.rs"]
 mod node_reads;
-#[path = "../shared/node_requests.rs"]
+#[path = "../../shared/node/requests.rs"]
 mod node_requests;
-#[path = "../shared/notices.rs"]
+#[path = "../../shared/node/notices.rs"]
 mod notices;
 mod queries;
-#[path = "../shared/raw_pages.rs"]
+#[path = "../../shared/raw_pages.rs"]
 mod raw_pages;
-#[path = "../shared/read_map.rs"]
+#[path = "../../shared/node/read_map.rs"]
 mod read_map;
 mod refresh;
-#[path = "../shared/replica.rs"]
+#[path = "../../shared/replica.rs"]
 mod replica_transactions;
-#[path = "../shared/tier_access.rs"]
+#[path = "../../shared/tier_access.rs"]
 mod tier_access;
-#[path = "../shared/tier_moves.rs"]
+#[path = "../../shared/tier_moves.rs"]
 mod tier_move_transactions;
-#[path = "../shared/tier.rs"]
+#[path = "../../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
-#[path = "../shared/work_audit.rs"]
+#[path = "../../shared/work/audit.rs"]
 mod work_audit;
-#[path = "../shared/work_sources.rs"]
+#[path = "../../shared/work/sources.rs"]
 mod work_sources;
-#[path = "../shared/work_sweep.rs"]
+#[path = "../../shared/work/sweep.rs"]
 mod work_sweep;
 
 #[cfg(test)]

@@ -164,7 +164,7 @@ pub(super) mod replication;
 pub(super) mod replication_changes;
 pub(super) mod replication_import;
 pub(super) mod replication_remote;
-#[path = "../../shared/read_sources.rs"]
+#[path = "../../../shared/node/read_sources.rs"]
 pub(super) mod sources;
 pub(super) use sources::{NodeReadChunk, NodeReadFragment, NodeReadRaw};
 pub(super) mod tier;

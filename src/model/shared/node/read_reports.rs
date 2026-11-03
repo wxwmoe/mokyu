@@ -86,7 +86,7 @@ pub(super) async fn report(
         .await?
         .ok_or(Error::NodeExpired)?
         .0;
-    let scopes = super::read_map::report_scopes(&mapping, &input.segments)?;
+    let scopes = mapping.report_scopes(&input.segments)?;
     let mut count = q::verification_count().fetch_one(&mut *tx).await?;
     let mut tasks = Vec::new();
     for (identity, scope) in scopes {

@@ -1,70 +1,70 @@
 mod connection;
-#[path = "../shared/embedded_native.rs"]
+#[path = "../../shared/node/embedded_native.rs"]
 mod embedded_native;
-#[path = "../shared/image.rs"]
+#[path = "../../shared/image.rs"]
 mod image_transactions;
 mod migration;
-#[path = "../shared/native_parts.rs"]
+#[path = "../../shared/node/native_parts.rs"]
 mod native_parts;
-#[path = "../shared/node_files.rs"]
+#[path = "../../shared/node/files.rs"]
 mod node_files;
-#[path = "../shared/node_inventory.rs"]
+#[path = "../../shared/node/inventory.rs"]
 mod node_inventory;
-#[path = "../shared/node_mutations.rs"]
+#[path = "../../shared/node/mutations.rs"]
 mod node_mutations;
-#[path = "../shared/node_reads.rs"]
+#[path = "../../shared/node/reads.rs"]
 mod node_reads;
-#[path = "../shared/node_registry.rs"]
+#[path = "../../shared/node/registry.rs"]
 mod node_registry;
-#[path = "../shared/node_requests.rs"]
+#[path = "../../shared/node/requests.rs"]
 mod node_requests;
-#[path = "../shared/node_work.rs"]
+#[path = "../../shared/node/work.rs"]
 mod node_work;
-#[path = "../shared/node_writes.rs"]
+#[path = "../../shared/node/writes.rs"]
 mod node_writes;
-#[path = "../shared/notices.rs"]
+#[path = "../../shared/node/notices.rs"]
 mod notices;
 mod queries;
-#[path = "../shared/raw_pages.rs"]
+#[path = "../../shared/raw_pages.rs"]
 mod raw_pages;
-#[path = "../shared/read_map.rs"]
+#[path = "../../shared/node/read_map.rs"]
 mod read_map;
-#[path = "../shared/read_reports.rs"]
+#[path = "../../shared/node/read_reports.rs"]
 mod read_reports;
-#[path = "../shared/replica.rs"]
+#[path = "../../shared/replica.rs"]
 mod replica_transactions;
-#[path = "../shared/staging.rs"]
+#[path = "../../shared/staging.rs"]
 mod staging;
-#[path = "../shared/tier_access.rs"]
+#[path = "../../shared/tier_access.rs"]
 mod tier_access;
-#[path = "../shared/tier_moves.rs"]
+#[path = "../../shared/tier_moves.rs"]
 mod tier_move_transactions;
-#[path = "../shared/tier.rs"]
+#[path = "../../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
-#[path = "../shared/work_audit.rs"]
+#[path = "../../shared/work/audit.rs"]
 mod work_audit;
-#[path = "../shared/work_collect.rs"]
+#[path = "../../shared/work/collect.rs"]
 mod work_collect;
-#[path = "../shared/work_conversion.rs"]
+#[path = "../../shared/work/conversion.rs"]
 mod work_conversion;
-#[path = "../shared/work_export.rs"]
+#[path = "../../shared/work/export.rs"]
 mod work_export;
-#[path = "../shared/work_import.rs"]
+#[path = "../../shared/work/import.rs"]
 mod work_import;
-#[path = "../shared/work_media.rs"]
+#[path = "../../shared/work/media.rs"]
 mod work_media;
-#[path = "../shared/work_migration.rs"]
+#[path = "../../shared/work/migration.rs"]
 mod work_migration;
-#[path = "../shared/work_raw.rs"]
+#[path = "../../shared/work/raw.rs"]
 mod work_raw;
-#[path = "../shared/work_replication.rs"]
+#[path = "../../shared/work/replication.rs"]
 mod work_replication;
-#[path = "../shared/work_rewrite.rs"]
+#[path = "../../shared/work/rewrite.rs"]
 mod work_rewrite;
-#[path = "../shared/work_sources.rs"]
+#[path = "../../shared/work/sources.rs"]
 mod work_sources;
-#[path = "../shared/work_sweep.rs"]
+#[path = "../../shared/work/sweep.rs"]
 mod work_sweep;
 
 use sqlx::{MySqlConnection, MySqlPool};

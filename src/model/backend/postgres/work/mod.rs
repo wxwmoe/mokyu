@@ -11,11 +11,11 @@ use super::super::work_sweep as sweep;
 
 mod rewrite;
 
-#[path = "../../shared/work_packing.rs"]
+#[path = "../../../shared/work/packing.rs"]
 mod packing;
 
 use super::super::transactions;
-#[path = "../../shared/work_transfer.rs"]
+#[path = "../../../shared/work/transfer.rs"]
 mod transfer;
 
 mod raw;

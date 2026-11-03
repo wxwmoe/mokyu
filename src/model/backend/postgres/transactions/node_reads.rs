@@ -31,7 +31,7 @@ pub(in super::super) async fn report_node_read(
         .await?
         .ok_or(Error::NodeExpired)?
         .0;
-    let scopes = super::super::read_map::report_scopes(&mapping, &input.segments)?;
+    let scopes = mapping.report_scopes(&input.segments)?;
     queries::lock_staging("mokyu:read-verification".into())
         .execute(&mut *tx)
         .await?;

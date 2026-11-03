@@ -1,7 +1,12 @@
 use crate::{
     app::StoredStream,
     content::{codec::Chunk, pack::Pack},
-    model::{ReadRoute, raw::RawSource, session::Run},
+    model::{
+        ReadRoute,
+        raw::RawSource,
+        session::Run,
+        source::{SourceScope, SourceType},
+    },
     storage::{model::Connection, profile::StorageProfile},
 };
 use anyhow::{Context, Result, ensure};
@@ -9,6 +14,7 @@ use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use uuid::Uuid;
 
 pub(crate) const MAX_ITEMS: usize = 1024;
@@ -674,6 +680,44 @@ pub(crate) struct Mapping {
 }
 
 impl Mapping {
+    pub(super) fn report_scopes(
+        &self,
+        segments: &[usize],
+    ) -> Result<BTreeMap<String, SourceScope>> {
+        let mut scopes = BTreeMap::new();
+        for &index in segments {
+            let segment = self
+                .segments
+                .get(index)
+                .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
+            let (storage_id, source, id) = match &segment.source {
+                Source::Chunk { chunk } => (
+                    chunk.storage_id.context("chunk storage missing")?,
+                    SourceType::Chunk,
+                    chunk.encoding_id,
+                ),
+                Source::Pack { pack, .. } => (
+                    pack.storage_id.context("pack storage missing")?,
+                    SourceType::Pack,
+                    pack.id,
+                ),
+                Source::Raw { source }
+                    if !source.pending_upload && source.medium == "shared_s3" =>
+                {
+                    (source.storage_id, SourceType::Raw, source.id)
+                }
+                _ => return Err(s3s::s3_error!(InvalidArgument).into()),
+            };
+            let scope = SourceScope {
+                storage_id,
+                source,
+                id: id.to_string(),
+            };
+            scopes.insert(serde_json::to_string(&scope)?, scope);
+        }
+        Ok(scopes)
+    }
+
     pub(crate) fn truncate(&mut self, end: i64) {
         self.end = self.end.min(end);
         self.segments.retain(|part| part.offset < self.end);

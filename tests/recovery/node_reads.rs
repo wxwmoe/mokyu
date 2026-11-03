@@ -7,6 +7,7 @@ use crate::{
         cluster::{ClusterStore, NodeReads, NodeSessions},
         node_read as read,
         session::{Open, Run},
+        source::SourceType,
     },
 };
 use anyhow::{Context, Result};
@@ -427,6 +428,14 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         (mapping.start, mapping.end, mapping.segments.len()),
         (0, 8192, 2)
     );
+    let scopes = mapping.report_scopes(&[0, 1])?;
+    assert_eq!(scopes.len(), 2);
+    assert!(
+        scopes
+            .values()
+            .all(|scope| scope.source == SourceType::Chunk && scope.storage_id == storage)
+    );
+    assert!(mapping.report_scopes(&[2]).is_err());
     assert_eq!(
         material::<read::Storage>(&first, read::MaterialType::Storage)?
             .connection
@@ -743,6 +752,12 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         mapping.segments[0].source,
         read::Source::Raw { .. }
     ));
+    let scopes = mapping.report_scopes(&[0])?;
+    let scope = scopes.values().next().unwrap();
+    assert_eq!(
+        (scope.source, scope.identity()?),
+        (SourceType::Raw, Id::Uuid(raw))
+    );
     sqlx::query("DELETE FROM raw_ranges WHERE stream_id=$1")
         .bind(stream)
         .execute(&pool)
@@ -783,6 +798,8 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         .open_read(&peer, &key, request(peer_run.run))
         .await?;
     assert!(local_pending.outcome == read::Outcome::Ready);
+    let mapping: read::Mapping = material(&local_pending, read::MaterialType::Mapping)?;
+    assert!(mapping.report_scopes(&[0]).is_err());
     assert!(
         !local_pending
             .grants
@@ -824,6 +841,13 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     let mapping: read::Mapping = material(&packed, read::MaterialType::Mapping)?;
     assert!(
         matches!(&mapping.segments[0].source, read::Source::Pack { pack: selected, chunk } if selected.id == Id::Uuid(pack) && selected.location_id == pack && chunk.id == Id::Uuid(member))
+    );
+    let scopes = mapping.report_scopes(&[0])?;
+    assert_eq!(scopes.len(), 1);
+    let scope = scopes.values().next().unwrap();
+    assert_eq!(
+        (scope.source, scope.identity()?),
+        (SourceType::Pack, Id::Uuid(pack))
     );
     assert!(
         packed
@@ -886,6 +910,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     assert!(
         matches!(&mapping.segments[0].source, read::Source::Staged { fragment: selected, storage: selected_storage, .. } if *selected == fragment && *selected_storage == storage)
     );
+    assert!(mapping.report_scopes(&[0]).is_err());
     assert!(
         staged
             .grants

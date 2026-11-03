@@ -130,7 +130,7 @@ mod metrics;
 pub(super) use metrics::*;
 mod source_repair;
 pub(super) use source_repair::*;
-#[path = "../../shared/read_sources.rs"]
+#[path = "../../../shared/node/read_sources.rs"]
 pub(super) mod sources;
 pub(super) use sources::{NodeReadChunk, NodeReadFragment, NodeReadRaw};
 mod read_sources;
