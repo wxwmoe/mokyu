@@ -22,6 +22,28 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
     queries::node_registry::insert(node, "pulse-race", "data", &[1])
         .execute(db)
         .await?;
+    let storage = super::storage_tests::fixture(&backend).await?;
+    let file = Uuid::from_u128(0x0180ff00_0000_7000_8000_000000000001);
+    let missing = Uuid::from_u128(file.as_u128() + 1);
+    let mut inventory = db.begin().await?;
+    let source = sqlx::query("INSERT INTO raw_sources(location_id,storage_id,state,size,digest,profile_revision,pending_upload) VALUES(?,?,'ready',4,?,1,TRUE)")
+        .bind(file).bind(storage).bind(&[7u8; 16][..]).execute(&mut *inventory).await?.last_insert_id();
+    sqlx::query(
+        "INSERT INTO raw_uploads(source_id,deduplicate,background,node_id) VALUES(?,FALSE,TRUE,?)",
+    )
+    .bind(source)
+    .bind(node)
+    .execute(&mut *inventory)
+    .await?;
+    let (target, size, pending, ..) = queries::node_files::snapshot(file, node)
+        .fetch_one(&mut *inventory)
+        .await?;
+    assert_eq!((target, size, pending), (Some(storage), 4, true));
+    let (target, size, pending, ..) = queries::node_files::snapshot(missing, node)
+        .fetch_one(&mut *inventory)
+        .await?;
+    assert_eq!((target, size, pending), (None, 0, false));
+    inventory.rollback().await?;
     let mut pulse = db.begin().await?;
     queries::node_registry::seen(node)
         .execute(&mut *pulse)
