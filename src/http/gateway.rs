@@ -464,7 +464,7 @@ impl S3 for Gateway {
     ) -> S3Result<S3Response<PutObjectOutput>> {
         async {
             reject_features(&req.headers)?;
-            let _permits = self.0.admit(true).await?;
+            let _permits = self.0.admit_put().await?;
             let i = &req.input;
             let b = self.0.bucket(&i.bucket, true).await?;
             let authority = self
