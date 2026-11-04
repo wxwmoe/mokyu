@@ -99,7 +99,11 @@ pub(super) async fn node_read_materials(
         )?;
         materials.push(storage);
     }
-    let records = queries::node_read_keys(&keys).fetch_all(&mut *db).await?;
+    let records = if keys.is_empty() {
+        Vec::new()
+    } else {
+        queries::node_read_keys(&keys).fetch_all(&mut *db).await?
+    };
     ensure!(records.len() == keys.len(), Error::SourceUnavailable);
     for record in records {
         let block = BlockKey::unprotect(record, key)?;

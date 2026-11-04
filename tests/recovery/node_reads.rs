@@ -855,6 +855,39 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
             .iter()
             .any(|grant| grant.r#type == read::GrantType::StorageRead)
     );
+    sqlx::query("INSERT INTO pending_uploads(chunk_id,offset_bytes,staged_size,next_retry_at,node_id) VALUES($1,0,4,now(),$2)")
+        .bind(member).bind(peer.node_id).execute(&pool).await?;
+    sqlx::query("UPDATE packs SET quarantined_at=now(),quarantine_code='remote_missing',quarantine_revision=quarantine_revision+1 WHERE id=$1")
+        .bind(pack).execute(&pool).await?;
+    let remote = backend.open_read(&node, &key, request(session.run)).await?;
+    assert!(remote.outcome == read::Outcome::Pending && remote.grants.is_empty());
+    let local = backend
+        .open_read(&peer, &key, request(peer_run.run))
+        .await?;
+    let fallback: read::Mapping = material(&local, read::MaterialType::Mapping)?;
+    assert!(
+        matches!(&fallback.segments[0].source, read::Source::Local { node, chunk } if *node == peer.node_id && chunk.id == Id::Uuid(member))
+    );
+    backend
+        .pulse_session(
+            &peer,
+            &key,
+            peer_run.run,
+            peer_run.epoch,
+            4,
+            false,
+            read::KeepAlive {
+                renew: Vec::new(),
+                release: vec![reference(&local, read::GrantType::Read)],
+            },
+        )
+        .await?;
+    sqlx::query("DELETE FROM pending_uploads WHERE chunk_id=$1")
+        .bind(member)
+        .execute(&pool)
+        .await?;
+    sqlx::query("UPDATE packs SET quarantined_at=NULL,quarantine_code=NULL,quarantine_revision=quarantine_revision+1 WHERE id=$1")
+        .bind(pack).execute(&pool).await?;
     sqlx::query("DELETE FROM extents WHERE stream_id=$1")
         .bind(stream)
         .execute(&pool)

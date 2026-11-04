@@ -79,24 +79,44 @@ impl Sources {
             .filter(|row| !encodings.contains_key(&row.chunk.id))
             .filter_map(|row| row.pack_id)
             .collect();
-        let packs: HashMap<_, _> = super::node_read_packs(&pack_ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .map(|pack| (pack.id, pack))
+        let packs: HashMap<_, _> = if pack_ids.is_empty() {
+            HashMap::new()
+        } else {
+            super::node_read_packs(&pack_ids)
+                .fetch_all(&mut *db)
+                .await?
+                .into_iter()
+                .map(|pack| (pack.id, pack))
+                .collect()
+        };
+        let local_ids: Vec<_> = chunks
+            .values()
+            .filter(|row| {
+                !encodings.contains_key(&row.chunk.id)
+                    && row.pack_id.is_none_or(|id| !packs.contains_key(&id))
+            })
+            .map(|row| row.chunk.id)
             .collect();
-        let pending: HashMap<_, _> = super::node_read_pending(&ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .collect();
+        let pending: HashMap<_, _> = if local_ids.is_empty() {
+            HashMap::new()
+        } else {
+            super::node_read_pending(&local_ids)
+                .fetch_all(&mut *db)
+                .await?
+                .into_iter()
+                .collect()
+        };
         let fragment_ids: Vec<_> = extents.iter().filter_map(|row| row.fragment_id).collect();
-        let fragments: HashMap<_, _> = super::node_read_fragments(&fragment_ids)
-            .fetch_all(&mut *db)
-            .await?
-            .into_iter()
-            .map(|row| (row.id, row))
-            .collect();
+        let fragments: HashMap<_, _> = if fragment_ids.is_empty() {
+            HashMap::new()
+        } else {
+            super::node_read_fragments(&fragment_ids)
+                .fetch_all(&mut *db)
+                .await?
+                .into_iter()
+                .map(|row| (row.id, row))
+                .collect()
+        };
 
         let mut by_stream: HashMap<Id, Vec<Extent>> = HashMap::new();
         for row in extents {
