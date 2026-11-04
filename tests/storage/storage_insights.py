@@ -15,7 +15,7 @@ assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 url = os.environ['MOKYU_TEST_WEB']
 connection = Path(os.environ['MOKYU_TEST_DATABASE_FILE']).read_text().strip()
 unit = 131072
-queries = (Path(__file__).resolve().parents[2] / 'src/model/backend/postgres/queries.rs').read_text()
+queries = (Path(__file__).resolve().parents[2] / 'src/model/backend/postgres/queries/metrics.rs').read_text()
 usage_sql = queries.split('const USAGE_SUMMARY: &str = r#"', 1)[1].split('"#;', 1)[0]
 
 # Temporary tables shadow the application relations on this connection only.
@@ -70,6 +70,18 @@ with psycopg.connect(connection) as db:
     db.execute(usage_sql, prepare=False)
     bridge = db.execute("SELECT data->'physical' FROM usage_summary WHERE id='global'").fetchone()[0]
     assert int(bridge['selected_bytes']) + int(bridge['retained_bytes']) + int(bridge['gc_bytes']) == int(bridge['indexed_bytes']) == 27 * unit
+    # A range on an unpublished stream retains its raw source without selecting it.
+    selected, retained, garbage = [uuid.uuid4() for _ in range(3)]
+    alpha, beta, unpublished = [uuid.uuid4() for _ in range(3)]
+    db.execute("INSERT INTO raw_sources VALUES(%s,7,'ready',NULL),(%s,5,'ready',NULL),(%s,3,'ready',NULL)",
+               (selected, retained, garbage))
+    db.execute('INSERT INTO objects VALUES(%s,%s),(%s,%s)', (buckets['alpha'], alpha, buckets['beta'], beta))
+    db.execute('INSERT INTO raw_ranges VALUES(%s,%s,7),(%s,%s,7),(%s,%s,5)',
+               (alpha, selected, beta, selected, unpublished, retained))
+    db.execute(usage_sql, prepare=False)
+    updated = db.execute("SELECT data->'physical' FROM usage_summary WHERE id='global'").fetchone()[0]
+    for field, added in [('indexed_bytes', 15), ('selected_bytes', 7), ('retained_bytes', 5), ('gc_bytes', 3)]:
+        assert int(updated[field]) == int(bridge[field]) + added
     db.rollback()
 print('PASS exact intervals, project union, proportional shared packs, negative savings, pending unknown and physical conservation', flush=True)
 

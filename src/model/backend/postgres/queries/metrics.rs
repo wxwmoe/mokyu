@@ -199,7 +199,10 @@ pub(in super::super) fn usage_history<'q>(
     sqlx::query_as("SELECT snapshot_at,data FROM (SELECT snapshot_at,data FROM usage_history WHERE scope_id=$1 ORDER BY snapshot_at DESC LIMIT 2048) p ORDER BY snapshot_at").bind(key)
 }
 
-pub(in super::super) const USAGE_SUMMARY: &str = r#"WITH ranges AS MATERIALIZED (
+// Range attribution joins entire inventories, where repeated inner scans cost more than hashing.
+pub(in super::super) const USAGE_SUMMARY: &str = r#"SET LOCAL jit=off;
+SET LOCAL enable_nestloop=off;
+WITH ranges AS MATERIALIZED (
     SELECT o.bucket_id,b.project_id,e.chunk_id,
            range_agg(int8range(e.source_offset::bigint,e.source_offset::bigint+e.length)) AS spans
     FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id
@@ -268,8 +271,8 @@ pub(in super::super) const USAGE_SUMMARY: &str = r#"WITH ranges AS MATERIALIZED 
         SELECT s.id AS id,r.source_id,MAX(r.size) AS size,SUM(r.attributed) AS attributed
         FROM scopes s JOIN raw_allocated r ON s.bucket_ids IS NULL OR r.bucket_id=ANY(s.bucket_ids) GROUP BY s.id,r.source_id
     ) scoped_raw GROUP BY id
-), raw_inventory AS (
-    SELECT r.*,
+), raw_inventory AS MATERIALIZED (
+    SELECT r.size,r.state,
         EXISTS(SELECT 1 FROM raw_ranges e JOIN objects o ON o.stream_id=e.stream_id WHERE e.source_id=r.id) AS selected,
         r.owner_stream IS NULL AND NOT EXISTS(SELECT 1 FROM raw_ranges e WHERE e.source_id=r.id) AS garbage
     FROM raw_sources r
