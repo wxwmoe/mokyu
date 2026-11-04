@@ -114,6 +114,19 @@ impl Worker {
                 return Ok(());
             };
             let plan: work::Plan = serde_json::from_slice(&json)?;
+            let conversion_slot = match &plan {
+                work::Plan::ConvertRaw {
+                    storage,
+                    sealed: false,
+                    ..
+                } if materials
+                    .get(&(wire::MaterialType::Storage as i32, storage.to_string()))
+                    .is_some_and(|material| material.balanced_uploads) =>
+                {
+                    upload_resources.take().map(|(slot, _)| slot)
+                }
+                _ => None,
+            };
             if !matches!(plan, work::Plan::UploadRaw { .. }) {
                 upload_resources.take();
             }
@@ -231,8 +244,15 @@ impl Worker {
                         let result = if sealed {
                             Ok(())
                         } else {
-                            Box::pin(self.writes.convert(write, source, etag, checksums, part))
-                                .await
+                            Box::pin(self.writes.convert(
+                                write,
+                                source,
+                                etag,
+                                checksums,
+                                part,
+                                conversion_slot,
+                            ))
+                            .await
                         };
                         if let Err(error) = &result {
                             tracing::debug!(%error, "raw conversion postponed");

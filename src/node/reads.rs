@@ -31,6 +31,7 @@ pub(super) struct Material {
     backend: Mutex<Option<Arc<super::body::Backend>>>,
     io: Arc<super::io::Io>,
     policy: Option<read::Policy>,
+    pub(super) balanced_uploads: bool,
 }
 
 #[derive(Default)]
@@ -114,13 +115,16 @@ impl Cache {
             value.referenced.store(true, Ordering::Relaxed);
             return Ok(value.clone());
         }
+        let mut balanced_uploads = false;
         let policy = match wire::MaterialType::try_from(version.r#type) {
             Ok(wire::MaterialType::ReadPolicy) => {
                 Some(serde_json::from_slice::<read::Policy>(&json)?)
             }
-            Ok(wire::MaterialType::Storage) => Some(read::Policy::try_from(
-                &serde_json::from_slice::<read::Storage>(&json)?.profile,
-            )?),
+            Ok(wire::MaterialType::Storage) => {
+                let storage: read::Storage = serde_json::from_slice(&json)?;
+                balanced_uploads = storage.profile.background_scheduling == "balanced";
+                Some(read::Policy::try_from(&storage.profile)?)
+            }
             _ => None,
         };
         let mut stale = false;
@@ -183,6 +187,7 @@ impl Cache {
             backend: Mutex::new(None),
             io: self.io.clone(),
             policy,
+            balanced_uploads,
         });
         if !stale && entry.policy.is_some() {
             // Discard optional fills prepared with an earlier storage configuration.

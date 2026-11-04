@@ -9,6 +9,7 @@ impl Writes {
         etag: String,
         checksums: serde_json::Value,
         part: bool,
+        memory: Option<Arc<OwnedSemaphorePermit>>,
     ) -> Result<()> {
         source.validate()?;
         ensure!(
@@ -16,7 +17,10 @@ impl Writes {
                 || (source.medium == "local" && source.pending_upload),
             codec::IntegrityError::RawMetadata
         );
-        let memory = Arc::new(self.reads.reader.acquire(&self.slots, 1).await?);
+        let memory = match memory {
+            Some(memory) => memory,
+            None => Arc::new(self.reads.reader.acquire(&self.slots, 1).await?),
+        };
         let node = &self.reads.node;
         let snapshot = node.background_snapshot()?;
         let held = self.reads.cache.snapshot();
