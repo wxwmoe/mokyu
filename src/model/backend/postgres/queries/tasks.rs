@@ -153,6 +153,10 @@ pub(in super::super) fn lock_storage_permits(key: String) -> Statement<'static> 
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))").bind(key)
 }
 
+pub(in super::super) fn try_lock_storage_permits(key: String) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))").bind(key)
+}
+
 pub(in super::super) fn publish_object<'q>(
     bucket: Uuid,
     key: &'q str,

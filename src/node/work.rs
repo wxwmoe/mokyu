@@ -556,6 +556,7 @@ impl Worker {
                         members,
                         inspect,
                         location,
+                        ..
                     } => {
                         ensure!(
                             location == snapshot.location(),
@@ -565,7 +566,7 @@ impl Worker {
                             let (result, candidates) = self
                                 .reader
                                 .inspect(
-                                    backend,
+                                    &materials,
                                     Arc::new(reads::keys(&materials)?),
                                     *snapshot,
                                     members,
@@ -622,7 +623,7 @@ impl Worker {
                                         let (outcome, candidates) = self
                                             .reader
                                             .inspect(
-                                                backend.clone(),
+                                                &materials,
                                                 keys.clone(),
                                                 *source,
                                                 item.members,

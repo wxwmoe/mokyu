@@ -207,13 +207,17 @@ pub(super) async fn prepare(
                         }
                         PhysicalSource::Raw(r) => (r.size, None),
                     };
-                    item.previous = if let PhysicalSource::Pack(p) = &snapshot.physical {
-                        q::previous(execution.id, p.id)
+                    item.previous = match &snapshot.physical {
+                        PhysicalSource::Pack(p) => q::previous(execution.id, p.id)
                             .fetch_optional(&mut **tx)
                             .await?
-                            .map(|code| work::Outcome::Inspected { code })
-                    } else {
-                        None
+                            .map(|code| work::Outcome::Inspected { code }),
+                        PhysicalSource::Raw(r) if r.quarantine_code.is_some() => {
+                            Some(work::Outcome::Inspected {
+                                code: Some("source_unavailable".into()),
+                            })
+                        }
+                        _ => None,
                     };
                     let cost = if detail.mode == Mode::Full && item.previous.is_none() {
                         size.max(0) as u64
@@ -225,7 +229,8 @@ pub(super) async fn prepare(
                     }
                     if item.previous.is_none() {
                         if let PhysicalSource::Pack(pack) = &snapshot.physical {
-                            item.members = work_sources::members(tx, pack, &snapshot).await?;
+                            item.members =
+                                super::work_sources::members(tx, pack, &snapshot).await?;
                             if member_count + item.members.len() > 4096 && !items.is_empty() {
                                 break;
                             }
@@ -286,6 +291,7 @@ pub(super) async fn prepare(
             mode: detail.mode,
             cursor: serde_json::to_string(&cursor)?,
             items,
+            source_permits: Vec::new(),
         },
         keys.into_values().collect(),
     )))

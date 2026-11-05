@@ -19,6 +19,21 @@ use sqlx::types::Json;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+pub(super) async fn placement_revision(
+    db: &mut q::Connection,
+    home: Uuid,
+    storage: Uuid,
+) -> Result<Option<i64>> {
+    if storage == home {
+        return Ok(None);
+    }
+    Ok(Some(
+        queries::storage_profile_revision(storage)
+            .fetch_one(db)
+            .await?,
+    ))
+}
+
 async fn hot(db: &mut q::Tx<'_>, principal: &Principal, bucket: Uuid) -> Result<Uuid> {
     transactions::lock_permit(
         db,

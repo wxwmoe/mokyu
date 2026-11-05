@@ -1,11 +1,6 @@
 use super::super::{Backend, transactions};
-use crate::model::{
-    key::ManagedKeyMaterial,
-    node_work::Member,
-    source::{SourceSnapshot, SourceUpdate},
-    task::Execution,
-};
-use anyhow::{Result, ensure};
+use crate::model::{key::ManagedKeyMaterial, source::SourceUpdate, task::Execution};
+use anyhow::Result;
 use uuid::Uuid;
 
 pub(in super::super) type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
@@ -28,16 +23,4 @@ pub(in super::super) async fn rate(
     rates: &[(&str, f64, f64)],
 ) -> Result<bool> {
     transactions::integrity_rate_in(tx, storage, rates).await
-}
-pub(in super::super) async fn members(
-    tx: &mut Tx<'_>,
-    pack: &crate::content::pack::Pack,
-    snapshot: &SourceSnapshot,
-) -> Result<Vec<Member>> {
-    let members = super::work::members(pack.id).fetch_all(&mut **tx).await?;
-    ensure!(
-        Some(crate::model::source::manifest_digest(pack, &members)?) == snapshot.manifest_digest,
-        crate::model::Error::OperationAborted
-    );
-    Ok(members)
 }

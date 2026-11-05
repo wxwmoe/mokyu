@@ -11,6 +11,19 @@ use crate::{
 use anyhow::{Result, ensure};
 use serde_json::Value;
 
+pub(super) async fn members(
+    tx: &mut q::Tx<'_>,
+    pack: &crate::content::pack::Pack,
+    snapshot: &crate::model::source::SourceSnapshot,
+) -> Result<Vec<work::Member>> {
+    let members = super::queries::pack_work::physical_members(tx, pack.id).await?;
+    ensure!(
+        Some(crate::model::source::manifest_digest(pack, &members)?) == snapshot.manifest_digest,
+        Error::OperationAborted
+    );
+    Ok(members)
+}
+
 async fn validate(
     tx: &mut q::Tx<'_>,
     execution: Execution,
@@ -98,7 +111,7 @@ pub(super) async fn prepare(
         }
     }
     let members = if let PhysicalSource::Pack(pack) = &snapshot.physical {
-        q::members(tx, pack, &snapshot).await?
+        members(tx, pack, &snapshot).await?
     } else {
         vec![]
     };
@@ -113,6 +126,7 @@ pub(super) async fn prepare(
             snapshot: Box::new(snapshot),
             members,
             inspect,
+            source_permits: Vec::new(),
         },
         keys,
     )))

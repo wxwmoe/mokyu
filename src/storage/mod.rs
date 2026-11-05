@@ -2722,10 +2722,12 @@ impl Storage {
         &self,
         snapshot: &crate::model::source::SourceSnapshot,
     ) -> Result<bool> {
-        let target = self.store_backend(snapshot.scope.storage_id)?;
+        let storage = snapshot.physical.storage()?;
+        let target = self.store_backend(storage)?;
         ensure!(
-            target.revision == snapshot.storage_revision
-                && target.identity_marker == snapshot.identity_marker,
+            target.revision == snapshot.physical_revision()?
+                && (storage != snapshot.scope.storage_id
+                    || target.identity_marker == snapshot.identity_marker),
             crate::model::Error::OperationAborted
         );
         self.check_storage_inner(&target).await?;

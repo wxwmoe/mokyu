@@ -8,13 +8,17 @@ use crate::model::{
 impl Reader {
     pub(crate) async fn inspect(
         &self,
-        backend: Arc<Backend>,
+        materials: &crate::node::reads::Held,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         snapshot: SourceSnapshot,
         members: Vec<Member>,
         mode: crate::worker::integrity::Mode,
         pages: Option<(&NodeContext, &crate::rpc::wire::Run, Uuid)>,
     ) -> Result<(Outcome, crate::storage::cache::Fills)> {
+        let backend = crate::node::reads::backend(materials, snapshot.physical.storage()?)?;
+        if backend.profile.revision != snapshot.physical_revision()? {
+            return Ok((Outcome::Retry, Vec::new()));
+        }
         let _io = self.acquire(&self.io, 1).await?;
         let timeout = crate::config::seconds(&backend.profile.integrity_batch_timeout)?;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);

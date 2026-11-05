@@ -2,6 +2,7 @@ use super::{node_read, session::Run};
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 pub(crate) const MAX_ITEMS: usize = 64;
@@ -179,12 +180,16 @@ pub(crate) enum Plan {
         location: Uuid,
         members: Vec<Member>,
         inspect: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_permits: Vec<Uuid>,
     },
     Audit {
         storage: Uuid,
         mode: crate::worker::integrity::Mode,
         cursor: String,
         items: Vec<Inspection>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_permits: Vec<Uuid>,
     },
     SweepScan {
         storage: Uuid,
@@ -212,9 +217,28 @@ pub(crate) enum Plan {
 }
 
 impl Plan {
+    pub(crate) fn inspection_storages(&self) -> Result<BTreeSet<Uuid>> {
+        match self {
+            Self::Inspect {
+                snapshot,
+                inspect: true,
+                ..
+            } => Ok(BTreeSet::from([snapshot.physical.storage()?])),
+            Self::Audit { items, .. } => items
+                .iter()
+                .filter(|item| item.previous.is_none())
+                .filter_map(|item| item.snapshot.as_deref())
+                .map(|snapshot| snapshot.physical.storage())
+                .collect(),
+            _ => Ok(BTreeSet::new()),
+        }
+    }
+
     pub(crate) fn source_permits(&self) -> &[Uuid] {
         match self {
             Self::Pack { source_permits, .. }
+            | Self::Inspect { source_permits, .. }
+            | Self::Audit { source_permits, .. }
             | Self::Rewrite { source_permits, .. }
             | Self::CopyTransfer { source_permits, .. }
             | Self::RawTransfer { source_permits, .. } => source_permits,

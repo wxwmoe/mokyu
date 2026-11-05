@@ -1,12 +1,6 @@
 use super::super::{Backend, transactions};
-use crate::model::{
-    Id,
-    key::ManagedKeyMaterial,
-    node_work::Member,
-    source::{SourceSnapshot, SourceUpdate},
-    task::Execution,
-};
-use anyhow::{Result, ensure};
+use crate::model::{key::ManagedKeyMaterial, source::SourceUpdate, task::Execution};
+use anyhow::Result;
 use uuid::Uuid;
 
 pub(in super::super) type Tx<'a> = sqlx::Transaction<'a, sqlx::Sqlite>;
@@ -48,23 +42,4 @@ pub(in super::super) async fn rate(
     Ok(backend
         .integrity_rates
         .acquire(storage, requests, bytes, count, size))
-}
-pub(in super::super) async fn members(
-    tx: &mut Tx<'_>,
-    pack: &crate::content::pack::Pack,
-    snapshot: &SourceSnapshot,
-) -> Result<Vec<Member>> {
-    let rows:Vec<(Id,Uuid,i64,i32,Vec<u8>)>=sqlx::query_as("SELECT m.chunk_id,c.uuid,m.offset_bytes,c.raw_size,c.hash FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=? ORDER BY m.ordinal LIMIT 4097").bind(pack.id).fetch_all(&mut **tx).await?;
-    let logical = rows
-        .iter()
-        .map(|(id, _, offset, size, hash)| (*id, *offset, *size, hash.clone()))
-        .collect::<Vec<_>>();
-    ensure!(
-        Some(crate::model::source::manifest_digest(pack, &logical)?) == snapshot.manifest_digest,
-        crate::model::Error::OperationAborted
-    );
-    Ok(rows
-        .into_iter()
-        .map(|(_, uuid, offset, size, hash)| (uuid.into(), offset, size, hash))
-        .collect())
 }

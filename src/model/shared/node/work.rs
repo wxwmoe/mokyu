@@ -743,25 +743,46 @@ impl NodeWork for Backend {
                     }
                 }
                 Some("tiering") => tier_plan(&mut tx, task, &detail, key).await?,
-                _ if task_type == "integrity" && detail.get("source_operation").is_none() => {
+                _ if task_type == "integrity" || detail.get("source_operation").is_some() => {
                     let id = serde_json::from_value(detail["storage_id"].clone())?;
                     let storage = material(&mut tx, id, key).await?;
-                    if let Some((plan, keys)) = super::work_audit::prepare(
-                        self,
-                        &mut tx,
-                        task,
-                        &detail,
-                        &storage.profile,
-                        input.max_items,
-                        key,
-                    )
-                    .await?
-                    {
+                    let inspection = if detail.get("source_operation").is_some() {
+                        super::work_sources::prepare(
+                            self,
+                            &mut tx,
+                            node,
+                            task,
+                            &detail,
+                            &storage.profile,
+                            key,
+                        )
+                        .await?
+                    } else {
+                        super::work_audit::prepare(
+                            self,
+                            &mut tx,
+                            task,
+                            &detail,
+                            &storage.profile,
+                            input.max_items,
+                            key,
+                        )
+                        .await?
+                    };
+                    if let Some((plan, keys)) = inspection {
+                        let mut additional = Vec::new();
+                        for store in plan
+                            .inspection_storages()?
+                            .into_iter()
+                            .filter(|store| *store != id)
+                        {
+                            additional.push(material(&mut tx, store, key).await?);
+                        }
                         Some((
                             plan,
                             serde_json::to_vec(&work::Materials {
                                 storage,
-                                additional: vec![],
+                                additional,
                                 keys,
                             })?,
                         ))
@@ -773,36 +794,6 @@ impl NodeWork for Backend {
                                 .await?;
                         }
                         None
-                    }
-                }
-                _ if detail.get("source_operation").is_some() => {
-                    let store = serde_json::from_value(detail["storage_id"].clone())?;
-                    let storage = material(&mut tx, store, key).await?;
-                    match super::work_sources::prepare(
-                        self,
-                        &mut tx,
-                        node,
-                        task,
-                        &detail,
-                        &storage.profile,
-                        key,
-                    )
-                    .await?
-                    {
-                        Some((plan, keys)) => Some((
-                            plan,
-                            serde_json::to_vec(&work::Materials {
-                                storage,
-                                additional: Vec::new(),
-                                keys,
-                            })?,
-                        )),
-                        None => {
-                            queries::finish_task(task, "queued", None)
-                                .execute(&mut *tx)
-                                .await?;
-                            None
-                        }
                     }
                 }
                 _ => anyhow::bail!(Error::NodeOperationConflict),

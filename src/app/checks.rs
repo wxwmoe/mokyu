@@ -162,18 +162,18 @@ impl Checks {
                     };
                     let scope = match target {
                         Target::Raw(raw) => SourceScope {
-                            storage_id: raw.storage_id,
+                            storage_id: raw.home_storage(),
                             source: SourceType::Raw,
                             id: raw.id.to_string(),
                         },
                         Target::Chunk(chunk) => match app.physical.source(chunk.id, true).await? {
                             PhysicalSource::Chunk(c) => SourceScope {
-                                storage_id: c.storage_id.context("chunk has no store")?,
+                                storage_id: c.home_storage().context("chunk has no store")?,
                                 source: SourceType::Chunk,
                                 id: c.encoding_id.to_string(),
                             },
                             PhysicalSource::Pack(p) => SourceScope {
-                                storage_id: p.storage_id.context("pack has no store")?,
+                                storage_id: p.home_storage().context("pack has no store")?,
                                 source: SourceType::Pack,
                                 id: p.id.to_string(),
                             },

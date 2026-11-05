@@ -702,19 +702,19 @@ impl Mapping {
                 .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
             let (storage_id, source, id) = match &segment.source {
                 Source::Chunk { chunk } => (
-                    chunk.storage_id.context("chunk storage missing")?,
+                    chunk.home_storage().context("chunk storage missing")?,
                     SourceType::Chunk,
                     chunk.encoding_id,
                 ),
                 Source::Pack { pack, .. } => (
-                    pack.storage_id.context("pack storage missing")?,
+                    pack.home_storage().context("pack storage missing")?,
                     SourceType::Pack,
                     pack.id,
                 ),
                 Source::Raw { source }
                     if !source.pending_upload && source.medium == "shared_s3" =>
                 {
-                    (source.storage_id, SourceType::Raw, source.id)
+                    (source.home_storage(), SourceType::Raw, source.id)
                 }
                 _ => return Err(s3s::s3_error!(InvalidArgument).into()),
             };

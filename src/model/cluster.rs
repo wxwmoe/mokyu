@@ -168,7 +168,7 @@ pub(crate) trait NodeReads: Send + Sync {
         node: &NodeState,
         key: &Key,
         input: super::node_read::Report,
-    ) -> Result<Vec<Uuid>>;
+    ) -> Result<(Vec<Uuid>, bool)>;
     async fn open_read(
         &self,
         node: &NodeState,

@@ -59,6 +59,7 @@ pub(super) async fn check(
         inspect,
         members,
         location,
+        ..
     } = reply.plan.unwrap()
     else {
         panic!("expected source plan")
@@ -173,12 +174,14 @@ pub(super) async fn check(
         (None, 3)
     );
 
-    for (outcome, expected, changed) in [
-        (work::Outcome::Retry, "backend_io_failed", false),
+    for (outcome, expected) in [
+        (work::Outcome::Retry, "backend_io_failed"),
+        (work::Outcome::Inspected { code: None }, "source_changed"),
         (
-            work::Outcome::Inspected { code: None },
+            work::Outcome::Inspected {
+                code: Some("remote_missing".into()),
+            },
             "source_changed",
-            true,
         ),
     ] {
         let task = enqueue(backend, &scope, "verify").await?;
@@ -190,11 +193,24 @@ pub(super) async fn check(
                 .plan
                 .is_some()
         );
-        if changed {
-            sqlx::query("UPDATE raw_sources SET revision=revision+1 WHERE id=$1")
-                .bind(raw)
-                .execute(pool)
-                .await?;
+        match &outcome {
+            work::Outcome::Inspected { code: None } => {
+                sqlx::query("UPDATE raw_sources SET revision=revision+1 WHERE id=$1")
+                    .bind(raw)
+                    .execute(pool)
+                    .await?;
+            }
+            work::Outcome::Inspected { code: Some(_) } => {
+                // A promotion changes the physical address without changing the logical source revision.
+                let address = Uuid::new_v4();
+                let mut physical = crate::model::PhysicalSource::Raw(
+                    queries::raw_source(raw.into()).fetch_one(pool).await?,
+                );
+                physical.relocate(storage, address, false);
+                sqlx::query("INSERT INTO tier_locations(unit,physical_id,home_storage,storage_id,address,generation,material,stored_bytes,activated_at,pressure_seconds) VALUES(2,$1,$2,$2,$3,1,$4,1,0,1)")
+                    .bind(raw).bind(storage).bind(address).bind(sqlx::types::Json(&physical)).execute(pool).await?;
+            }
+            _ => {}
         }
         let completion = work::Completion {
             operation,

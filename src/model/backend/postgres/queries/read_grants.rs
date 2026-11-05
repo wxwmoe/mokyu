@@ -161,7 +161,7 @@ pub(in super::super) async fn report(
     node: &NodeState,
     key: &Key,
     input: read::Report,
-) -> Result<Vec<Uuid>> {
+) -> Result<(Vec<Uuid>, bool)> {
     transactions::report_node_read(b, node, key, input).await
 }
 

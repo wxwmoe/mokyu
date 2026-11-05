@@ -54,10 +54,21 @@ pub(crate) struct SourceSnapshot {
     pub revision: i64,
     pub quarantine_code: Option<String>,
     pub storage_revision: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier_revision: Option<i64>,
     pub identity_marker: Value,
     pub manifest_digest: Option<String>,
 }
 impl SourceSnapshot {
+    pub fn physical_revision(&self) -> Result<i64> {
+        if self.physical.storage()? == self.scope.storage_id {
+            Ok(self.storage_revision)
+        } else {
+            self.tier_revision
+                .ok_or(super::Error::OperationAborted.into())
+        }
+    }
+
     pub fn repairable(&self) -> bool {
         self.quarantine_code.is_some()
             && (self.state == "ready"

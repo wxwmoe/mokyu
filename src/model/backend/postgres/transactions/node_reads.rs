@@ -5,7 +5,7 @@ pub(in super::super) async fn report_node_read(
     state: &crate::cluster::NodeState,
     key: &crate::content::codec::Key,
     input: crate::model::node_read::Report,
-) -> Result<Vec<Uuid>> {
+) -> Result<(Vec<Uuid>, bool)> {
     use crate::model::{Error, source::SourceOperation};
     ensure!(
         !input.segments.is_empty() && input.segments.len() <= 16,
@@ -38,6 +38,7 @@ pub(in super::super) async fn report_node_read(
     let mut pending = queries::node_read_verifications()
         .fetch_one(&mut *tx)
         .await?;
+    let initial = pending;
     let mode = if backend.control_epoch.is_some() {
         "single_control"
     } else {
@@ -77,5 +78,5 @@ pub(in super::super) async fn report_node_read(
         tasks.push(task);
     }
     tx.commit().await?;
-    Ok(tasks)
+    Ok((tasks, pending > initial))
 }

@@ -69,7 +69,7 @@ pub(super) async fn report(
     state: &NodeState,
     key: &Key,
     input: read::Report,
-) -> Result<Vec<Uuid>> {
+) -> Result<(Vec<Uuid>, bool)> {
     ensure!(
         !input.segments.is_empty() && input.segments.len() <= 16,
         s3s::s3_error!(InvalidArgument)
@@ -88,6 +88,7 @@ pub(super) async fn report(
         .0;
     let scopes = mapping.report_scopes(&input.segments)?;
     let mut count = q::verification_count().fetch_one(&mut *tx).await?;
+    let initial = count;
     let mut tasks = Vec::new();
     for (identity, scope) in scopes {
         let mut hash = blake3::Hasher::new_derive_key("mokyu node read report v1");
@@ -116,5 +117,5 @@ pub(super) async fn report(
         tasks.push(task);
     }
     tx.commit().await?;
-    Ok(tasks)
+    Ok((tasks, count > initial))
 }

@@ -650,12 +650,15 @@ impl NodeReads for Service {
             ));
         }
         let input = super::read::report(request.into_inner())?;
-        let tasks = bounded(self.app.node_reads.report_read(
+        let (tasks, queued) = bounded(self.app.node_reads.report_read(
             &node,
             &self.app.secrets.credential_key,
             input,
         ))
         .await?;
+        if queued {
+            self.app.work_queued();
+        }
         Ok(Response::new(wire::ReadReportReply {
             task_ids: tasks.into_iter().map(|id| id.to_string()).collect(),
         }))

@@ -695,6 +695,7 @@ async fn permits(
     maintenance: Uuid,
     profile: &crate::storage::profile::StorageProfile,
     direction: &str,
+    wait_for_locks: bool,
 ) -> Result<bool> {
     let limit = match direction {
         "upload" => profile.upload_concurrency,
@@ -703,9 +704,18 @@ async fn permits(
         _ => profile.maintenance_concurrency,
     };
     for (direction, limit) in [("control", profile.control_concurrency), (direction, limit)] {
-        queries::lock_storage_permits(format!("mokyu:store:{}:{direction}", profile.storage_id))
-            .execute(&mut *db)
-            .await?;
+        let lock = format!("mokyu:store:{}:{direction}", profile.storage_id);
+        if wait_for_locks {
+            queries::lock_storage_permits(lock)
+                .execute(&mut *db)
+                .await?;
+        } else if !queries::try_lock_storage_permits(lock)
+            .fetch_one(&mut *db)
+            .await?
+        {
+            // A source discovered after locking the home backend may sort before it.
+            return Ok(false);
+        }
         queries::expire_storage_permits(profile.storage_id, direction)
             .execute(&mut *db)
             .await?;
@@ -1096,6 +1106,7 @@ pub(crate) async fn exchange(
                             maintenance,
                             &profile,
                             "migration",
+                            true,
                         )
                         .await?
                         {
@@ -1254,7 +1265,17 @@ pub(crate) async fn exchange(
             };
             let mut permitted = true;
             for (profile, control, work) in &scopes {
-                if !permits(&mut tx, node.node_id, *control, *work, profile, direction).await? {
+                if !permits(
+                    &mut tx,
+                    node.node_id,
+                    *control,
+                    *work,
+                    profile,
+                    direction,
+                    true,
+                )
+                .await?
+                {
                     permitted = false;
                     break;
                 }
@@ -1473,8 +1494,13 @@ pub(crate) async fn exchange(
                             .await?;
                     } else {
                         let mut stores: Vec<_> = secondary.into_iter().collect();
+                        let inspection_stores = value.inspection_storages()?;
                         let routed: Option<(std::collections::BTreeSet<_>, &mut Vec<Uuid>)> =
                             match &mut value {
+                                work::Plan::Audit { source_permits, .. }
+                                | work::Plan::Inspect { source_permits, .. } => {
+                                    Some((inspection_stores, source_permits))
+                                }
                                 work::Plan::Pack {
                                     batch,
                                     source_permits,
@@ -1502,8 +1528,9 @@ pub(crate) async fn exchange(
                                 ensure!(r.r#type == "s3", Error::SourceUnavailable);
                                 let [io, job] = [Uuid::new_v4(), Uuid::new_v4()];
                                 ensure!(
-                                    permits(&mut tx, node.node_id, io, job, &p, direction).await?,
-                                    Error::OperationAborted
+                                    permits(&mut tx, node.node_id, io, job, &p, direction, false)
+                                        .await?,
+                                    Error::NodeWriteBusy
                                 );
                                 tokens.extend([io, job]);
                                 stores.push((r, p));

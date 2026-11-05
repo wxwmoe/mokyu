@@ -70,6 +70,19 @@ fn reference(reply: &read::Reply, r#type: read::GrantType) -> read::GrantRef {
     }
 }
 
+async fn read_store(pool: &PgPool, deployment: Uuid, key: &Key, name: &str) -> Result<Uuid> {
+    let id = Uuid::now_v7();
+    sqlx::query("INSERT INTO storages(id,name,type,endpoint_url,remote_bucket_name,region,access_key_encrypted,secret_key_encrypted,identity_marker) VALUES($1,$2,'s3','http://backend:8333',$2,'us-east-1',$3,$4,$5)")
+        .bind(id).bind(name).bind(codec::protect(b"source-access", key, format!("storage-{id}-access").as_bytes())?)
+        .bind(codec::protect(b"source-secret", key, format!("storage-{id}-secret").as_bytes())?)
+        .bind(crate::storage::model::identity_marker(deployment, id)?).execute(pool).await?;
+    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency) VALUES($1,2)")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
 async fn active(pool: &PgPool) -> Result<(i64, i64, i64)> {
     Ok(sqlx::query_as("SELECT (SELECT count(*) FROM node_reads),(SELECT count(*) FROM node_read_windows),(SELECT count(*) FROM storage_permits)").fetch_one(pool).await?)
 }
@@ -216,15 +229,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     let session = backend.open_session(&node, &key, hello()).await?;
     let peer_run = backend.open_session(&peer, &key, hello()).await?;
     let worker_run = backend.open_session(&worker, &key, hello()).await?;
-    let storage = Uuid::now_v7();
-    sqlx::query("INSERT INTO storages(id,name,type,endpoint_url,remote_bucket_name,region,access_key_encrypted,secret_key_encrypted,identity_marker) VALUES($1,'source','s3','http://backend:8333','read-fixture','us-east-1',$2,$3,$4)")
-        .bind(storage).bind(codec::protect(b"source-access", &key, format!("storage-{storage}-access").as_bytes())?)
-        .bind(codec::protect(b"source-secret", &key, format!("storage-{storage}-secret").as_bytes())?)
-        .bind(crate::storage::model::identity_marker(node.deployment_id, storage)?).execute(&pool).await?;
-    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency) VALUES($1,2)")
-        .bind(storage)
-        .execute(&pool)
-        .await?;
+    let storage = read_store(&pool, node.deployment_id, &key, "source").await?;
     let bucket: Uuid =
         sqlx::query_scalar("INSERT INTO buckets(name,storage_id) VALUES('reads',$1) RETURNING id")
             .bind(storage)
@@ -746,17 +751,37 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     .bind(raw)
     .execute(&pool)
     .await?;
+    let cold = read_store(&pool, node.deployment_id, &key, "cold").await?;
+    let mut physical =
+        model::PhysicalSource::Raw(queries::raw_source(raw.into()).fetch_one(&pool).await?);
+    let address = Uuid::new_v4();
+    physical.relocate(cold, address, false);
+    sqlx::query("INSERT INTO tier_locations(unit,physical_id,home_storage,storage_id,address,generation,material,stored_bytes,activated_at,pressure_seconds) VALUES(2,$1,$2,$3,$4,1,$5,8,0,1)")
+        .bind(raw).bind(storage).bind(cold).bind(address).bind(sqlx::types::Json(&physical)).execute(&pool).await?;
     let raw_reply = backend.open_read(&node, &key, request(session.run)).await?;
     let mapping: read::Mapping = material(&raw_reply, read::MaterialType::Mapping)?;
     assert!(matches!(
-        mapping.segments[0].source,
-        read::Source::Raw { .. }
+        &mapping.segments[0].source,
+        read::Source::Raw { source } if source.storage_id == cold && source.address() == address
     ));
     let scopes = mapping.report_scopes(&[0])?;
     let scope = scopes.values().next().unwrap();
     assert_eq!(
-        (scope.source, scope.identity()?),
-        (SourceType::Raw, Id::Uuid(raw))
+        (scope.storage_id, scope.source, scope.identity()?),
+        (storage, SourceType::Raw, Id::Uuid(raw))
+    );
+    let report = || read::Report {
+        run: session.run,
+        read: reference(&raw_reply, read::GrantType::Read).id,
+        window: reference(&raw_reply, read::GrantType::Window).id,
+        segments: vec![0],
+    };
+    let (tasks, queued) = backend.report_read(&node, &key, report()).await?;
+    assert!(queued);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(
+        backend.report_read(&node, &key, report()).await?,
+        (tasks, false)
     );
     sqlx::query("DELETE FROM raw_ranges WHERE stream_id=$1")
         .bind(stream)
@@ -778,6 +803,10 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         )
         .await?;
     assert!(model::raw::RawStore::claim(backend.as_ref(), Id::Uuid(raw), 1, 0, 0).await?);
+    sqlx::query("DELETE FROM tier_locations WHERE physical_id=$1 AND unit=2")
+        .bind(raw)
+        .execute(&pool)
+        .await?;
     sqlx::query(
         "UPDATE raw_sources SET state='ready',medium='local',pending_upload=true WHERE id=$1",
     )

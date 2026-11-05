@@ -94,10 +94,10 @@ class Fixture:
         assert response.status_code == expected, (path, response.status_code, response.text)
         return response.json() if response.content else None
 
-    def finished(self, reply, state='completed'):
+    def finished(self, reply, state='completed', *, seconds=120):
         task = reply['task_id']
         row = wait(lambda: (row if (row := self.api('/api/v1/tasks/' + task))['status']
-                            in ('completed', 'failed', 'paused') else None), 'task did not finish')
+                            in ('completed', 'failed', 'paused') else None), 'task did not finish', seconds)
         assert row['status'] == state, row
         assert 'source_operation' not in row['detail'], 'task exposed its internal authorization snapshot'
         return row

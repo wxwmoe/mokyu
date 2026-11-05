@@ -504,7 +504,7 @@ impl NodeReads for Backend {
         state: &NodeState,
         key: &Key,
         input: read::Report,
-    ) -> Result<Vec<Uuid>> {
+    ) -> Result<(Vec<Uuid>, bool)> {
         q::report(self, state, key, input).await
     }
     async fn read_window(
