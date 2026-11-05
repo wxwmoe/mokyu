@@ -293,6 +293,9 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
         Ok(wire::ReadSurface::Web) => true,
         _ => return Err(invalid()),
     };
+    if input.access_key.is_empty() && !input.overrides.is_empty() {
+        return Err(super::server::failure(s3s::s3_error!(AccessDenied).into()));
+    }
     if input.include.is_empty()
         || input.include.len() > 5
         || !text(&input.access_key, 128)

@@ -1168,6 +1168,9 @@ impl S3 for Gateway {
         )
         .map_err(delivery::error)?;
         let mut overrides = HeaderMap::new();
+        if request.credentials.is_none() && !prepared.input.overrides.is_empty() {
+            return Err(s3s::s3_error!(AccessDenied));
+        }
         for field in &prepared.input.overrides {
             overrides.insert(
                 hyper::header::HeaderName::from_bytes(field.name.as_bytes())

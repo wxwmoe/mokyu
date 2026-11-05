@@ -540,19 +540,14 @@ impl S3 for Gateway {
             }
             let b = self.read_bucket(&i.bucket, &req.extensions).await?;
             if req.credentials.is_none() {
-                let mut overrides = hyper::HeaderMap::new();
-                for (name, value) in [
-                    ("content-type", i.response_content_type),
-                    ("content-disposition", i.response_content_disposition),
-                    ("content-encoding", i.response_content_encoding),
-                    ("content-language", i.response_content_language),
-                    ("cache-control", i.response_cache_control),
-                    ("expires", i.response_expires.map(http_date).transpose()?),
-                ] {
-                    if let Some(value) = value {
-                        overrides
-                            .insert(hyper::header::HeaderName::from_static(name), value.parse()?);
-                    }
+                if i.response_content_type.is_some()
+                    || i.response_content_disposition.is_some()
+                    || i.response_content_encoding.is_some()
+                    || i.response_content_language.is_some()
+                    || i.response_cache_control.is_some()
+                    || i.response_expires.is_some()
+                {
+                    return Err(s3_error!(AccessDenied).into());
                 }
                 let read = super::object::read(
                     &self.0,
@@ -560,7 +555,7 @@ impl S3 for Gateway {
                     &i.key,
                     &req.headers,
                     false,
-                    &overrides,
+                    &hyper::HeaderMap::new(),
                     i.checksum_mode.is_some(),
                 )
                 .await?;

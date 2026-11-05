@@ -85,6 +85,16 @@ def main():
                 WHERE o.bucket_id=%s AND o.object_key=%s''', uuid.UUID(fixture.bucket_id),
                 key if database.type == 'postgres' else key.encode())[0]
 
+        put('attachment', ContentType='application/octet-stream', ContentDisposition='attachment')
+        for field in ('content-type', 'content-disposition', 'cache-control', 'content-encoding', 'content-language', 'expires'):
+            assert read('attachment?response-' + field + '=inline').status_code == 403
+        assert read('attachment?x-amz-foo=1&response-content-type=text/html').status_code == 403
+        signed_override = fixture.client.generate_presigned_url('get_object', Params={
+            'Bucket': fixture.name, 'Key': 'attachment', 'ResponseContentDisposition': 'inline'})
+        allowed = requests.get(signed_override, timeout=15)
+        assert allowed.status_code == 200 and allowed.headers['Content-Disposition'] == 'inline'
+        assert requests.get(signed_override.replace('=inline', '=attachment'), timeout=15).status_code == 403
+
         put('authority')
         warm('authority')
         before = status()

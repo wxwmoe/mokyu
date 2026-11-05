@@ -32,8 +32,13 @@ fn failure(error: anyhow::Error) -> anyhow::Error {
 }
 
 pub(crate) fn request(query: Option<&str>) -> Result<crate::processing::image::request::Request> {
-    crate::processing::image::request::Request::parse(query.unwrap_or(""))
-        .map_err(|e| s3s::s3_error!(InvalidArgument, "{e}").into())
+    crate::processing::image::request::Request::parse(query.unwrap_or("")).map_err(|e| {
+        if e.is::<s3s::S3Error>() {
+            e
+        } else {
+            s3s::s3_error!(InvalidArgument, "{e}").into()
+        }
+    })
 }
 pub(crate) async fn single(
     app: Arc<crate::app::App>,
@@ -391,7 +396,6 @@ async fn original(
     stream: StoredStream,
     request: HeaderMap,
     head: bool,
-    uri: &Uri,
     body: Body,
 ) -> Result<Response> {
     let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
@@ -425,23 +429,6 @@ async fn original(
     }
     ensure!(non_image(&prefix, complete), s3s::s3_error!(AccessDenied));
     let (mut headers, status, range) = headers(&stream, &metadata, &request)?;
-    if !head {
-        let axum::extract::Query(query) =
-            axum::extract::Query::<Vec<(String, String)>>::try_from_uri(uri)?;
-        let mut seen = std::collections::HashSet::new();
-        for (name, value) in query {
-            if let Some(name) = name
-                .strip_prefix("response-")
-                .filter(|name| crate::rpc::read::OVERRIDES.contains(name))
-            {
-                ensure!(seen.insert(name.to_owned()), s3s::s3_error!(InvalidRequest));
-                headers.insert(
-                    axum::http::HeaderName::from_bytes(name.as_bytes())?,
-                    value.parse()?,
-                );
-            }
-        }
-    }
     if let Some(user) = &metadata.user {
         for (name, value) in user {
             headers.insert(
@@ -534,7 +521,7 @@ where
     );
     let head = method == Method::HEAD;
     let Some(rule) = &selection.rule else {
-        return original(stream, request, head, &uri, body.await?).await;
+        return original(stream, request, head, body.await?).await;
     };
     let identity = job::identity(&stream);
     let accept = request

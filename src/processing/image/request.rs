@@ -62,6 +62,12 @@ impl Request {
             } else {
                 let (name, value) = part.split_once('=').unwrap_or((&part, ""));
                 match name {
+                    name if name
+                        .strip_prefix("response-")
+                        .is_some_and(|field| crate::rpc::read::OVERRIDES.contains(&field)) =>
+                    {
+                        return Err(s3s::s3_error!(AccessDenied).into());
+                    }
                     "style" => {
                         ensure!(result.style.is_none(), "repeated image style");
                         crate::model::image_styles::name(value)?;
