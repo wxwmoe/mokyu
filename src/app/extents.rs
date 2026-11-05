@@ -447,7 +447,7 @@ impl App {
     pub async fn body(
         self: &Arc<Self>,
         stream: StoredStream,
-        pin: Active,
+        pin: impl std::borrow::Borrow<Active> + Send + Sync + 'static,
         span: std::ops::Range<i64>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
         range: bool,
@@ -468,7 +468,7 @@ impl App {
             config::seconds(&app.config.requests.read_idle_timeout)?,
         ));
         let body = async_stream::try_stream! {
-            let _pin=pin;let (_reader,slot)=permits;let slot=Arc::new(slot);let primary=Arc::new(tokio::sync::Semaphore::new(crate::storage::read_buffer::UNITS));let spare=crate::storage::read_buffer::Spares::new(app.slots.clone());let read_context=Arc::new(crate::storage::ReadContext::user(range, app.read_checks.clone(), capture.clone()));
+            let _pin: &Active=pin.borrow();let (_reader,slot)=permits;let slot=Arc::new(slot);let primary=Arc::new(tokio::sync::Semaphore::new(crate::storage::read_buffer::UNITS));let spare=crate::storage::read_buffer::Spares::new(app.slots.clone());let read_context=Arc::new(crate::storage::ReadContext::user(range, app.read_checks.clone(), capture.clone()));
             #[cfg(feature="fault-injection")]
             crate::faults::point("read-body").await;
             _pin.renew_read_lease().await?;

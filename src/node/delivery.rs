@@ -75,6 +75,7 @@ pub(crate) async fn response(
     head: bool,
     overrides: &HeaderMap,
     memory: Option<OwnedSemaphorePermit>,
+    ranges: Option<Vec<std::ops::Range<u64>>>,
 ) -> Result<object::Read> {
     prepared.check()?;
     let outcome = wire::ReadOutcome::try_from(prepared.reply.outcome)?;
@@ -204,7 +205,11 @@ pub(crate) async fn response(
         )?);
         let lease = prepared.run.clone();
         let mut events = reads.node.subscribe();
-        let builder = if direct {
+        ensure!(
+            ranges.is_none() || encoding == Encoding::Identity,
+            "image source must be identity"
+        );
+        let builder = if direct || ranges.is_some() {
             None
         } else {
             reads.cache_body(&prepared, &object, encoding, &headers)?
@@ -249,14 +254,21 @@ pub(crate) async fn response(
                 let _request = prepared;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("response-cache-body").await;
-                entry.demand(&access,span);
-                yield bytes;
+                if let Some(ranges) = ranges {
+                    for range in ranges {
+                        if range.start < span.start as u64 || range.end > span.end as u64 || range.start > range.end { Err(io::Error::other("invalid image source range"))?; }
+                        entry.demand(&access,range.start as i64..range.end as i64);
+                        yield bytes.slice((range.start-span.start as u64) as usize..(range.end-span.start as u64) as usize);
+                    }
+                } else {
+                    entry.demand(&access,span);
+                    yield bytes;
+                }
             })
         } else {
             prepared.capture = builder.as_ref().map(|builder| builder.capture.clone());
             Box::pin(
-                reads
-                    .body(prepared)
+                super::body::stream(reads.clone(), prepared, ranges)
                     .map(|result| result.map_err(io::Error::other)),
             )
         };

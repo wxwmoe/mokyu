@@ -131,7 +131,7 @@ impl App {
     pub(crate) async fn raw_body(
         self: &Arc<Self>,
         stream: StoredStream,
-        pin: Active,
+        pin: impl std::borrow::Borrow<Active> + Send + Sync + 'static,
         span: std::ops::Range<i64>,
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
         capture: Option<Arc<Mutex<super::responses::Mapping>>>,
@@ -189,7 +189,8 @@ impl App {
         let recovery = crate::storage::read_retry::Recovery::new(idle);
         let first = if let Some((first, _)) = ranges.first() {
             Some(
-                pin.with_read_lease(self.storage.raw_reader(&first.source, false))
+                pin.borrow()
+                    .with_read_lease(self.storage.raw_reader(&first.source, false))
                     .await?,
             )
         } else {
@@ -197,7 +198,7 @@ impl App {
         };
         let app = self.clone();
         let body = async_stream::try_stream! {
-            let _pin=pin;let (_reader,slot)=permits;let spare=read_buffer::Spares::new(app.slots.clone());
+            let _pin: &Active=pin.borrow();let (_reader,slot)=permits;let spare=read_buffer::Spares::new(app.slots.clone());
             let slot=Arc::new(slot);let primary=Arc::new(tokio::sync::Semaphore::new(read_buffer::UNITS));
             let retain:segments::Retain=Arc::new(move |n| {
                 let primary=primary.clone();let slot=slot.clone();let spare=spare.clone();

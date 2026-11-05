@@ -80,6 +80,7 @@ pub(crate) async fn single(
         let (stream, pin) = app.current(bucket, &selection.key).await?;
         let size = stream.size;
         let input = stream.clone();
+        let pin = Arc::new(pin);
         let spans = if selection
             .rule
             .as_ref()
@@ -102,11 +103,19 @@ pub(crate) async fn single(
             None,
             None,
             spans,
-            async move {
-                let permits = app.admit(false).await?;
-                Ok(Body::new(s3s::Body::from(
-                    app.body(input, pin, 0..size, permits, false, None).await?,
-                )))
+            move |ranges: Option<Vec<std::ops::Range<u64>>>| async move {
+                let ranges = ranges.unwrap_or_else(|| vec![0..size as u64]);
+                let source: futures_util::stream::BoxStream<'static, anyhow::Result<Bytes>> =
+                    Box::pin(async_stream::try_stream! {
+                        for span in ranges {
+                            let partial = span != (0..size as u64);
+                            let permits = app.admit(false).await?;
+                            let blob = app.body(input.clone(), pin.clone(), span.start as i64..span.end as i64, permits, partial, None).await?;
+                            let mut source = Body::new(s3s::Body::from(blob)).into_data_stream();
+                            while let Some(chunk) = source.next().await { yield chunk?; }
+                        }
+                    });
+                Ok(Body::from_stream(source))
             },
         )
         .await
@@ -392,12 +401,15 @@ fn non_image(bytes: &[u8], complete: bool) -> bool {
     true
 }
 
-async fn original(
+async fn original<F>(
     stream: StoredStream,
     request: HeaderMap,
     head: bool,
-    body: Body,
-) -> Result<Response> {
+    body: impl FnOnce(Option<Vec<std::ops::Range<u64>>>) -> F,
+) -> Result<Response>
+where
+    F: Future<Output = Result<Body>>,
+{
     let metadata: Metadata = serde_json::from_value(stream.metadata.clone())?;
     ensure!(
         !metadata
@@ -413,22 +425,35 @@ async fn original(
             .is_none_or(|e| e.is_empty() || e == "identity"),
         s3s::s3_error!(AccessDenied)
     );
-    let mut source = body.into_data_stream();
-    let mut prefix = Vec::new();
-    let mut fragments = Vec::new();
-    let mut complete = false;
-    while prefix.len() < 4096 {
-        let Some(chunk) = source.next().await else {
-            complete = true;
-            break;
-        };
-        let chunk = chunk?;
-        let count = chunk.len().min(4096 - prefix.len());
-        prefix.extend_from_slice(&chunk[..count]);
-        fragments.push(chunk);
+    let size = u64::try_from(stream.size)?;
+    let prefix_end = size.min(4096);
+    let delivery = headers(&stream, &metadata, &request);
+    let mut ranges = vec![0..prefix_end];
+    if !head
+        && let Ok((_, _, span)) = &delivery
+        && span.end > prefix_end
+    {
+        ranges.push(span.start.max(prefix_end)..span.end);
     }
-    ensure!(non_image(&prefix, complete), s3s::s3_error!(AccessDenied));
-    let (mut headers, status, range) = headers(&stream, &metadata, &request)?;
+    let mut source = body(Some(ranges)).await?.into_data_stream();
+    let mut prefix = bytes::BytesMut::with_capacity(prefix_end as usize);
+    while prefix.len() < prefix_end as usize {
+        let chunk = source
+            .next()
+            .await
+            .transpose()?
+            .ok_or_else(|| s3s::s3_error!(IncompleteBody))?;
+        ensure!(
+            prefix.len() + chunk.len() <= prefix_end as usize,
+            s3s::s3_error!(InternalError)
+        );
+        prefix.extend_from_slice(&chunk);
+    }
+    ensure!(
+        non_image(&prefix, prefix_end == size),
+        s3s::s3_error!(AccessDenied)
+    );
+    let (mut headers, status, range) = delivery?;
     if let Some(user) = &metadata.user {
         for (name, value) in user {
             headers.insert(
@@ -468,27 +493,16 @@ async fn original(
     let body = if head || status == StatusCode::NOT_MODIFIED {
         Body::empty()
     } else {
-        let source =
-            futures_util::stream::iter(fragments.into_iter().map(Ok::<Bytes, axum::Error>))
-                .chain(source);
-        let filtered: std::pin::Pin<
-            Box<dyn futures_util::Stream<Item = std::io::Result<Bytes>> + Send>,
-        > = Box::pin(async_stream::try_stream! {
-            let mut source = std::pin::pin!(source);
-            let mut offset = 0u64;
-            while let Some(chunk) = source.next().await {
-                let chunk = chunk.map_err(std::io::Error::other)?;
-                let end = offset + chunk.len() as u64;
-                if end > range.start && offset < range.end {
-                    let start = range.start.saturating_sub(offset) as usize;
-                    let stop = (range.end - offset).min(chunk.len() as u64) as usize;
-                    yield chunk.slice(start..stop);
-                }
-                offset = end;
-                if offset >= range.end { break; }
-            }
-        });
-        Body::from_stream(filtered)
+        let first = prefix
+            .freeze()
+            .slice(range.start.min(prefix_end) as usize..range.end.min(prefix_end) as usize);
+        if range.end <= prefix_end {
+            Body::from(first)
+        } else if first.is_empty() {
+            Body::from_stream(source)
+        } else {
+            Body::from_stream(futures_util::stream::once(async { Ok(first) }).chain(source))
+        }
     };
     let mut response = Response::new(body);
     *response.status_mut() = status;
@@ -506,7 +520,7 @@ pub(crate) async fn respond<F>(
     retained: Option<Arc<OwnedSemaphorePermit>>,
     run: Option<Arc<crate::node::RunLease>>,
     spans: Vec<crate::app::responses::DemandSpan>,
-    body: F,
+    body: impl FnOnce(Option<Vec<std::ops::Range<u64>>>) -> F,
 ) -> Result<Response>
 where
     F: Future<Output = Result<Body>> + Send + 'static,
@@ -521,8 +535,9 @@ where
     );
     let head = method == Method::HEAD;
     let Some(rule) = &selection.rule else {
-        return original(stream, request, head, body.await?).await;
+        return original(stream, request, head, body).await;
     };
+    let body = body(None);
     let identity = job::identity(&stream);
     let accept = request
         .get("accept")
@@ -578,6 +593,46 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn protected_range_reads_only_the_prefix_and_requested_bytes() {
+        let stream = StoredStream {
+            id: crate::model::Id::Integer(1),
+            bucket_id: uuid::Uuid::nil(),
+            object_key: "plain".into(),
+            stream_type: "object".into(),
+            payload_type: "raw".into(),
+            payload_revision: 1,
+            state: "ready".into(),
+            size: 1_000_000,
+            etag: "v1".into(),
+            metadata: serde_json::json!({"content_type":"text/plain"}),
+            public_read: true,
+            checksums: serde_json::json!({}),
+            http_compression: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            touched_at: chrono::Utc::now(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("range", "bytes=900000-900003".parse().unwrap());
+        let response = original(stream, headers, false, |ranges| async move {
+            assert_eq!(ranges.unwrap(), [0..4096, 900000..900004]);
+            Ok(Body::from_stream(futures_util::stream::iter([
+                Ok::<_, std::io::Error>(Bytes::from(vec![b'a'; 4096])),
+                Ok(Bytes::from_static(b"tail")),
+            ])))
+        })
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 4)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"tail"
+        );
+    }
+
     #[test]
     fn originals_require_confirmed_non_image_content() {
         for bytes in [

@@ -799,7 +799,7 @@ impl Reads {
         self: &Arc<Self>,
         prepared: Prepared,
     ) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes>> {
-        super::body::stream(self.clone(), prepared)
+        super::body::stream(self.clone(), prepared, None)
     }
 
     pub(super) async fn copy_body(

@@ -309,6 +309,7 @@ impl Gateway {
             head,
             overrides,
             request.compression,
+            None,
         )
         .await
     }
@@ -377,7 +378,7 @@ impl Gateway {
             Some(slot),
             Some(run.clone()),
             spans,
-            async move {
+            move |ranges| async move {
                 if request.prepared.needs_source() {
                     let next = reads
                         .open_memory(request.input.clone(), Some(request.prepared.memory()))
@@ -390,9 +391,15 @@ impl Gateway {
                     );
                     request.prepared = next;
                 }
-                let response =
-                    delivery::response(&reads, request.prepared, false, &HeaderMap::new(), None)
-                        .await?;
+                let response = delivery::response(
+                    &reads,
+                    request.prepared,
+                    false,
+                    &HeaderMap::new(),
+                    None,
+                    ranges,
+                )
+                .await?;
                 let body = response.body.context("image source body missing")?;
                 Ok(Body::new(s3s::Body::from(body)))
             },

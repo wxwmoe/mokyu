@@ -844,7 +844,11 @@ fn validate_mapping(
     Ok(())
 }
 
-pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static, Result<Bytes>> {
+pub(super) fn stream(
+    reads: Arc<Reads>,
+    prepared: Prepared,
+    ranges: Option<Vec<std::ops::Range<u64>>>,
+) -> BoxStream<'static, Result<Bytes>> {
     Box::pin(async_stream::try_stream! {
         let object: read::Object = prepared.material(prepared.reply.object.as_ref().context("object material missing")?)?;
         let mut position = prepared.reply.offset;
@@ -860,6 +864,16 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
         if !prepared.grants.iter().any(|grant| grant.reference.r#type == wire::GrantType::ReadProtection as i32) {
             Err(anyhow::anyhow!("read protection missing"))?;
         }
+        let whole = position..end;
+        let spans = ranges.as_deref().unwrap_or(std::slice::from_ref(&whole));
+        let mut previous = position;
+        let mut expected = 0;
+        for span in spans {
+            if span.start < previous || span.end < span.start || span.end > end { Err(anyhow::anyhow!("invalid source ranges"))?; }
+            previous = span.end;
+            expected += span.end - span.start;
+        }
+        let mut delivered = 0;
         let mut current = Arc::new(prepared);
         let mut retired = None;
         let mut demand=crate::status::access::DemandRead::default();
@@ -867,15 +881,28 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
             current.check()?;
             let value = mapping(&current, object.id, object.revision, position, end)?;
             let keys = Arc::new(current.keys()?);
-            let mut prefetch = current.reply.next.clone().map(|cursor| {
+            let mut next = current.reply.next.clone().and_then(|mut cursor| {
+                let span = spans.iter().find(|span| span.end > cursor.offset)?;
+                cursor.offset = cursor.offset.max(span.start);
+                Some(cursor)
+            });
+            let next_start = next.as_ref().map(|cursor| cursor.offset);
+            let load_next = |cursor| {
                 let reads = reads.clone(); let current = current.clone();
                 Prefetch(tokio::spawn(async move { reads.window(current, cursor, retired).await }))
-            });
+            };
+            let mut prefetch = if ranges.is_none() { next.take().map(load_next) } else { None };
+            for span in spans {
             for (batch_index,batch) in value.segments.chunks(read::LANES).enumerate() {
                 let mut packs=std::collections::HashMap::new();
                 let mut chunks=std::collections::HashMap::new();
                 let mut tasks=Vec::with_capacity(batch.len());
                 for (offset,segment) in batch.iter().enumerate() {
+                    let begin = span.start.max(segment.offset as u64);
+                    let stop = span.end.min((segment.offset + segment.length) as u64);
+                    if begin >= stop { continue; }
+                    let source_offset = segment.source_offset + (begin as i64 - segment.offset);
+                    let length = (stop - begin) as i64;
                     let index=batch_index*read::LANES+offset;
                     let loader = match &segment.source {
                         read::Source::Pack {pack,..} => Some(packs.entry(pack.location_id).or_insert_with(||Arc::new(tokio::sync::Mutex::new(None))).clone()),
@@ -902,14 +929,14 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         }
                     }.map(|result|result.map_err(Arc::new)).boxed().shared();
                     let job=if let Some(group)=group { chunks.entry(group).or_insert(work).clone() } else {work};
-                    tasks.push(async move {(index,segment,crate::storage::read_retry::READ_AHEAD.scope(offset!=0,job).await)});
+                    tasks.push(async move {(index,segment,begin,source_offset,length,crate::storage::read_retry::READ_AHEAD.scope(offset!=0,job).await)});
                 }
                 drop(packs);drop(chunks);
                 let mut ready=futures_util::stream::iter(tasks).buffered(read::LANES);
-                while let Some((index,segment,result))=current.guard(&reads.node,async {Ok(ready.next().await)}).await? {
+                while let Some((index,segment,begin,source_offset,length,result))=current.guard(&reads.node,async {Ok(ready.next().await)}).await? {
 
                 if let Some(capture)=&current.capture && let Some(source)=segment.source.cached_source(){
-                    capture.lock().unwrap().demand(position as i64,position as i64+segment.length,source);
+                    capture.lock().unwrap().demand(begin as i64,begin as i64+length,source);
                 }
                 if let read::Source::Raw { source } = &segment.source {
                     use crate::storage::raw_segments as segments;
@@ -920,21 +947,20 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                     let (mut file,io)=opened?;
                     let mut remote=file.remote_source();
                     let mut local_io=if remote.is_some() {drop(io);None} else {Some(io)};
-                    let start=segment.source_offset as u64;
-                    let span=start..start+segment.length as u64;
-                    let proof=current.page_hashes(segment)?.map(|bytes|segments::Proof::new(&span,bytes.to_vec(),reads.reader.cpu.clone()).map(Arc::new)).transpose()?;
+                    let start=source_offset as u64;
+                    let proof=current.page_hashes(segment)?.map(|bytes|segments::Proof::new(&(segment.source_offset as u64..(segment.source_offset + segment.length) as u64),bytes.to_vec(),reads.reader.cpu.clone()).map(Arc::new)).transpose()?;
                     if strict && proof.is_none(){Err(crate::model::Error::SourceUnavailable)?;}
 
                     let from_backend=remote.is_some();
-                    let mut audit=reads.check_raw(current.clone(),index,source,start==0 && segment.length==source.size,from_backend)?;
+                    let mut audit=reads.check_raw(current.clone(),index,source,start==0 && length==source.size,from_backend)?;
                     let held=current.clone();
                     let retain:segments::Retain=Arc::new(move |n|{
                         let held=held.clone();Box::pin(async move{Ok(Box::new(held.reserve(n).await?) as segments::Permit)})
                     });
                     let mut received=0;
-                    while received<segment.length {
+                    while received<length {
                     let at=start+received as u64;
-                    let span=at..start+segment.length as u64;
+                    let span=at..start+length as u64;
                     let proof=proof.clone();let retain=retain.clone();
                     let cached=matches!(&file,RawFile::Cached{..});let mut rejected=false;
                     let mut output=if let Some(remote)=remote.clone() {
@@ -960,7 +986,7 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         }
                         let (bytes,from_backend)=result?;received+=bytes.len() as i64;
                         if let Some(audit)=&mut audit {audit.feed(bytes.clone(),bytes.len());}
-                        if received==segment.length && position+received as u64==end {current.finish_source();}
+                        if received==length && begin+received as u64==end {current.finish_source();}
                         if !reads.reader.background && !current.verify {
                             reads.node.access.demand(&mut demand,crate::model::tiering::Source::Raw(source.location_id),bytes.len(),from_backend);
                         }
@@ -980,33 +1006,36 @@ pub(super) fn stream(reads: Arc<Reads>, prepared: Prepared) -> BoxStream<'static
                         reads.reader.files.reject(source.location_id).await;
                         continue;
                     }
-                    if received!=segment.length {Err(codec::IntegrityError::Length)?;}
+                    if received!=length {Err(codec::IntegrityError::Length)?;}
                     }
                 } else {
                     if let Err(error) = &result { reads.report_error(current.clone(), index, &segment.source, error).await; }
                     let (bytes,origin)=result.map_err(|e|Arc::try_unwrap(e).unwrap_or_else(|e|anyhow::anyhow!("{e:#}")))?;
                     reads.check_chunk(current.clone(), index, &segment.source, bytes.clone())?;
-                    if position + segment.length as u64 == end { current.finish_source(); }
+                    if begin + length as u64 == end { current.finish_source(); }
                     if !reads.reader.background && !current.verify {
                         if let Some(source)=segment.source.demand(){
-                            reads.node.access.demand(&mut demand,source,segment.length as usize,origin);
+                            reads.node.access.demand(&mut demand,source,length as usize,origin);
                         }
                         if let read::Source::Chunk { chunk } | read::Source::Pack { chunk, .. } | read::Source::Local { chunk, .. } = &segment.source {
-                            reads.node.access.chunk(chunk.id, current.reply.http_status == 206, segment.length as usize, false);
+                            reads.node.access.chunk(chunk.id, current.reply.http_status == 206, length as usize, false);
                         }
                     }
-                    yield bytes.slice(segment.source_offset as usize..(segment.source_offset + segment.length) as usize);
+                    yield bytes.slice(source_offset as usize..(source_offset + length) as usize);
                 }
-                position += segment.length as u64;
+                delivered += length as u64;
                 }
             }
+            }
+            if prefetch.is_none() { prefetch = next.map(load_next); }
             let Some(next) = &mut prefetch else { break; };
             retired = current.grants.iter().find(|grant| grant.reference.r#type == wire::GrantType::ReadWindow as i32)
                 .map(|grant| Uuid::parse_str(&grant.reference.id)).transpose()?;
             let prepared = current.guard(&reads.node, async { (&mut next.0).await? }).await?;
+            position = next_start.context("read cursor missing")?;
             current = Arc::new(prepared);
         }
-        if position != end { Err(anyhow::anyhow!("incomplete read body"))?; }
+        if delivered != expected { Err(anyhow::anyhow!("incomplete read body"))?; }
     })
 }
 
