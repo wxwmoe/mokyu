@@ -13,7 +13,7 @@ export default {
   imageTitle: "Image processing",
   imageEnabled: "Enable public image processing",
   imagePixelLimit: "Maximum source pixels (MP)",
-  imagePixelLimitHint: "Width × height × frames. The node memory budget may allow fewer pixels.",
+  imagePixelLimitHint: "Width × height × frames. The node memory budget may allow fewer pixels. Each serving node needs at least 256 MiB of shared working memory",
   imageInputLimit: "Maximum input (MB)",
   imageProtect: "Protect original images",
   imageProtectHint: "Only saved styles can access protected public images. Turning processing off does not turn protection off.",

@@ -76,6 +76,10 @@ impl Drop for Temporary {
         }
     }
 }
+pub(crate) fn capacity(units: u32) -> serde_json::Value {
+    let available = units.min(768);
+    serde_json::json!({"memory_mib": available, "minimum_mib": super::engine::MIN_MEMORY_MIB, "enabled_by_budget": available >= super::engine::MIN_MEMORY_MIB})
+}
 pub(crate) struct Resources {
     pub disk: Arc<Disk>,
     pub cpu: Arc<Semaphore>,

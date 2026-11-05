@@ -13,7 +13,7 @@ export default {
   imageTitle: "画像処理",
   imageEnabled: "公開画像の処理を有効にする",
   imagePixelLimit: "元画像の総画素数の上限（MP）",
-  imagePixelLimitHint: "幅 × 高さ × フレーム数で計算し、ノードのメモリ上限によって処理可能な画素数が少なくなる場合があります",
+  imagePixelLimitHint: "幅 × 高さ × フレーム数で計算し、ノードのメモリ上限によって処理可能な画素数が少なくなる場合があります。処理ノードには 256 MiB 以上の共有作業メモリが必要です",
   imageInputLimit: "入力サイズの上限（MB）",
   imageProtect: "元画像を保護",
   imageProtectHint: "有効にすると保存済みスタイルでのみ公開画像にアクセスでき、処理を無効にしても元画像の保護は維持されます",

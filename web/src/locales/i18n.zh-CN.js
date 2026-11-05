@@ -13,7 +13,7 @@ export default {
   imageTitle: "图像处理",
   imageEnabled: "启用公共图片处理",
   imagePixelLimit: "原图总像素上限（MP）",
-  imagePixelLimitHint: "按宽 × 高 × 帧数计算，节点的内存预算可能进一步降低实际可用上限",
+  imagePixelLimitHint: "按宽 × 高 × 帧数计算，节点的内存预算可能进一步降低实际可用上限，提供图片处理的节点至少需要 256 MiB 共享工作内存",
   imageInputLimit: "输入大小上限（MB）",
   imageProtect: "原图保护",
   imageProtectHint: "仅允许通过已保存样式访问公开图片，关闭图片处理后仍保留原图保护",

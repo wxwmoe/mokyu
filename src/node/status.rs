@@ -42,6 +42,7 @@ impl NodeContext {
             "maintenance": state.maintenance, "draining": state.draining,
             "node_id": self.client.identity.node_id, "boot_id": self.boot,
             "runtime": runtime, "resources": self.budget.get(),
+            "image_processing": self.budget.get().map(|b| crate::processing::image::job::capacity(b.pack_memory_units)),
             "process_memory": crate::status::stats::process_memory().await,
             "db_pool_size": 0, "db_pool_idle": 0, "active_grants": self.resources.active(),
             "pending_uploads": state.pending_uploads,

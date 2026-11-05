@@ -31,7 +31,7 @@ async fn collect(app: &App, restricted: bool) -> Result<(Value, Value)> {
     };
     let memory = crate::status::stats::process_memory().await;
     let status = json!({
-        "work": work, "runtime": runtime, "resources": app.budget,
+        "work": work, "runtime": runtime, "resources": app.budget, "image_processing":crate::processing::image::job::capacity(app.budget.pack_memory_units),
         "process_memory": memory, "db_pool_size": size, "db_pool_idle": idle,
         "active_streams": app.active_operations(), "data_slots_available": app.slots.available_permits(),
         "upload_slots_available": app.uploads.available_permits(), "read_slots_available": app.reads.available_permits(),

@@ -68,10 +68,11 @@ pub(crate) struct Limits {
     pub output: u64,
     pub deadline: Duration,
 }
+pub(crate) const MIN_MEMORY_MIB: u32 = 256;
 impl Limits {
     pub fn new(input: InputLimits, memory: u64) -> Result<Self> {
         ensure!(
-            input.bytes > 0 && memory >= 512 * 1024 * 1024,
+            input.bytes > 0 && memory >= u64::from(MIN_MEMORY_MIB) * 1024 * 1024,
             "insufficient image budget"
         );
         Ok(Self {
