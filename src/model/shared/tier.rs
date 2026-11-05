@@ -268,7 +268,19 @@ impl TieringStore for Backend {
             s3s::s3_error!(InvalidArgument)
         );
         let mut db = q::begin(self).await?;
-        hot(&mut db, principal, bucket).await?;
+        // Decisions include reads from every bucket that shares the physical unit.
+        ensure!(
+            transactions::lock_identity(&mut db, principal).await?
+                && queries::permission_bucket(bucket)
+                    .fetch_optional(&mut *db)
+                    .await?
+                    .is_some(),
+            s3s::s3_error!(AccessDenied)
+        );
+        replication_queries::profile(bucket)
+            .fetch_optional(&mut *db)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
         let (ids, rows, clock) = q::references(&mut db, bucket, unit, after, limit, false).await?;
         let limited = rows.len() > 1024;
         let mut groups = BTreeMap::<Uuid, Vec<&Reference>>::new();

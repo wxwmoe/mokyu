@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Database, Layers, ChartColumn, ListChecks } from 'lucide-vue-next'
-import { api, ApiError, bytes, params, write, type Bucket } from '../api/client'
+import { api, ApiError, bytes, params, session, write, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
 import ErrorNotice from './ErrorNotice.vue'
@@ -59,7 +59,8 @@ async function change(action:'preview'|'save'|Action) {
 }
 const unit=ref('chunk'), after=ref(''), history=ref<string[]>([])
 watch(unit,()=>{after.value='';history.value=[]})
-const reasons=useQuery({queryKey:['tier-reasons',base,unit,after],enabled:computed(()=>!!view.data.value?.policy),queryFn:({signal})=>api<Candidate[]>(base.value+'/units?'+params({unit:unit.value,after:after.value||undefined,limit:'16'}),{signal})})
+const showDecisions=computed(()=>session.value?.role==='admin' && !!view.data.value?.policy)
+const reasons=useQuery({queryKey:['tier-reasons',base,unit,after],enabled:showDecisions,queryFn:({signal})=>api<Candidate[]>(base.value+'/units?'+params({unit:unit.value,after:after.value||undefined,limit:'16'}),{signal})})
 const reasonUnit=computed(()=>(['chunk','pack','raw'] as const).map(value=>({value,label:t('tierUnit_'+value)})))
 const metrics=['hot_bytes','cold_bytes','duplicate_bytes','retiring_bytes'] as const
 const empty=()=>({hot_bytes:0,cold_bytes:0,duplicate_bytes:0,retiring_bytes:0,unconfirmed:0,units:0,phases:{} as Record<string,number>})
@@ -92,7 +93,7 @@ onBeforeUnmount(()=>scan?.abort())
       <div class="bucket-heading"><span class="policy-icon sky"><Layers :size="22" aria-hidden="true" /></span><div><h2>{{ t('tierTitle') }}</h2><p class="field-help">{{ t('tierHint') }}</p></div></div>
       <span v-if="view.data.value" class="badge node-state" :data-tone="view.data.value.state==='active'?'mint':'gray'">{{ t('tierState_'+view.data.value.state) }}</span>
     </header>
-    <ErrorNotice :error="error || view.error.value || options.error.value || reasons.error.value"/>
+    <ErrorNotice :error="error || view.error.value || options.error.value || (showDecisions ? reasons.error.value : null)"/>
     <p v-if="stale" class="bucket-stale" role="status">{{ t('tierStale') }} <button @click="reset">{{ t('refresh') }}</button></p>
     <form class="bucket-subpanel form-stack" @submit.prevent="change('preview')">
       <p v-if="view.data.value" class="tier-backend"><Database :size="16" aria-hidden="true" />{{ t('tierHot') }} <strong>{{ hot?.name || props.bucket.storage_id }}</strong></p>
@@ -128,7 +129,7 @@ onBeforeUnmount(()=>scan?.abort())
         <div><dt>{{ t('tierUnconfirmed') }}</dt><dd>{{ totals.unconfirmed }}</dd></div><div><dt>{{ t(complete?'tierCounted':'tierPartial') }}</dt><dd>{{ totals.units }}</dd></div>
       </dl>
     </section>
-    <section v-if="view.data.value?.policy" class="bucket-subpanel form-stack">
+    <section v-if="showDecisions" class="bucket-subpanel form-stack">
       <header class="bucket-section-head"><div class="bucket-heading"><span class="chunk-bead lilac"><ListChecks :size="18" aria-hidden="true" /></span><h3>{{ t('tierDecisions') }}</h3></div>
         <UiSelect v-model="unit" :options="reasonUnit" :label="t('tierDecisions')"/>
       </header>

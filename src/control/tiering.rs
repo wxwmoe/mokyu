@@ -43,7 +43,7 @@ pub(super) async fn usage(
     ))
 }
 
-#[utoipa::path(get,path="/api/v1/buckets/{bucket}/tiering/units",operation_id="bucket_tiering_units",params(("bucket"=Uuid,Path),Filter),responses((status=200,body=Vec<Candidate>)))]
+#[utoipa::path(get,path="/api/v1/buckets/{bucket}/tiering/units",operation_id="bucket_tiering_units",params(("bucket"=Uuid,Path),Filter),responses((status=200,body=Vec<Candidate>),(status=403,body=super::contract::ErrorBody)))]
 pub(super) async fn units(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,

@@ -70,11 +70,18 @@ pub(in super::super) async fn hold_admin(
     }))
 }
 
+pub(in super::super) async fn lock_identity(
+    connection: &mut MySqlConnection,
+    principal: &Principal,
+) -> Result<bool> {
+    queries::validate_identity(principal, connection, true).await
+}
+
 pub(in super::super) async fn lock_permit(
     connection: &mut MySqlConnection,
     permit: &crate::authorization::Permit,
 ) -> Result<()> {
-    let admin = queries::validate_identity(&permit.principal, connection, true).await?;
+    let admin = lock_identity(connection, &permit.principal).await?;
     for (bucket, required) in &permit.resources {
         if queries::permission_bucket(*bucket)
             .fetch_optional(&mut *connection)

@@ -159,7 +159,6 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/buckets/{bucket}/redundancy/{id}"
                 | "/api/v1/buckets/{bucket}/tiering"
                 | "/api/v1/buckets/{bucket}/tiering/usage"
-                | "/api/v1/buckets/{bucket}/tiering/units"
                 | "/api/v1/buckets/{bucket}/image-processing/styles"
                 | "/api/v1/buckets/{bucket}/image-processing/styles/export"
                 | "/api/v1/external-buckets"

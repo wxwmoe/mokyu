@@ -252,14 +252,14 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 `POST /api/v1/buckets/{bucket}/tiering/state` 接受当前 `revision` 和 `action`：`pause` 暂停新迁移，已发布的位置继续可读；`resume` 恢复自动判断；`drain` 将该桶使用的冷单位搬回热端；`disable` 在冷位置及在途依赖解除后关闭策略。修改冷后端同样需要先排空该桶。读取直接访问当前位置，不等待后台升热。
 
-`GET /api/v1/buckets/{bucket}/tiering/usage?unit=raw` 按物理 ID 返回用量，可用 `after`、`limit`（1–256）继续翻页；`unit` 可选 `chunk`、`pack`、`raw`。同一桶内共享的物理单位只列一次，整包的成员不另计。`hot_bytes`、`cold_bytes` 包含确认写入的额外副本，`duplicate_bytes` 和 `retiring_bytes` 是其中的临时双份和待回收部分，不能再次相加。`unconfirmed` 表示未确认的写入仍可能占用更多空间。跨页统计反映查询期间陆续观测到的位置；物理用量不改变对象逻辑配额。桶详情中的「智能分层」可按需统计用量，并查看迁移阶段、最近读取及降冷条件。
+`GET /api/v1/buckets/{bucket}/tiering/usage?unit=raw` 按物理 ID 返回用量，可用 `after`、`limit`（1–256）继续翻页；`unit` 可选 `chunk`、`pack`、`raw`。同一桶内共享的物理单位只列一次，整包的成员不另计。`hot_bytes`、`cold_bytes` 包含确认写入的额外副本，`duplicate_bytes` 和 `retiring_bytes` 是其中的临时双份和待回收部分，不能再次相加。`unconfirmed` 表示未确认的写入仍可能占用更多空间。跨页统计反映查询期间陆续观测到的位置；物理用量不改变对象逻辑配额。具有 `bucket.settings` 权限的用户可在桶详情的「智能分层」中统计用量并查看迁移阶段。
 
 | 方法与路径 | 作用 |
 | --- | --- |
 | `GET` | 返回热端、当前策略、状态和修订号；未配置时 `policy` 为 `null`，修订号为 0 |
 | `POST /preview` | 接受 `{revision,policy}`，校验位置和读取能力，不保存 |
 | `PUT` | 保存与预览相同的配置，修订号冲突返回 409 |
-| `GET /units` | 按 `unit=chunk\|pack\|raw`、UUID 游标 `after` 和 `limit`（1–128）查看物理单元、字节数、最近读取和降冷资格 |
+| `GET /units` | 仅实例管理员或具有完整管理权限的 API Token 可查看候选明细。最近读取和降冷原因综合所有引用桶的活动。支持 `unit=chunk\|pack\|raw`、UUID 游标 `after` 和 `limit`（1–128） |
 
 策略分别配置无读取时长 `cool_after_seconds`、升热观察窗口 `observation_seconds`、读取次数门槛 `promote_reads`、最短驻留时长 `residency_seconds`，以及并发数 `parallelism` 和每秒搬运预算 `bytes_per_second`。共享来源必须满足所有引用桶的策略；包成员随整包移动，读取某一成员不会增加其他成员的热度。
 
