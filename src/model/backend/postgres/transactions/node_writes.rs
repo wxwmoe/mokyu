@@ -1054,7 +1054,7 @@ pub(in super::super) async fn commit_node_chunks(
     let mut tx = backend.pool.begin().await?;
     backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
-    let batch = queries::node_write_batch(node.node_id, input.operation, input.batch)
+    let mut batch = queries::node_write_batch(node.node_id, input.operation, input.batch)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(Error::NodeOperationMissing)?;
@@ -1093,7 +1093,7 @@ pub(in super::super) async fn commit_node_chunks(
                     .all(|value| expected.contains(&value.chunk)),
             Error::OperationAborted
         );
-        if let Some(step) = chunk::pending_checks(&batch.plan, stream, verified) {
+        if let Some(step) = chunk::prepare_commit(&mut batch.plan, stream, verified) {
             return Ok(step);
         }
         let mut completed = HashSet::new();

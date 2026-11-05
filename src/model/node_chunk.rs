@@ -111,8 +111,8 @@ impl CommitStep {
     }
 }
 
-pub(crate) fn pending_checks(
-    items: &[Item],
+pub(crate) fn prepare_commit(
+    items: &mut [Item],
     stream: super::Id,
     verified: &[super::Id],
 ) -> Option<CommitStep> {
@@ -126,7 +126,19 @@ pub(crate) fn pending_checks(
         })
         .filter_map(|item| item.repair(stream))
         .collect();
-    (!pending.is_empty()).then_some(CommitStep::Verify(pending))
+    if !pending.is_empty() {
+        return Some(CommitStep::Verify(pending));
+    }
+    if !verified.is_empty() {
+        // Take recovery locks in the same order as allocation. Each extent keeps its byte offset.
+        items.sort_by(|a, b| {
+            a.chunk
+                .hash
+                .cmp(&b.chunk.hash)
+                .then_with(|| a.chunk.raw_size.cmp(&b.chunk.raw_size))
+        });
+    }
+    None
 }
 
 pub(crate) struct Assembly {

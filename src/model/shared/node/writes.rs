@@ -1077,7 +1077,7 @@ impl NodeWrites for Backend {
         let mut tx = start(self, node, key, input.run).await?;
         let row = lookup(&mut tx, node.node_id, input.operation).await?;
         row.owned(node, input.run)?;
-        let batch = q::batch(node.node_id, input.operation, input.batch)
+        let mut batch = q::batch(node.node_id, input.operation, input.batch)
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(Error::NodeOperationMissing)?;
@@ -1112,7 +1112,7 @@ impl NodeWrites for Backend {
                         && input.encoded.iter().all(|i| needed.contains(&i.chunk)),
                     Error::OperationAborted
                 );
-                if let Some(step) = node_chunk::pending_checks(&batch.plan, stream, verified) {
+                if let Some(step) = node_chunk::prepare_commit(&mut batch.plan, stream, verified) {
                     return Ok(step);
                 }
                 for item in batch.plan.iter().filter(|i| !i.reused) {
