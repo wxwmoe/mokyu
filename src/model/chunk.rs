@@ -14,6 +14,23 @@ pub(crate) struct ChunkCreate {
     pub(crate) key: Option<Uuid>,
 }
 
+impl ChunkCreate {
+    pub(super) fn repair_candidate(&self, current: Chunk, location_id: Uuid) -> Chunk {
+        Chunk {
+            storage_id: Some(self.storage),
+            home_storage_id: None,
+            address: None,
+            location_id,
+            algorithm: self.algorithm.clone(),
+            block_key_id: self.key,
+            stored_size: None,
+            compressed: false,
+            nonce: None,
+            ..current
+        }
+    }
+}
+
 pub(crate) struct ReadExtent {
     pub(crate) extent: Extent,
     pub(crate) chunk: Chunk,

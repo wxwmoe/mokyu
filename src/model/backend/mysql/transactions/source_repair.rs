@@ -261,7 +261,7 @@ async fn repair_sources(
         if let Some(id) = id {
             let scope = SourceScope {
                 storage_id: chunk
-                    .storage_id
+                    .home_storage()
                     .ok_or(crate::model::Error::OperationAborted)?,
                 source,
                 id: id.to_string(),
@@ -287,7 +287,7 @@ pub(in super::super) async fn prepare_repair(
     use crate::model::recovery::{Repair, RepairAllocation};
     let mut tx = pool.begin().await?;
     repair_writer(&mut tx, input.stream, node.as_ref()).await?;
-    let mut chunk = queries::reusable_chunk(&mut tx, &input)
+    let chunk = queries::reusable_chunk(&mut tx, &input)
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
     match require_sources(&mut tx, None, &[chunk.id]).await {
@@ -313,13 +313,7 @@ pub(in super::super) async fn prepare_repair(
             .all(|source| source.storage_revision == revision),
         crate::model::Error::OperationAborted
     );
-    chunk.address = None;
-    chunk.location_id = Uuid::now_v7();
-    chunk.algorithm = input.algorithm;
-    chunk.block_key_id = input.key;
-    chunk.stored_size = None;
-    chunk.compressed = false;
-    chunk.nonce = None;
+    let mut chunk = input.repair_candidate(chunk, Uuid::now_v7());
     chunk.encoding_id = Id::try_from(
         queries::insert_repair(&chunk, input.stream)
             .execute(&mut *tx)

@@ -371,7 +371,7 @@ pub(in super::super) fn saved_source_inputs(task: Uuid) -> Scalar<'static, Value
 // Recovery candidates are private to their writing stream until full verification.
 pub(in super::super) fn repair_mode() -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT deployment_mode='single' AND NOT maintenance FROM mokyu_meta FOR SHARE",
+        "SELECT deployment_mode IN ('single','single_control') AND NOT maintenance FROM mokyu_meta FOR SHARE",
     )
 }
 

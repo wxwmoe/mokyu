@@ -249,7 +249,7 @@ impl App {
         #[cfg(feature = "fault-injection")]
         crate::faults::point("repair-prepared").await;
         self.storage
-            .verify_source_namespace(&repair.sources[0])
+            .verify_repair_namespace(&repair.sources[0])
             .await?;
         let (chunk, encoded, cache) = self
             .storage
@@ -270,7 +270,7 @@ impl App {
         crate::faults::point("repair-stored").await;
         self.storage.verify_chunk(&repair.chunk).await?;
         self.storage
-            .verify_source_namespace(&repair.sources[0])
+            .verify_repair_namespace(&repair.sources[0])
             .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("repair-before-commit").await;

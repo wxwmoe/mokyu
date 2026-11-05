@@ -2718,6 +2718,18 @@ impl Storage {
         )
         .await
     }
+    pub(crate) async fn verify_repair_namespace(
+        &self,
+        snapshot: &crate::model::source::SourceSnapshot,
+    ) -> Result<()> {
+        let target = self.store_backend(snapshot.scope.storage_id)?;
+        ensure!(
+            target.revision == snapshot.storage_revision
+                && target.identity_marker == snapshot.identity_marker,
+            crate::model::Error::OperationAborted
+        );
+        self.check_storage_inner(&target).await
+    }
     pub(crate) async fn verify_source_namespace(
         &self,
         snapshot: &crate::model::source::SourceSnapshot,
