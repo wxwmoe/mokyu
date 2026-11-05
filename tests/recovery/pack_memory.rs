@@ -73,6 +73,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
                     uuid: Uuid::now_v7(),
                     id: id.into(),
                     encoding_id: id.into(),
+                    home_storage_id: None,
                     address: None,
                     location_id: Uuid::new_v4(),
                     storage_id: Some(store_id),
@@ -93,6 +94,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
         .collect();
     let template = Pack {
         id: 1.into(),
+        home_storage_id: None,
         address: None,
         location_id: Uuid::new_v4(),
         storage_id: Some(store_id),

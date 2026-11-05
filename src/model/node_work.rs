@@ -156,12 +156,12 @@ pub(crate) enum Plan {
         storage: Uuid,
         transfer: Box<super::transfer::Work>,
         batch: Box<super::node_pack::Batch>,
-        source_permits: [Uuid; 2],
+        source_permits: Vec<Uuid>,
     },
     RawTransfer {
         storage: Uuid,
         transfer: Box<super::transfer::RawCopy>,
-        source_permits: [Uuid; 2],
+        source_permits: Vec<Uuid>,
     },
     HashRaw {
         storage: Uuid,
@@ -214,12 +214,11 @@ pub(crate) enum Plan {
 impl Plan {
     pub(crate) fn source_permits(&self) -> &[Uuid] {
         match self {
-            Self::Pack { source_permits, .. } | Self::Rewrite { source_permits, .. } => {
-                source_permits
-            }
-            Self::Tier { source_permits, .. }
+            Self::Pack { source_permits, .. }
+            | Self::Rewrite { source_permits, .. }
             | Self::CopyTransfer { source_permits, .. }
             | Self::RawTransfer { source_permits, .. } => source_permits,
+            Self::Tier { source_permits, .. } => source_permits,
             _ => &[],
         }
     }

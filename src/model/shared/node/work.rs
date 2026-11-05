@@ -415,15 +415,14 @@ async fn finish(
             );
             super::tier_move_transactions::finish(tx, task, outcome).await?;
             if matches!(&**outcome, Outcome::Removed) {
-                "completed"
-            } else {
-                "queued"
+                return settle(tx, node, task, result.operation, &hash).await;
             }
+            "queued"
         }
         (Some(work::Plan::Tier { .. }), [work::Outcome::Retry]) => {
             super::tier_move_transactions::finish(tx, task, &crate::model::tiering::Outcome::Retry)
                 .await?;
-            "queued"
+            return settle(tx, node, task, result.operation, &hash).await;
         }
         (
             Some(work::Plan::Inspect {

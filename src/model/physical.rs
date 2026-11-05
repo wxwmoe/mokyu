@@ -72,14 +72,18 @@ impl PhysicalSource {
     pub(crate) fn relocate(&mut self, storage: Uuid, address: Uuid, local: bool) {
         match self {
             Self::Chunk(c) => {
+                c.home_storage_id = c.home_storage().filter(|home| *home != storage);
                 c.storage_id = Some(storage);
                 c.address = Some(address);
             }
             Self::Pack(p) => {
+                p.home_storage_id = p.home_storage().filter(|home| *home != storage);
                 p.storage_id = Some(storage);
                 p.address = Some(address);
             }
             Self::Raw(r) => {
+                let home = r.home_storage();
+                r.home_storage_id = (home != storage).then_some(home);
                 r.storage_id = storage;
                 r.address = Some(address);
                 r.medium = if local { "local" } else { "shared_s3" }.into();
@@ -119,18 +123,30 @@ impl PhysicalSource {
         if !self.same_content(&candidate)
             || candidate.address().is_nil()
             || candidate.address() == self.identity()
-            || candidate.storage().is_err()
             || candidate.bytes().is_err()
         {
             return Err(sqlx::Error::Decode(
                 "tier location does not match its immutable source".into(),
             ));
         }
+        // Ownership comes from the database row even when the tier supplies new I/O material.
+        let home = self.storage().map_err(|e| sqlx::Error::Decode(e.into()))?;
+        let storage = candidate
+            .storage()
+            .map_err(|e| sqlx::Error::Decode(e.into()))?;
+        let home = (storage != home).then_some(home);
         match (&self, &mut candidate) {
-            (Self::Chunk(a), Self::Chunk(b)) => b.state.clone_from(&a.state),
-            (Self::Pack(a), Self::Pack(b)) => b.state.clone_from(&a.state),
+            (Self::Chunk(a), Self::Chunk(b)) => {
+                b.home_storage_id = home;
+                b.state.clone_from(&a.state);
+            }
+            (Self::Pack(a), Self::Pack(b)) => {
+                b.home_storage_id = home;
+                b.state.clone_from(&a.state);
+            }
             (Self::Raw(a), Self::Raw(b)) => {
                 b.state.clone_from(&a.state);
+                b.home_storage_id = home;
                 b.revision = a.revision;
                 b.quarantine_code.clone_from(&a.quarantine_code);
             }
@@ -151,6 +167,7 @@ mod tier_material_tests {
         let raw = super::super::raw::RawSource {
             id: 1i64.into(),
             location_id: Uuid::from_u128(1),
+            home_storage_id: None,
             address: None,
             storage_id: Uuid::from_u128(2),
             size: 13,
@@ -163,6 +180,11 @@ mod tier_material_tests {
         };
         let mut remote = PhysicalSource::Raw(raw.clone());
         remote.relocate(Uuid::from_u128(3), Uuid::from_u128(4), false);
+        let PhysicalSource::Raw(cold) = &mut remote else {
+            unreachable!()
+        };
+        assert_eq!(cold.home_storage(), raw.storage_id);
+        cold.home_storage_id = None; // Previously stored tier material had no ownership field.
         let mut current = raw;
         current.state = "quarantined".into();
         current.revision = 3;
@@ -174,10 +196,22 @@ mod tier_material_tests {
             panic!("expected raw")
         };
         assert_eq!(routed.address(), Uuid::from_u128(4));
+        assert_eq!(routed.home_storage(), Uuid::from_u128(2));
+        assert_eq!(routed.storage_id, Uuid::from_u128(3));
         assert_eq!(
             (routed.revision, routed.quarantine_code),
             (3, current.quarantine_code.clone())
         );
+        let mut hot = remote.clone();
+        hot.relocate(current.storage_id, Uuid::from_u128(5), false);
+        let PhysicalSource::Raw(hot) = PhysicalSource::Raw(current.clone())
+            .bind_location(hot)
+            .unwrap()
+        else {
+            unreachable!()
+        };
+        assert_eq!(hot.home_storage_id, None);
+        assert_eq!(hot.address(), Uuid::from_u128(5));
         current.digest = Some(vec![8; 16]);
         assert!(PhysicalSource::Raw(current).bind_location(remote).is_err());
     }

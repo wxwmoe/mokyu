@@ -1539,6 +1539,7 @@ mod tests {
         let row = crate::model::raw::RawRange {
             source: crate::model::raw::RawSource {
                 id: 1.into(),
+                home_storage_id: None,
                 address: None,
                 location_id: Uuid::now_v7(),
                 storage_id: Uuid::new_v4(),
@@ -1627,6 +1628,7 @@ mod tests {
                 uuid: Uuid::now_v7(),
                 id: 1.into(),
                 encoding_id: 1.into(),
+                home_storage_id: None,
                 address: None,
                 location_id: Uuid::new_v4(),
                 storage_id: None,

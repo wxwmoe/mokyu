@@ -139,6 +139,7 @@ impl Reader {
                             id,
                             uuid: member.id,
                             encoding_id: crate::model::Id::default(),
+                            home_storage_id: None,
                             address: None,
                             location_id: Uuid::nil(),
                             storage_id: target.storage_id,

@@ -116,6 +116,8 @@ pub struct Pack {
     pub location_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_storage_id: Option<Uuid>,
     pub storage_id: Option<Uuid>,
     pub algorithm: String,
     pub block_key_id: Option<Uuid>,
@@ -129,6 +131,10 @@ pub struct Pack {
     pub created_at: DateTime<Utc>,
 }
 impl Pack {
+    pub fn home_storage(&self) -> Option<Uuid> {
+        self.home_storage_id.or(self.storage_id)
+    }
+
     pub fn address(&self) -> Uuid {
         self.address.unwrap_or(self.location_id)
     }
@@ -452,6 +458,7 @@ mod tests {
                             uuid: Uuid::now_v7(),
                             id: id.into(),
                             encoding_id: id.into(),
+                            home_storage_id: None,
                             address: None,
                             location_id: Uuid::new_v4(),
                             storage_id: None,
@@ -472,6 +479,7 @@ mod tests {
                 .collect();
             let p = Pack {
                 id: 7.into(),
+                home_storage_id: None,
                 address: None,
                 location_id: Uuid::new_v4(),
                 storage_id: None,

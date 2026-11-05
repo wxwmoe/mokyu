@@ -95,7 +95,8 @@ impl RawCopy {
                 && self.target.quarantine_code.is_none()
                 && !self.target.pending_upload
                 && self.target.state == "writing"
-                && self.target.storage_id != self.input.storage()?
+                && self.target.storage_id != self.input.home_storage()?
+                && self.target.address.is_none()
                 && !self.target.location_id.is_nil()
                 && matches!(self.target.medium.as_str(), "local" | "shared_s3")
                 && self.target.size == self.input.size()? as i64
@@ -107,6 +108,11 @@ impl RawCopy {
             ensure!(
                 self.target.digest == source.digest,
                 "raw transfer digest differs"
+            );
+            ensure!(
+                self.target.storage_id != source.storage_id
+                    || self.target.location_id != source.address(),
+                "raw transfer would overwrite its source"
             );
             let mut offset = 0;
             for (index, part) in self.parts.iter().enumerate() {
@@ -275,13 +281,26 @@ impl Work {
         self.input.validate()?;
         ensure!(
             self.revision > 0
-                && storage != self.input.storage()?
+                && storage != self.input.home_storage()?
                 && batch.sources.is_empty()
                 && !self.targets.is_empty()
                 && self.targets.len() == batch.chunks.len()
                 && self.targets.len() <= crate::content::pack::MAX_MEMBERS,
             "invalid transfer work"
         );
+        if storage == self.input.storage()? {
+            let distinct = match &self.input {
+                Input::Chunk { chunk } => batch
+                    .chunks
+                    .iter()
+                    .all(|out| out.location != chunk.address()),
+                Input::Pack { pack, .. } => {
+                    batch.packs.iter().all(|out| out.location != pack.address())
+                }
+                Input::Raw { .. } => true,
+            };
+            ensure!(distinct, "transfer would overwrite its encoded source");
+        }
         let sources: std::collections::BTreeMap<_, _> = match &self.input {
             Input::Chunk { chunk } => {
                 ensure!(self.spans.is_empty(), "unexpected chunk proofs");
@@ -421,7 +440,7 @@ impl Copy {
         let value = &self.prepared;
         ensure!(
             self.revision > 0
-                && self.storage != self.input.storage()?
+                && self.storage != self.input.home_storage()?
                 && value.start < value.end
                 && value.end <= self.input.size()?
                 && !value.targets.is_empty()
@@ -480,7 +499,7 @@ impl Copy {
             ensure!(
                 target.source == id
                     && target.offset == end
-                    && target.chunk.storage_id == Some(self.storage)
+                    && target.chunk.home_storage() == Some(self.storage)
                     && !target.chunk.uuid.is_nil()
                     && target.chunk.hash == hash
                     && target.chunk.raw_size == size as i32,
@@ -497,7 +516,10 @@ impl Copy {
 
 impl Input {
     pub(crate) fn validate(&self) -> Result<()> {
-        ensure!(!self.storage()?.is_nil(), "invalid transfer store");
+        ensure!(
+            !self.storage()?.is_nil() && !self.home_storage()?.is_nil(),
+            "invalid transfer store"
+        );
         match self {
             Self::Chunk { chunk } => {
                 ensure!(
@@ -543,6 +565,15 @@ impl Input {
             Self::Raw { source } => source.validate()?,
         }
         Ok(())
+    }
+
+    pub(crate) fn home_storage(&self) -> Result<Uuid> {
+        match self {
+            Self::Chunk { chunk } => chunk.home_storage(),
+            Self::Pack { pack, .. } => pack.home_storage(),
+            Self::Raw { source } => Some(source.home_storage()),
+        }
+        .context("transfer source has no home store")
     }
 
     pub(crate) fn storage(&self) -> Result<Uuid> {
@@ -870,6 +901,7 @@ mod tests {
             input: Input::Pack {
                 pack: Pack {
                     id: Id::Uuid(Uuid::now_v7()),
+                    home_storage_id: None,
                     address: None,
                     location_id: Uuid::now_v7(),
                     storage_id: Some(Uuid::new_v4()),
@@ -902,11 +934,30 @@ mod tests {
             storage,
             transfer: Box::new(work.clone()),
             batch: Box::new(batch.clone()),
-            source_permits: [Uuid::new_v4(), Uuid::new_v4()],
+            source_permits: vec![Uuid::new_v4(), Uuid::new_v4()],
         };
         let encoded = serde_json::to_vec(&plan)?;
         assert!(encoded.len() <= 3 * 1024 * 1024, "{}", encoded.len());
         let _: Plan = serde_json::from_slice(&encoded)?;
+        let mut cold = work.clone();
+        let Input::Pack { pack, .. } = &mut cold.input else {
+            unreachable!()
+        };
+        pack.home_storage_id = pack.storage_id;
+        pack.storage_id = Some(storage);
+        let address = Uuid::now_v7();
+        pack.address = Some(address);
+        cold.validate(storage, &batch)?;
+        assert!(cold.validate(cold.input.home_storage()?, &batch).is_err());
+        batch.packs.push(wire::Attempt {
+            id: None,
+            start: 0,
+            end: 2,
+            location: address,
+            nonce: None,
+        });
+        assert!(cold.validate(storage, &batch).is_err());
+        batch.packs.clear();
         batch.chunks[0].hash[0] ^= 1;
         assert!(work.validate(storage, &batch).is_err());
         batch.chunks[0].hash[0] ^= 1;

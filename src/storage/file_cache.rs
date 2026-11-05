@@ -484,6 +484,7 @@ mod tests {
         let source = crate::model::raw::RawSource {
             id: 1.into(),
             location_id: id,
+            home_storage_id: None,
             address: Some(Uuid::new_v4()),
             storage_id: Uuid::new_v4(),
             size: 4,

@@ -514,6 +514,7 @@ mod tests {
         let id = Uuid::new_v4();
         let pending = RawSource {
             id: Id::Uuid(id),
+            home_storage_id: None,
             address: None,
             location_id: id,
             storage_id: Uuid::new_v4(),

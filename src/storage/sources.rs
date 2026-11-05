@@ -280,6 +280,7 @@ mod tests {
             id: Id::Integer(id),
             uuid: Uuid::now_v7(),
             encoding_id: Id::Integer(id),
+            home_storage_id: None,
             address: None,
             location_id: Uuid::now_v7(),
             storage_id: Some(Uuid::now_v7()),

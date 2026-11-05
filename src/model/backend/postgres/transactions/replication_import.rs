@@ -293,7 +293,7 @@ async fn project(
         for row in selected {
             row.validate()?;
             ensure!(
-                row.offset_bytes == position && row.source.storage_id == run.storage()?,
+                row.offset_bytes == position && row.source.home_storage() == run.storage()?,
                 Error::SourceUnavailable
             );
             rows.push((

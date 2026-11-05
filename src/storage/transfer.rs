@@ -464,6 +464,7 @@ mod tests {
     fn plan(bytes: &[u8]) -> RawCopy {
         let source = RawSource {
             id: Id::Uuid(Uuid::now_v7()),
+            home_storage_id: None,
             address: None,
             location_id: Uuid::now_v7(),
             storage_id: Uuid::new_v4(),
@@ -500,6 +501,22 @@ mod tests {
             receipts: vec![None; parts.len()],
             parts,
         }
+    }
+
+    #[test]
+    fn cold_raw_copy_requires_a_distinct_target_key() -> Result<()> {
+        let mut plan = plan(b"tiered bytes");
+        let Input::Raw { source } = &mut plan.input else {
+            unreachable!()
+        };
+        source.home_storage_id = Some(source.storage_id);
+        source.storage_id = plan.target.storage_id;
+        let address = Uuid::now_v7();
+        source.address = Some(address);
+        plan.validate()?;
+        plan.target.location_id = address;
+        assert!(plan.validate().is_err());
+        Ok(())
     }
 
     #[tokio::test]

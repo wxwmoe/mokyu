@@ -990,12 +990,12 @@ pub(in super::super) async fn verification(
         return Ok(Step::Continue);
     }
     ensure!(
-        source.storage_id == run.storage()?
+        source.home_storage() == run.storage()?
             && matches!(source.medium.as_str(), "local" | "shared_s3"),
         Error::SourceUnavailable
     );
     Ok(Step::Verify {
-        storage: run.storage()?,
+        storage: source.storage_id,
         sources: vec![source],
     })
 }

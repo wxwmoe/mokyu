@@ -43,7 +43,7 @@ class Fault:
 
 
 class Fixture:
-    def __init__(self):
+    def __init__(self, *, backend_file=None):
         assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
         self.command = [os.environ['MOKYU_TEST_BINARY'], '--config', os.environ['MOKYU_TEST_CONFIG'], 'cli']
         self.name = 'source-' + uuid.uuid4().hex[:12]
@@ -59,7 +59,7 @@ class Fixture:
         client_config = Config(signature_version='s3v4', s3={'addressing_style': 'path'}, retries={'max_attempts': 0},
                                request_checksum_calculation='when_required', response_checksum_validation='when_required')
         self.backend = None
-        if file := os.environ.get('MOKYU_TEST_BACKEND'):
+        if file := backend_file or os.environ.get('MOKYU_TEST_BACKEND'):
             backend = json.loads(Path(file).read_text())
             self.prefix = backend.get('prefix', '').strip('/') + '/' + self.name + '/'
             self.prefix = self.prefix.lstrip('/')

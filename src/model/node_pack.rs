@@ -76,6 +76,7 @@ impl Batch {
             id: item.id,
             uuid,
             encoding_id: item.encoding.unwrap_or(Id::Uuid(item.location)),
+            home_storage_id: None,
             address: None,
             location_id: item.location,
             storage_id: Some(storage),
@@ -100,6 +101,7 @@ impl Batch {
         );
         let pack = Pack {
             id: item.id.unwrap_or(Id::Uuid(item.location)),
+            home_storage_id: None,
             address: None,
             location_id: item.location,
             storage_id: Some(storage),

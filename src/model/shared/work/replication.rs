@@ -10,7 +10,6 @@ use crate::{
     model::{Error, node_work as work, replication::Step, session::Run, task::Execution},
 };
 use anyhow::{Result, ensure};
-use uuid::Uuid;
 
 async fn schedule(tx: &mut Tx<'_>, task: Execution, reason: Option<&str>) -> Result<()> {
     let record = queries::task_record(task.id).fetch_one(&mut **tx).await?;
@@ -90,7 +89,6 @@ async fn prepare(
             break step;
         }
     };
-    let permits = [Uuid::new_v4(), Uuid::new_v4()];
     let (plan, storage, source, blocks) = match step {
         Step::Continue => {
             schedule(tx, task, None).await?;
@@ -154,7 +152,7 @@ async fn prepare(
                 work::Plan::RawTransfer {
                     storage,
                     transfer: Box::new(copy),
-                    source_permits: permits,
+                    source_permits: Vec::new(),
                 },
                 storage,
                 Some(source),
@@ -173,7 +171,7 @@ async fn prepare(
                     storage,
                     transfer: Box::new(p.work),
                     batch: Box::new(p.batch),
-                    source_permits: permits,
+                    source_permits: Vec::new(),
                 },
                 storage,
                 Some(source),

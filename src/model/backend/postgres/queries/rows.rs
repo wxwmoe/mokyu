@@ -67,6 +67,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::content::codec::Chu
                 id: row.try_get("id")?,
                 uuid: row.try_get("id")?,
                 encoding_id: row.try_get("current_encoding_id")?,
+                home_storage_id: None,
                 address: None,
                 location_id: match row.try_get("location_id") {
                     Ok(value) => value,
@@ -96,6 +97,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::content::pack::Pack
         crate::model::physical::read_pack(
             Self {
                 id: row.try_get("id")?,
+                home_storage_id: None,
                 address: None,
                 location_id: row.try_get("id")?,
                 storage_id: row.try_get("storage_id")?,

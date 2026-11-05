@@ -100,6 +100,8 @@ pub struct Chunk {
     pub location_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_storage_id: Option<Uuid>,
     pub storage_id: Option<Uuid>,
     pub hash: Vec<u8>,
     pub raw_size: i32,
@@ -114,6 +116,10 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    pub fn home_storage(&self) -> Option<Uuid> {
+        self.home_storage_id.or(self.storage_id)
+    }
+
     pub fn address(&self) -> Uuid {
         self.address.unwrap_or(self.location_id)
     }
@@ -502,6 +508,7 @@ mod tests {
                 uuid: Uuid::from_u128(41),
                 id: 42.into(),
                 encoding_id: 42.into(),
+                home_storage_id: None,
                 address: None,
                 location_id: Uuid::from_u128(42),
                 storage_id: None,
@@ -702,6 +709,7 @@ mod tests {
                     uuid: Uuid::now_v7(),
                     id: 42.into(),
                     encoding_id: 42.into(),
+                    home_storage_id: None,
                     address: None,
                     location_id: Uuid::from_u128(42),
                     storage_id: None,
@@ -891,6 +899,7 @@ mod tests {
                             uuid: Uuid::now_v7(),
                             id: (1 + worker * 2 + i as i64).into(),
                             encoding_id: (1 + worker * 2 + i as i64).into(),
+                            home_storage_id: None,
                             address: None,
                             location_id: Uuid::new_v4(),
                             storage_id: None,

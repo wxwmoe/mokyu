@@ -222,6 +222,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for Chunk {
                 })?,
                 uuid: row.try_get("uuid")?,
                 encoding_id: row.try_get("current_encoding_id")?,
+                home_storage_id: None,
                 address: None,
                 location_id: row.try_get("location_id")?,
                 storage_id: row.try_get("storage_id")?,
@@ -272,6 +273,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for Pack {
         crate::model::physical::read_pack(
             Self {
                 id: row.try_get("id")?,
+                home_storage_id: None,
                 address: None,
                 location_id: row.try_get("location_id")?,
                 storage_id: row.try_get("storage_id")?,

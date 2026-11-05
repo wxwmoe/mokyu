@@ -318,6 +318,7 @@ mod tests {
                             id: id.into(),
                             uuid: Uuid::now_v7(),
                             encoding_id: id.into(),
+                            home_storage_id: None,
                             address: None,
                             location_id: Uuid::now_v7(),
                             storage_id: Some(storage),
@@ -338,6 +339,7 @@ mod tests {
                 .collect();
             let original = pack::Pack {
                 id: 19.into(),
+                home_storage_id: None,
                 address: None,
                 location_id: Uuid::now_v7(),
                 storage_id: Some(storage),
@@ -454,6 +456,7 @@ mod tests {
             revision: 1,
             source: RawSource {
                 id: Id::Uuid(Uuid::now_v7()),
+                home_storage_id: None,
                 address: None,
                 location_id: Uuid::now_v7(),
                 storage_id: Uuid::now_v7(),
@@ -577,6 +580,7 @@ mod tests {
                     id: (n as i64 + 101).into(),
                     uuid: Uuid::now_v7(),
                     encoding_id: (n as i64 + 201).into(),
+                    home_storage_id: None,
                     address: None,
                     location_id: Uuid::now_v7(),
                     storage_id: Some(storage),

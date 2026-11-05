@@ -26,7 +26,7 @@ pub(in super::super) async fn capture(
             let source = r::raw(id).fetch_one(&mut **db).await?;
             source.validate()?;
             ensure!(
-                source.storage_id == run.read_storage()?,
+                source.home_storage() == run.read_storage()?,
                 Error::SourceUnavailable
             );
             q::freeze(unit.id, &Input::Raw { source })
@@ -58,7 +58,7 @@ pub(in super::super) async fn capture(
                 }
             };
             ensure!(
-                input.storage()? == run.read_storage()?,
+                input.home_storage()? == run.read_storage()?,
                 Error::SourceUnavailable
             );
             q::freeze(unit.id, &input).execute(&mut **db).await?;
@@ -121,7 +121,7 @@ pub(in super::super) async fn scan(
     ensure!(
         unit.source_type == "raw"
             && unit.source_id == source.id
-            && source.storage_id == run.read_storage()?,
+            && source.home_storage() == run.read_storage()?,
         Error::SourceUnavailable
     );
     let current = r::raw(source.id).fetch_one(&mut **db).await?;
@@ -260,7 +260,7 @@ pub(in super::super) async fn prepare(
         .clone();
     input.validate()?;
     ensure!(
-        input.storage()? == run.source_storage()?,
+        input.home_storage()? == run.source_storage()?,
         Error::SourceUnavailable
     );
     ensure!(
@@ -487,7 +487,7 @@ pub(in super::super) async fn copied(
         run.phase == "verify"
             && run.generation == plan.revision
             && run.storage()? == plan.storage
-            && run.source_storage()? == plan.input.storage()?,
+            && run.source_storage()? == plan.input.home_storage()?,
         Error::OperationAborted
     );
     ensure!(
@@ -767,7 +767,7 @@ pub(in super::super) async fn raw_progress(
     ensure!(
         run.phase == "verify"
             && run.generation == plan.revision
-            && run.source_storage()? == plan.input.storage()?
+            && run.source_storage()? == plan.input.home_storage()?
             && run.storage()? == plan.target.storage_id,
         Error::OperationAborted
     );
@@ -1001,7 +1001,7 @@ pub(in super::super) async fn project_raw(
         for row in selected.into_iter().take(128 - rows.len()) {
             row.validate()?;
             ensure!(
-                row.source.storage_id == run.storage()?,
+                row.source.home_storage() == run.storage()?,
                 Error::SourceUnavailable
             );
             let first = row.offset_bytes.max(start);

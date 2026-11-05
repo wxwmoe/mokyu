@@ -79,6 +79,7 @@ async fn shared_raw_reader_validates_content_and_pins_remote_etag() -> Result<()
     let bytes = Bytes::from_static(b"raw range bytes");
     let source = crate::model::raw::RawSource {
         id: Uuid::new_v4().into(),
+        home_storage_id: None,
         address: None,
         location_id: Uuid::new_v4(),
         storage_id: Uuid::new_v4(),

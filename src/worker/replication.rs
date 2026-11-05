@@ -195,12 +195,12 @@ impl App {
         let source = input.storage()?;
         let (path, limit, key) = match input {
             Input::Chunk { chunk } => (
-                self.storage.path_for(source, chunk.location_id)?,
+                self.storage.path_for(source, chunk.address())?,
                 crate::content::codec::MAX + 16,
                 chunk.block_key_id,
             ),
             Input::Pack { pack, .. } => (
-                self.storage.pack_path_for(source, pack.location_id)?,
+                self.storage.pack_path_for(source, pack.address())?,
                 pack.payload_size()? + 16,
                 pack.block_key_id,
             ),

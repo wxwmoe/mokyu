@@ -16,6 +16,8 @@ pub(crate) struct RawSource {
     pub location_id: Uuid,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_storage_id: Option<Uuid>,
     pub storage_id: Uuid,
     pub size: i64,
     pub digest: Option<Vec<u8>>,
@@ -32,6 +34,7 @@ macro_rules! raw_rows {
         fn from_row(row: &'r $row) -> sqlx::Result<Self> {
             use sqlx::Row;
             crate::model::physical::read_raw(Self {
+                home_storage_id: None,
                 address: None,
                 id: row.try_get("raw_id")?,
                 location_id: row.try_get("raw_location")?,
@@ -54,6 +57,10 @@ raw_rows!(
 );
 
 impl RawSource {
+    pub fn home_storage(&self) -> Uuid {
+        self.home_storage_id.unwrap_or(self.storage_id)
+    }
+
     pub fn address(&self) -> Uuid {
         self.address.unwrap_or(self.location_id)
     }
@@ -146,7 +153,7 @@ pub(crate) fn copy_window(storage: Uuid, rows: &[RawRange]) -> Result<(i64, i64,
     for row in rows {
         row.validate()?;
         ensure!(
-            row.source.storage_id == storage
+            row.source.home_storage() == storage
                 && row.offset_bytes == end
                 && (row.length > 0 || rows.len() == 1 && start == 0),
             "invalid raw copy mapping"
@@ -382,6 +389,7 @@ mod tests {
         let mut range = RawRange {
             source: RawSource {
                 id: Id::from(1),
+                home_storage_id: None,
                 address: None,
                 location_id: Uuid::now_v7(),
                 storage_id: Uuid::new_v4(),
