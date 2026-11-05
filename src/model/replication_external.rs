@@ -754,10 +754,17 @@ pub(crate) fn apply(plan: &Plan, outcome: &Outcome) -> Result<Change> {
             } else if plan.options.operation == Operation::Move {
                 state.finish("conflict", Some("source_delete_unfenced"));
             } else {
+                let target_public = if !plan.options.target_external
+                    && plan.options.permissions == Permissions::Ignore
+                {
+                    state.target_public
+                } else {
+                    *public
+                };
                 state.finish(
                     if state.changed
                         || state.previous.as_ref().is_some_and(|previous| {
-                            previous.matches(state.output.as_ref(), *public)
+                            previous.matches(state.output.as_ref(), target_public)
                         })
                     {
                         "completed"
@@ -1129,12 +1136,20 @@ mod tests {
         let mut plan = pending(0)?;
         let object = plan.state.source.clone().unwrap();
         plan.parts.clear();
-        for (owned, cleanup_pending) in [(true, false), (false, false), (true, true)] {
+        for (owned, cleanup_pending, native_public) in [
+            (true, false, None),
+            (false, false, None),
+            (true, true, None),
+            (true, false, Some(false)),
+            (true, false, Some(true)),
+            (false, false, Some(true)),
+        ] {
+            plan.options.target_external = native_public.is_none();
             plan.state = State {
                 cleanup_pending,
                 previous: owned.then(|| super::super::changes::Target {
                     object: object.clone(),
-                    public: None,
+                    public: native_public,
                 }),
                 ..State::default()
             };
@@ -1144,7 +1159,7 @@ mod tests {
                     source: Some(object.clone()),
                     target: Some(object.clone()),
                     source_public: None,
-                    target_public: None,
+                    target_public: native_public,
                 },
             )?
             .state;
