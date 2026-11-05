@@ -7,7 +7,6 @@ import { api, params, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { notify, report } from '../app/feedback'
-import { secure } from '../app/security'
 import EmptyState from '../components/EmptyState.vue'
 import ErrorNotice from '../components/ErrorNotice.vue'
 import ExternalTest from './ExternalTest.vue'
@@ -49,8 +48,8 @@ async function save() {
   const connection: Connection = { endpoint_url: draft.endpoint.trim(), region: draft.region.trim(), bucket: draft.bucket.trim(), prefix: draft.prefix, virtual_hosted: draft.addressing === 'virtual', allow_http: draft.allowHttp }
   try {
     const row = editing.value
-      ? await secure(() => write<Bucket>(endpoint + '/' + editing.value!.id, { revision: editing.value!.revision, name: draft.name.trim(), connection, enabled: draft.enabled, ...(draft.access ? { access_key: draft.access } : {}), ...(draft.secret ? { secret_key: draft.secret } : {}) }, 'PATCH'))
-      : await secure(() => write<Bucket>(endpoint, { project_id: draft.project, name: draft.name.trim(), connection, access_key: draft.access, secret_key: draft.secret }))
+      ? await write<Bucket>(endpoint + '/' + editing.value!.id, { revision: editing.value!.revision, name: draft.name.trim(), connection, enabled: draft.enabled, ...(draft.access ? { access_key: draft.access } : {}), ...(draft.secret ? { secret_key: draft.secret } : {}) }, 'PATCH')
+      : await write<Bucket>(endpoint, { project_id: draft.project, name: draft.name.trim(), connection, access_key: draft.access, secret_key: draft.secret })
     queries.setQueryData(['external-bucket', row.id], row)
     if (!editing.value) await router.replace({ name: 'external-buckets', params: { external: row.id }, query: route.query })
     editorOpen.value = false
@@ -63,7 +62,7 @@ async function remove() {
   if (!row) return
   busy.value = true; error.value = null
   try {
-    await secure(() => write(endpoint + '/' + row.id, { revision: row.revision }, 'DELETE'))
+    await write(endpoint + '/' + row.id, { revision: row.revision }, 'DELETE')
     deleting.value = false; detailOpen.value = false
     queries.removeQueries({ queryKey: ['external-bucket', row.id], exact: true })
     await queries.invalidateQueries({ queryKey: ['external-buckets'] })

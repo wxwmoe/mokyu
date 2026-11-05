@@ -164,8 +164,11 @@ try:
     membership = f"/api/v1/projects/{bucket['project_id']}/members/{user['id']}"
     assert admin.put(url + membership, json={'role': 'reader', 'scope': 'selected', 'grants': [grant]}).status_code == 204
     member = login(prefix, password)
+    member_session = member.get(url + '/api/v1/auth/session').json()['session_id']
+    db.execute("UPDATE sessions SET reauthenticated_at=now()-interval '6 minutes' WHERE id=%s", (member_session,))
     member_token, member_issued = mint(member, grants=[grant])
-    assert member.post(url + '/api/v1/api-tokens', json={'label': prefix, 'system': True}).status_code == 403
+    forbidden = member.post(url + '/api/v1/api-tokens', json={'label': prefix, 'system': True})
+    assert forbidden.status_code == 403 and forbidden.json()['code'] == 'AccessDenied'
     assert member.post(url + '/api/v1/api-tokens', json={'label': prefix, 'grants': [{**grant, 'actions': ['object.write']}]}).status_code == 403
     assert member.post(url + '/api/v1/s3-credentials', json=key_input).status_code == 403
     assert member.get(url + '/api/v1/api-tokens', params={'user': admin.get(url + '/api/v1/account').json()['id']}).status_code == 403

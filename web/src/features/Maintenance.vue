@@ -7,7 +7,6 @@ import { Flower2, Play, Pause, ScanHeart, ShieldCheck, CloudUpload, ArrowUpRight
 import { api, write, queries, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
-import { secure } from '../app/security'
 import { notify, report } from '../app/feedback'
 import { useMaintenance, policies, jobIcon } from '../app/maintenance'
 import { taskTone } from '../app/insights'
@@ -42,7 +41,7 @@ async function start() {
 async function toggle(which: 'mode' | 'pack-creation', enabled: boolean) {
   busy.value = which
   try {
-    await secure(() => write(`/api/v1/maintenance/${which}`, { enabled }))
+    await write(`/api/v1/maintenance/${which}`, { enabled })
     await state.refetch()
     await queries.refetchQueries({ queryKey: [which === 'pack-creation' ? 'service-config' : 'service-status'] })
     const message = which === 'mode' ? (enabled ? 'maintenanceEntered' : 'maintenanceExited') : (enabled ? 'packCreationEnabledNotice' : 'packCreationDisabledNotice')

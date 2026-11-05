@@ -8,7 +8,6 @@ import { api, write, params, session, refreshSession, queries, type Bucket } fro
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
 import { notify, report, errorText } from '../app/feedback'
-import { secure } from '../app/security'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
 import UiCheckbox from '../components/ui/UiCheckbox.vue'
@@ -44,12 +43,12 @@ function member(row?: Member) { memberRole.value = row?.role || 'reader'; scope.
 async function changed(message = t('projectUpdated')) { await queries.invalidateQueries({ queryKey: ['projects'] }); await refreshSession(); notify(message) }
 async function save() {
   busy.value = true
-  try { const message = editing.value ? t('projectUpdated') : t('projectCreated'); await secure(() => write('/api/v1/projects' + (editing.value ? '/' + editing.value : ''), { ...draft }, editing.value ? 'PUT' : 'POST')); editorOpen.value = false; await changed(message) }
+  try { const message = editing.value ? t('projectUpdated') : t('projectCreated'); await write('/api/v1/projects' + (editing.value ? '/' + editing.value : ''), { ...draft }, editing.value ? 'PUT' : 'POST'); editorOpen.value = false; await changed(message) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 async function saveMember() {
   busy.value = true
-  try { await secure(() => write(`/api/v1/projects/${projectId.value}/members/${memberId.value}`, { role: memberRole.value, scope: scope.value, grants: scope.value === 'all' ? [] : grants.value.filter(grant => grant.actions.length), external_grants: scope.value === 'all' ? [] : externalGrants.value.filter(grant => grant.actions.length) }, 'PUT')); membershipOpen.value = false; await members.refetch(); notify(t('projectMembershipUpdated')) }
+  try { await write(`/api/v1/projects/${projectId.value}/members/${memberId.value}`, { role: memberRole.value, scope: scope.value, grants: scope.value === 'all' ? [] : grants.value.filter(grant => grant.actions.length), external_grants: scope.value === 'all' ? [] : externalGrants.value.filter(grant => grant.actions.length) }, 'PUT'); membershipOpen.value = false; await members.refetch(); notify(t('projectMembershipUpdated')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 const removing = ref<Member | null>(null)
@@ -58,17 +57,17 @@ async function removeMember() {
   if (!removing.value) return
   const id = removing.value.user_id
   busy.value = true
-  try { await secure(() => api(`/api/v1/projects/${projectId.value}/members/${id}`, { method: 'DELETE' })); removing.value = null; await members.refetch(); notify(t('projectMembershipRemoved')) }
+  try { await api(`/api/v1/projects/${projectId.value}/members/${id}`, { method: 'DELETE' }); removing.value = null; await members.refetch(); notify(t('projectMembershipRemoved')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 async function removeProject() {
   busy.value = true
-  try { await secure(() => api('/api/v1/projects/' + projectId.value, { method: 'DELETE' })); deleting.value = false; detailOpen.value = false; await changed(t('projectDeleted')) }
+  try { await api('/api/v1/projects/' + projectId.value, { method: 'DELETE' }); deleting.value = false; detailOpen.value = false; await changed(t('projectDeleted')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 async function mode() {
   busy.value = true
-  try { await secure(() => write('/api/v1/projects/settings', { enabled: !session.value?.project_management }, 'PUT')); await changed(t('projectModeUpdated')) }
+  try { await write('/api/v1/projects/settings', { enabled: !session.value?.project_management }, 'PUT'); await changed(t('projectModeUpdated')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 </script>

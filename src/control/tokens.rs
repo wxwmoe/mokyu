@@ -85,13 +85,22 @@ pub(super) async fn list(
     let next = more.then(|| tokens.last().unwrap().id);
     Ok(Json(TokenPage { tokens, next }))
 }
+async fn check_scope(actor: &Identity, app: &App, input: &TokenInput) -> Result<(), HttpError> {
+    if input.system {
+        if !actor.admin {
+            return Err(crate::http::unauthorized());
+        }
+        actor.recent(app).await?;
+    }
+    Ok(())
+}
 #[utoipa::path(post,path="/api/v1/api-tokens",operation_id="tokens_create",request_body=TokenInput,responses((status=201,body=TokenSecret)))]
 pub(super) async fn create(
     State(app): State<Arc<App>>,
     Extension(actor): Extension<Identity>,
     Json(input): Json<TokenInput>,
 ) -> Result<(StatusCode, Json<TokenSecret>), HttpError> {
-    actor.recent(&app).await?;
+    check_scope(&actor, &app, &input).await?;
     Ok((
         StatusCode::CREATED,
         Json(create_token(&app, &actor.principal, actor.id, input).await?),
@@ -104,7 +113,7 @@ pub(super) async fn update(
     Path(id): Path<Uuid>,
     Json(input): Json<TokenInput>,
 ) -> Result<Json<Token>, HttpError> {
-    actor.recent(&app).await?;
+    check_scope(&actor, &app, &input).await?;
     Ok(Json(
         update_token(&app, &actor.principal, actor.id, id, input).await?,
     ))
@@ -115,7 +124,6 @@ pub(super) async fn revoke(
     Extension(actor): Extension<Identity>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, HttpError> {
-    actor.recent(&app).await?;
     revoke_token(&app, &actor.principal, id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

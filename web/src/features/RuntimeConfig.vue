@@ -9,7 +9,6 @@ import { t, date } from '../app/i18n'
 import { useDeployment, rollout, nodeTone } from '../app/cluster'
 import NodePicker from '../components/NodePicker.vue'
 import { notify, errorText } from '../app/feedback'
-import { secure } from '../app/security'
 import ErrorNotice from '../components/ErrorNotice.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
 import UiSwitch from '../components/ui/UiSwitch.vue'
@@ -57,7 +56,7 @@ watch(controlSettings, row => { if (row && !settingsBusy.value && row.value && t
 
 async function saveControlSettings() {
   settingsBusy.value = true; settingsError.value = ''
-  try { const result = await secure(() => write<RuntimeSettings>('/api/v1/runtime-settings/web', { value: controlDraft.value, revision: controlSettings.value?.revision }, 'PUT')); await Promise.all(['service-status', 'cluster-status', 'cluster-nodes', 'cluster-node-config'].map(key => queries.invalidateQueries({ queryKey: [key] }))); await runtimeSettings.refetch(); await config.refetch(); notify(t(cluster.value ? 'clusterSettingsSaved' : result.restart_required ? 'settingsSavedRestart' : 'controlSettingsSaved'), cluster.value ? t('clusterSettingsSavedHint') : result.restart_required ? t('restartPendingHint') : undefined, cluster.value || result.restart_required ? 'info' : 'success') }
+  try { const result = await write<RuntimeSettings>('/api/v1/runtime-settings/web', { value: controlDraft.value, revision: controlSettings.value?.revision }, 'PUT'); await Promise.all(['service-status', 'cluster-status', 'cluster-nodes', 'cluster-node-config'].map(key => queries.invalidateQueries({ queryKey: [key] }))); await runtimeSettings.refetch(); await config.refetch(); notify(t(cluster.value ? 'clusterSettingsSaved' : result.restart_required ? 'settingsSavedRestart' : 'controlSettingsSaved'), cluster.value ? t('clusterSettingsSavedHint') : result.restart_required ? t('restartPendingHint') : undefined, cluster.value || result.restart_required ? 'info' : 'success') }
   catch (error) { settingsError.value = errorText(error) } finally { settingsBusy.value = false }
 }
 function runtimeFieldTarget(key: string) {
@@ -86,7 +85,7 @@ function updateRuntimeField(field: RuntimeField, value: string | number | null) 
 function inputRuntimeField(field: RuntimeField, event: Event) { const value = (event.target as HTMLInputElement).value; updateRuntimeField(field, field.valueType === 'number' ? (value === '' ? null : Number(value)) : value) }
 async function saveRuntime() {
   runtimeError.value = ''; settingsBusy.value = true
-  try { const result = await secure(() => write<RuntimeSettings>(`/api/v1/runtime-settings/${encodeURIComponent(runtimeSection.value)}`, { value: runtimeDraft.value, revision: runtimeRevision.value }, 'PUT')); await Promise.all(['service-status', 'cluster-status', 'cluster-nodes', 'cluster-node-config'].map(key => queries.invalidateQueries({ queryKey: [key] }))); runtimeOpen.value = false; await runtimeSettings.refetch(); await config.refetch(); notify(t(cluster.value ? 'clusterSettingsSaved' : result.restart_required ? 'settingsSavedRestart' : 'runtimeSettingsSaved'), cluster.value ? t('clusterSettingsSavedHint') : result.restart_required ? t('restartPendingHint') : undefined, cluster.value || result.restart_required ? 'info' : 'success') }
+  try { const result = await write<RuntimeSettings>(`/api/v1/runtime-settings/${encodeURIComponent(runtimeSection.value)}`, { value: runtimeDraft.value, revision: runtimeRevision.value }, 'PUT'); await Promise.all(['service-status', 'cluster-status', 'cluster-nodes', 'cluster-node-config'].map(key => queries.invalidateQueries({ queryKey: [key] }))); runtimeOpen.value = false; await runtimeSettings.refetch(); await config.refetch(); notify(t(cluster.value ? 'clusterSettingsSaved' : result.restart_required ? 'settingsSavedRestart' : 'runtimeSettingsSaved'), cluster.value ? t('clusterSettingsSavedHint') : result.restart_required ? t('restartPendingHint') : undefined, cluster.value || result.restart_required ? 'info' : 'success') }
   catch (error) { runtimeError.value = errorText(error) } finally { settingsBusy.value = false }
 }
 </script>

@@ -6,7 +6,6 @@ import { api, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { report } from '../app/feedback'
-import { secure } from '../app/security'
 import ErrorNotice from '../components/ErrorNotice.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 
@@ -23,9 +22,9 @@ async function change(action: 'start' | 'pause' | 'resume' | 'stop') {
   const id = props.bucket.id, revision = props.bucket.revision, task = current.value?.id
   busy.value = true; error.value = null
   try {
-    if (action === 'start') await secure(() => write(`/api/v1/external-buckets/${id}/test`, { revision }))
-    else if (action === 'stop') await secure(() => write(`/api/v1/external-buckets/${id}/test/stop`, { test_id: task }))
-    else await secure(() => write(`/api/v1/tasks/${task}/actions`, { action }))
+    if (action === 'start') await write(`/api/v1/external-buckets/${id}/test`, { revision })
+    else if (action === 'stop') await write(`/api/v1/external-buckets/${id}/test/stop`, { test_id: task })
+    else await write(`/api/v1/tasks/${task}/actions`, { action })
     stopping.value = false
     await queries.invalidateQueries({ queryKey: ['external-test', id] })
     await queries.invalidateQueries({ queryKey: ['jobs'] })

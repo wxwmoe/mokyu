@@ -134,8 +134,7 @@ pub(in super::super) fn touch_refresh(id: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn session_times(hash: &[u8]) -> Rows<'_, SessionTimes> {
-    sqlx::query_as("SELECT id,expires_at,reauthenticated_at FROM sessions WHERE token_hash=?")
-        .bind(hash)
+    sqlx::query_as("SELECT id,expires_at,last_seen_at FROM sessions WHERE token_hash=?").bind(hash)
 }
 
 pub(in super::super) fn account_profile(user: Uuid) -> Rows<'static, Profile> {

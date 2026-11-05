@@ -3,8 +3,10 @@ import { randomUUID } from 'node:crypto'
 import { test, expect } from '@playwright/test'
 import en from '../src/locales/i18n.en.js'
 
+const testPassword = () => (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
+
 test('create, save and revoke a scoped token through styled controls', async ({ page, request }) => {
-  const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
+  const password = testPassword()
   const login = await request.post('/api/v1/auth/login', { headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password } })
   const headers = { Origin: process.env.MOKYU_TEST_WEB!, 'X-CSRF-Token': (await login.json()).csrf_token }
   await request.put('/api/v1/account', { headers, data: { display_name: '', locale: 'en', theme: 'light', avatar_email: '', avatar_enabled: false } })
@@ -65,4 +67,41 @@ test('create, save and revoke a scoped token through styled controls', async ({ 
     await expect(listed.getByText(en.keyInactive, { exact: true })).toBeVisible()
     expect(errors).toEqual([])
   } finally { if (tokenId) await request.delete('/api/v1/api-tokens/' + tokenId, { headers }) }
+})
+
+test('a renewed password challenge keeps the full-access token draft open', async ({ page }) => {
+  const password = testPassword()
+  const login = await page.request.post('/api/v1/auth/login', {
+    headers: { Origin: process.env.MOKYU_TEST_WEB! }, data: { username: 'tester', password },
+  })
+  expect(login.status()).toBe(200)
+  await page.goto('/tokens')
+  await page.locator('.page-heading button.primary').click()
+  const draft = page.getByRole('dialog').filter({ has: page.locator('.key-editor') })
+  const label = draft.locator('input[autocomplete="off"]').first()
+  await label.fill('full-access draft')
+  await draft.locator('.key-editor section').first().getByRole('checkbox').check()
+  let attempts = 0
+  await page.route('**/api/v1/api-tokens', async route => {
+    if (route.request().method() !== 'POST') return route.continue()
+    expect(route.request().postDataJSON().system).toBe(true)
+    attempts++
+    await route.fulfill({ status: 403, json: { code: 'ReauthenticationRequired' } })
+  })
+  await draft.locator('button.primary').click()
+  const field = page.getByRole('dialog').locator('input[autocomplete="current-password"]')
+  await expect(field).toBeFocused()
+  expect(attempts).toBe(1)
+  await field.fill(password)
+  const retry = page.waitForResponse(r => r.url().endsWith('/api/v1/api-tokens') && r.request().method() === 'POST')
+  await field.press('Enter')
+  expect((await retry).status()).toBe(403)
+  await expect(field).toBeFocused()
+  await expect(field).toHaveValue('')
+  await field.press('Escape')
+  await expect(field).toHaveCount(0)
+  await expect(label).toBeEnabled()
+  await expect(label).toHaveValue('full-access draft')
+  await expect(page.locator('.toast.error')).toHaveCount(0)
+  expect(attempts).toBe(2)
 })

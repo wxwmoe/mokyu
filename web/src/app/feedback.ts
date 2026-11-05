@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { ApiError } from '../api/client'
+import { ApiError, wasCancelled } from '../api/client'
 import { t } from './i18n'
 export interface Notice { id: number; title: string; description?: string; requestId?: string; duration?: number; tone: 'success' | 'error' | 'info' }
 export const notices = ref<Notice[]>([])
@@ -15,11 +15,13 @@ export function notify(title: string, description?: string, tone: Notice['tone']
 }
 export function dismiss(id: number) { notices.value = notices.value.filter(item => item.id !== id) }
 export function report(error: unknown) {
-  if (error instanceof ApiError && error.code === 'Cancelled') return
+  const description = errorText(error)
+  if (!description) return
   const failure = error instanceof ApiError
-  addNotice({ tone: 'error', title: t('attention'), description: errorText(error), requestId: failure ? error.requestId : undefined, duration: 10000 })
+  addNotice({ tone: 'error', title: t('attention'), description, requestId: failure ? error.requestId : undefined, duration: 10000 })
 }
 export function errorText(error: unknown) {
+  if (error == null || wasCancelled(error)) return ''
   if (error instanceof ApiError) {
     const translated = t(`error_${error.code}`)
     if(error.detail)return (translated.startsWith('error_')?error.code:translated)+': '+error.detail

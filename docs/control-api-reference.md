@@ -7,7 +7,7 @@
 - 认证使用 `mokyu_session` Cookie 或 `Authorization: Bearer TOKEN`，不能混用，令牌不能放入 URL。Cookie 为 HttpOnly、SameSite=Strict，Secure 和固定寿命见[配置](configuration.md#runtime-设置)。
 - Cookie 写请求要求 `Origin` 精确匹配 `control.origin`，并提交 `X-CSRF-Token`；登录、安装引导要求 Origin。`GET /api/v1/auth/session` 返回 CSRF token。Bearer 不使用 CSRF，桶 CORS 不作用于管理接口。
 - 登录、首次安装状态、安装提交、info 和 OpenAPI 无需已有会话，其余入口默认拒绝未认证请求。账户与 Token 自助管理仅接受 Cookie；管理员明确签发的 system Token 可调用实例管理入口。
-- 敏感管理写操作要求最近五分钟验证密码；收到 `ReauthenticationRequired` 后调用 `/api/v1/account/reauth` 再重试。system Token 不使用交互式密码验证。
+- 部分敏感管理写操作要求最近五分钟内验证过密码。收到 `403 ReauthenticationRequired` 时，管理页面会弹窗输入当前密码。API 客户端应在 `POST /api/v1/account/reauth` 成功后重试原请求。自动续期只延长会话。system Token 使用自身凭据调用允许的管理入口。
 - JSON 默认上限 16 KiB；桶设置 128 KiB、授权与密钥 512 KiB、对象批量操作和上传完成 2 MiB。UploadPart 按预期分片大小校验。
 - key 按原始 UTF-8 传递，不折叠斜杠、空格或路径段。身份使用不透明字符串，可能是 UUID 或十进制整数，客户端不得作数值转换；字节量及新接口计数使用十进制字符串。游标不可解析或跨筛选范围复用；分页不保证跨请求快照。
 - 私有响应为 `Cache-Control: private, no-store`。GET 支持 HEAD，HEAD 无正文。错误为 `{error,code,request_id}`，与 `X-Request-ID` 对应；不回显密码、SQL 或请求正文。
@@ -79,7 +79,9 @@
 | `POST /api/v1/s3-credentials/{key}/rotate` | 新密钥和可选旧密钥重叠期 |
 | `GET/POST /api/v1/api-tokens`、`PUT/DELETE /api/v1/api-tokens/{id}` | 列举、创建、更新及撤销个人管理 Token |
 
-S3 密钥由管理员管理，属于项目，不随创建者删除；只能授权同项目桶。Token 权限与用户当前权限取交集，空 grants 没有桶权限。`system=true` 仅管理员可签发，必须空 grants，允许全实例管理；仍不能调用 Cookie 专属入口。普通 Token 无全局任务、审计和用户管理权限。
+S3 密钥由管理员管理，属于项目，只能授权同项目桶，创建者删除后仍有效。管理员使用有效会话即可创建、修改、轮换和撤销应用密钥。
+
+个人 Token 权限与用户当前权限取交集，空 grants 没有桶权限。普通 Token 无全局任务、审计和用户管理权限。有效会话可以管理普通 Token 或按已有权限撤销 Token。创建或更新为 `system=true` 时，仅限管理员，须在最近五分钟内验证过密码，`grants` 和 `external_grants` 都须留空。system Token 允许全实例管理，Cookie 专属入口仍须使用 Web 会话。
 
 secret 仅创建或轮换时返回。Token 只存哈希；S3 secret 由 deployment key 加密。label 1～128 字节，授权最多 1000 桶。`expires_in` 为正时长、最多 3650 天：密钥省略或 null 不到期；Token 省略为 90 天、null 不到期。更新的 `keep_expiry=true` 保留原时间；轮换 overlap 为 0～30 天。最近使用最多五分钟落库一次。S3 密钥使用时间在签名验证后进入有界后台队列，同一密钥合并回写；排队满、数据库超时或进程退出时允许丢弃本次统计，请求不等待此项回写。
 

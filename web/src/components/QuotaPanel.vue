@@ -6,7 +6,6 @@ import { Gauge, SlidersHorizontal, Sprout, Clock3 } from 'lucide-vue-next'
 import { api, bytes, parseBytes, session, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
-import { secure } from '../app/security'
 import { notify, report, errorText } from '../app/feedback'
 import UiDialog from './ui/UiDialog.vue'
 import UiSelect from './ui/UiSelect.vue'
@@ -38,7 +37,7 @@ async function save() {
   try { limits = { logical_bytes_limit: parseBytes(draft.bytes, draft.byteUnit), inflight_bytes_limit: props.scope === 'project' ? parseBytes(draft.inflight, draft.inflightUnit) : null, bucket_count_limit: props.scope === 'project' ? parseBytes(draft.buckets) : null } }
   catch { invalid.value = true; return }
   busy.value = true
-  try { await secure(() => write(path.value, limits, 'PUT')); open.value = false; await quota.refetch(); notify(t('quotaSaved')) }
+  try { await write(path.value, limits, 'PUT'); open.value = false; await quota.refetch(); notify(t('quotaSaved')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 </script>

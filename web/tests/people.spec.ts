@@ -30,20 +30,35 @@ test('create a member, grant one bucket, rotate password and browse as that memb
     await creation.getByRole('textbox', { name: en.initialPassword, exact: true }).fill(initial)
     await expect(creation.getByRole('checkbox', { name: en.requireChange })).toBeChecked()
     // The API expiry boundary is covered separately; exercise the nested retry dialog here.
-    let expired = false
+    let confirmed = false, submissions = 0
+    page.on('response', response => {
+      if (response.url().endsWith('/api/v1/account/reauth') && response.status() === 204) confirmed = true
+    })
     await page.route('**/api/v1/users', async route => {
-      if (route.request().method() === 'POST' && !expired) {
-        expired = true
+      if (route.request().method() === 'POST') submissions++
+      if (route.request().method() === 'POST' && !confirmed) {
         await route.fulfill({ status: 403, contentType: 'application/json', body: JSON.stringify({ code: 'ReauthenticationRequired', error: 'Forbidden' }) })
       } else await route.continue()
     })
-    const created = page.waitForResponse(response => response.url().endsWith('/api/v1/users') && response.request().method() === 'POST' && response.status() === 201)
     await creation.getByRole('button', { name: en.createUser, exact: true }).click()
     const verification = page.getByRole('dialog', { name: en.verifyIdentity, exact: true })
-    await verification.getByRole('textbox', { name: en.currentPassword, exact: true }).fill(password())
-    await verification.getByRole('button', { name: en.continue, exact: true }).click()
+    const field = verification.getByLabel(en.currentPassword, { exact: true })
+    await expect(field).toBeFocused()
+    await field.fill('incorrect-password')
+    await field.press('Enter')
+    await expect(verification.getByRole('alert')).toHaveText(en.passwordNotVerified)
+    await expect(field).toBeFocused()
+    await verification.getByRole('button', { name: en.cancel, exact: true }).click()
+    await expect(verification).toHaveCount(0)
+    await expect(creation.getByLabel(en.username, { exact: true })).toHaveValue(username)
+    expect(submissions).toBe(1)
+    await creation.getByRole('button', { name: en.createUser, exact: true }).click()
+    await field.fill(password())
+    const created = page.waitForResponse(response => response.url().endsWith('/api/v1/users') && response.request().method() === 'POST' && response.status() === 201)
+    await field.press('Enter')
     const result = await created
     expect(result.status()).toBe(201)
+    expect(submissions).toBe(3)
     id = (await result.json()).id
     const detail = page.getByRole('dialog', { name: username, exact: true })
     await expect(detail).toBeVisible()

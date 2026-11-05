@@ -941,6 +941,7 @@ export default {
   "confirmIdentity": "Type “{name}” to confirm",
   "verifyIdentity": "A little security check",
   "verifyHint": "Please confirm your password to continue with this sensitive change.",
+  "passwordNotVerified": "That password didn’t match. Please try again.",
   "continue": "Continue",
   "passwordRequired": "Your administrator has asked you to choose a new password before continuing.",
   "projects": "Projects",

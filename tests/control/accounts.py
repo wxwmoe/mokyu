@@ -90,9 +90,35 @@ try:
     body = response.json()
     refreshed.headers['X-CSRF-Token'] = body['csrf_token']
     assert db.execute("SELECT reauthenticated_at<now()-interval '5 minutes' FROM sessions WHERE id=%s", (session_id,)).fetchone()[0]
-    blocked = refreshed.post(url + '/api/v1/api-tokens', json={'label': 'refresh-boundary', 'grants': []})
-    assert blocked.status_code == 403 and blocked.json()['code'] == 'ReauthenticationRequired', blocked.text
-    print('PASS session refresh preserves the high-risk reauthentication boundary', flush=True)
+    assert refreshed.get(url + '/api/v1/auth/session').json()['refresh_after'] > 30
+
+    keys = url + '/api/v1/s3-credentials'
+    project = refreshed.get(url + '/api/v1/projects').json()[0]['id']
+    settings = {'label': 'refresh-boundary', 'project_id': project, 'grants': []}
+    assert refreshed.post(keys, json=settings, headers={'X-CSRF-Token': 'invalid'}).json()['code'] == 'CsrfTokenMismatch'
+    issued = refreshed.post(keys, json=settings)
+    assert issued.status_code == 201, issued.status_code
+    key = keys + '/' + issued.json()['access_key']
+    assert refreshed.put(key, json={'label': 'updated', 'enabled': True, 'keep_expiry': True}).status_code == 200
+    assert refreshed.put(key + '/grants', json=[]).status_code == 200
+    rotated = refreshed.post(key + '/rotate', json={'overlap': '1h'})
+    assert rotated.status_code == 201, rotated.status_code
+    for path in [key, keys + '/' + rotated.json()['access_key']]:
+        assert refreshed.delete(path).status_code == 204
+
+    tokens = url + '/api/v1/api-tokens'
+    scoped = refreshed.post(tokens, json={'label': 'scoped'})
+    assert scoped.status_code == 201, scoped.status_code
+    personal = tokens + '/' + scoped.json()['token']['id']
+    assert refreshed.put(personal, json={'label': 'updated'}).status_code == 200
+    system = {'label': 'instance', 'system': True}
+    for blocked in [refreshed.post(tokens, json=system), refreshed.put(personal, json=system)]:
+        assert blocked.status_code == 403 and blocked.json()['code'] == 'ReauthenticationRequired'
+    assert refreshed.post(url + '/api/v1/account/reauth', json={'password': new}).status_code == 204
+    upgraded = refreshed.put(personal, json=system)
+    assert upgraded.status_code == 200 and upgraded.json()['system']
+    assert refreshed.delete(personal).status_code == 204
+    print('PASS renewed sessions manage scoped credentials and require a password to grant instance access', flush=True)
 
     # Password verification occurs outside the row lock. A concurrent reset must win
     # over a verification result obtained before the reset committed.

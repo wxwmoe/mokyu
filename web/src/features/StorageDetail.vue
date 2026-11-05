@@ -10,7 +10,6 @@ import { api, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { date, t } from '../app/i18n'
 import { errorText, notify, report } from '../app/feedback'
-import { secure } from '../app/security'
 
 type Storage = components['schemas']['StorageView']
 type StorageProfile = components['schemas']['StorageProfile']
@@ -59,7 +58,7 @@ async function toggle() {
   if (!storage.value) return
   checking.value = true
   try {
-    const result = await secure(() => write<Storage>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}`, { enabled: !storage.value!.enabled }, 'PUT'))
+    const result = await write<Storage>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}`, { enabled: !storage.value!.enabled }, 'PUT')
     await queries.invalidateQueries({ queryKey: ['storages'] })
     notify(t(result.enabled ? 'storeEnabledNotice' : 'storeDisabledNotice'))
   } catch (error) { report(error) } finally { checking.value = false }
@@ -74,7 +73,7 @@ async function confirmCheck() {
   if (!storage.value || checkPhrase.value !== storage.value.name) return
   checking.value = true
   try {
-    await secure(() => api<Storage>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}/check`, { method: 'POST' }))
+    await api<Storage>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}/check`, { method: 'POST' })
     checkOpen.value = false
     notify(t('storeChecked'))
   } catch (error) { checkError.value = errorText(error) } finally { checking.value = false }
@@ -83,14 +82,14 @@ async function previewRewrite() {
   if (!storage.value) return
   rewriteOpen.value = true; rewritePreview.value = null; rewritePhrase.value = ''; rewriteError.value = ''; rewriteBusy.value = true
   try {
-    rewritePreview.value = await secure(() => write<RewritePreview>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}/rewrite`, { action: 'preview', target_key: storage.value!.block_key_id }))
+    rewritePreview.value = await write<RewritePreview>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}/rewrite`, { action: 'preview', target_key: storage.value!.block_key_id })
   } catch (error) { rewriteError.value = errorText(error) } finally { rewriteBusy.value = false }
 }
 async function startRewrite() {
   if (!storage.value || !rewritePreview.value) return
   rewriteBusy.value = true; rewriteError.value = ''
   try {
-    const result = await secure(() => write<components['schemas']['TaskStarted']>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}/rewrite`, { action: 'start', target_key: storage.value!.block_key_id, confirmation: rewritePhrase.value }))
+    const result = await write<components['schemas']['TaskStarted']>(`/api/v1/storages/${encodeURIComponent(storage.value!.name)}/rewrite`, { action: 'start', target_key: storage.value!.block_key_id, confirmation: rewritePhrase.value })
     rewriteOpen.value = false
     notify(t('storeRewriteQueued'), result.task_id ? t('taskQueuedHint', { id: result.task_id }) : undefined, 'info')
   } catch (error) { rewriteError.value = errorText(error) } finally { rewriteBusy.value = false }

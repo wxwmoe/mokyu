@@ -157,7 +157,6 @@ pub(super) async fn create(
     Extension(actor): Extension<Identity>,
     Json(input): Json<CredentialInput>,
 ) -> Result<(StatusCode, Json<CredentialSecret>), HttpError> {
-    actor.recent(&app).await?;
     Ok((
         StatusCode::CREATED,
         Json(create_credential(&app, &actor.principal, input).await?),
@@ -170,7 +169,6 @@ pub(super) async fn update(
     Path(key): Path<String>,
     Json(input): Json<CredentialSettings>,
 ) -> Result<Json<Credential>, HttpError> {
-    actor.recent(&app).await?;
     Ok(Json(
         update_credential(&app, &actor.principal, &key, input).await?,
     ))
@@ -181,7 +179,6 @@ pub(super) async fn revoke(
     Extension(actor): Extension<Identity>,
     Path(key): Path<String>,
 ) -> Result<StatusCode, HttpError> {
-    actor.recent(&app).await?;
     revoke_credential(&app, &actor.principal, &key).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -192,7 +189,6 @@ pub(super) async fn grants(
     Path(key): Path<String>,
     Json(input): Json<Vec<BucketGrant>>,
 ) -> Result<Json<Credential>, HttpError> {
-    actor.recent(&app).await?;
     Ok(Json(set_grants(&app, &actor.principal, &key, input).await?))
 }
 #[utoipa::path(post,path="/api/v1/s3-credentials/{key}/rotate",operation_id="credentials_rotate",params(("key"=String,Path)),request_body=RotateCredential,responses((status=201,body=CredentialRotation)))]
@@ -202,7 +198,6 @@ pub(super) async fn rotate(
     Path(key): Path<String>,
     Json(input): Json<RotateCredential>,
 ) -> Result<(StatusCode, Json<CredentialRotation>), HttpError> {
-    actor.recent(&app).await?;
     Ok((
         StatusCode::CREATED,
         Json(rotate_credential(&app, &actor.principal, &key, input).await?),

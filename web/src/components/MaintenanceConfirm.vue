@@ -5,7 +5,6 @@ import { ShieldCheck } from 'lucide-vue-next'
 import { write, queries, bytes } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
-import { secure } from '../app/security'
 import { errorText } from '../app/feedback'
 import UiDialog from './ui/UiDialog.vue'
 const props = defineProps<{ operation: 'sweep' | 'unpack' | 'quarantine' | 'recheck'; input: Record<string, unknown> }>()
@@ -23,7 +22,7 @@ async function execute() {
   if (!preview.value) return
   busy.value = true; error.value = ''
   try {
-    const job = await secure(() => write<components['schemas']['TaskStarted']>(`/api/v1/maintenance/${props.operation}/execute`, { preview_id: preview.value!.id, confirmation: phrase.value }))
+    const job = await write<components['schemas']['TaskStarted']>(`/api/v1/maintenance/${props.operation}/execute`, { preview_id: preview.value!.id, confirmation: phrase.value })
     open.value = false; await queries.invalidateQueries({ queryKey: ['maintenance'] }); await router.push({ path: '/tasks', query: { task: job.task_id } })
   } catch (e) { error.value = errorText(e) } finally { busy.value = false }
 }

@@ -4,6 +4,7 @@ import type { components } from './schema'
 import { applyPreferences } from '../app/preferences'
 import { locale } from '../app/i18n'
 import { saveLocal } from '../app/theme'
+import { confirmPassword } from '../app/security'
 
 export type Session = components['schemas']['SessionView']
 export type Bucket = components['schemas']['BucketView']
@@ -15,7 +16,7 @@ export function uuid() {
   const hex = Array.from(value, v => v.toString(16).padStart(2, '0')).join('')
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
-export const queries = new QueryClient({ defaultOptions: { queries: { staleTime: 15_000, retry: 1, refetchOnWindowFocus: false } } })
+export const queries = new QueryClient({ defaultOptions: { queries: { staleTime: 15_000, retry: (count, error) => count < 1 && !wasCancelled(error), refetchOnWindowFocus: false } } })
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, public requestId?: string, public detail?: string) {
@@ -23,11 +24,12 @@ export class ApiError extends Error {
   }
 }
 
+export function wasCancelled(error: unknown) { return error instanceof ApiError && error.code === 'Cancelled' }
+
 const refreshPath = '/api/v1/auth/refresh'
 const refreshStorageKey = 'mokyu.auth.refresh'
 let volatileRefresh = ''
 let refreshFlight: Promise<boolean> | undefined
-let forcedRefresh = false
 let deadline = 0, retryAt = 0, generation = 0
 let recoveryNeeded = false
 const channel = typeof BroadcastChannel === 'undefined' ? undefined : new BroadcastChannel('mokyu.auth')
@@ -55,7 +57,7 @@ async function request<T>(path: string, init: RequestInit = {}, format: 'json' |
     throw new ApiError(reply.status, error.code || 'RequestFailed', error.request_id || reply.headers.get('x-request-id'), typeof error.detail==='string'?error.detail:undefined)
   }
   const rotated = reply.headers.get('x-mokyu-refresh-token')
-  if (rotated && generation === expected) saveRefresh(rotated)
+  if (rotated && generation === expected) { saveRefresh(rotated); recoveryNeeded = false }
   if (format === 'blob') return await reply.blob() as T
   if (format === 'response') return reply as T
   if (reply.status === 204) return undefined as T
@@ -98,28 +100,26 @@ async function refreshLock<T>(run: () => Promise<T>): Promise<T> {
   finally { window.removeEventListener('pagehide', release); release() }
 }
 
-export async function refreshAuth(force = false): Promise<boolean> {
-  if (refreshFlight) {
-    const wasForced = forcedRefresh
-    const refreshed = await refreshFlight
-    return force && !wasForced && refreshed ? refreshAuth(true) : refreshed
-  }
+export async function refreshAuth(): Promise<boolean> {
   if (!refreshFlight) {
     const expected = generation
-    forcedRefresh = force
     refreshFlight = refreshLock(async () => {
       if (generation !== expected) return false
       try {
         // A sibling tab may have renewed while this tab waited for the lock.
+        let active = false
         try {
           const current = await request<Session>('/api/v1/auth/session', { cache: 'no-store', signal: AbortSignal.timeout(8_000) })
           await applySession(current, expected)
-          if (!force && current.refresh_after > 30 && !recoveryNeeded) return generation === expected
+          active = true
+          if (current.refresh_after > 30 && !recoveryNeeded) return generation === expected
         } catch (error) { if (!denied(error)) throw error }
         const refresh = storedRefresh()
         if (!refresh) {
-          recoveryNeeded = !!session.value
-          if (!session.value && generation === expected) resetSession()
+          if (generation === expected) {
+            if (active) recoveryNeeded = true
+            else resetSession()
+          }
           return false
         }
         const current = await request<Session>(refreshPath, {
@@ -144,7 +144,7 @@ export async function refreshAuth(force = false): Promise<boolean> {
         }
         return false
       }
-    }).finally(() => { refreshFlight = undefined; forcedRefresh = false })
+    }).finally(() => { refreshFlight = undefined })
   }
   return refreshFlight
 }
@@ -165,16 +165,35 @@ export async function api<T>(path: string, init: RequestInit = {}, format: 'json
     }
     return request<T>(path, { ...init, headers }, format)
   }
+  if (!managed) return send()
+  const owner = session.value?.session_id, page = window.location.href
+  const current = () => !!owner && session.value?.session_id === owner && window.location.href === page && !init.signal?.aborted
+  let retry = false
+  const attempt = () => {
+    if (retry && !current()) throw new ApiError(0, 'Cancelled')
+    return send()
+  }
+  for (;;) {
+    try { return await withSession(attempt) }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.code !== 'ReauthenticationRequired') throw error
+      if (!current() || !await confirmPassword()) throw new ApiError(0, 'Cancelled')
+      retry = true
+    }
+  }
+}
+
+async function withSession<T>(send: () => Promise<T>): Promise<T> {
   try { return await send() }
   catch (error) {
-    if (managed && error instanceof ApiError && error.code === 'AccessDenied') {
-      let expired = false
+    if (!(error instanceof ApiError)) throw error
+    if (error.code === 'AccessDenied') {
       try { await request<Session>('/api/v1/auth/session', { cache: 'no-store' }) }
-      catch (currentError) { expired = denied(currentError) }
-      if (expired && await refreshAuth()) return send()
+      catch (currentError) { if (denied(currentError) && await refreshAuth()) return send() }
+      throw error
     }
-    // This code is emitted only by the pre-handler gate, so no mutation ran.
-    if (!managed || !(error instanceof ApiError) || !['CsrfTokenMismatch', 'Unauthorized'].includes(error.code) || !await refreshAuth()) throw error
+    // Both errors are emitted before the handler can change anything.
+    if (!['CsrfTokenMismatch', 'Unauthorized'].includes(error.code) || !await refreshAuth()) throw error
     return send()
   }
 }

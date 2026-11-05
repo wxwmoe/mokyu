@@ -9,7 +9,6 @@ import { ApiError, api, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { notify, report } from '../app/feedback'
-import { secure } from '../app/security'
 import { useDeployment } from '../app/cluster'
 import UiSwitch from '../components/ui/UiSwitch.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
@@ -195,7 +194,7 @@ async function save() {
     const body = editing.value
       ? { ...input(), enabled: draft.enabled, profile }
       : { name: draft.name.trim(), initialize: draft.initialize, profile, ...input() }
-    await secure(() => write<Storage>('/api/v1/storages' + (editing.value ? '/' + encodeURIComponent(editing.value.name) : ''), body, editing.value ? 'PUT' : 'POST'))
+    await write<Storage>('/api/v1/storages' + (editing.value ? '/' + encodeURIComponent(editing.value.name) : ''), body, editing.value ? 'PUT' : 'POST')
     open.value = false
     await queries.invalidateQueries({ queryKey: ['storages'] })
     await queries.invalidateQueries({ queryKey: ['bucket-projects'] })
@@ -209,7 +208,7 @@ async function save() {
 }
 async function toggle(row: Storage) {
   checking.value = row.name
-  try { const result = await secure(() => write<Storage>('/api/v1/storages/' + encodeURIComponent(row.name), { enabled: !row.enabled }, 'PUT')); await storages.refetch(); await queries.invalidateQueries({ queryKey: ['bucket-projects'] }); notify(t(result.enabled ? 'storeEnabledNotice' : 'storeDisabledNotice')) }
+  try { const result = await write<Storage>('/api/v1/storages/' + encodeURIComponent(row.name), { enabled: !row.enabled }, 'PUT'); await storages.refetch(); await queries.invalidateQueries({ queryKey: ['bucket-projects'] }); notify(t(result.enabled ? 'storeEnabledNotice' : 'storeDisabledNotice')) }
   catch (error) { report(error) } finally { checking.value = '' }
 }
 </script>

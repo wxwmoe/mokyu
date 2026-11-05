@@ -1,17 +1,14 @@
-import { ref } from 'vue'
-import { ApiError, refreshAuth, session } from '../api/client'
-export const verifyOpen = ref(false)
+import { shallowRef } from 'vue'
+
+export const passwordPrompt = shallowRef<((confirmed: boolean) => void) | null>(null)
 let pending: Promise<boolean> | undefined
-let answer: ((value: boolean) => void) | undefined
-export function verified(value: boolean) { answer?.(value); answer = undefined; pending = undefined; verifyOpen.value = false }
-export async function secure<T>(operation: () => Promise<T>): Promise<T> {
-  try { return await operation() }
-  catch (error) {
-    if (!(error instanceof ApiError) || error.code !== 'ReauthenticationRequired') throw error
-    if (await refreshAuth(true)) return operation()
-    if (!session.value) throw error
-    if (!pending) { pending = new Promise(resolve => { answer = resolve }); verifyOpen.value = true }
-    if (!await pending) throw new ApiError(0, 'Cancelled')
-    return operation()
-  }
+
+export function confirmPassword() {
+  return pending ??= new Promise<boolean>(resolve => {
+    passwordPrompt.value = confirmed => {
+      pending = undefined
+      passwordPrompt.value = null
+      resolve(confirmed)
+    }
+  })
 }

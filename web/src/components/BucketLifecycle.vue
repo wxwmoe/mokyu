@@ -4,7 +4,6 @@ import { useQuery } from '@tanstack/vue-query'
 import { Pause, Play, ArrowRightLeft, Trash2, RefreshCw } from 'lucide-vue-next'
 import { api, write, queries, bytes, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
-import { secure } from '../app/security'
 import { t } from '../app/i18n'
 import { notify, report, errorText } from '../app/feedback'
 import UiDialog from './ui/UiDialog.vue'
@@ -16,6 +15,7 @@ type Impact = components['schemas']['BucketImpact']
 type Transfer = components['schemas']['TransferPreview']
 const open = ref(false), busy = ref(false), operation = ref<'transfer' | 'purge' | 'delete'>('transfer')
 const target = ref(''), name = ref(''), error = ref<unknown>(), preview = ref<components['schemas']['BucketPreview'] | Transfer>()
+const message = computed(() => errorText(error.value))
 const projects = useQuery({ queryKey: ['projects'], queryFn: ({ signal }) => api<components['schemas']['Project'][]>('/api/v1/projects', { signal }) })
 const choices = computed(() => projects.data.value?.filter(p => p.id !== props.bucket.project_id).map(p => ({ value: p.id, label: p.name })) || [])
 const transfer = computed(() => preview.value && 'target' in preview.value ? preview.value : undefined)
@@ -44,9 +44,9 @@ async function execute() {
   busy.value = true; error.value = undefined
   try {
     const input = { confirm_name: name.value, confirmation: preview.value.confirmation }
-    if (operation.value === 'transfer') { await secure(() => write(path.value + '/transfer', { ...input, target_project: target.value })); emit('changed'); notify(t('bucketTransferred')) }
-    else if (operation.value === 'purge') { const task = await secure(() => write<components['schemas']['BucketTask']>(path.value + '/purge', input)); notify(t('bucketPurgeQueued'), t('taskQueuedHint', { id: task.task_id }), 'info'); emit('removed') }
-    else { await secure(() => write(path.value, input, 'DELETE')); notify(t('bucketDeleted')); emit('removed') }
+    if (operation.value === 'transfer') { await write(path.value + '/transfer', { ...input, target_project: target.value }); emit('changed'); notify(t('bucketTransferred')) }
+    else if (operation.value === 'purge') { const task = await write<components['schemas']['BucketTask']>(path.value + '/purge', input); notify(t('bucketPurgeQueued'), t('taskQueuedHint', { id: task.task_id }), 'info'); emit('removed') }
+    else { await write(path.value, input, 'DELETE'); notify(t('bucketDeleted')); emit('removed') }
     open.value = false; await queries.invalidateQueries({ queryKey: ['buckets'] }); await queries.invalidateQueries({ queryKey: ['quota'] })
   } catch (failure) { error.value = failure; report(failure) } finally { busy.value = false }
 }
@@ -60,7 +60,7 @@ async function execute() {
   </section>
   <UiDialog v-model:open="open" :title="t(operation === 'transfer' ? 'transferBucket' : operation === 'purge' ? 'purgeBucket' : 'deleteEmptyBucket')" :busy="busy">
     <div v-if="operation === 'transfer'"><label class="field"><span>{{ t('destinationProject') }}</span><UiSelect v-model="target" :label="t('destinationProject')" :options="choices" :disabled="busy" /></label><button :disabled="busy || !target" @click="refresh"><RefreshCw :size="15" />{{ t('reviewTransfer') }}</button><p class="field-help">{{ t('transferDrainHint') }}</p></div>
-    <p v-if="error" class="error" role="alert">{{ errorText(error) }} <button :disabled="busy" @click="refresh">{{ t('refresh') }}</button></p>
+    <p v-if="message" class="error" role="alert">{{ message }} <button :disabled="busy" @click="refresh">{{ t('refresh') }}</button></p>
     <div v-if="impact" class="bucket-impact"><dl class="facts"><dt>{{ t('bucket') }}</dt><dd>{{ impact.name }}</dd><dt>{{ t('objects') }}</dt><dd>{{ impact.objects }}</dd><dt>{{ t('size') }}</dt><dd>{{ bytes(Number(impact.logical_bytes)) }}</dd><dt>{{ t('activeUploads') }}</dt><dd>{{ impact.active_uploads }}</dd><dt>{{ t('writingStreams') }}</dt><dd>{{ impact.writing_streams }}</dd></dl>
       <template v-if="transfer"><p class="info-callout">{{ t('transferAccessHint', { members: impact.member_bucket_grants, keys: impact.service_grants, tokens: impact.token_bucket_grants }) }}</p><p class="field-help">{{ t('transferTargetHint', { name: transfer.target.name, members: transfer.target.members, used: bytes(Number(transfer.target.used_bytes)), limit: transfer.target.logical_bytes_limit == null ? t('quotaUnlimited') : bytes(Number(transfer.target.logical_bytes_limit)) }) }}</p><div v-if="!drained" class="info-callout"><p>{{ t(impact.uploads_paused ? 'waitingForDrain' : 'pauseToTransfer') }}</p><button v-if="!impact.uploads_paused" :disabled="busy" @click="pause">{{ t('pauseUploads') }}</button><button v-else :disabled="busy" @click="refresh">{{ t('refresh') }}</button></div></template>
       <p v-else class="info-callout" :class="{ 'danger-callout': operation === 'purge' }">{{ t(operation === 'purge' ? 'purgeBucketWarning' : 'deleteEmptyHint') }}</p>

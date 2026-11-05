@@ -10,7 +10,6 @@ import { KeyRound, Plus, Copy, ShieldCheck, RefreshCw, Trash2, ChevronRight } fr
 import { api, write, params, session, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
-import { secure } from '../app/security'
 import { report, notify, copy } from '../app/feedback'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
@@ -72,13 +71,13 @@ function openManagedKey() { keyName.value = ''; keyPurpose.value = 'block'; keyA
 function requestKeyRevoke(row: ManagedKey) { selectedKey.value = row; revokeOpen.value = true }
 async function createManagedKey() {
   keyBusy.value = true
-  try { await secure(() => write<ManagedKey>('/api/v1/keys', { name: keyName.value.trim(), purpose: keyPurpose.value, ...(keyPurpose.value === 'block' ? { algorithm: keyAlgorithm.value } : {}) })); keyOpen.value = false; await keys.refetch(); notify(t('keyCreated')) }
+  try { await write<ManagedKey>('/api/v1/keys', { name: keyName.value.trim(), purpose: keyPurpose.value, ...(keyPurpose.value === 'block' ? { algorithm: keyAlgorithm.value } : {}) }); keyOpen.value = false; await keys.refetch(); notify(t('keyCreated')) }
   catch (error) { report(error) } finally { keyBusy.value = false }
 }
 async function revokeManagedKey() {
   if (!selectedKey.value) return
   keyBusy.value = true
-  try { await secure(() => api('/api/v1/keys/' + selectedKey.value!.id, { method: 'DELETE' })); revokeOpen.value = false; await keys.refetch(); notify(t('keyRevoked')) }
+  try { await api('/api/v1/keys/' + selectedKey.value!.id, { method: 'DELETE' }); revokeOpen.value = false; await keys.refetch(); notify(t('keyRevoked')) }
   catch (error) { report(error) } finally { keyBusy.value = false }
 }
 onMounted(() => { if (managed.value && route.query.create === 'block') openManagedKey() })
@@ -93,15 +92,15 @@ async function save() {
     if (service.value) {
       if (selected.value) {
         const key = id(selected.value)
-        detail.value = await secure(() => write<Credential>(endpoint.value + '/' + key, { label: draft.label, enabled: draft.enabled, expires_in: expires(), keep_expiry: draft.expiry === 'keep', grants }, 'PUT'))
+        detail.value = await write<Credential>(endpoint.value + '/' + key, { label: draft.label, enabled: draft.enabled, expires_in: expires(), keep_expiry: draft.expiry === 'keep', grants }, 'PUT')
       } else {
-        const row = await secure(() => write<components['schemas']['CredentialSecret']>(endpoint.value, { project_id: draft.project, label: draft.label, expires_in: expires(), grants }))
+        const row = await write<components['schemas']['CredentialSecret']>(endpoint.value, { project_id: draft.project, label: draft.label, expires_in: expires(), grants })
         reveal(row.secret_key, row.access_key)
       }
     } else {
       const input = { label: draft.label, system: draft.system, expires_in: expires(), keep_expiry: draft.expiry === 'keep', grants, external_grants: draft.system ? [] : draft.external_grants.filter(grant => grant.actions.length) }
-      if (selected.value) detail.value = await secure(() => write<Token>(endpoint.value + '/' + id(selected.value!), input, 'PUT'))
-      else { const row = await secure(() => write<components['schemas']['TokenSecret']>(endpoint.value, input)); reveal(row.secret) }
+      if (selected.value) detail.value = await write<Token>(endpoint.value + '/' + id(selected.value!), input, 'PUT')
+      else { const row = await write<components['schemas']['TokenSecret']>(endpoint.value, input); reveal(row.secret) }
     }
     editOpen.value = false; await saved(t(created ? (service.value ? 'credentialCreated' : 'tokenCreated') : (service.value ? 'credentialUpdated' : 'tokenUpdated')))
   } catch (error) { report(error) } finally { busy.value = false }
@@ -111,9 +110,9 @@ async function execute() {
   busy.value = true
   try {
     if (operation.value === 'rotate') {
-      const row = await secure(() => write<components['schemas']['CredentialRotation']>(endpoint.value + '/' + id(detail.value!) + '/rotate', { overlap: overlap.value, expires_in: null }))
+      const row = await write<components['schemas']['CredentialRotation']>(endpoint.value + '/' + id(detail.value!) + '/rotate', { overlap: overlap.value, expires_in: null })
       reveal(row.secret_key, row.access_key)
-    } else await secure(() => api(endpoint.value + '/' + id(detail.value!), { method: 'DELETE' }))
+    } else await api(endpoint.value + '/' + id(detail.value!), { method: 'DELETE' })
     const message = operation.value === 'rotate' ? t('credentialRotated') : t(service.value ? 'credentialRevoked' : 'tokenRevoked')
     detail.value = null; operation.value = ''; await saved(message)
   } catch (error) { report(error) } finally { busy.value = false }

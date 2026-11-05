@@ -41,14 +41,14 @@ try:
     # The intent exists before the business transaction can acquire its administration lock.
     lock = psycopg.connect(database, autocommit=True)
     lock.execute('SELECT pg_advisory_lock(734922709851002)')
-    before = db.execute('SELECT COALESCE(max(id),0) FROM audit_events').fetchone()[0]
+    before = db.execute('SELECT clock_timestamp()').fetchone()[0]
     with ThreadPoolExecutor(max_workers=1) as pool:
         pending = pool.submit(admin.post, url + '/api/v1/users', json={'username': prefix, 'password': password, 'role': 'member', 'must_change_password': False}, timeout=20)
         try:
             deadline = time.monotonic() + 10
             intent = None
             while not intent:
-                intent = db.execute("SELECT id,outcome FROM audit_events WHERE id>%s AND action='POST /api/v1/users'", (before,)).fetchone()
+                intent = db.execute("SELECT id,outcome FROM audit_events WHERE created_at>=%s AND actor_label='tester' AND action='POST /api/v1/users'", (before,)).fetchone()
                 assert time.monotonic() < deadline
                 time.sleep(.02)
             assert intent[1] == 'unknown'
@@ -66,9 +66,6 @@ try:
 
     member = login(prefix, password)
     issued = member.post(url + '/api/v1/api-tokens', json={'label': prefix, 'grants': []})
-    if issued.status_code == 403 and issued.json()['code'] == 'ReauthenticationRequired':
-        member.post(url + '/api/v1/account/reauth', json={'password': password})
-        issued = member.post(url + '/api/v1/api-tokens', json={'label': prefix, 'grants': []})
     assert issued.status_code == 201, issued.status_code
     secret = issued.json()['secret']
     token = issued.json()['token']['id']

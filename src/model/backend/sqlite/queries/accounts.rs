@@ -107,8 +107,7 @@ pub(in super::super) fn touch_refresh(id: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn session_times(hash: &[u8]) -> Rows<'_, (Uuid, i64, i64)> {
-    sqlx::query_as("SELECT id,expires_at,reauthenticated_at FROM sessions WHERE token_hash=?")
-        .bind(hash)
+    sqlx::query_as("SELECT id,expires_at,last_seen_at FROM sessions WHERE token_hash=?").bind(hash)
 }
 
 pub(in super::super) fn account_profile(user: Uuid) -> Rows<'static, Profile> {
@@ -259,7 +258,7 @@ impl AccountStore for Backend {
         session_times(hash)
             .fetch_optional(&self.read)
             .await?
-            .map(|(id, expires, recent)| Ok((id, datetime(expires)?, datetime(recent)?)))
+            .map(|(id, expires, last_seen)| Ok((id, datetime(expires)?, datetime(last_seen)?)))
             .transpose()
     }
     async fn logout(&self, user: Uuid, hash: &[u8]) -> Result<()> {

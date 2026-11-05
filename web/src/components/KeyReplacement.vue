@@ -5,7 +5,6 @@ import { useQueryClient } from '@tanstack/vue-query'
 import { api, write, ApiError } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
-import { secure } from '../app/security'
 import { report } from '../app/feedback'
 import { useDeployment } from '../app/cluster'
 import UiDialog from './ui/UiDialog.vue'
@@ -38,7 +37,7 @@ async function prepare() {
   if (!props.source) return
   busy.value = true
   try {
-    preview.value = await secure(() => write<Preview>(`/api/v1/keys/${props.source!.id}/replace-preview`, target.value === 'new' ? { name: name.value.trim() || null, target: null } : { target: target.value, name: null }))
+    preview.value = await write<Preview>(`/api/v1/keys/${props.source!.id}/replace-preview`, target.value === 'new' ? { name: name.value.trim() || null, target: null } : { target: target.value, name: null })
     await router.replace({ query: { ...route.query, replace_key: props.source.id, replacement: preview.value.id } })
   } catch (error) { report(error) } finally { busy.value = false }
 }
@@ -46,7 +45,7 @@ async function apply() {
   if (!preview.value) return
   busy.value = true
   try {
-    applied.value = await secure(() => write<Applied>('/api/v1/key-replacements/' + preview.value!.id, {}))
+    applied.value = await write<Applied>('/api/v1/key-replacements/' + preview.value!.id, {})
     result.value = applied.value.result
     await queries.invalidateQueries({ predicate: query => ['managed-keys', 'storages', 'storage-profile', 'service-status'].includes(String(query.queryKey[0])) })
   } catch (error) {

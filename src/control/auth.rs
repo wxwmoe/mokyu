@@ -23,10 +23,10 @@ use uuid::Uuid;
 
 use crate::model::account::{AuthSession, SessionLogin, SessionRefresh, csrf_token, derived_token};
 
-fn refresh_after(expires: DateTime<Utc>, recent: DateTime<Utc>) -> u64 {
+fn refresh_after(expires: DateTime<Utc>, last_seen: DateTime<Utc>) -> u64 {
     let now = Utc::now();
     ((expires - now).num_seconds() * 3 / 4)
-        .min((recent + chrono::Duration::minutes(3) - now).num_seconds())
+        .min((last_seen + chrono::Duration::minutes(3) - now).num_seconds())
         .clamp(0, 180) as u64
 }
 
@@ -553,7 +553,7 @@ pub(super) async fn session(
     headers: HeaderMap,
 ) -> Result<Json<SessionView>, HttpError> {
     let id = actor.id;
-    let (session_id, expires, recent) = app
+    let (session_id, expires, last_seen) = app
         .accounts
         .session(blake3::hash(token(&headers)?.as_bytes()).as_bytes())
         .await?
@@ -562,7 +562,7 @@ pub(super) async fn session(
         account: account::profile(&app, id).await?,
         csrf_token: csrf_token(token(&headers)?),
         session_id,
-        refresh_after: refresh_after(expires, recent),
+        refresh_after: refresh_after(expires, last_seen),
         refresh_token: None,
     }))
 }

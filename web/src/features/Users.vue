@@ -6,7 +6,6 @@ import { api, write, params, session, refreshSession, queries } from '../api/cli
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
 import { report, notify, errorText } from '../app/feedback'
-import { secure } from '../app/security'
 import { useRouter } from 'vue-router'
 import UiSelect from '../components/ui/UiSelect.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
@@ -34,14 +33,14 @@ async function changed(message = t('userUpdated')) {
 }
 async function create() {
   busy.value = true
-  try { const user = await secure(() => write<User>('/api/v1/users', { ...draft })); createOpen.value = false; draft.username = ''; await changed(t('userCreated')); selected.value = user }
+  try { const user = await write<User>('/api/v1/users', { ...draft }); createOpen.value = false; draft.username = ''; await changed(t('userCreated')); selected.value = user }
   catch (error) { report(error) } finally { busy.value = false }
 }
 async function save() {
   if (!selected.value) return
   const id = selected.value.id
   busy.value = true
-  try { selected.value = await secure(() => write<User>('/api/v1/users/' + id, { role: role.value, enabled: enabled.value }, 'PATCH')); await changed(t('userUpdated')) }
+  try { selected.value = await write<User>('/api/v1/users/' + id, { role: role.value, enabled: enabled.value }, 'PATCH'); await changed(t('userUpdated')) }
   catch (error) { report(error) } finally { busy.value = false }
 }
 async function execute() {
@@ -49,8 +48,8 @@ async function execute() {
   const id = selected.value.id
   busy.value = true
   try {
-    if (action.value === 'reset') await secure(() => write('/api/v1/users/' + id + '/reset-password', { password: password.value, must_change_password: requireChange.value }))
-    else { await secure(() => api('/api/v1/users/' + id, { method: 'DELETE' })); selected.value = null }
+    if (action.value === 'reset') await write('/api/v1/users/' + id + '/reset-password', { password: password.value, must_change_password: requireChange.value })
+    else { await api('/api/v1/users/' + id, { method: 'DELETE' }); selected.value = null }
     const message = action.value === 'reset' ? t('userPasswordReset') : t('userDeleted')
     action.value = ''; await changed(message)
   } catch (error) { report(error) } finally { busy.value = false }
