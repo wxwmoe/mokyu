@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261105213227.
+-- Generated from the complete sqlite migration chain through 20261105234041.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;

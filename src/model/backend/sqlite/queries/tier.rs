@@ -40,7 +40,9 @@ pub(in super::super) const MAXIMUM: &str = "MAX";
 pub(in super::super) const BIG_INT: &str = "BIGINT";
 pub(in super::super) const COVERAGE: &str = "SELECT unixepoch(), COALESCE(CAST(coverage_since/1000000 AS INTEGER),0), COALESCE(CAST(flushed_at/1000000 AS INTEGER),0) FROM access_state WHERE id=1";
 pub(in super::super) const CREATED: &str = "CAST(u.created_at/1000000 AS INTEGER)";
-pub(in super::super) const OBSERVED: &str = "COALESCE(unixepoch(t.observed_since),0)";
+// Round the policy start up to the scheduler's whole-second clock.
+pub(in super::super) const OBSERVED: &str =
+    "COALESCE(unixepoch(t.observed_since,'+0.999 seconds'),0)";
 pub(in super::super) const MEMBER_ID: &str = "c.uuid";
 pub(in super::super) const EXPIRE_TOTALS: &str = "DELETE FROM physical_demand WHERE rowid IN (SELECT rowid FROM physical_demand WHERE last_read<unixepoch()-MAX(?,COALESCE((SELECT MAX(CAST(json_extract(policy,'$.cool_after_seconds') AS INTEGER)) FROM bucket_tiering),0)) ORDER BY last_read LIMIT ?)";
 pub(in super::super) async fn active(backend: &Backend) -> anyhow::Result<bool> {
@@ -82,7 +84,7 @@ pub(in super::super) fn cold(
         .bind(bucket)
 }
 pub(in super::super) const INSERT_POLICY: &str = "INSERT INTO bucket_tiering(bucket_id,hot_storage,cold_storage,cold_domain,cold_space,policy,revision,state) VALUES(?,?,?,?,?,?,?,'active')";
-pub(in super::super) const UPDATE_POLICY: &str = "UPDATE bucket_tiering SET cold_storage=?,cold_domain=?,cold_space=?,policy=?,revision=revision+1,observed_since=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE bucket_id=? AND revision=?";
+pub(in super::super) const UPDATE_POLICY: &str = "UPDATE bucket_tiering SET cold_storage=?,cold_domain=?,cold_space=?,policy=?,revision=revision+1,observed_since=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE bucket_id=? AND revision=?";
 pub(in super::super) const EXPIRE: &str = "DELETE FROM physical_demand_windows WHERE rowid IN (SELECT rowid FROM physical_demand_windows WHERE hour_start<unixepoch()-? ORDER BY hour_start LIMIT ?)";
 use crate::model::tiering::Unit;
 use anyhow::Result;

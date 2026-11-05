@@ -86,6 +86,87 @@ type TestConnection = SqliteConnection;
 include!("migration_chain.rs");
 
 #[tokio::test]
+async fn sqlite_tier_policy_observation_survives_upgrade_and_edit() -> Result<()> {
+    use super::queries::tier;
+    use uuid::Uuid;
+
+    let mut db = SqliteConnection::connect("sqlite::memory:").await?;
+    let migrations = sqlx::migrate!("./src/model/backend/sqlite/migrations");
+    let previous = sqlx::migrate::Migrator::with_migrations(
+        migrations
+            .iter()
+            .take_while(|m| m.version < 20261105234041)
+            .cloned()
+            .collect(),
+    );
+    previous.run(&mut db).await?;
+    let hot = Uuid::from_u128(1);
+    let cold = Uuid::from_u128(2);
+    for storage in [hot, cold] {
+        sqlx::query(
+            "INSERT INTO storages(id,name,type,path,identity_marker) VALUES(?,?,'local',?,'{}')",
+        )
+        .bind(storage)
+        .bind(storage.to_string())
+        .bind(format!("/data/{storage}"))
+        .execute(&mut db)
+        .await?;
+    }
+    let cases = [
+        ("1700000000999999", "2023-11-14T22:13:20.999Z", 1700000001),
+        (
+            "2023-11-14T22:13:20.000Z",
+            "2023-11-14T22:13:20.000Z",
+            1700000000,
+        ),
+        ("invalid", "invalid", 0),
+    ];
+    for (value, _, _) in cases {
+        let bucket = Uuid::new_v4();
+        sqlx::query("INSERT INTO buckets(id,name,storage_id,project_id) VALUES(?,?,?,?)")
+            .bind(bucket)
+            .bind(value)
+            .bind(hot)
+            .bind(crate::authorization::DEFAULT_PROJECT)
+            .execute(&mut db)
+            .await?;
+        sqlx::query("INSERT INTO bucket_tiering(bucket_id,hot_storage,cold_storage,cold_domain,cold_space,policy,revision,state,observed_since) VALUES(?,?,?,?,?,'{}',1,'active',?)")
+            .bind(bucket).bind(hot).bind(cold).bind(cold).bind("cold").bind(value).execute(&mut db).await?;
+    }
+    migration::run(&mut db).await?;
+    let read = format!(
+        "SELECT t.bucket_id,t.observed_since,{} FROM bucket_tiering t JOIN buckets b ON b.id=t.bucket_id WHERE b.name=?",
+        tier::OBSERVED
+    );
+    for (name, stamp, observed) in cases {
+        let (bucket, saved, start): (Uuid, String, i64) =
+            sqlx::query_as(sqlx::AssertSqlSafe(read.as_str()))
+                .bind(name)
+                .fetch_one(&mut db)
+                .await?;
+        assert_eq!((saved.as_str(), start), (stamp, observed));
+        let updated = sqlx::query(tier::UPDATE_POLICY)
+            .bind(cold)
+            .bind(cold)
+            .bind("cold")
+            .bind("{}")
+            .bind(bucket)
+            .bind(1)
+            .execute(&mut db)
+            .await?;
+        assert_eq!(updated.rows_affected(), 1);
+        let parsed: Option<i64> = sqlx::query_scalar(
+            "SELECT unixepoch(observed_since) FROM bucket_tiering WHERE bucket_id=?",
+        )
+        .bind(bucket)
+        .fetch_one(&mut db)
+        .await?;
+        assert!(parsed.is_some_and(|t| t > observed));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_schema_bootstrap_contract() -> Result<()> {
     let mut fresh = SqliteConnection::connect("sqlite::memory:").await?;
     let mut history = SqliteConnection::connect("sqlite::memory:").await?;

@@ -327,12 +327,14 @@ pub(crate) fn candidate(
     let mut last_read = None;
     let mut age = 0;
     let mut observed = since;
+    let mut observation_gap = since <= 0 || now - flushed > stale || flushed > now;
     let mut duration = 0;
     let mut dwell = 0;
     for row in rows {
         last_read = last_read.max(row.last_read);
         age = age.max(row.created);
         observed = observed.max(row.observed);
+        observation_gap |= row.observed <= 0;
         busy |= !row.ready || !row.visible;
         let Some(policy) = &row.policy else {
             incompatible = true;
@@ -351,7 +353,7 @@ pub(crate) fn candidate(
     } else if incompatible {
         reason = "shared_policy";
     } else {
-        if since <= 0 || now - flushed > stale || flushed > now || now - observed < duration {
+        if observation_gap || now - observed < duration {
             reason = "observation_gap";
         } else if now - age < dwell.max(duration) {
             reason = "minimum_residency";
@@ -455,6 +457,12 @@ mod tests {
         for clock in [(60, 52, 59), (60, 10, 40), (60, 10, 61)] {
             assert_eq!(reason(&first, &second, clock, false), "observation_gap");
         }
+        second.observed = 0;
+        assert_eq!(
+            reason(&first, &second, (60, 10, 59), false),
+            "observation_gap"
+        );
+        second.observed = 10;
         second.last_read = Some(55);
         assert_eq!(reason(&first, &second, (60, 10, 59), false), "recent_read");
         second.policy.as_mut().unwrap().0.cold_storage = Uuid::from_u128(6);
