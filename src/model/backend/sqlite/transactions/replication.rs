@@ -225,7 +225,7 @@ impl ReplicationStore for Backend {
     }
 
     async fn view(&self, principal: &Principal, id: Uuid) -> Result<Replication> {
-        let mut db = self.write.begin_with(queries::BEGIN_WRITE).await?;
+        let mut db = self.read.begin().await?;
         let run = load(&mut db, id).await?;
         authorize(&mut db, &run, principal, false).await?;
         db.commit().await?;
@@ -238,7 +238,7 @@ impl ReplicationStore for Backend {
         after: Option<Uuid>,
         limit: i64,
     ) -> Result<(Vec<Replication>, Option<Uuid>)> {
-        let mut db = self.write.begin_with(queries::BEGIN_WRITE).await?;
+        let mut db = self.read.begin().await?;
         let limit = limit.clamp(1, 100);
         let rows = q::list(principal.user_id(), after, limit + 1)
             .fetch_all(&mut *db)
@@ -266,7 +266,7 @@ impl ReplicationStore for Backend {
         after: Option<Id>,
         limit: i64,
     ) -> Result<Vec<Item>> {
-        let mut db = self.write.begin_with(queries::BEGIN_WRITE).await?;
+        let mut db = self.read.begin().await?;
         let run = load(&mut db, id).await?;
         authorize(&mut db, &run, principal, false).await?;
         let result = q::items(id, after, limit.clamp(1, 101))
