@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import subprocess
+import time
 
 import requests
 
@@ -26,8 +27,10 @@ def check(binary, config, origin, password, mode, counts=None):
         assert service['deployment_mode'] == local['deployment_mode'] == mode
         assert service['deployment_mode_revision'] == local['deployment_mode_revision']
         assert service['started_mode'] == mode and not service['mode_mismatch']
+        runtime = get('usage/runtime')
         if mode == 'single':
             assert service['current_node'] is None
+            assert runtime['scope'] == 'single' and runtime['current'] and runtime['cluster'] is None
             return
         overview, command = get('cluster/status'), cli('cluster', 'status')
         fields = ('mode', 'mode_revision', 'remote_nodes', 'ready_data', 'ready_workers', 'remote_work')
@@ -35,6 +38,12 @@ def check(binary, config, origin, password, mode, counts=None):
         assert overview['mode'] == mode and overview['mode_revision'] == service['deployment_mode_revision']
         if counts is not None:
             assert [overview[key] for key in fields[2:]] == list(counts)
+        assert runtime['scope'] == 'cluster' and runtime['current'] is None
+        deadline = time.monotonic() + 150
+        while not ((runtime['cluster']['current'] or {}).get('reported_nodes') or 0):
+            assert time.monotonic() < deadline, 'single control did not aggregate node samples'
+            time.sleep(2)
+            runtime = get('usage/runtime')
 
 
 if __name__ == '__main__':

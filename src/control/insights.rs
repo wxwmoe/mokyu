@@ -156,7 +156,7 @@ pub(super) async fn runtime(
         oldest_pending,
         failed_uploads,
     } = app.metrics.runtime(&actor.principal).await?;
-    let cluster = if app.role == "single" {
+    let cluster = if app.deployment_mode() == "single" {
         None
     } else {
         let mut history = app.node_inventory.cluster_runtime(&query).await?;
@@ -172,17 +172,17 @@ pub(super) async fn runtime(
     history.drain(..history.len().saturating_sub(query.limit as usize));
     Ok(Json(RuntimeInsights {
         cluster,
-        scope: if app.role == "single" {
+        scope: if app.deployment_mode() == "single" {
             "single"
         } else {
             "cluster"
         },
-        current: if app.role == "single" {
+        current: if app.deployment_mode() == "single" {
             Some(runtime_point(&app).await?)
         } else {
             None
         },
-        history: if app.role == "single" {
+        history: if app.deployment_mode() == "single" {
             history
         } else {
             Vec::new()
@@ -196,7 +196,7 @@ pub(super) async fn runtime(
 }
 pub(crate) async fn runtime_loop(app: Arc<App>) -> Result<()> {
     // Unattributed local samples cannot represent cluster history.
-    if app.role != "single" {
+    if app.deployment_mode() != "single" {
         return std::future::pending().await;
     }
     let interval = Duration::from_secs(config::seconds(&app.config.metrics.runtime_interval)?);

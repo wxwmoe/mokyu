@@ -59,7 +59,17 @@ pub(in super::super) fn enabled() -> Scalar<'static, i64> {
 pub(in super::super) fn window(
     since: i64,
 ) -> Rows<'static, (Uuid, i64, sqlx::types::Json<NodeSample>)> {
-    sqlx::query_as("SELECT node_id,CAST(UNIX_TIMESTAMP(received_at)*1000000 AS SIGNED),sample FROM (SELECT s.node_id,s.received_at,s.sample,ROW_NUMBER() OVER(PARTITION BY s.node_id ORDER BY s.received_at DESC) AS rn FROM node_runtime_samples s JOIN nodes n ON n.id=s.node_id WHERE n.enabled AND s.received_at>=TIMESTAMPADD(MICROSECOND,?,TIMESTAMP'1970-01-01 00:00:00')) samples WHERE rn<=2 ORDER BY node_id,received_at DESC").bind(since)
+    sqlx::query_as(
+        "SELECT s.node_id, CAST(UNIX_TIMESTAMP(s.received_at)*1000000 AS SIGNED), s.sample
+         FROM nodes n JOIN node_runtime_samples s ON s.node_id=n.id
+         WHERE n.enabled AND s.received_at>=TIMESTAMPADD(MICROSECOND,?,TIMESTAMP'1970-01-01 00:00:00')
+           AND s.received_at>=COALESCE((
+               SELECT r.received_at FROM node_runtime_samples r WHERE r.node_id=n.id
+               ORDER BY r.received_at DESC LIMIT 1 OFFSET 1
+           ),s.received_at)
+         ORDER BY s.node_id,s.received_at DESC",
+    )
+    .bind(since)
 }
 pub(in super::super) fn prune_nodes(before: i64) -> Statement<'static> {
     sqlx::query("DELETE FROM node_runtime_samples WHERE received_at<TIMESTAMPADD(MICROSECOND,?,TIMESTAMP\'1970-01-01 00:00:00\') ORDER BY received_at LIMIT 512").bind(before)
