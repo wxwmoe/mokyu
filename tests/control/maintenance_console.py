@@ -112,6 +112,21 @@ try:
     page = admin.get(url + '/api/v1/packs', params={'limit': 1})
     assert page.status_code == 200 and len(page.json()['packs']) == 1, page.text
     packed = str(db.execute("SELECT id FROM packs WHERE state='ready' ORDER BY id DESC LIMIT 1").fetchone()[0])
+    for owner in (member, admin):
+        token = owner.post(url + '/api/v1/api-tokens', json={'label': 'pack access', 'grants': []})
+        assert token.status_code == 201, token.status_code
+        issued = token.json()
+        scoped = requests.Session()
+        scoped.headers['Authorization'] = 'Bearer ' + issued['secret']
+        try:
+            for client in (member, scoped):
+                for path in ('/api/v1/packs', '/api/v1/packs/' + packed):
+                    for request in (client.get, client.head):
+                        assert request(url + path).status_code == 403, path
+                assert client.get(url + '/api/v1/storage/packs').json()['items'] == []
+                assert client.get(url + '/api/v1/storage/packs/' + packed).status_code == 404
+        finally:
+            assert owner.delete(url + '/api/v1/api-tokens/' + issued['token']['id']).status_code == 204
     detail = admin.get(url + '/api/v1/packs/' + packed)
     assert detail.status_code == 200 and detail.json()['pack']['id'] == packed, detail.text
     members = detail.json()['members']
