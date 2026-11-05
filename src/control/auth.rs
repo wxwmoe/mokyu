@@ -427,13 +427,13 @@ pub(super) async fn login(
     let row = app.accounts.login_user(&input.username).await?;
     let attempted = row.as_ref().map(|row| row.0);
     let started = tokio::time::Instant::now();
-    let verified = if let Some((id, hash, revision)) = row {
-        operations::password_matches(hash.clone(), input.password)
-            .await?
-            .then_some((id, hash, revision))
-    } else {
-        None
-    };
+    // Unknown accounts must spend the same bounded password job as a wrong password.
+    const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$bW9reXUtbG9naW4$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let hash = row
+        .as_ref()
+        .map_or(DUMMY_HASH, |(_, hash, _)| hash.as_str());
+    let matches = operations::password_matches(hash.to_owned(), input.password).await?;
+    let verified = row.filter(|_| matches);
     tokio::time::sleep_until(started + Duration::from_millis(300)).await;
     let Some((user, verified_hash, revision)) = verified else {
         if let Some(user) = attempted {
