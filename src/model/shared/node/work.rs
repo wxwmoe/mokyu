@@ -220,6 +220,7 @@ async fn finish(
     run: Run,
     result: &work::Completion,
     key: &Key,
+    wake_shared: &mut bool,
 ) -> Result<()> {
     let hash = crate::model::node_chunk::hash(&result.outcomes)?;
     let offer = q::offer(node, result.operation)
@@ -379,7 +380,7 @@ async fn finish(
         }
         (Some(work::Plan::UploadRaw { items, .. }), [outcome]) if items.len() == 1 => {
             let (next, error) =
-                super::node_files::finish(tx, node, task, &items[0], outcome).await?;
+                super::node_files::finish(tx, node, task, &items[0], outcome, wake_shared).await?;
             issue = error;
             next
         }
@@ -593,10 +594,26 @@ impl NodeWork for Backend {
             .fetch_optional(&mut *tx)
             .await?
         {
-            return known.reply(node, key, &input, &digest);
+            let mut reply = known.reply(node, key, &input, &digest)?;
+            // The receipt is fixed; an empty replay can still prompt a fresh claim.
+            if active && input.class == 2 && input.max_items > 0 && reply.plan.is_none() {
+                reply.check_again = queries::node_files::pending(node.node_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            }
+            return Ok(reply);
         }
+        let mut wake_shared = false;
         if let Some(result) = &input.completion {
-            finish(&mut tx, node.node_id, input.run, result, key).await?;
+            finish(
+                &mut tx,
+                node.node_id,
+                input.run,
+                result,
+                key,
+                &mut wake_shared,
+            )
+            .await?;
         }
         let token = Uuid::new_v4();
         if active
@@ -617,6 +634,7 @@ impl NodeWork for Backend {
         } else {
             None
         };
+        let mut check_again = false;
         let mut task_id = None;
         let mut plan = None;
         let mut encrypted = None;
@@ -786,6 +804,12 @@ impl NodeWork for Backend {
                 encrypted = Some(codec::protect(&secret, key, token.as_bytes())?);
                 plan = Some(proposal);
                 task_id = Some(task.id);
+            } else if input.class == 2 && task_type == "upload" {
+                check_again = queries::task_record(task.id)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .state
+                    == "completed";
             }
         }
         q::insert(
@@ -807,7 +831,9 @@ impl NodeWork for Backend {
         let offer = q::offer(node.node_id, input.operation)
             .fetch_one(&mut *tx)
             .await?;
-        let reply = offer.reply(node, key, &input, &digest)?;
+        let mut reply = offer.reply(node, key, &input, &digest)?;
+        reply.check_again = check_again;
+        reply.wake_shared = wake_shared;
         tx.commit().await?;
         Ok(reply)
     }

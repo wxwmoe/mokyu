@@ -128,6 +128,122 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
 
 #[tokio::test]
 #[ignore = "requires MOKYU_TEST_MYSQL_CONFIG pointing to a fresh isolated MySQL or MariaDB database"]
+async fn mysql_owner_continues_after_local_task_cleanup() -> Result<()> {
+    use crate::authorization::Principal;
+    use crate::model::cluster::{NodeSessions, NodeWork};
+    use crate::model::{RuntimeSettingsStore, node_work, session};
+    use sqlx::Connection;
+
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
+    let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
+    let setup = connection::open(&config, &secrets, &budget, "single").await?;
+    sqlx::query("UPDATE mokyu_meta SET deployment_mode='single_control' WHERE id=1")
+        .execute(&setup.pool)
+        .await?;
+    setup.pool.close().await;
+    setup.owner.into_inner().close().await?;
+
+    let backend = connection::open(&config, &secrets, &budget, "single").await?;
+    RuntimeSettingsStore::ensure(&backend, &crate::model::runtime_defaults(&config)).await?;
+    let key = &secrets.credential_key;
+    let owner = backend
+        .provision_node(&Principal::Local, "owner", "data", key)
+        .await?;
+    let peer = backend
+        .provision_node(&Principal::Local, "peer", "data", key)
+        .await?;
+    let session = backend
+        .open_session(
+            &owner,
+            key,
+            session::Open {
+                boot: Uuid::new_v4(),
+                connection: Uuid::new_v4(),
+                previous_epoch: 0,
+            },
+        )
+        .await?;
+    let request = |operation| node_work::Exchange {
+        run: session.run,
+        operation,
+        completion: None,
+        class: 2,
+        max_items: node_work::MAX_ITEMS,
+        cached: vec![],
+    };
+    let storage = super::storage_tests::fixture(&backend).await?;
+    let mut tasks = Vec::new();
+    for node in [peer.node_id, owner.node_id, owner.node_id] {
+        let task = backend.enqueue("upload", None, json!({
+            "operation":"cache", "source_id":"100", "source_node":node, "storage_id":storage,
+        })).await?;
+        queries::node_files::target(task, node)
+            .execute(&backend.pool)
+            .await?;
+        tasks.push(task);
+    }
+    let first = Uuid::now_v7();
+    for operation in [first, first, Uuid::now_v7()] {
+        let reply = backend
+            .exchange_work(&owner, key, request(operation))
+            .await?;
+        assert!(
+            reply.plan.is_none()
+                && reply.grants.is_empty()
+                && reply.check_again
+                && !reply.wake_shared
+        );
+    }
+    for operation in [Uuid::now_v7(), first] {
+        let reply = backend
+            .exchange_work(&owner, key, request(operation))
+            .await?;
+        assert!(reply.plan.is_none() && reply.grants.is_empty() && !reply.check_again);
+    }
+    for (id, expected) in tasks.into_iter().zip(["queued", "completed", "completed"]) {
+        assert_eq!(
+            queries::task_record(id)
+                .fetch_one(&backend.pool)
+                .await?
+                .state,
+            expected
+        );
+    }
+    let task = backend
+        .enqueue("upload", None, json!({"operation":"cdc"}))
+        .await?;
+    queries::node_files::target(task, owner.node_id)
+        .execute(&backend.pool)
+        .await?;
+    for conversion in [Some(task), None] {
+        let mut tx = backend.pool.begin().await?;
+        let source = sqlx::query("INSERT INTO raw_sources(location_id,storage_id,state,size,digest,profile_revision,medium,pending_upload,processing_task) VALUES(?,?,'ready',4,?,1,'local',TRUE,?)")
+            .bind(Uuid::new_v4()).bind(storage).bind(&[1u8;16][..]).bind(conversion)
+            .execute(&mut *tx).await?.last_insert_id() as i64;
+        sqlx::query("INSERT INTO raw_uploads(source_id,deduplicate,background,node_id,token) VALUES(?,FALSE,TRUE,?,?)")
+            .bind(source).bind(owner.node_id).bind(Uuid::new_v4()).execute(&mut *tx).await?;
+        let upload = queries::raw_upload_record(crate::model::Id::Integer(source))
+            .fetch_one(&mut *tx)
+            .await?;
+        let shared = super::transactions::complete_raw_upload_in(&mut tx, &upload, None).await?;
+        assert_eq!(shared, conversion.is_some());
+        tx.commit().await?;
+    }
+    let source_node =
+        sqlx::query_scalar::<_, Option<Uuid>>("SELECT source_node FROM tasks WHERE id=?")
+            .bind(task)
+            .fetch_one(&backend.pool)
+            .await?;
+    assert!(source_node.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MOKYU_TEST_MYSQL_CONFIG pointing to a fresh isolated MySQL or MariaDB database"]
 async fn mysql_write_cleanup_skips_busy_receipts() -> Result<()> {
     assert_eq!(
         std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,

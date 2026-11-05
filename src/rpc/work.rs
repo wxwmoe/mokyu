@@ -59,6 +59,7 @@ pub(super) fn exchange(input: wire::WorkRequest) -> Result<work::Exchange, Statu
 
 pub(super) fn reply(value: work::Reply) -> Result<wire::WorkReply, Status> {
     let reply = wire::WorkReply {
+        check_again: value.check_again,
         operation_id: value.operation.to_string(),
         plan_json: value
             .plan

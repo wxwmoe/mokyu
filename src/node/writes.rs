@@ -69,7 +69,7 @@ struct Operation {
     copy_references: bool,
     packing: bool,
     part: bool,
-    cached_part: std::sync::atomic::AtomicBool,
+    cached_upload: std::sync::atomic::AtomicBool,
     limit: u64,
     checksum_algorithm: Option<String>,
 }
@@ -277,7 +277,7 @@ impl Writes {
             packing: false,
             copy_references: reply.copy_references,
             part,
-            cached_part: false.into(),
+            cached_upload: false.into(),
             limit,
             checksum_algorithm: reply.checksum_algorithm,
             bucket: Uuid::parse_str(&reply.bucket_id)?,
@@ -368,7 +368,7 @@ impl Writes {
             if !operation.backend.profile.cdc_enabled {
                 self.reads.node.native_work.notify_one();
                 if !operation
-                    .cached_part
+                    .cached_upload
                     .load(std::sync::atomic::Ordering::Acquire)
                 {
                     self.wait_native(&operation.stream).await?;
@@ -525,6 +525,14 @@ impl Writes {
                     .is_some_and(|value| value.size == size && value.etag == etag),
             "invalid publication receipt"
         );
+        if operation
+            .cached_upload
+            .load(std::sync::atomic::Ordering::Acquire)
+            && (!operation.part || operation.backend.profile.cdc_enabled)
+            && self.reads.node.current.borrow().deployment_mode.as_deref() == Some("single_control")
+        {
+            self.reads.node.upload_work.notify_one();
+        }
         Ok(reply)
     }
 
@@ -865,6 +873,9 @@ impl Writes {
                         ),
                     )
                     .await?;
+                operation
+                    .cached_upload
+                    .store(true, std::sync::atomic::Ordering::Release);
             } else {
                 ensure!(
                     operation.backend.profile.upload_concurrency.is_none()

@@ -46,15 +46,66 @@ impl Worker {
             .await?)
     }
 
-    async fn drain(&self, class: u32) -> Result<()> {
+    // Limit how long continuous foreground traffic can defer one upload.
+    async fn upload_turn(
+        &self,
+        mut started: u64,
+        state: &mut tokio::sync::watch::Receiver<super::State>,
+    ) -> Result<Option<u64>> {
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => return Ok(None),
+                _ = tokio::time::sleep(Duration::from_millis(750)) => {
+                    let (current, active) = self.node.statistics.data_activity();
+                    if active == 0 && current == started {
+                        return Ok(Some(current));
+                    }
+                    started = current;
+                }
+                changed = state.changed() => {
+                    changed?;
+                    let current = state.borrow_and_update();
+                    if current.phase != super::Phase::Ready {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn drain(
+        &self,
+        class: u32,
+        state: &mut tokio::sync::watch::Receiver<super::State>,
+    ) -> Result<()> {
         let snapshot = self.node.background_snapshot()?;
+        let pace = class == 2
+            && state.borrow().deployment_mode.as_deref() == Some("single_control")
+            && matches!(self.node.client.identity.role.as_str(), "data" | "node");
+        let mut quiet = None;
+        let mut follow_cleanup = false;
         let mut completion = None;
         let mut fills = Vec::new();
         let mut previous = Vec::<Arc<Grant>>::new();
         let mut upload_resources = None;
         loop {
             let mut maximum = work::MAX_ITEMS;
-            if class == 2 && upload_resources.is_none() {
+            let cleanup_turn = std::mem::take(&mut follow_cleanup);
+            if pace && !cleanup_turn {
+                let (started, active) = self.node.statistics.data_activity();
+                if active != 0 || quiet != Some(started) {
+                    upload_resources.take();
+                    if previous.is_empty() {
+                        quiet = self.upload_turn(started, state).await?;
+                        snapshot.lease.check()?;
+                    } else {
+                        // Settle the completed work before yielding to foreground requests.
+                        maximum = 0;
+                    }
+                }
+            }
+            if class == 2 && maximum != 0 && upload_resources.is_none() {
                 if previous.is_empty() {
                     let memory = Arc::new(self.writes.slots.clone().acquire_owned().await?);
                     let io = Arc::new(self.writes.io.clone().acquire_owned().await?);
@@ -108,7 +159,10 @@ impl Worker {
             )?;
             crate::storage::cache::publish_fills(std::mem::take(&mut fills));
             let Some(json) = reply.plan_json else {
-                if maximum == 0 {
+                if maximum == 0 || reply.check_again {
+                    // One control-only cleanup can share the current upload turn.
+                    follow_cleanup = pace && maximum != 0 && reply.check_again && !cleanup_turn;
+                    upload_resources.take();
                     continue;
                 }
                 return Ok(());
@@ -706,12 +760,13 @@ impl Worker {
 
     async fn run_class(&self, class: u32) -> Result<()> {
         let mut events = self.node.subscribe();
+        let mut local_upload = false;
         loop {
             let state = events.borrow_and_update().clone();
             if state.phase == super::Phase::Stopped {
                 return Ok(());
             }
-            if state.work_pending
+            if (state.work_pending || local_upload)
                 && let Err(error) = crate::storage::resource_gate::PRIORITY
                     .scope(
                         if class == 2 {
@@ -719,16 +774,20 @@ impl Worker {
                         } else {
                             crate::storage::resource_gate::MAINTENANCE
                         },
-                        self.drain(class),
+                        self.drain(class, &mut events),
                     )
                     .await
             {
                 tracing::debug!(%error,class,"background work postponed");
                 tokio::time::sleep(Duration::from_secs(3)).await;
             }
-            if events.changed().await.is_err() {
-                return Ok(());
-            }
+            local_upload = tokio::select! {
+                changed = events.changed() => {
+                    if changed.is_err() { return Ok(()); }
+                    false
+                }
+                _ = self.node.upload_work.notified(), if class == 2 => true,
+            };
         }
     }
 }

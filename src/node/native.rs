@@ -427,7 +427,7 @@ impl Writes {
         if let Some(charge) = charge {
             files.hold_part(id, charge);
             operation
-                .cached_part
+                .cached_upload
                 .store(true, std::sync::atomic::Ordering::Release);
         }
         operation.check()?;

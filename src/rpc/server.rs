@@ -1502,6 +1502,9 @@ impl NodeWork for Service {
             input,
         ))
         .await?;
+        if value.wake_shared {
+            self.app.work_queued();
+        }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-work-exchanged").await;
         Ok(Response::new(super::work::reply(value)?))

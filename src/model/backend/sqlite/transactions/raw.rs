@@ -892,7 +892,7 @@ pub(in super::super) async fn complete_raw_upload_in(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     work: &crate::model::raw::RawUpload,
     hash: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<bool> {
     ensure!(
         hash.is_none_or(|h| h.len() == 32),
         crate::model::Error::NodeOperationConflict
@@ -905,10 +905,13 @@ pub(in super::super) async fn complete_raw_upload_in(
         crate::model::Error::OperationAborted
     );
     current.source.validate()?;
+    let mut shared = false;
     if current.source.pending_upload {
-        super::super::queries::node_files::share_conversion(work.source.id)
+        shared = super::super::queries::node_files::share_conversion(work.source.id)
             .execute(&mut **tx)
-            .await?;
+            .await?
+            .rows_affected()
+            != 0;
         ensure!(
             queries::raw_uploaded(work.source.id)
                 .execute(&mut **tx)
@@ -951,7 +954,7 @@ pub(in super::super) async fn complete_raw_upload_in(
             .execute(&mut **tx)
             .await?;
     }
-    Ok(())
+    Ok(shared)
 }
 
 pub(in super::super) async fn abandon_raw_upload(

@@ -145,6 +145,7 @@ pub(super) async fn finish(
     task: Execution,
     item: &work::UploadFile,
     outcome: &work::Outcome,
+    wake_shared: &mut bool,
 ) -> Result<(&'static str, Option<&'static str>)> {
     ensure!(
         item.task == task.id
@@ -172,8 +173,9 @@ pub(super) async fn finish(
             Ok(("queued", None))
         }
         work::Outcome::Uploaded if !item.hashing => {
-            transactions::complete_raw_upload_in(tx, &current, current.content_hash.as_deref())
-                .await?;
+            *wake_shared =
+                transactions::complete_raw_upload_in(tx, &current, current.content_hash.as_deref())
+                    .await?;
             Ok((
                 if q::exists(item.source.id).fetch_one(&mut **tx).await? {
                     "queued"

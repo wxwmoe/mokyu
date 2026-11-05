@@ -356,6 +356,16 @@ impl Default for Statistics {
     }
 }
 impl Statistics {
+    pub(crate) fn data_activity(&self) -> (u64, u64) {
+        let [s3, web, _] = &self.http;
+        (
+            s3.started
+                .load(Relaxed)
+                .wrapping_add(web.started.load(Relaxed)),
+            s3.active.load(Relaxed) + web.active.load(Relaxed),
+        )
+    }
+
     pub fn runtime(&self) -> Value {
         json!({"started_at":self.started_at,"uptime_seconds":self.started.elapsed().as_secs(),
             "http":{"s3":self.http[0].snapshot(),"web":self.http[1].snapshot(),"control":self.http[2].snapshot()},

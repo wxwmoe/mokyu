@@ -334,6 +334,8 @@ impl Exchange {
 }
 
 pub(crate) struct Reply {
+    pub check_again: bool,
+    pub wake_shared: bool,
     pub operation: Uuid,
     pub plan: Option<Plan>,
     pub materials: Vec<node_read::Material>,
@@ -398,6 +400,8 @@ pub(crate) fn materialize(
         });
     }
     Ok(Reply {
+        check_again: false,
+        wake_shared: false,
         operation: input.operation,
         plan,
         materials,
