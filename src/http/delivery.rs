@@ -91,7 +91,7 @@ pub(crate) async fn prepare(
     let value = format!(
         "{}{}",
         profile.file_delivery_prefix.as_deref().unwrap(),
-        crate::storage::chunk_name(row.source.location_id)
+        crate::storage::chunk_name(row.source.address())
     );
     let name = if profile.file_delivery == "x_accel_redirect" {
         "x-accel-redirect"
