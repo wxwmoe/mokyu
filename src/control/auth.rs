@@ -157,6 +157,9 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/replications/{id}/items"
                 | "/api/v1/buckets/{bucket}/redundancy"
                 | "/api/v1/buckets/{bucket}/redundancy/{id}"
+                | "/api/v1/buckets/{bucket}/tiering"
+                | "/api/v1/buckets/{bucket}/tiering/usage"
+                | "/api/v1/buckets/{bucket}/tiering/units"
                 | "/api/v1/buckets/{bucket}/image-processing/styles"
                 | "/api/v1/buckets/{bucket}/image-processing/styles/export"
                 | "/api/v1/external-buckets"
@@ -194,6 +197,8 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/replications/{id}/command"
                 | "/api/v1/buckets/{bucket}/redundancy"
                 | "/api/v1/buckets/{bucket}/redundancy/preview"
+                | "/api/v1/buckets/{bucket}/tiering/preview"
+                | "/api/v1/buckets/{bucket}/tiering/state"
                 | "/api/v1/buckets/{bucket}/redundancy/{id}/command"
                 | "/api/v1/buckets/{bucket}/image-processing/preview"
                 | "/api/v1/buckets/{bucket}/image-processing/styles/import"
@@ -203,7 +208,10 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/buckets/{bucket}/uploads"
                 | "/api/v1/uploads/{id}/complete"
         ) | ("PUT", "/api/v1/account")
-            | ("PUT", "/api/v1/buckets/{bucket}/image-processing")
+            | (
+                "PUT",
+                "/api/v1/buckets/{bucket}/image-processing" | "/api/v1/buckets/{bucket}/tiering"
+            )
             | ("PUT", "/api/v1/uploads/{id}/parts/{number}")
             | ("DELETE", "/api/v1/uploads/{id}")
             | ("PUT" | "DELETE", "/api/v1/api-tokens/{id}")
