@@ -230,7 +230,7 @@ async fn identity(
         super::queries::work::expire_node(id)
             .execute(&mut **tx)
             .await?;
-        super::queries::work::requeue().execute(&mut **tx).await?;
+        super::queries::work::requeue(tx).await?;
         q::rotate(id, generation, &encrypted)
             .execute(&mut **tx)
             .await?;
@@ -396,7 +396,7 @@ impl NodeSessions for Backend {
         super::queries::work::expire_node(row.id)
             .execute(&mut *tx)
             .await?;
-        super::queries::work::requeue().execute(&mut *tx).await?;
+        super::queries::work::requeue(&mut tx).await?;
         super::queries::notices::remove(row.id)
             .execute(&mut *tx)
             .await?;
@@ -470,7 +470,7 @@ impl NodeSessions for Backend {
             super::queries::work::expire_node(state.node_id)
                 .execute(&mut *tx)
                 .await?;
-            super::queries::work::requeue().execute(&mut *tx).await?;
+            super::queries::work::requeue(&mut tx).await?;
         }
         let lease = Lease {
             control,

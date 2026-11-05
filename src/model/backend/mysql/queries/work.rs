@@ -39,10 +39,29 @@ pub(in super::super) fn expire_node(node: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE node_work SET expires_at=UTC_TIMESTAMP(6) WHERE node_id=? AND result_hash IS NULL AND expires_at>UTC_TIMESTAMP(6)").bind(node)
 }
 
-pub(in super::super) fn requeue() -> Statement<'static> {
-    sqlx::query(
-        "UPDATE tasks SET state='queued',execution_token=NULL,updated_at=UTC_TIMESTAMP(6) WHERE state='running' AND EXISTS(SELECT 1 FROM node_work w WHERE w.task_id=tasks.id AND w.token=tasks.execution_token AND w.result_hash IS NULL AND w.expires_at<=UTC_TIMESTAMP(6))",
+pub(in super::super) async fn requeue(
+    tx: &mut super::node_registry::Tx<'_>,
+) -> anyhow::Result<u64> {
+    // A plain read of running tasks avoids locking their state index during completion.
+    let due: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM tasks t
+         STRAIGHT_JOIN node_work w FORCE INDEX(node_work_task) ON w.task_id=t.id AND w.token=t.execution_token
+         WHERE t.state='running' AND w.result_hash IS NULL AND w.expires_at<=UTC_TIMESTAMP(6))",
     )
+    .fetch_one(&mut **tx)
+    .await?;
+    if !due {
+        return Ok(0);
+    }
+    Ok(sqlx::query(
+        "UPDATE node_work w FORCE INDEX(node_work_task)
+         STRAIGHT_JOIN tasks t FORCE INDEX(PRIMARY) ON t.id=w.task_id AND t.execution_token=w.token
+         SET t.state='queued',t.execution_token=NULL,t.updated_at=UTC_TIMESTAMP(6)
+         WHERE w.task_id IS NOT NULL AND w.result_hash IS NULL AND w.expires_at<=UTC_TIMESTAMP(6) AND t.state='running'",
+    )
+    .execute(&mut **tx)
+    .await?
+    .rows_affected())
 }
 
 pub(in super::super) fn prune() -> Statement<'static> {

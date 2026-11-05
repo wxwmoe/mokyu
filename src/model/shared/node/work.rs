@@ -557,7 +557,7 @@ impl NodeWork for Backend {
     }
     async fn recover_work(&self) -> Result<u64> {
         let mut tx = registry::begin(self).await?;
-        let count = q::requeue().execute(&mut *tx).await?.rows_affected();
+        let count = q::requeue(&mut tx).await?;
         q::prune().execute(&mut *tx).await?;
         super::node_writes::expire(&mut tx).await?;
         super::queries::node_receipts::prune()

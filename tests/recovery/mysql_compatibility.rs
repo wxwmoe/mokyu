@@ -125,3 +125,181 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires MOKYU_TEST_MYSQL_CONFIG pointing to a fresh isolated MySQL or MariaDB database"]
+async fn mysql_write_cleanup_skips_busy_receipts() -> Result<()> {
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
+    let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
+    let backend = connection::open(&config, &secrets, &budget, "single").await?;
+    let db = &backend.pool;
+    let node = Uuid::new_v4();
+    queries::node_registry::insert(node, "receipt-owner", "data", &[1])
+        .execute(db)
+        .await?;
+    let ops = [
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    ];
+    for (op, phase) in ops
+        .into_iter()
+        .zip(["active", "active", "published", "published"])
+    {
+        sqlx::query("INSERT INTO node_writes(node_id,operation_id,lease_id,boot_id,fence,credential_generation,request_hash,bucket_id,storage_id,profile,intent,phase,expires_at,updated_at) VALUES(?,?,?,?,?,1,?,?,?,'{}','{}',?,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND,UTC_TIMESTAMP(6)-INTERVAL 2 DAY)")
+            .bind(node).bind(op).bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::new_v4())
+            .bind(&[0u8;32][..]).bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(phase).execute(db).await?;
+    }
+    let mut writer = db.begin().await?;
+    for op in [ops[0], ops[2]] {
+        sqlx::query("SELECT 1 FROM node_writes WHERE node_id=? AND operation_id=? FOR UPDATE")
+            .bind(node)
+            .bind(op)
+            .fetch_one(&mut *writer)
+            .await?;
+    }
+    let mut sweep = db.begin().await?;
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        super::node_writes::expire(&mut sweep),
+    )
+    .await??;
+    sweep.commit().await?;
+    sqlx::query("UPDATE node_writes SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR,updated_at=UTC_TIMESTAMP(6) WHERE node_id=? AND operation_id IN (?,?)")
+        .bind(node).bind(ops[0]).bind(ops[2]).execute(&mut *writer).await?;
+    writer.commit().await?;
+    let mut sweep = db.begin().await?;
+    super::node_writes::expire(&mut sweep).await?;
+    sweep.commit().await?;
+    for (op, phase) in
+        ops.into_iter()
+            .zip([Some("active"), Some("expired"), Some("published"), None])
+    {
+        let row = sqlx::query_scalar::<_, String>(
+            "SELECT phase FROM node_writes WHERE node_id=? AND operation_id=?",
+        )
+        .bind(node)
+        .bind(op)
+        .fetch_optional(db)
+        .await?;
+        assert_eq!(row.as_deref(), phase);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MOKYU_TEST_MYSQL_CONFIG pointing to a fresh isolated MySQL or MariaDB database"]
+async fn mysql_work_recovery_skips_live_tasks() -> Result<()> {
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
+    let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
+    let backend = connection::open(&config, &secrets, &budget, "single").await?;
+    let db = &backend.pool;
+    let node = Uuid::new_v4();
+    queries::node_registry::insert(node, "work-recovery", "data", &[1])
+        .execute(db)
+        .await?;
+    let mut tasks = Vec::new();
+    for (expires, replaced) in [(60, false), (-1, false), (-1, true)] {
+        let task = backend.enqueue("upload", None, json!({})).await?;
+        let token = Uuid::new_v4();
+        queries::claim_task(task, token).execute(db).await?;
+        sqlx::query("INSERT INTO node_work(node_id,operation_id,boot_id,fence,request_hash,task_id,token,expires_at) VALUES(?,?,?,?,?,?,?,TIMESTAMPADD(SECOND,?,UTC_TIMESTAMP(6)))")
+            .bind(node).bind(Uuid::now_v7()).bind(Uuid::new_v4()).bind(Uuid::new_v4())
+            .bind(&[0u8; 32][..]).bind(task).bind(if replaced { Uuid::new_v4() } else { token })
+            .bind(expires).execute(db).await?;
+        tasks.push(task);
+    }
+    let mut writer = db.begin().await?;
+    sqlx::query("SELECT id FROM tasks WHERE id=? FOR UPDATE")
+        .bind(tasks[0])
+        .fetch_one(&mut *writer)
+        .await?;
+    let mut sweep = db.begin().await?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), queries::work::requeue(&mut sweep)).await??,
+        1
+    );
+    sweep.commit().await?;
+    writer.commit().await?;
+    for (task, expected) in tasks.into_iter().zip(["running", "queued", "running"]) {
+        assert_eq!(
+            queries::task_record(task).fetch_one(db).await?.state,
+            expected
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MOKYU_TEST_MYSQL_CONFIG pointing to a fresh isolated MySQL or MariaDB database"]
+async fn mysql_read_cleanup_preserves_busy_grants() -> Result<()> {
+    use crate::authorization::{Action, Permit, Principal};
+    use crate::model::{BucketStore, bucket::CreateBucket};
+
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
+    let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
+    let backend = connection::open(&config, &secrets, &budget, "single").await?;
+    let storage = super::storage_tests::fixture(&backend).await?;
+    let bucket = BucketStore::create(
+        &backend,
+        &Principal::Local,
+        CreateBucket {
+            name: "read-grants".into(),
+            project_id: None,
+            storage_id: Some(storage),
+        },
+    )
+    .await?;
+    let db = &backend.pool;
+    let stream = sqlx::query("INSERT INTO streams(bucket_id,object_key,stream_type,state,write_authorization) VALUES(?,'test','object','ready',?)")
+        .bind(bucket.id).bind(sqlx::types::Json(Permit::for_action(Principal::Local, bucket.id, Action::Write))).execute(db).await?.last_insert_id();
+    let node = Uuid::new_v4();
+    queries::node_registry::insert(node, "read-owner", "data", &[1])
+        .execute(db)
+        .await?;
+    let reads = [Uuid::new_v4(), Uuid::new_v4()];
+    for id in reads {
+        sqlx::query("INSERT INTO node_reads(read_id,node_id,boot_id,fence,credential_generation,operation_id,request_hash,stream_id,payload_revision,offset_bytes,end_bytes,expires_at) VALUES(?,?,?,?,1,?,?,?,1,0,0,UTC_TIMESTAMP(6)-INTERVAL 1 SECOND)")
+            .bind(id).bind(node).bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(Uuid::new_v4()).bind(&[1u8;32][..]).bind(stream).execute(db).await?;
+    }
+    let mut reader = db.begin().await?;
+    sqlx::query("SELECT read_id FROM node_reads WHERE read_id=? FOR UPDATE")
+        .bind(reads[0])
+        .fetch_one(&mut *reader)
+        .await?;
+    let mut sweep = db.begin().await?;
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        queries::read_grants::expire(&mut sweep),
+    )
+    .await??;
+    sweep.commit().await?;
+    sqlx::query(
+        "UPDATE node_reads SET expires_at=UTC_TIMESTAMP(6)+INTERVAL 1 HOUR WHERE read_id=?",
+    )
+    .bind(reads[0])
+    .execute(&mut *reader)
+    .await?;
+    reader.commit().await?;
+    let mut sweep = db.begin().await?;
+    queries::read_grants::expire(&mut sweep).await?;
+    sweep.commit().await?;
+    let retained = sqlx::query_scalar::<_, Uuid>("SELECT read_id FROM node_reads")
+        .fetch_all(db)
+        .await?;
+    assert_eq!(retained, vec![reads[0]]);
+    Ok(())
+}

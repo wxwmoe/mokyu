@@ -39,10 +39,15 @@ pub(in super::super) fn expire_node(node: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE node_work SET expires_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE node_id=? AND result_hash IS NULL AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)").bind(node)
 }
 
-pub(in super::super) fn requeue() -> Statement<'static> {
-    sqlx::query(
+pub(in super::super) async fn requeue(
+    tx: &mut super::node_registry::Tx<'_>,
+) -> anyhow::Result<u64> {
+    Ok(sqlx::query(
         "UPDATE tasks SET state='queued',execution_token=NULL,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE state='running' AND EXISTS(SELECT 1 FROM node_work w WHERE w.task_id=tasks.id AND w.token=tasks.execution_token AND w.result_hash IS NULL AND w.expires_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER))",
     )
+    .execute(&mut **tx)
+    .await?
+    .rows_affected())
 }
 
 pub(in super::super) fn prune() -> Statement<'static> {

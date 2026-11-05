@@ -355,7 +355,18 @@ pub(in super::super) async fn expire(tx: &mut Tx<'_>) -> Result<()> {
     sqlx::query("DELETE FROM storage_permits WHERE expires_at<=UTC_TIMESTAMP(6) LIMIT 512")
         .execute(&mut **tx)
         .await?;
-    sqlx::query("DELETE FROM node_reads WHERE expires_at<=UTC_TIMESTAMP(6) LIMIT 512")
+    // Closing a read locks its primary row before removing the expiry index entry.
+    sqlx::query(
+        "DELETE old FROM (
+             SELECT r.read_id FROM (
+                 SELECT read_id FROM node_reads WHERE expires_at<=UTC_TIMESTAMP(6) ORDER BY expires_at LIMIT 512
+             ) due
+             STRAIGHT_JOIN node_reads r FORCE INDEX(PRIMARY) ON r.read_id=due.read_id
+             WHERE r.expires_at<=UTC_TIMESTAMP(6)
+             ORDER BY r.read_id LIMIT 512 FOR UPDATE SKIP LOCKED
+         ) picked
+         STRAIGHT_JOIN node_reads old FORCE INDEX(PRIMARY) ON old.read_id=picked.read_id",
+    )
         .execute(&mut **tx)
         .await?;
     Ok(())

@@ -37,14 +37,32 @@ pub(in super::super) fn phase<'a>(
 ) -> Statement<'a> {
     sqlx::query("UPDATE node_writes SET phase=?,publish_hash=?,published=?,updated_at=UTC_TIMESTAMP(6) WHERE node_id=? AND operation_id=?").bind(phase).bind(hash).bind(result.map(Json)).bind(node).bind(op)
 }
+// Find due keys before locking the primary rows used by publishers.
 pub(in super::super) fn expired() -> Rows<'static, (Uuid, Uuid, Option<Id>)> {
     sqlx::query_as(
-        "SELECT node_id,operation_id,stream_id FROM node_writes WHERE phase='active' AND expires_at<=UTC_TIMESTAMP(6) ORDER BY expires_at LIMIT 64 FOR UPDATE",
+        "SELECT w.node_id,w.operation_id,w.stream_id
+         FROM (SELECT node_id,operation_id FROM node_writes
+               WHERE phase='active' AND expires_at<=UTC_TIMESTAMP(6) ORDER BY expires_at LIMIT 64) due
+         STRAIGHT_JOIN node_writes w FORCE INDEX(PRIMARY)
+           ON w.node_id=due.node_id AND w.operation_id=due.operation_id
+         WHERE w.phase='active' AND w.expires_at<=UTC_TIMESTAMP(6)
+         ORDER BY w.node_id,w.operation_id FOR UPDATE SKIP LOCKED",
     )
 }
 pub(in super::super) fn prune() -> Statement<'static> {
     sqlx::query(
-        "DELETE FROM node_writes WHERE phase IN ('aborted','expired','published') AND updated_at<UTC_TIMESTAMP(6)-INTERVAL 1 DAY LIMIT 128",
+        "DELETE old FROM (
+             SELECT w.node_id,w.operation_id
+             FROM (SELECT node_id,operation_id FROM node_writes
+                   WHERE phase IN ('aborted','expired','published') AND updated_at<UTC_TIMESTAMP(6)-INTERVAL 1 DAY
+                   ORDER BY phase,updated_at LIMIT 128) due
+             STRAIGHT_JOIN node_writes w FORCE INDEX(PRIMARY)
+               ON w.node_id=due.node_id AND w.operation_id=due.operation_id
+             WHERE w.phase IN ('aborted','expired','published') AND w.updated_at<UTC_TIMESTAMP(6)-INTERVAL 1 DAY
+             ORDER BY w.node_id,w.operation_id LIMIT 128 FOR UPDATE SKIP LOCKED
+         ) picked
+         STRAIGHT_JOIN node_writes old FORCE INDEX(PRIMARY)
+           ON old.node_id=picked.node_id AND old.operation_id=picked.operation_id",
     )
 }
 pub(in super::super) fn touch(node: Uuid, run: Run, id: Uuid, renew: bool) -> Statement<'static> {
