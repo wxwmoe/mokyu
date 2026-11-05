@@ -901,7 +901,8 @@ fn take(bucket: &str, key: &str, access: Option<&str>) -> Result<RequestRead> {
         anyhow::bail!(s3s::s3_error!(InvalidRequest));
     };
     ensure!(
-        access.unwrap_or("") == read.input.access_key,
+        access.unwrap_or("") == read.input.access_key
+            && (access.is_some() || read.route.image().is_some()),
         s3s::s3_error!(AccessDenied)
     );
     let Some(wire::read_route::Route::Bucket(route)) = read

@@ -70,6 +70,16 @@ def run(f, request, page, case, checks):
         url(gif, frame=True)
         limit(4095)
         url(gif, frame=True, status=415)
+        settings(dict(initial, enabled=True, protect_original=True))
+        opaque = prefix + "-opaque"
+        content = b"GIF89a" + bytes(64)
+        f.client.put_object(Bucket=f.name, Key=opaque, Body=content, ACL="public-read",
+                            ContentType="application/octet-stream")
+        endpoint = f.client.meta.endpoint_url.rstrip("/") + "/" + f.name + "/" + opaque
+        for query in ("", "?x-amz-foo=1", "?signature=0", "?expires=1"):
+            assert requests.get(endpoint + query, timeout=10).status_code == 403
+            assert requests.head(endpoint + query, timeout=10).status_code == 403
+        assert f.client.get_object(Bucket=f.name, Key=opaque)["Body"].read() == content
     finally:
         settings(initial)
     checks.append("Source pixels across orientations, frames, cached and conditional reads, redirects and previews")
