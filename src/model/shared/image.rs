@@ -326,16 +326,32 @@ impl ImageStore for Backend {
         transactions::lock_bucket_settings(&mut tx, principal, bucket).await?;
         let (current, prior) = settings(&mut tx, bucket, true).await?;
         ensure!(current.revision == update.revision, Error::OperationAborted);
-        ensure!(
-            !q::collision(&mut tx, bucket, policy, &update.edits).await?,
-            s3s::s3_error!(
-                InvalidArgument,
-                "image style route conflicts with an existing object key"
-            )
-        );
         let mut families = mapped.unwrap_or(prior);
         let names: Vec<_> = update.edits.iter().map(|e| e.name().to_owned()).collect();
         let existing = named(&mut tx, bucket, &names).await?;
+        if policy.enabled {
+            let (added, kept): (Vec<_>, Vec<_>) = policy
+                .delimiters
+                .iter()
+                .partition(|d| !current.policy.enabled || !current.policy.delimiters.contains(d));
+            let added_styles: Vec<_> = update
+                .edits
+                .iter()
+                .filter(|e| {
+                    matches!(e, Edit::Put { style }
+                if style.enabled && !existing.get(&style.name).is_some_and(|old| old.enabled))
+                })
+                .cloned()
+                .collect();
+            ensure!(
+                !q::collision(&mut tx, bucket, &added, true, &update.edits).await?
+                    && !q::collision(&mut tx, bucket, &kept, false, &added_styles).await?,
+                s3s::s3_error!(
+                    InvalidArgument,
+                    "image style route conflicts with an existing object key"
+                )
+            );
+        }
         if let Some(map) = &policy.mapping {
             let groups = names
                 .iter()

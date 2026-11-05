@@ -14,18 +14,21 @@ pub(in super::super) fn pool(b: &Backend) -> &sqlx::Pool<Db> {
 pub(in super::super) async fn collision(
     t: &mut sqlx::Transaction<'_, Db>,
     bucket: uuid::Uuid,
-    policy: &crate::model::image_styles::Policy,
+    delimiters: &[&String],
+    stored: bool,
     edits: &[crate::model::image_styles::Edit],
 ) -> anyhow::Result<bool> {
     use crate::model::image_styles::Edit;
-    if !policy.enabled || policy.delimiters.is_empty() {
+    if delimiters.is_empty() || !stored && edits.is_empty() {
         return Ok(false);
     }
     let mut query = sqlx::QueryBuilder::<Db>::new(
         "SELECT o.object_key FROM objects o JOIN (SELECT name FROM image_styles WHERE enabled AND bucket_id=",
     );
     query.push_bind(bucket);
-    if !edits.is_empty() {
+    if !stored {
+        query.push(" AND 1=0");
+    } else if !edits.is_empty() {
         query.push(" AND name NOT IN (");
         let mut p = query.separated(",");
         for edit in edits {
@@ -41,7 +44,7 @@ pub(in super::super) async fn collision(
         }
     }
     query.push(") s ON (");
-    for (i, delimiter) in policy.delimiters.iter().enumerate() {
+    for (i, delimiter) in delimiters.iter().copied().enumerate() {
         if i > 0 {
             query.push(" OR ");
         }
@@ -54,7 +57,7 @@ pub(in super::super) async fn collision(
     query
         .push(") WHERE o.bucket_id=")
         .push_bind(bucket)
-        .push(" LIMIT 1");
+        .push(" AND length(o.object_key)>length(s.name)+1 AND (o.stream_id IS NOT NULL OR EXISTS(SELECT 1 FROM streams w WHERE w.id=o.write_token AND w.bucket_id=o.bucket_id AND w.object_key=o.object_key AND w.state='writing')) LIMIT 1");
     query.push(" FOR SHARE OF o");
     Ok(query.build().fetch_optional(&mut **t).await?.is_some())
 }
