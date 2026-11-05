@@ -1,5 +1,10 @@
 use super::*;
 
+pub(in super::super) fn lock_repair_chunk(storage: Uuid, hash: &[u8], size: i32) -> Scalar<'_, Id> {
+    sqlx::query_scalar("SELECT id FROM chunks FORCE INDEX (chunks_dedup) WHERE storage_id=? AND active_hash=? AND raw_size=? FOR UPDATE")
+        .bind(storage).bind(hash).bind(size)
+}
+
 fn source_scope(query: &mut sqlx::QueryBuilder<MySql>, stream: Option<Id>, chunks: &[Id]) {
     query.push("c.id IN (");
     if let Some(stream) = stream {
@@ -25,7 +30,8 @@ pub(in super::super) fn source_locks(
     let mut query = sqlx::QueryBuilder::new(match phase {
         0 => "SELECT c.id FROM chunks c WHERE ",
         1 => {
-            "SELECT l.encoding_id FROM chunk_encodings l WHERE l.state='ready' AND l.chunk_id IN (SELECT c.id FROM chunks c WHERE "
+            // A scan of the ready-state index can lock encodings belonging to other chunks.
+            "SELECT l.encoding_id FROM chunks c STRAIGHT_JOIN chunk_encodings l FORCE INDEX (encodings_ready) ON l.ready_chunk=c.id WHERE "
         }
         2 => {
             "SELECT p.id FROM packs p WHERE p.state='ready' AND p.id IN (SELECT c.pack_id FROM chunks c WHERE "
@@ -35,7 +41,7 @@ pub(in super::super) fn source_locks(
     source_scope(&mut query, stream, chunks);
     query.push(match phase {
         0 => " ORDER BY c.id LOCK IN SHARE MODE",
-        1 => ") ORDER BY l.encoding_id LOCK IN SHARE MODE",
+        1 => " ORDER BY l.encoding_id LOCK IN SHARE MODE",
         _ => ") ORDER BY p.id LOCK IN SHARE MODE",
     });
     query

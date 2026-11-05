@@ -304,6 +304,16 @@ pub(in super::super) async fn finish_repair(
     Ok(result)
 }
 
+pub(in super::super) async fn lock_repair_batch(
+    _: &mut sqlx::SqliteConnection,
+    _: Id,
+    _: Uuid,
+    _: &[crate::model::node_chunk::Item],
+) -> Result<()> {
+    // The SQLite write transaction already excludes concurrent publishers.
+    Ok(())
+}
+
 pub(in super::super) async fn finish_repair_in(
     tx: &mut sqlx::SqliteConnection,
     repair: &crate::model::recovery::Repair,

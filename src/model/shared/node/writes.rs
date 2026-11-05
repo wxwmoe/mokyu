@@ -991,6 +991,14 @@ impl NodeWrites for Backend {
                 nonces.len() == required.len() && required.iter().all(|id| nonces.contains_key(id)),
                 Error::OperationAborted
             );
+            if batch
+                .plan
+                .iter()
+                .any(|item| !item.repair_sources.is_empty())
+            {
+                transactions::lock_repair_batch(&mut tx, stream, row.storage_id, &batch.plan)
+                    .await?;
+            }
             let mut registered = HashSet::new();
             for item in batch.plan.iter_mut().filter(|i| !i.reused) {
                 if let Some(value) = nonces.get(&item.chunk.uuid) {
@@ -1114,6 +1122,10 @@ impl NodeWrites for Backend {
                 );
                 if let Some(step) = node_chunk::prepare_commit(&mut batch.plan, stream, verified) {
                     return Ok(step);
+                }
+                if !verified.is_empty() {
+                    transactions::lock_repair_batch(&mut tx, stream, row.storage_id, &batch.plan)
+                        .await?;
                 }
                 for item in batch.plan.iter().filter(|i| !i.reused) {
                     if needed.remove(&item.chunk.uuid) {

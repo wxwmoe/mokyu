@@ -29,7 +29,7 @@ pub(in super::super) fn save_repair_metadata(chunk: &Chunk, stream: Id) -> State
 }
 
 pub(in super::super) fn retire_repair_sources(chunk: Id) -> Statement<'static> {
-    sqlx::query("UPDATE chunk_encodings SET state='retired',sync_pending=FALSE,boot_id=NULL,unreferenced_at=CURRENT_TIMESTAMP(6) WHERE chunk_id=? AND (state='ready' OR (state='uploading' AND boot_id IS NOT NULL)) AND quarantined_at IS NOT NULL").bind(chunk)
+    sqlx::query("UPDATE chunk_encodings FORCE INDEX (encodings_chunk_id) SET state='retired',sync_pending=FALSE,boot_id=NULL,unreferenced_at=CURRENT_TIMESTAMP(6) WHERE chunk_id=? AND (state='ready' OR (state='uploading' AND boot_id IS NOT NULL)) AND quarantined_at IS NOT NULL").bind(chunk)
 }
 
 pub(in super::super) fn publish_repair(encoding: Id, stream: Id) -> Statement<'static> {

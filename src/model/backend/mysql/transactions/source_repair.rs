@@ -350,6 +350,14 @@ pub(in super::super) async fn repair_metadata(
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
     repair_writer(&mut tx, repair.stream, repair.node.as_ref()).await?;
+    require_repair_stream(&mut tx, repair.stream).await?;
+    ensure!(
+        queries::lock_chunk(repair.chunk.id)
+            .fetch_one(&mut *tx)
+            .await?
+            == "ready",
+        crate::model::Error::OperationAborted
+    );
     let result = repair_metadata_in(&mut tx, repair).await?;
     tx.commit().await?;
     Ok(result)
@@ -360,7 +368,6 @@ pub(in super::super) async fn repair_metadata_in(
     repair: &crate::model::recovery::Repair,
 ) -> Result<()> {
     repair.validate()?;
-    require_repair_stream(tx, repair.stream).await?;
     let candidate = queries::repair_candidate(repair.chunk.encoding_id, repair.stream)
         .fetch_optional(&mut *tx)
         .await?
@@ -385,9 +392,39 @@ pub(in super::super) async fn finish_repair(
 ) -> Result<Chunk> {
     let mut tx = pool.begin().await?;
     repair_writer(&mut tx, repair.stream, repair.node.as_ref()).await?;
+    require_repair_stream(&mut tx, repair.stream).await?;
     let result = finish_repair_in(&mut tx, repair, offset).await?;
     tx.commit().await?;
     Ok(result)
+}
+
+pub(in super::super) async fn lock_repair_batch(
+    tx: &mut sqlx::MySqlConnection,
+    stream: Id,
+    storage: Uuid,
+    items: &[crate::model::node_chunk::Item],
+) -> Result<()> {
+    require_repair_stream(tx, stream).await?;
+    // Lock logical rows before candidate rows or secondary-index updates, also during activation.
+    let chunks: std::collections::BTreeMap<_, _> = items
+        .iter()
+        .map(|item| {
+            (
+                (item.chunk.hash.as_slice(), item.chunk.raw_size),
+                item.chunk.id,
+            )
+        })
+        .collect();
+    for ((hash, size), id) in chunks {
+        ensure!(
+            queries::lock_repair_chunk(storage, hash, size)
+                .fetch_optional(&mut *tx)
+                .await?
+                == Some(id),
+            crate::model::Error::OperationAborted
+        );
+    }
+    Ok(())
 }
 
 pub(in super::super) async fn finish_repair_in(
@@ -396,7 +433,6 @@ pub(in super::super) async fn finish_repair_in(
     offset: i64,
 ) -> Result<Chunk> {
     repair.validate()?;
-    require_repair_stream(tx, repair.stream).await?;
     let input = ChunkCreate {
         stream: repair.stream,
         storage: repair
