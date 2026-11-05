@@ -90,6 +90,10 @@ async fn repair_writer(
         node.is_none() && queries::repair_mode().fetch_one(&mut *db).await?,
         crate::model::Error::OperationAborted
     );
+    Ok(())
+}
+
+async fn require_repair_stream(db: &mut sqlx::SqliteConnection, stream: Id) -> Result<()> {
     let observed = queries::repair_owner(stream)
         .fetch_optional(&mut *db)
         .await?
@@ -199,15 +203,25 @@ pub(in super::super) async fn prepare_repair(
     input: ChunkCreate,
     node: Option<crate::model::recovery::RepairNode>,
 ) -> Result<crate::model::recovery::RepairAllocation> {
-    use crate::model::recovery::{Repair, RepairAllocation};
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     repair_writer(&mut tx, input.stream, node.as_ref()).await?;
-    let chunk = queries::reusable_chunk(&mut tx, &input)
+    let result = prepare_repair_in(&mut tx, input, node).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(in super::super) async fn prepare_repair_in(
+    tx: &mut sqlx::SqliteConnection,
+    input: ChunkCreate,
+    node: Option<crate::model::recovery::RepairNode>,
+) -> Result<crate::model::recovery::RepairAllocation> {
+    use crate::model::recovery::{Repair, RepairAllocation};
+    require_repair_stream(tx, input.stream).await?;
+    let chunk = queries::reusable_chunk(tx, &input)
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
-    match require_sources(&mut tx, None, &[chunk.id]).await {
+    match require_sources(tx, None, &[chunk.id]).await {
         Ok(()) => {
-            tx.commit().await?;
             return Ok(RepairAllocation::Existing(chunk));
         }
         Err(error)
@@ -217,7 +231,7 @@ pub(in super::super) async fn prepare_repair(
             ) => {}
         Err(error) => return Err(error),
     }
-    let sources = repair_sources(&mut tx, &chunk).await?;
+    let sources = repair_sources(tx, &chunk).await?;
     let revision = queries::repair_target(input.storage, input.key, &input.algorithm)
         .fetch_optional(&mut *tx)
         .await?
@@ -241,7 +255,6 @@ pub(in super::super) async fn prepare_repair(
         sources,
     };
     repair.validate()?;
-    tx.commit().await?;
     Ok(RepairAllocation::Candidate(Box::new(repair)))
 }
 
@@ -249,9 +262,19 @@ pub(in super::super) async fn repair_metadata(
     pool: &sqlx::SqlitePool,
     repair: &crate::model::recovery::Repair,
 ) -> Result<()> {
-    repair.validate()?;
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     repair_writer(&mut tx, repair.stream, repair.node.as_ref()).await?;
+    let result = repair_metadata_in(&mut tx, repair).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(in super::super) async fn repair_metadata_in(
+    tx: &mut sqlx::SqliteConnection,
+    repair: &crate::model::recovery::Repair,
+) -> Result<()> {
+    repair.validate()?;
+    require_repair_stream(tx, repair.stream).await?;
     let candidate = queries::repair_candidate(repair.chunk.encoding_id, repair.stream)
         .fetch_optional(&mut *tx)
         .await?
@@ -265,8 +288,7 @@ pub(in super::super) async fn repair_metadata(
             == 1,
         crate::model::Error::OperationAborted
     );
-    queries::refresh_encoding_fingerprint(&mut tx, repair.chunk.encoding_id).await?;
-    tx.commit().await?;
+    queries::refresh_encoding_fingerprint(tx, repair.chunk.encoding_id).await?;
     Ok(())
 }
 
@@ -275,9 +297,20 @@ pub(in super::super) async fn finish_repair(
     repair: &crate::model::recovery::Repair,
     offset: i64,
 ) -> Result<Chunk> {
-    repair.validate()?;
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     repair_writer(&mut tx, repair.stream, repair.node.as_ref()).await?;
+    let result = finish_repair_in(&mut tx, repair, offset).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub(in super::super) async fn finish_repair_in(
+    tx: &mut sqlx::SqliteConnection,
+    repair: &crate::model::recovery::Repair,
+    offset: i64,
+) -> Result<Chunk> {
+    repair.validate()?;
+    require_repair_stream(tx, repair.stream).await?;
     let input = ChunkCreate {
         stream: repair.stream,
         storage: repair
@@ -289,14 +322,14 @@ pub(in super::super) async fn finish_repair(
         algorithm: repair.chunk.algorithm.clone(),
         key: repair.chunk.block_key_id,
     };
-    let current = queries::reusable_chunk(&mut tx, &input)
+    let current = queries::reusable_chunk(tx, &input)
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
     ensure!(
         current.id == repair.chunk.id,
         crate::model::Error::OperationAborted
     );
-    let healthy = match require_sources(&mut tx, None, &[current.id]).await {
+    let healthy = match require_sources(tx, None, &[current.id]).await {
         Ok(()) => true,
         Err(error)
             if matches!(
@@ -311,7 +344,7 @@ pub(in super::super) async fn finish_repair(
     let sources = if healthy {
         Vec::new()
     } else {
-        repair_sources(&mut tx, &current).await?
+        repair_sources(tx, &current).await?
     };
     let candidate = queries::repair_candidate(repair.chunk.encoding_id, repair.stream)
         .fetch_optional(&mut *tx)
@@ -373,7 +406,7 @@ pub(in super::super) async fn finish_repair(
     queries::insert_chunk_extent(repair.stream, offset, result.raw_size, result.id)
         .execute(&mut *tx)
         .await?;
-    queries::changed_references(&mut tx, &[result.id], true).await?;
+    queries::changed_references(tx, &[result.id], true).await?;
     queries::pin_chunk(result.id, repair.stream)
         .execute(&mut *tx)
         .await?;
@@ -383,6 +416,5 @@ pub(in super::super) async fn finish_repair(
     queries::resize_writing_stream(repair.stream, offset + i64::from(result.raw_size))
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
     Ok(result)
 }

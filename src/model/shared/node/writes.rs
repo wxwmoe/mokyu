@@ -838,29 +838,43 @@ impl NodeWrites for Backend {
             .map(|i| ((i.hash, i.raw_size), i))
             .collect::<BTreeMap<_, _>>()
         {
-            let (mut chunk, reused) = transactions::allocate_chunk_in(
-                &mut tx,
-                crate::model::ChunkCreate {
-                    storage: row.storage_id,
-                    stream,
-                    hash: item.hash,
-                    raw_size: item.raw_size,
-                    algorithm: algorithm.clone(),
-                    key: row.block_key_id,
-                },
-            )
-            .await?;
+            let chunk_input = || crate::model::ChunkCreate {
+                storage: row.storage_id,
+                stream,
+                hash: item.hash,
+                raw_size: item.raw_size,
+                algorithm: algorithm.clone(),
+                key: row.block_key_id,
+            };
+            let (mut chunk, reused, repair_sources) =
+                match transactions::allocate_chunk_in(&mut tx, chunk_input()).await {
+                    Ok((chunk, reused)) => (chunk, reused, Vec::new()),
+                    Err(error)
+                        if row.owner_task_id.is_none()
+                            && row.copy_source.is_none()
+                            && row.intent.completion.is_none()
+                            && matches!(
+                                crate::model::error(&error),
+                                Some(Error::SourceUnavailable)
+                            ) =>
+                    {
+                        transactions::prepare_repair_in(&mut tx, chunk_input(), None)
+                            .await?
+                            .into_node_plan()
+                    }
+                    Err(error) => return Err(error),
+                };
             if !reused {
                 chunk.compressed = item.compressed;
                 chunk.stored_size =
                     Some(item.payload_size + if algorithm == "none" { 0 } else { 16 });
             }
-            unique.insert(identity, (chunk, reused));
+            unique.insert(identity, (chunk, reused, repair_sources));
         }
         let mut plan = Vec::with_capacity(input.items.len());
         let mut offset = input.offset;
         for item in &input.items {
-            let (chunk, reused) = &unique[&(item.hash, item.raw_size)];
+            let (chunk, reused, repair_sources) = &unique[&(item.hash, item.raw_size)];
             if *reused {
                 transactions::reference_chunk_in(&mut tx, stream, offset, chunk.id, chunk.raw_size)
                     .await?;
@@ -870,6 +884,7 @@ impl NodeWrites for Backend {
                 chunk: chunk.clone(),
                 reused: *reused,
                 payload_hash: item.payload_hash,
+                repair_sources: repair_sources.clone(),
             });
             offset += i64::from(item.raw_size);
         }
@@ -993,9 +1008,15 @@ impl NodeWrites for Backend {
                     item.chunk.nonce = Some(value.clone());
                 }
                 if registered.insert(item.chunk.uuid) {
-                    transactions::start_chunk_upload_in(&mut tx, stream, &item.chunk).await?;
+                    if let Some(repair) = item.repair(stream) {
+                        transactions::repair_metadata_in(&mut tx, &repair).await?;
+                    } else {
+                        transactions::start_chunk_upload_in(&mut tx, stream, &item.chunk).await?;
+                    }
                 }
-                item.chunk.state = "uploading".into();
+                if item.repair_sources.is_empty() {
+                    item.chunk.state = "uploading".into();
+                }
             }
             ensure!(
                 q::activate(node.node_id, input.operation, input.batch, &batch.plan)
@@ -1044,12 +1065,13 @@ impl NodeWrites for Backend {
             grants,
         })
     }
-    async fn commit_chunks(
+    async fn commit_chunk_batch(
         &self,
         node: &NodeState,
         key: &Key,
-        mut input: node_chunk::Commit,
-    ) -> Result<i64> {
+        input: &mut node_chunk::Commit,
+        verified: &[crate::model::Id],
+    ) -> Result<node_chunk::CommitStep> {
         use std::collections::HashSet;
         let hash = input.hash()?;
         let mut tx = start(self, node, key, input.run).await?;
@@ -1061,7 +1083,7 @@ impl NodeWrites for Backend {
             .ok_or(Error::NodeOperationMissing)?;
         if let Some(prior) = batch.commit_hash {
             ensure!(prior == hash, Error::NodeOperationConflict);
-            return Ok(batch.end_bytes);
+            return Ok(node_chunk::CommitStep::Complete(batch.end_bytes));
         }
         let stream = row.active(&mut tx, node, input.run).await?;
         ensure!(batch.ready, Error::NodeOperationConflict);
@@ -1090,15 +1112,22 @@ impl NodeWrites for Backend {
                         && input.encoded.iter().all(|i| needed.contains(&i.chunk)),
                     Error::OperationAborted
                 );
+                if let Some(step) = node_chunk::pending_checks(&batch.plan, stream, verified) {
+                    return Ok(step);
+                }
                 for item in batch.plan.iter().filter(|i| !i.reused) {
                     if needed.remove(&item.chunk.uuid) {
-                        transactions::complete_chunk_write_in(
-                            &mut tx,
-                            stream,
-                            item.offset,
-                            &item.chunk,
-                        )
-                        .await?;
+                        if let Some(repair) = item.repair(stream) {
+                            transactions::finish_repair_in(&mut tx, &repair, item.offset).await?;
+                        } else {
+                            transactions::complete_chunk_write_in(
+                                &mut tx,
+                                stream,
+                                item.offset,
+                                &item.chunk,
+                            )
+                            .await?;
+                        }
                     } else {
                         transactions::reference_chunk_in(
                             &mut tx,
@@ -1130,7 +1159,7 @@ impl NodeWrites for Backend {
             .await?;
         node_registry::validate_run(&mut tx, node, input.run).await?;
         tx.commit().await?;
-        Ok(batch.end_bytes)
+        Ok(node_chunk::CommitStep::Complete(batch.end_bytes))
     }
     async fn copy_write_references(
         &self,

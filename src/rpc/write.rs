@@ -236,6 +236,7 @@ pub(super) fn prepared(
                 Ok(wire::PreparedChunk {
                     offset: value.offset as u64,
                     reused: value.reused,
+                    repair: !value.repair_sources.is_empty(),
                     payload_hash: value.payload_hash.to_vec(),
                     chunk_json: serde_json::to_vec(&value.chunk)
                         .map_err(|_| Status::internal("cannot encode chunk plan"))?,

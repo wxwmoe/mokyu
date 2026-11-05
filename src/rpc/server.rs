@@ -444,6 +444,19 @@ impl NodeWrites for Service {
                 .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-chunks-allocated").await;
+        if !assembly.committed {
+            if let Some(source) = assembly
+                .items
+                .iter()
+                .find_map(|item| item.repair_sources.first())
+            {
+                self.app
+                    .storage
+                    .verify_repair_namespace(source)
+                    .await
+                    .map_err(failure)?;
+            }
+        }
         let mut nonces = Vec::new();
         if !assembly.ready && !assembly.committed {
             let mut seen = std::collections::HashSet::new();
@@ -482,14 +495,38 @@ impl NodeWrites for Service {
         request: Request<wire::CommitChunksRequest>,
     ) -> Result<Response<wire::WriteBatchReply>, Status> {
         let node = write_identity(&request)?;
-        let input = super::write::commit(write_request(request)?)?;
+        let mut input = super::write::commit(write_request(request)?)?;
         let batch_id = input.batch as u64;
-        let end = bounded(self.app.node_writes.commit_chunks(
-            &node,
-            &self.app.secrets.credential_key,
-            input,
-        ))
-        .await?;
+        let writes = &self.app.node_writes;
+        let key = &self.app.secrets.credential_key;
+        let step = bounded(writes.commit_chunk_batch(&node, key, &mut input, &[])).await?;
+        let end = match step {
+            model::node_chunk::CommitStep::Complete(end) => end,
+            model::node_chunk::CommitStep::Verify(repairs) => {
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("repair-stored").await;
+                let mut verified = Vec::with_capacity(repairs.len());
+                for repair in &repairs {
+                    self.app
+                        .storage
+                        .verify_chunk(&repair.chunk)
+                        .await
+                        .map_err(failure)?;
+                    verified.push(repair.chunk.encoding_id);
+                }
+                self.app
+                    .storage
+                    .verify_repair_namespace(&repairs[0].sources[0])
+                    .await
+                    .map_err(failure)?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("repair-before-commit").await;
+                bounded(writes.commit_chunk_batch(&node, key, &mut input, &verified))
+                    .await?
+                    .end()
+                    .map_err(failure)?
+            }
+        };
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-chunks-committed").await;
         Ok(Response::new(wire::WriteBatchReply {

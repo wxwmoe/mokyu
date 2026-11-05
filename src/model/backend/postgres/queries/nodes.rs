@@ -470,13 +470,14 @@ impl crate::model::cluster::NodeWrites for Backend {
             .await
             .map_err(normalize_error)
     }
-    async fn commit_chunks(
+    async fn commit_chunk_batch(
         &self,
         node: &crate::cluster::NodeState,
         key: &crate::content::codec::Key,
-        input: crate::model::node_chunk::Commit,
-    ) -> Result<i64> {
-        super::super::transactions::commit_node_chunks(self, node, key, input)
+        input: &mut crate::model::node_chunk::Commit,
+        verified: &[crate::model::Id],
+    ) -> Result<crate::model::node_chunk::CommitStep> {
+        super::super::transactions::commit_node_chunks(self, node, key, input, verified)
             .await
             .map_err(normalize_error)
     }

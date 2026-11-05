@@ -1227,7 +1227,13 @@ impl Writes {
                         backend.profile.storage_id == operation.backend.profile.storage_id,
                         "write storage changed"
                     );
-                    uploads.push((chunk, payload.bytes, backend, entry.payload_hash));
+                    uploads.push((
+                        chunk,
+                        payload.bytes,
+                        backend,
+                        entry.payload_hash,
+                        entry.repair,
+                    ));
                 }
             }
             let permits: Vec<_> = grants
@@ -1251,7 +1257,7 @@ impl Writes {
             let encoded = operation
                 .guard(node, &grants, async {
                     futures_util::stream::iter(uploads.into_iter().map(
-                        |(chunk, bytes, backend, hash)| {
+                        |(chunk, bytes, backend, hash, repair)| {
                             let keys = keys.clone();
                             let io = io.clone();
                             let memory = operation.request.memory.clone();
@@ -1300,7 +1306,11 @@ impl Writes {
                                         ))
                                     })
                                     .await??;
-                                backend.store.ensure_verified().await?;
+                                if repair {
+                                    backend.store.verify().await?;
+                                } else {
+                                    backend.store.ensure_verified().await?;
+                                }
                                 backend
                                     .store
                                     .backend

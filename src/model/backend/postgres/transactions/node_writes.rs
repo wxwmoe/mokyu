@@ -847,29 +847,42 @@ pub(in super::super) async fn prepare_node_chunks(
         .collect();
     let mut allocated = HashMap::new();
     for (identity, item) in unique {
-        let (mut value, reused) = allocate_chunk_in(
-            &mut tx,
-            crate::model::ChunkCreate {
-                storage,
-                stream,
-                hash: item.hash,
-                raw_size: item.raw_size,
-                algorithm: algorithm.clone(),
-                key: row.block_key_id,
-            },
-            false,
-        )
-        .await?;
+        let chunk_input = || crate::model::ChunkCreate {
+            storage,
+            stream,
+            hash: item.hash,
+            raw_size: item.raw_size,
+            algorithm: algorithm.clone(),
+            key: row.block_key_id,
+        };
+        let (mut value, reused, repair_sources) =
+            match allocate_chunk_in(&mut tx, chunk_input(), false).await {
+                Ok((chunk, reused)) => (chunk, reused, Vec::new()),
+                Err(error)
+                    if row.owner_task_id.is_none()
+                        && row.copy_source.is_none()
+                        && row.completion_upload.is_none()
+                        && matches!(
+                            crate::model::error(&error),
+                            Some(Error::SourceUnavailable)
+                        ) =>
+                {
+                    prepare_repair_in(&mut tx, chunk_input(), None)
+                        .await?
+                        .into_node_plan()
+                }
+                Err(error) => return Err(error),
+            };
         if !reused {
             value.compressed = item.compressed;
             value.stored_size = Some(item.payload_size + if algorithm == "none" { 0 } else { 16 });
         }
-        allocated.insert(identity, (value, reused));
+        allocated.insert(identity, (value, reused, repair_sources));
     }
     let mut offset = input.offset;
     let mut plan = Vec::with_capacity(input.items.len());
     for item in &input.items {
-        let (value, reused) = &allocated[&(item.hash, item.raw_size)];
+        let (value, reused, repair_sources) = &allocated[&(item.hash, item.raw_size)];
         if *reused {
             reference_chunk_in(&mut tx, stream, offset, value.id, value.raw_size, false).await?;
         }
@@ -878,6 +891,7 @@ pub(in super::super) async fn prepare_node_chunks(
             chunk: value.clone(),
             reused: *reused,
             payload_hash: item.payload_hash,
+            repair_sources: repair_sources.clone(),
         });
         offset += i64::from(item.raw_size);
     }
@@ -967,9 +981,15 @@ pub(in super::super) async fn activate_node_chunks(
                 item.chunk.nonce = Some(value.clone());
             }
             if registered.insert(item.chunk.uuid) {
-                start_chunk_upload_in(&mut tx, stream, &item.chunk, false).await?;
+                if let Some(repair) = item.repair(stream) {
+                    repair_metadata_in(&mut tx, &repair).await?;
+                } else {
+                    start_chunk_upload_in(&mut tx, stream, &item.chunk, false).await?;
+                }
             }
-            item.chunk.state = "uploading".into();
+            if item.repair_sources.is_empty() {
+                item.chunk.state = "uploading".into();
+            }
         }
         ensure!(
             queries::activate_node_write_batch(
@@ -1027,8 +1047,9 @@ pub(in super::super) async fn commit_node_chunks(
     backend: &super::super::Backend,
     node: &NodeState,
     key: &Key,
-    mut input: chunk::Commit,
-) -> Result<i64> {
+    input: &mut chunk::Commit,
+    verified: &[crate::model::Id],
+) -> Result<chunk::CommitStep> {
     let hash = input.hash()?;
     let mut tx = backend.pool.begin().await?;
     backend.fence_control(&mut tx).await?;
@@ -1040,7 +1061,7 @@ pub(in super::super) async fn commit_node_chunks(
     if let Some(previous) = batch.commit_hash {
         ensure!(previous == hash, Error::NodeOperationConflict);
         tx.commit().await?;
-        return Ok(batch.end_bytes);
+        return Ok(chunk::CommitStep::Complete(batch.end_bytes));
     }
     let stream = require_node_write(&mut tx, &row).await?;
     ensure!(batch.ready, Error::OperationAborted);
@@ -1072,10 +1093,18 @@ pub(in super::super) async fn commit_node_chunks(
                     .all(|value| expected.contains(&value.chunk)),
             Error::OperationAborted
         );
+        if let Some(step) = chunk::pending_checks(&batch.plan, stream, verified) {
+            return Ok(step);
+        }
         let mut completed = HashSet::new();
         for item in batch.plan.iter().filter(|item| !item.reused) {
             if completed.insert(item.chunk.uuid) {
-                complete_chunk_write_in(&mut tx, stream, item.offset, &item.chunk, false).await?;
+                if let Some(repair) = item.repair(stream) {
+                    finish_repair_in(&mut tx, &repair, item.offset).await?;
+                } else {
+                    complete_chunk_write_in(&mut tx, stream, item.offset, &item.chunk, false)
+                        .await?;
+                }
             } else {
                 reference_chunk_in(
                     &mut tx,
@@ -1105,7 +1134,7 @@ pub(in super::super) async fn commit_node_chunks(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    Ok(batch.end_bytes)
+    Ok(chunk::CommitStep::Complete(batch.end_bytes))
 }
 
 pub(in super::super) async fn copy_node_references(

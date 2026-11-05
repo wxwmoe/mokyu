@@ -82,6 +82,51 @@ pub(crate) struct Item {
     pub chunk: Chunk,
     pub reused: bool,
     pub payload_hash: [u8; 32],
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_sources: Vec<super::source::SourceSnapshot>,
+}
+
+impl Item {
+    pub(crate) fn repair(&self, stream: super::Id) -> Option<super::recovery::Repair> {
+        (!self.repair_sources.is_empty()).then(|| super::recovery::Repair {
+            stream,
+            node: None,
+            chunk: self.chunk.clone(),
+            sources: self.repair_sources.clone(),
+        })
+    }
+}
+
+pub(crate) enum CommitStep {
+    Complete(i64),
+    Verify(Vec<super::recovery::Repair>),
+}
+
+impl CommitStep {
+    pub(crate) fn end(self) -> Result<i64> {
+        match self {
+            Self::Complete(end) => Ok(end),
+            Self::Verify(_) => Err(super::Error::OperationAborted.into()),
+        }
+    }
+}
+
+pub(crate) fn pending_checks(
+    items: &[Item],
+    stream: super::Id,
+    verified: &[super::Id],
+) -> Option<CommitStep> {
+    let mut seen = std::collections::HashSet::new();
+    let pending: Vec<_> = items
+        .iter()
+        .filter(|item| {
+            !item.repair_sources.is_empty()
+                && !verified.contains(&item.chunk.encoding_id)
+                && seen.insert(item.chunk.encoding_id)
+        })
+        .filter_map(|item| item.repair(stream))
+        .collect();
+    (!pending.is_empty()).then_some(CommitStep::Verify(pending))
 }
 
 pub(crate) struct Assembly {

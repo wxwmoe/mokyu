@@ -370,12 +370,24 @@ pub(crate) trait NodeWrites: NativeParts + RemoteParts + Send + Sync {
         input: super::node_chunk::Prepare,
         nonces: Vec<super::node_chunk::Nonce>,
     ) -> Result<super::node_chunk::Prepared>;
+    async fn commit_chunk_batch(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: &mut super::node_chunk::Commit,
+        verified: &[super::Id],
+    ) -> Result<super::node_chunk::CommitStep>;
+    #[cfg(test)]
     async fn commit_chunks(
         &self,
         node: &NodeState,
         key: &Key,
-        input: super::node_chunk::Commit,
-    ) -> Result<i64>;
+        mut input: super::node_chunk::Commit,
+    ) -> Result<i64> {
+        self.commit_chunk_batch(node, key, &mut input, &[])
+            .await?
+            .end()
+    }
     async fn copy_write_references(
         &self,
         node: &NodeState,

@@ -385,6 +385,7 @@ message PreparedChunk {
   bytes chunk_json = 2;
   bool reused = 3;
   bytes payload_hash = 4;
+  bool repair = 5;
 }
 
 message PreparedChunks {

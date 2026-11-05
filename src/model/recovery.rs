@@ -11,6 +11,15 @@ pub(crate) enum RepairAllocation {
     Candidate(Box<Repair>),
 }
 
+impl RepairAllocation {
+    pub(super) fn into_node_plan(self) -> (Chunk, bool, Vec<SourceSnapshot>) {
+        match self {
+            Self::Existing(chunk) => (chunk, true, Vec::new()),
+            Self::Candidate(repair) => (repair.chunk, false, repair.sources),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RepairNode {
     pub state: crate::cluster::NodeState,
