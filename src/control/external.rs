@@ -46,7 +46,7 @@ pub(super) async fn start_test(
     Json(input): Json<TestRequest>,
 ) -> Result<(StatusCode, Json<super::maintenance::TaskStarted>), HttpError> {
     actor.recent(&app).await?;
-    if input.revision <= 0 || app.role == "single" && input.node_id.is_some() {
+    if input.revision <= 0 || app.deployment_mode() == "single" && input.node_id.is_some() {
         return Err(s3s::s3_error!(InvalidArgument).into());
     }
     let record = app.external_buckets.record(&actor.principal, id).await?;

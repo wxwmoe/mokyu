@@ -209,6 +209,13 @@ pub(super) fn merge(
     }
     Ok(value)
 }
+pub(super) async fn ready_worker(tx: &mut registry::Tx<'_>, id: Uuid) -> Result<bool> {
+    let Some(node) = q::node(id).fetch_optional(&mut **tx).await? else {
+        return Ok(false);
+    };
+    let (_, revision, _, _) = q::status().fetch_one(&mut **tx).await?;
+    Ok(matches!(node.role.as_str(), "worker" | "node") && node.ready(Utc::now(), revision)?)
+}
 pub(super) async fn record_sample(
     tx: &mut registry::Tx<'_>,
     id: Uuid,

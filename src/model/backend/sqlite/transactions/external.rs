@@ -205,7 +205,12 @@ impl ExternalStore for Backend {
                 == serde_json::to_value(&input.report.connection)?,
             Error::OperationAborted
         );
-        ensure!(input.node.is_none(), s3s::s3_error!(InvalidArgument));
+        if let Some(node) = input.node {
+            ensure!(
+                super::super::node_inventory::ready_worker(&mut tx, node).await?,
+                s3s::s3_error!(InvalidArgument)
+            );
+        }
         let detail = serde_json::json!({"operation":"external_test","policy":"external_test","external_id":input.external_id,"revision":input.revision,"project_id":row.project_id,"source_node":input.node});
         let id = transactions::enqueue_task(&mut tx, "integrity", None, detail).await?;
         q::insert_test(id, &input).execute(&mut *tx).await?;

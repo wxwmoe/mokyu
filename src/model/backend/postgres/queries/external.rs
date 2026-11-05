@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 pub(in super::super) fn test_node(id: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM nodes WHERE id=$1 AND enabled AND role IN ('worker','node'))",
+        "SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_sessions ss ON ss.node_id=n.id JOIN node_reports r ON r.node_id=n.id CROSS JOIN mokyu_meta m WHERE n.id=$1 AND n.enabled AND n.role IN ('worker','node') AND ss.expires_at>now() AND NOT ss.draining AND ss.boot_id=r.boot_id AND ss.credential_generation=n.credential_generation AND r.status->>'ready'='true' AND r.status->>'draining'='false' AND r.received_at>=now()-interval '30 seconds' AND n.last_seen_at>=now()-interval '30 seconds' AND r.status->>'deployment_mode_revision'=m.deployment_mode_revision::text)",
     )
     .bind(id)
 }
