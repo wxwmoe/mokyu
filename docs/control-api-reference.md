@@ -248,7 +248,7 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 ## 智能分层
 
-桶设置权限允许访问 `/api/v1/buckets/{bucket}/tiering`。热层是桶当前的内部后端，`policy.cold_storage` 指定另一个已启用、支持直接读取的内部后端。集群两端都需要共享 S3。冷端须与热端及有关联的冗余副本位置独立。
+桶设置权限允许访问 `/api/v1/buckets/{bucket}/tiering`。热层是桶当前的内部 S3 后端，`policy.cold_storage` 指定另一个已启用、支持直接读取的内部 S3 后端。冷端须与热端及有关联的冗余副本位置独立。
 
 `POST /api/v1/buckets/{bucket}/tiering/state` 接受当前 `revision` 和 `action`：`pause` 暂停新迁移，已发布的位置继续可读；`resume` 恢复自动判断；`drain` 将该桶使用的冷单位搬回热端；`disable` 在冷位置及在途依赖解除后关闭策略。修改冷后端同样需要先排空该桶。读取直接访问当前位置，不等待后台升热。
 

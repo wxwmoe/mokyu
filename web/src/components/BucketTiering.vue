@@ -17,8 +17,9 @@ const props = defineProps<{ bucket: Bucket }>()
 const base = computed(() => '/api/v1/buckets/' + props.bucket.id + '/tiering')
 const view = useQuery({queryKey:['bucket-tiering',base],queryFn:({signal})=>api<View>(base.value,{signal})})
 const options = useQuery({queryKey:['bucket-projects'],queryFn:({signal})=>api<components['schemas']['BucketCreationOptions']>('/api/v1/bucket-projects',{signal})})
-const targets = computed(() => (options.data.value?.storages || []).filter(s=>s.id!==props.bucket.storage_id && (!options.data.value?.shared_storage_only || s.type==='s3')).map(s=>({value:s.id,label:s.name})))
-const hot = computed(()=>options.data.value?.storages.find(s=>s.id===props.bucket.storage_id)?.name || props.bucket.storage_id)
+const hot = computed(() => options.data.value?.storages.find(s => s.id === props.bucket.storage_id))
+const targets = computed(() => hot.value?.type === 's3' ? (options.data.value?.storages || [])
+  .filter(s => s.id !== props.bucket.storage_id && s.type === 's3').map(s => ({ value: s.id, label: s.name })) : [])
 const defaults = (): Policy => ({cold_storage:'',cool_after_seconds:2592000,observation_seconds:86400,promote_reads:3,residency_seconds:86400,parallelism:1,bytes_per_second:8388608})
 const form=ref<Policy>(defaults()), revision=ref(-1), previous=ref(''), reviewed=ref(''), busy=ref(false), error=ref<unknown>()
 const dirty=computed(()=>JSON.stringify(form.value)!==previous.value)
@@ -94,7 +95,7 @@ onBeforeUnmount(()=>scan?.abort())
     <ErrorNotice :error="error || view.error.value || options.error.value || reasons.error.value"/>
     <p v-if="stale" class="bucket-stale" role="status">{{ t('tierStale') }} <button @click="reset">{{ t('refresh') }}</button></p>
     <form class="bucket-subpanel form-stack" @submit.prevent="change('preview')">
-      <p v-if="view.data.value" class="tier-backend"><Database :size="16" aria-hidden="true" />{{ t('tierHot') }} <strong>{{ hot }}</strong></p>
+      <p v-if="view.data.value" class="tier-backend"><Database :size="16" aria-hidden="true" />{{ t('tierHot') }} <strong>{{ hot?.name || props.bucket.storage_id }}</strong></p>
       <label class="field"><span>{{ t('tierCold') }}</span><UiSelect v-model="form.cold_storage" :options="targets" :label="t('tierCold')" :disabled="locked || !targets.length"/></label>
       <p v-if="!targets.length && options.data.value" class="field-help">{{ t('tierNoStorage') }}</p>
       <div class="form-pair">
@@ -106,14 +107,14 @@ onBeforeUnmount(()=>scan?.abort())
         <label class="field"><span>{{ t('tier_parallelism') }}</span><input v-model.number="form.parallelism" type="number" min="1" max="32" step="1" required :disabled="locked"></label>
         <label class="field"><span>{{ t('tier_bytes_per_second') }}</span><input v-model.number="form.bytes_per_second" type="number" min="1" step="1" required :disabled="locked"><small>{{ bytes(form.bytes_per_second || 0) }}/s</small></label>
       </div>
-      <div class="form-footer"><button type="submit" :disabled="locked || !form.cold_storage">{{ t('tierPreview') }}</button>
+      <div class="form-footer"><button type="submit" :disabled="locked || !targets.some(s => s.value === form.cold_storage)">{{ t('tierPreview') }}</button>
         <button type="button" class="primary" :disabled="locked || !reviewed" @click="change('save')">{{ t('save') }}</button>
         <button type="button" :disabled="busy || !dirty" @click="reset">{{ t('cancel') }}</button></div>
       <p v-if="reviewed" class="field-help" role="status">{{ t('tierReviewed') }}</p>
       <div v-if="view.data.value?.policy" class="actions">
         <button type="button" v-if="view.data.value.state==='active'" :disabled="locked || dirty" @click="change('pause')">{{ t('tierPause') }}</button>
-        <button type="button" v-else :disabled="locked || dirty" @click="change('resume')">{{ t('tierResume') }}</button>
-        <button type="button" :disabled="locked || dirty || view.data.value.state==='draining'" @click="change('drain')">{{ t('tierDrain') }}</button>
+        <button type="button" v-else :disabled="locked || dirty || !targets.some(s => s.value === form.cold_storage)" @click="change('resume')">{{ t('tierResume') }}</button>
+        <button type="button" :disabled="locked || dirty || !targets.some(s => s.value === form.cold_storage) || view.data.value.state==='draining'" @click="change('drain')">{{ t('tierDrain') }}</button>
         <button type="button" :disabled="locked || dirty" @click="change('disable')">{{ t('tierDisable') }}</button>
       </div>
     </form>

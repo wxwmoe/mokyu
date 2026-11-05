@@ -125,7 +125,7 @@ export default {
   tierHint: "Move inactive chunks, whole packs and raw files to another backend. Reading an object never waits for promotion.",
   tierHot: "Hot backend",
   tierCold: "Cold backend",
-  tierNoStorage: "An additional internal storage backend is required.",
+  tierNoStorage: "Select two enabled internal S3 backends for the hot and cold tiers.",
   tier_cool_after_seconds: "Time without reads before cooling",
   tier_observation_seconds: "Window for counting cold origin reads",
   tier_residency_seconds: "Minimum time on a tier",

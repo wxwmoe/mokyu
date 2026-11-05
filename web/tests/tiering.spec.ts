@@ -37,7 +37,7 @@ test('preview, save, inspect and drain a tiering policy',async({page,request})=>
     const cold=panel.getByRole('combobox',{name:tr.tierCold,exact:true})
     await cold.click()
     const choices=page.getByRole('option')
-    await expect(choices).toHaveCount(storages.filter((s:{id:string})=>s.id!==f.source.storage_id).length)
+    await expect(choices).toHaveCount(storages.filter((s:{id:string;type:string})=>s.id!==f.source.storage_id && s.type==='s3').length)
     await page.getByRole('option',{name:coldName,exact:true}).click()
     await panel.getByRole('spinbutton',{name:tr.tier_promote_reads}).fill('5')
     await expect(panel.getByRole('button',{name:tr.save,exact:true})).toBeDisabled()

@@ -22,7 +22,9 @@ pub(in super::super) async fn changed(
     }
     Ok(())
 }
-pub(in super::super) const DUE: &str = "SELECT t.bucket_id,t.hot_storage,t.cold_storage,t.revision,t.state,t.policy,s.unit,s.after_id FROM bucket_tiering t LEFT JOIN tier_scans s ON s.bucket_id=t.bucket_id AND s.revision=t.revision WHERE (t.state<>'paused' OR EXISTS(SELECT 1 FROM tier_moves m WHERE m.bucket_id=t.bucket_id)) AND COALESCE(s.next_scan,0)<=$1 ORDER BY COALESCE(s.next_scan,0),t.bucket_id LIMIT 1";
+pub(in super::super) const S3_PAIR: &str =
+    "SELECT COUNT(*) FROM storages WHERE id IN ($1,$2) AND type='s3' AND enabled";
+pub(in super::super) const DUE: &str = "SELECT t.bucket_id,t.hot_storage,t.cold_storage,t.revision,t.state,t.policy,s.unit,s.after_id FROM bucket_tiering t JOIN storages hot ON hot.id=t.hot_storage AND hot.type='s3' AND hot.enabled JOIN storages cold ON cold.id=t.cold_storage AND cold.type='s3' AND cold.enabled LEFT JOIN tier_scans s ON s.bucket_id=t.bucket_id AND s.revision=t.revision WHERE (t.state<>'paused' OR EXISTS(SELECT 1 FROM tier_moves m WHERE m.bucket_id=t.bucket_id)) AND COALESCE(s.next_scan,0)<=$1 ORDER BY COALESCE(s.next_scan,0),t.bucket_id LIMIT 1";
 pub(in super::super) const CURSOR: &str = "INSERT INTO tier_scans(bucket_id,revision,unit,after_id,next_scan) VALUES($1,$2,$3,$4,$5) ON CONFLICT(bucket_id) DO UPDATE SET revision=excluded.revision,unit=excluded.unit,after_id=excluded.after_id,next_scan=excluded.next_scan";
 pub(in super::super) const HEAD: &str = "SELECT generation,storage_id,address,activated_at,pressure_since,origin_reads FROM tier_locations WHERE unit=$1 AND physical_id=$2 FOR UPDATE";
 pub(in super::super) const MOVEMENT: &str = "SELECT m.* FROM tier_moves m WHERE id=$1 FOR UPDATE";

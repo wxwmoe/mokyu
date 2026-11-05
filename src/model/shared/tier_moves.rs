@@ -370,6 +370,18 @@ pub(super) async fn step(
         work: None,
         switched: false,
     };
+    let available: i64 = sqlx::query_scalar(q::S3_PAIR)
+        .bind(movement.source_material.storage()?)
+        .bind(movement.target_storage)
+        .fetch_one(&mut **db)
+        .await?;
+    if available != 2 {
+        sqlx::query(q::PARK)
+            .bind(task.id)
+            .execute(&mut **db)
+            .await?;
+        return Ok(idle);
+    }
     let target = movement
         .target_material
         .as_ref()

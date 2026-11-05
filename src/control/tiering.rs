@@ -3,7 +3,7 @@ use crate::{
     app::App,
     http::HttpError,
     model::{
-        redundancy::{Location, Placement},
+        redundancy::Placement,
         tiering::{Candidate, Unit, Update, View},
     },
 };
@@ -95,12 +95,6 @@ pub(super) async fn change(
         .tiering
         .locations(principal, bucket, input.policy.cold_storage)
         .await?;
-    ensure!(
-        app.role == "single"
-            || matches!(pair.cold.2, Location::Remote { .. })
-                && matches!(pair.hot.2, Location::Remote { .. }),
-        s3s::s3_error!(InvalidArgument, "cluster tiers require shared S3 storage")
-    );
     let (source, target) = tokio::try_join!(pair.hot.2.resolve(), pair.cold.2.resolve())?;
     let placement = Placement { source, target };
     placement.validate()?;

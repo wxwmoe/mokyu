@@ -50,7 +50,12 @@ async fn locations(
             .ok_or_else(|| {
                 s3s::s3_error!(InvalidArgument, "an enabled internal storage is required")
             })?;
-        Ok((id, row.revision, Location::storage(&row)?))
+        let location = Location::storage(&row)?;
+        ensure!(
+            matches!(location, Location::Remote { .. }),
+            s3s::s3_error!(InvalidArgument, "tiering requires two internal S3 backends")
+        );
+        Ok((id, row.revision, location))
     }
     Ok(Locations {
         hot: read(db, home).await?,
@@ -150,6 +155,9 @@ impl TieringStore for Backend {
             .policy
             .as_ref()
             .ok_or_else(|| s3s::s3_error!(InvalidArgument, "tiering is disabled"))?;
+        if matches!(input.action, Transition::Resume | Transition::Drain) {
+            locations(&mut db, principal, bucket, policy.cold_storage).await?;
+        }
         let state = match input.action {
             Transition::Pause => "paused",
             Transition::Resume => "active",

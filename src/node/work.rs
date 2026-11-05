@@ -345,7 +345,6 @@ impl Worker {
                                 crate::storage::tiering::Site::new(
                                     s,
                                     b.store.backend.clone(),
-                                    None,
                                     b.store.streaming.as_ref(),
                                     b.store.multipart.as_deref(),
                                 )

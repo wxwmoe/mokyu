@@ -16,9 +16,8 @@ use md5::{Digest, Md5};
 use object_store::{
     GetOptions, ObjectStore, ObjectStoreExt, multipart::MultipartStore, path::Path,
 };
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::{
-    io::{AsyncSeekExt, AsyncWriteExt},
     sync::{OwnedSemaphorePermit, Semaphore},
     time::Instant,
 };
@@ -28,39 +27,29 @@ const PART: u64 = Progress::PART_BYTES;
 pub(crate) struct Site<'a> {
     backend: Arc<dyn ObjectStore>,
     path: Path,
-    local: Option<PathBuf>,
-    streaming: Option<&'a super::s3::Streaming>,
-    multipart: Option<&'a dyn MultipartStore>,
+    streaming: &'a super::s3::Streaming,
+    multipart: &'a dyn MultipartStore,
 }
 
 impl<'a> Site<'a> {
     pub(crate) fn new(
         value: &PhysicalSource,
-        mut backend: Arc<dyn ObjectStore>,
-        root: Option<&PathBuf>,
+        backend: Arc<dyn ObjectStore>,
         streaming: Option<&'a super::s3::Streaming>,
         multipart: Option<&'a dyn MultipartStore>,
     ) -> Result<Self> {
         let address = value.address();
         ensure!(!address.is_nil(), "missing tier address");
-        let mut local = None;
         let path = match value {
             PhysicalSource::Chunk(_) => Path::from(super::chunk_name(address)),
             PhysicalSource::Pack(_) => Path::from(format!("packs/{}", super::chunk_name(address))),
-            PhysicalSource::Raw(_) if root.is_some() => {
-                let root = root.unwrap();
-                local = Some(root.join(super::chunk_name(address)));
-                backend = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root)?);
-                Path::from(super::chunk_name(address))
-            }
             PhysicalSource::Raw(_) => super::raw::remote_path(address),
         };
         Ok(Self {
             backend,
             path,
-            local,
-            streaming,
-            multipart,
+            streaming: streaming.context("tiering requires an S3 backend")?,
+            multipart: multipart.context("missing tier multipart connection")?,
         })
     }
 
@@ -107,19 +96,10 @@ impl<'a> Site<'a> {
         Ok((md5.finalize().into(), *digest.finalize().as_bytes()))
     }
     async fn remove(&self) -> Result<()> {
-        if let (Some(stream), Some(parts)) = (self.streaming, self.multipart) {
-            let (pending, more) = stream.pending_multipart(&self.path).await?;
-            ensure!(!more, "too many tier uploads");
-            for id in pending {
-                parts.abort_multipart(&self.path, &id).await?;
-            }
-        }
-        if let Some(local) = &self.local {
-            match tokio::fs::remove_file(local.with_extension("partial")).await {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
+        let (pending, more) = self.streaming.pending_multipart(&self.path).await?;
+        ensure!(!more, "too many tier uploads");
+        for id in pending {
+            self.multipart.abort_multipart(&self.path, &id).await?;
         }
         match self.backend.delete(&self.path).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
@@ -240,144 +220,101 @@ async fn raw(
         progress.parts <= count && part <= 5 * 1024 * 1024 * 1024,
         "invalid tier checkpoint"
     );
-    if let Some(path) = &target.local {
-        let parent = path.parent().context("missing local tier directory")?;
-        tokio::fs::create_dir_all(parent).await?;
-        let partial = path.with_extension("partial");
-        let mut options = tokio::fs::OpenOptions::new();
-        options.create(true).truncate(false).read(true).write(true);
-        let mut file = options.open(&partial).await?;
+    let streaming = target.streaming;
+    let parts = target.multipart;
+    let Some(upload) = &progress.upload else {
+        let (mut existing, more) = streaming.pending_multipart(&target.path).await?;
+        ensure!(!more, "too many tier uploads");
+        existing.sort();
+        let upload = if let Some(id) = existing.first() {
+            id.clone()
+        } else {
+            parts.create_multipart(&target.path).await?
+        };
+        return Ok(Outcome::Checkpoint {
+            progress: Progress {
+                upload: Some(upload),
+                parts: 0,
+            },
+        });
+    };
+    if progress.parts < count {
         let offset = u64::from(progress.parts) * part;
-        if file.metadata().await?.len() < offset.min(size) {
+        let length = part.min(size - offset);
+        let Some(page) = streaming
+            .parts(&target.path, upload, progress.parts)
+            .await?
+        else {
             return Ok(Outcome::Checkpoint {
                 progress: Progress::default(),
             });
+        };
+        let (hash, buffered) = if length <= PART {
+            let bytes = source.bounded(offset, length, PART).await?;
+            let hash: [u8; 16] = Md5::digest(&bytes).into();
+            (hash, Some(bytes))
+        } else {
+            (source.digests(offset, length).await?.0, None)
+        };
+        pace(start, length, rate).await;
+        if !page
+            .items
+            .iter()
+            .any(|p| p.number == progress.parts + 1 && p.matches(length, &hash))
+        {
+            streaming
+                .part(
+                    &target.path,
+                    upload,
+                    usize::from(progress.parts),
+                    length,
+                    &hash,
+                    || match &buffered {
+                        Some(bytes) => Box::pin(futures_util::stream::once(std::future::ready(
+                            Ok(bytes.clone()),
+                        ))),
+                        None => source.read(offset, length),
+                    },
+                )
+                .await?;
         }
-        if progress.parts < count {
-            let length = part.min(size - offset);
-            file.seek(std::io::SeekFrom::Start(offset)).await?;
-            let mut stream = source.read(offset, length);
-            let mut seen = 0;
-            while let Some(bytes) = stream.next().await {
-                let bytes = bytes?;
-                seen += bytes.len() as u64;
-                pace(start, seen, rate).await;
-                file.write_all(&bytes).await?;
-            }
-            file.sync_data().await?;
+        return Ok(Outcome::Checkpoint {
+            progress: Progress {
+                upload: Some(upload.clone()),
+                parts: progress.parts + 1,
+            },
+        });
+    }
+    let mut complete = Vec::with_capacity(usize::from(count));
+    let mut after = 0;
+    loop {
+        let Some(page) = streaming.parts(&target.path, upload, after).await? else {
             return Ok(Outcome::Checkpoint {
-                progress: Progress {
-                    upload: None,
-                    parts: progress.parts + 1,
-                },
-            });
-        }
-        file.set_len(size).await?;
-        file.sync_all().await?;
-        drop(file);
-        tokio::fs::rename(&partial, path).await?;
-        super::raw::sync_directory(parent).await?;
-    } else {
-        let streaming = target
-            .streaming
-            .context("missing tier streaming connection")?;
-        let parts = target
-            .multipart
-            .context("missing tier multipart connection")?;
-        let Some(upload) = &progress.upload else {
-            let (mut existing, more) = streaming.pending_multipart(&target.path).await?;
-            ensure!(!more, "too many tier uploads");
-            existing.sort();
-            let upload = if let Some(id) = existing.first() {
-                id.clone()
-            } else {
-                parts.create_multipart(&target.path).await?
-            };
-            return Ok(Outcome::Checkpoint {
-                progress: Progress {
-                    upload: Some(upload),
-                    parts: 0,
-                },
+                progress: Progress::default(),
             });
         };
-        if progress.parts < count {
-            let offset = u64::from(progress.parts) * part;
-            let length = part.min(size - offset);
-            let Some(page) = streaming
-                .parts(&target.path, upload, progress.parts)
-                .await?
-            else {
-                return Ok(Outcome::Checkpoint {
-                    progress: Progress::default(),
-                });
-            };
-            let (hash, buffered) = if length <= PART {
-                let bytes = source.bounded(offset, length, PART).await?;
-                let hash: [u8; 16] = Md5::digest(&bytes).into();
-                (hash, Some(bytes))
-            } else {
-                (source.digests(offset, length).await?.0, None)
-            };
-            pace(start, length, rate).await;
-            if !page
-                .items
-                .iter()
-                .any(|p| p.number == progress.parts + 1 && p.matches(length, &hash))
+        for p in page.items {
+            if complete.len() >= usize::from(count)
+                || usize::from(p.number) != complete.len() + 1
+                || p.size != part.min(size - part * (u64::from(p.number) - 1))
             {
-                streaming
-                    .part(
-                        &target.path,
-                        upload,
-                        usize::from(progress.parts),
-                        length,
-                        &hash,
-                        || match &buffered {
-                            Some(bytes) => Box::pin(futures_util::stream::once(
-                                std::future::ready(Ok(bytes.clone())),
-                            )),
-                            None => source.read(offset, length),
-                        },
-                    )
-                    .await?;
+                return Ok(Outcome::Discard);
             }
-            return Ok(Outcome::Checkpoint {
-                progress: Progress {
-                    upload: Some(upload.clone()),
-                    parts: progress.parts + 1,
-                },
-            });
+            complete.push((i32::from(p.number), p.etag));
         }
-        let mut complete = Vec::with_capacity(usize::from(count));
-        let mut after = 0;
-        loop {
-            let Some(page) = streaming.parts(&target.path, upload, after).await? else {
-                return Ok(Outcome::Checkpoint {
-                    progress: Progress::default(),
-                });
-            };
-            for p in page.items {
-                if complete.len() >= usize::from(count)
-                    || usize::from(p.number) != complete.len() + 1
-                    || p.size != part.min(size - part * (u64::from(p.number) - 1))
-                {
-                    return Ok(Outcome::Discard);
-                }
-                complete.push((i32::from(p.number), p.etag));
+        if let Some(next) = page.next {
+            if next <= after {
+                return Ok(Outcome::Discard);
             }
-            if let Some(next) = page.next {
-                if next <= after {
-                    return Ok(Outcome::Discard);
-                }
-                after = next
-            } else {
-                break;
-            }
+            after = next
+        } else {
+            break;
         }
-        if complete.len() != usize::from(count) {
-            return Ok(Outcome::Discard);
-        }
-        streaming.complete(&target.path, upload, &complete).await?;
     }
+    if complete.len() != usize::from(count) {
+        return Ok(Outcome::Discard);
+    }
+    streaming.complete(&target.path, upload, &complete).await?;
     let (a, b) = tokio::try_join!(source.digests(0, size), target.digests(0, size))?;
     ensure!(a.0.as_slice() == md5, codec::IntegrityError::Hash);
     if a != b {
@@ -482,20 +419,9 @@ impl super::Storage {
             .target()
             .map(|v| self.store_backend(v.storage()?))
             .transpose()?;
-        let _space = if let (Some(store), Some(material)) = (&target, work.target()) {
+        if let Some(store) = &target {
             self.verify_raw_target(store).await?;
-            let partial = matches!(work,Work::Copy{progress,..} if progress.parts>0);
-            self.local_space(
-                store,
-                if partial {
-                    0
-                } else {
-                    material.bytes()?.max(0) as u64
-                },
-            )?
-        } else {
-            None
-        };
+        }
         let mut stores = vec![&source];
         stores.extend(target.as_ref());
         stores.sort_by_key(|s| s.profile.storage_id);
@@ -507,7 +433,6 @@ impl super::Storage {
             Site::new(
                 v,
                 s.backend.clone(),
-                s.raw_root.as_ref(),
                 s.streaming.as_ref(),
                 s.multipart.as_deref(),
             )
