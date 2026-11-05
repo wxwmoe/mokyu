@@ -122,3 +122,18 @@ mod tests {
         assert_eq!(model::error(&sqlx::Error::PoolTimedOut.into()), None);
     }
 }
+
+#[derive(Clone, Debug)]
+pub(crate) struct InputDetail(pub String);
+impl std::fmt::Display for InputDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for InputDetail {}
+
+impl InputDetail {
+    pub(crate) fn storage(message: &'static str, code: s3s::S3ErrorCode) -> anyhow::Error {
+        anyhow::Error::from(s3s::S3Error::new(code)).context(Self(message.into()))
+    }
+}

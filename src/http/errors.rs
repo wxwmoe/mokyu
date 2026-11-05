@@ -57,11 +57,11 @@ impl HttpError {
         if status == StatusCode::NOT_MODIFIED {
             return status.into_response();
         }
-        let mut response = (
-            status,
-            Json(json!({"error":status.canonical_reason().unwrap_or("request failed")})),
-        )
-            .into_response();
+        let mut message = json!({"error":status.canonical_reason().unwrap_or("request failed")});
+        if let Some(detail) = self.0.downcast_ref::<crate::model::InputDetail>() {
+            message["detail"] = json!(detail.0);
+        }
+        let mut response = (status, Json(message)).into_response();
         response.extensions_mut().insert(ErrorCode(
             self.0
                 .downcast_ref::<s3s::S3Error>()
@@ -75,10 +75,7 @@ impl HttpError {
         {
             response.headers_mut().extend(headers.clone());
         }
-        if let Some(detail) = self
-            .0
-            .downcast_ref::<crate::model::image_styles::InvalidImageInput>()
-        {
+        if let Some(detail) = self.0.downcast_ref::<crate::model::InputDetail>() {
             response.extensions_mut().insert(detail.clone());
         }
         response

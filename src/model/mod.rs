@@ -69,7 +69,7 @@ pub(crate) use cache::UploadCacheStore;
 pub(crate) use chunk::Mapping;
 pub(crate) use chunk::{ChunkCreate, ChunkStore, FragmentSource, ReadExtent};
 pub(crate) use credential::CredentialStore;
-pub(crate) use error::Error;
+pub(crate) use error::{Error, InputDetail};
 pub(crate) use id::Id;
 pub(crate) use multipart::MultipartStore;
 pub(crate) use object::{ObjectChange, ObjectStore};

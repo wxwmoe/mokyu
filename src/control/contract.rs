@@ -303,7 +303,7 @@ pub(crate) async fn errors(
             request_id,
             detail: response
                 .extensions()
-                .get::<crate::model::image_styles::InvalidImageInput>()
+                .get::<crate::model::InputDetail>()
                 .map(|e| e.0.clone())
                 .or_else(|| {
                     response

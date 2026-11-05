@@ -745,10 +745,28 @@ pub(in super::super) async fn create_bucket(
         .await?;
     let storage = match input.storage_id {
         Some(id) if available.contains(&id) => id,
-        Some(_) => anyhow::bail!("storage is unavailable"),
+        Some(_) => {
+            return Err(crate::model::InputDetail::storage(
+                "storage is unavailable",
+                s3s::S3ErrorCode::InvalidArgument,
+            )
+            .into());
+        }
         None if available.len() == 1 => available[0],
-        None if available.is_empty() => anyhow::bail!("no storage configured"),
-        None => anyhow::bail!("storage must be selected"),
+        None if available.is_empty() => {
+            return Err(crate::model::InputDetail::storage(
+                "no storage configured",
+                s3s::S3ErrorCode::InvalidArgument,
+            )
+            .into());
+        }
+        None => {
+            return Err(crate::model::InputDetail::storage(
+                "storage must be selected",
+                s3s::S3ErrorCode::InvalidArgument,
+            )
+            .into());
+        }
     };
     ensure!(
         !queries::duplicate_bucket(&input.name)

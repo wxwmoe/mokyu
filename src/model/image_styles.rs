@@ -10,20 +10,12 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 pub(crate) const PAGE: usize = 128;
-#[derive(Clone, Debug)]
-pub(crate) struct InvalidImageInput(pub String);
-impl std::fmt::Display for InvalidImageInput {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-impl std::error::Error for InvalidImageInput {}
 pub(crate) fn validation_error(error: anyhow::Error) -> anyhow::Error {
     if error
         .downcast_ref::<s3s::S3Error>()
         .is_some_and(|e| e.code() == &s3s::S3ErrorCode::InvalidArgument)
     {
-        let detail = InvalidImageInput(error.to_string().chars().take(2048).collect());
+        let detail = crate::model::InputDetail(error.to_string().chars().take(2048).collect());
         error.context(detail)
     } else {
         error

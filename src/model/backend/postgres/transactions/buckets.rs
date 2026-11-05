@@ -72,12 +72,28 @@ pub(in super::super) async fn create_bucket(
         .await?;
     let storage_id = match input.storage_id {
         Some(id) if available.contains(&id) => id,
-        Some(_) => return Err(anyhow::anyhow!("storage is unavailable").into()),
+        Some(_) => {
+            return Err(crate::model::InputDetail::storage(
+                "storage is unavailable",
+                s3s::S3ErrorCode::InvalidArgument,
+            )
+            .into());
+        }
         None if available.len() == 1 => available[0],
         None if available.is_empty() => {
-            return Err(anyhow::anyhow!("no storage configured").into());
+            return Err(crate::model::InputDetail::storage(
+                "no storage configured",
+                s3s::S3ErrorCode::InvalidArgument,
+            )
+            .into());
         }
-        None => return Err(anyhow::anyhow!("storage must be selected").into()),
+        None => {
+            return Err(crate::model::InputDetail::storage(
+                "storage must be selected",
+                s3s::S3ErrorCode::InvalidArgument,
+            )
+            .into());
+        }
     };
     let row: Option<Bucket> = queries::insert_bucket(&input.name, project, storage_id)
         .fetch_optional(&mut *tx)

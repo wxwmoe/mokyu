@@ -282,7 +282,10 @@ impl Store {
         let mut objects = self.backend.list(None);
         ensure!(
             objects.try_next().await?.is_none(),
-            "storage namespace is not empty; refusing initialization"
+            crate::model::InputDetail::storage(
+                "storage namespace is not empty",
+                s3s::S3ErrorCode::OperationAborted
+            )
         );
         drop(objects);
         self.backend
