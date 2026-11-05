@@ -252,6 +252,13 @@ async fn finish(
             == "replication"
     {
         super::work_replication::finish(tx, task, &plan, &result.outcomes, key).await?;
+        if !result
+            .outcomes
+            .iter()
+            .any(|outcome| matches!(outcome, work::Outcome::Retry))
+        {
+            *wake_shared = true;
+        }
         return settle(tx, node, task, result.operation, &hash).await;
     }
     let mut issue = None;
@@ -639,6 +646,8 @@ impl NodeWork for Backend {
         let mut plan = None;
         let mut encrypted = None;
         if let Some((task, task_type, detail)) = next {
+            let replication =
+                task_type == "storage_migration" && detail["operation"] == "replication";
             ensure!(
                 queries::claim_task(task, token)
                     .execute(&mut *tx)
@@ -804,6 +813,11 @@ impl NodeWork for Backend {
                 encrypted = Some(codec::protect(&secret, key, token.as_bytes())?);
                 plan = Some(proposal);
                 task_id = Some(task.id);
+            } else if replication {
+                let record = queries::task_record(task.id).fetch_one(&mut *tx).await?;
+                wake_shared |= record.state == "queued"
+                    && record.detail["external"] != true
+                    && record.detail["phase"] != "verify";
             } else if input.class == 2 && task_type == "upload" {
                 check_again = queries::task_record(task.id)
                     .fetch_one(&mut *tx)

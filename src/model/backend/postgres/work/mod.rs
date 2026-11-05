@@ -189,7 +189,7 @@ async fn finish(
     completion: &work::Completion,
     maintenance: bool,
     key: &Key,
-) -> Result<()> {
+) -> Result<bool> {
     let row = q::batch(node.node_id, completion.operation)
         .fetch_optional(&mut **db)
         .await?
@@ -198,7 +198,7 @@ async fn finish(
     let hash = crate::model::node_chunk::hash(completion)?;
     if let Some(previous) = row.result_hash {
         ensure!(hash == previous, Error::NodeOperationConflict);
-        return Ok(());
+        return Ok(false);
     }
     ensure!(row.valid_for_ms > 0, Error::NodeExpired);
     let mut permit_tokens = vec![row.token, row.maintenance_token];
@@ -220,6 +220,7 @@ async fn finish(
         .fetch_optional(&mut **db)
         .await?
         .ok_or(Error::NodeExpired)?;
+    let replication = detail["operation"] == "replication";
     let mut deleted = 0;
     let mut error = None;
     let mut complete = false;
@@ -680,7 +681,11 @@ async fn finish(
             .execute(&mut **db)
             .await?;
     }
-    Ok(())
+    let wake = replication && !complete && error.is_none();
+    if wake {
+        queries::notify_work(task).execute(&mut **db).await?;
+    }
+    Ok(wake)
 }
 
 async fn permits(
@@ -947,8 +952,9 @@ pub(crate) async fn exchange(
             && issued >= now - chrono::Duration::minutes(15),
         Error::NodeOperationExpired
     );
+    let mut wake_shared = false;
     if let Some(completion) = &input.completion {
-        finish(
+        wake_shared = finish(
             &mut tx,
             node,
             input.run,
@@ -1395,7 +1401,13 @@ pub(crate) async fn exchange(
                                 None
                             }
                         }
-                        crate::model::replication::Step::Continue => None,
+                        crate::model::replication::Step::Continue => {
+                            if run.phase == "publish" {
+                                queries::notify_work(task).execute(&mut *tx).await?;
+                                wake_shared = true;
+                            }
+                            None
+                        }
                         crate::model::replication::Step::External { .. } => {
                             return Err(Error::NodeOperationConflict.into());
                         }
@@ -1596,7 +1608,8 @@ pub(crate) async fn exchange(
     let row = q::batch(node.node_id, input.operation)
         .fetch_one(&mut *tx)
         .await?;
-    let value = reply(node, key, &input, row)?;
+    let mut value = reply(node, key, &input, row)?;
+    value.wake_shared = wake_shared;
     tx.commit().await?;
     #[cfg(feature = "fault-injection")]
     if let Some(boundary) = boundary {

@@ -257,6 +257,9 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
     // Upload paths already wait when a source or another owner is not ready.
     let upload =
         matches!(task_type.as_str(), "upload" | "cache_flush") && detail["operation"] != "cdc";
+    let notify_worker = app.deployment_mode() == "single_control"
+        && task_type == "storage_migration"
+        && detail["operation"] == "replication";
     let execution = Execution { id, token };
     let work = async {
         if matches!(task_type.as_str(), "gc" | "cleanup") {
@@ -404,6 +407,15 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
         app.statistics
             .gc_failures
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if notify_worker
+        && result.is_ok()
+        && !app.maintenance.load(std::sync::atomic::Ordering::Acquire)
+        && !app.draining.load(std::sync::atomic::Ordering::Acquire)
+    {
+        app.notifications
+            .hint(&crate::model::notification::Signal::Work(None));
+        app.notifications.committed();
     }
     let ready = upload && result.is_ok();
     if let Err(e) = result {
