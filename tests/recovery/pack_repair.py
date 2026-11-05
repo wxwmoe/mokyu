@@ -22,8 +22,6 @@ def main():
     manifest = database.query('SELECT ordinal,chunk_id,offset_bytes FROM pack_members WHERE pack_id=%s ORDER BY ordinal', pack['id'])
     assert len(manifest) >= 2
     stream = database.query('SELECT stream_id FROM objects WHERE bucket_id=%s', uuid.UUID(fixture.bucket_id))[0]['stream_id']
-    if not isinstance(stream, uuid.UUID):
-        stream = uuid.UUID(bytes=stream) if isinstance(stream, bytes) else uuid.UUID(str(stream))
     extents = database.query('SELECT offset_bytes,chunk_id,length FROM extents WHERE stream_id=%s ORDER BY offset_bytes', stream)
     physical = location(fixture, pack['location_id'], packed=True)
     encoded = fixture.bytes(physical)
