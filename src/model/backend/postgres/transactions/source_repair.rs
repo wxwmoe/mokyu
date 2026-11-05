@@ -78,7 +78,10 @@ pub(in super::super) async fn source_update_in(
         queries::source_executor(update.execution.id)
             .fetch_optional(&mut **tx)
             .await?
-            .unwrap_or(operation.mode == "single"),
+            .unwrap_or(crate::model::runtime::accepts_role(
+                &operation.mode,
+                "single"
+            )),
         crate::model::Error::OperationAborted
     );
     lock_execution(tx, update.execution).await?;

@@ -46,7 +46,7 @@ async fn quarantine(stores: &Stores, storage: Uuid, encoding: Id, clear: bool) -
     };
     let operation = SourceOperation {
         principal: Principal::Local,
-        mode: "single".into(),
+        mode: stores.runtime.state().await?.mode,
         snapshot: stores.physical.source_snapshot(&scope).await?,
         code: if clear {
             None
@@ -427,6 +427,11 @@ async fn source_recovery_contract() -> Result<()> {
             .username(&config.database.user)
             .password(&secrets.database_password);
         let mut db = sqlx::PgConnection::connect_with(&options).await?;
+        sqlx::query("UPDATE mokyu_meta SET deployment_mode='single_control'")
+            .execute(&mut db)
+            .await?;
+        quarantine(&stores, storage, repaired.encoding_id, false).await?;
+        quarantine(&stores, storage, repaired.encoding_id, true).await?;
         sqlx::query("UPDATE mokyu_meta SET deployment_mode='cluster'")
             .execute(&mut db)
             .await?;
