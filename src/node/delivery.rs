@@ -73,6 +73,7 @@ pub(crate) async fn response(
     reads: &Arc<Reads>,
     mut prepared: Prepared,
     head: bool,
+    proxy: bool,
     overrides: &HeaderMap,
     memory: Option<OwnedSemaphorePermit>,
     ranges: Option<Vec<std::ops::Range<u64>>>,
@@ -185,6 +186,69 @@ pub(crate) async fn response(
             )
             .parse()?,
         );
+    }
+    if proxy
+        && !head
+        && !partial
+        && !prepared.verify
+        && ranges.is_none()
+        && object.payload == "raw"
+        && encoding == Encoding::Identity
+        && crate::http::delivery::proxy_response(&metadata, &headers)
+        && prepared
+            .reply
+            .policy
+            .as_ref()
+            .map(|v| prepared.material::<read::Policy>(v))
+            .transpose()?
+            .is_some_and(|p| !p.body_cache_enabled)
+        && let Some(version) = &prepared.reply.mapping
+    {
+        let mapping: read::Mapping = prepared.material(version)?;
+        if let [segment] = mapping.segments.as_slice()
+            && mapping.stream == object.id
+            && mapping.revision == object.revision
+            && mapping.start == 0
+            && mapping.end == object.size
+            && segment.offset == 0
+            && segment.source_offset == 0
+            && segment.length == object.size
+            && let read::Source::Raw { source } = &segment.source
+            && source.size == object.size
+            && !source.pending_upload
+            && source.medium == "shared_s3"
+        {
+            let backend = prepared.backend(source.storage_id)?;
+            let profile = &backend.profile;
+            if profile.file_delivery == "x_accel_redirect"
+                && profile.cache_enabled
+                && profile.read_integrity != "inline"
+            {
+                source.validate()?;
+                reads.reader.files.initialize().await?;
+                use crate::storage::raw_partial::Shelf;
+                if reads.reader.files.files().delivery_raw(source).await? {
+                    prepared.check()?;
+                    crate::http::delivery::handoff(profile, source.location_id, &mut headers)?;
+                    if let Some(demand) = segment.source.demand() {
+                        reads.node.access.demand(
+                            &mut Default::default(),
+                            demand,
+                            object.size as usize,
+                            false,
+                        );
+                    }
+                    return Ok(object::Read {
+                        status,
+                        headers,
+                        body: None,
+                        metadata,
+                        checksums: object.checksums,
+                        partial,
+                    });
+                }
+            }
+        }
     }
     let body = if head {
         None

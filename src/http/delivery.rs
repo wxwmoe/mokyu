@@ -47,7 +47,7 @@ pub(crate) async fn prepare(
     checksum: bool,
     headers: &mut HeaderMap,
 ) -> Result<bool> {
-    if app.role != "single" || stream.payload_type != "raw" {
+    if stream.payload_type != "raw" {
         return Ok(false);
     }
     let Some(row) = crate::app::reads::raw(stream.id, stream.payload_revision) else {
@@ -59,39 +59,105 @@ pub(crate) async fn prepare(
     }
     let eligible = !head
         && !checksum
-        && !super::object::conditional(request)
-        && !request.contains_key(header::RANGE)
-        && !request.contains_key(header::IF_RANGE)
-        && !headers.contains_key(header::CONTENT_ENCODING)
-        && metadata.user.as_ref().is_none_or(|user| user.is_empty())
+        && proxy_request(request, &profile.file_delivery)
+        && proxy_response(metadata, headers)
         && profile.read_integrity != "inline"
-        && row.source.medium == "local"
         && !row.source.pending_upload
-        && complete(&row, stream.size)
-        && request
-            .get("x-mokyu-file-delivery")
-            .is_some_and(|value| value.as_bytes() == profile.file_delivery.as_bytes());
+        && complete(&row, stream.size);
     if !eligible {
         app.file_delivery.fallback.fetch_add(1, Relaxed);
         return Ok(false);
     }
     row.validate()?;
-    // This checks location, file type and length without reading the body; the proxy opens its own fd.
-    let reader = app.storage.raw_reader(&row.source, false).await?;
-    if matches!(reader.file, crate::storage::raw::RawFile::Memory { .. }) {
-        app.file_delivery.fallback.fetch_add(1, Relaxed);
-        return Ok(false);
-    }
-    app.storage.check_delivery_directory(&row.source).await?;
+    let address = match row.source.medium.as_str() {
+        "local" => {
+            let reader = app.storage.raw_reader(&row.source, false).await?;
+            if matches!(reader.file, crate::storage::raw::RawFile::Memory { .. }) {
+                app.file_delivery.fallback.fetch_add(1, Relaxed);
+                return Ok(false);
+            }
+            app.storage.check_delivery_directory(&row.source).await?;
+            row.source.address()
+        }
+        "shared_s3"
+            if profile.file_delivery == "x_accel_redirect"
+                && profile.cache_enabled
+                && app.storage.file_cache().delivery_raw(&row.source).await? =>
+        {
+            row.source.location_id
+        }
+        _ => {
+            app.file_delivery.fallback.fetch_add(1, Relaxed);
+            return Ok(false);
+        }
+    };
     if app.storage.profile(row.source.storage_id)?.revision != profile.revision {
         return Err(
             s3s::s3_error!(ServiceUnavailable, "file delivery settings changed; retry").into(),
         );
     }
+    handoff(&profile, address, headers)?;
+    if row.source.medium == "shared_s3" {
+        app.storage.access.demand(
+            &mut Default::default(),
+            crate::model::tiering::Source::Raw(row.source.location_id),
+            stream.size as usize,
+            false,
+        );
+    }
+    if row.source.medium == "local" && profile.read_integrity == "background" {
+        app.read_checks.raw_source(row.source.clone());
+    }
+    if profile.file_delivery == "x_accel_redirect" {
+        &app.file_delivery.accel
+    } else {
+        &app.file_delivery.sendfile
+    }
+    .fetch_add(1, Relaxed);
+    app.file_delivery
+        .bytes
+        .fetch_add(stream.size as u64, Relaxed);
+    Ok(true)
+}
+
+fn complete(row: &RawRange, size: i64) -> bool {
+    row.offset_bytes == 0 && row.source_offset == 0 && row.length == size && row.source.size == size
+}
+
+pub(crate) fn proxy_request(headers: &HeaderMap, mode: &str) -> bool {
+    headers
+        .get("x-mokyu-file-delivery")
+        .is_some_and(|value| value.as_bytes() == mode.as_bytes())
+        && !super::object::conditional(headers)
+        && !headers.contains_key(header::RANGE)
+        && !headers.contains_key(header::IF_RANGE)
+        && !headers.contains_key("x-amz-checksum-mode")
+        && !super::compression::no_transform(headers)
+}
+
+pub(crate) fn proxy_response(metadata: &Metadata, headers: &HeaderMap) -> bool {
+    metadata.user.as_ref().is_none_or(|user| user.is_empty())
+        && !metadata
+            .cache_control
+            .as_deref()
+            .is_some_and(super::compression::no_transform_value)
+        && metadata.content_encoding.is_none()
+        && !headers.contains_key(header::CONTENT_ENCODING)
+        && !super::compression::no_transform(headers)
+}
+
+pub(crate) fn handoff(
+    profile: &crate::storage::profile::StorageProfile,
+    address: uuid::Uuid,
+    headers: &mut HeaderMap,
+) -> Result<()> {
     let value = format!(
         "{}{}",
-        profile.file_delivery_prefix.as_deref().unwrap(),
-        crate::storage::chunk_name(row.source.address())
+        profile
+            .file_delivery_prefix
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("missing delivery prefix"))?,
+        crate::storage::chunk_name(address)
     );
     let name = if profile.file_delivery == "x_accel_redirect" {
         "x-accel-redirect"
@@ -114,21 +180,5 @@ pub(crate) async fn prepare(
             }
         }
     }
-    if profile.read_integrity == "background" {
-        app.read_checks.raw_source(row.source.clone());
-    }
-    if name == "x-accel-redirect" {
-        &app.file_delivery.accel
-    } else {
-        &app.file_delivery.sendfile
-    }
-    .fetch_add(1, Relaxed);
-    app.file_delivery
-        .bytes
-        .fetch_add(stream.size as u64, Relaxed);
-    Ok(true)
-}
-
-fn complete(row: &RawRange, size: i64) -> bool {
-    row.offset_bytes == 0 && row.source_offset == 0 && row.length == size && row.source.size == size
+    Ok(())
 }

@@ -193,6 +193,8 @@ fn late_read_policy_keeps_its_reply_without_replacing_current_policy() {
             storage_id: storage,
             revision,
             cors_cache_enabled: true,
+            http_compression_enabled: true,
+            body_cache_enabled: true,
             public_cache_enabled: true,
             refresh_seconds: 1,
             max_age_seconds: 5,

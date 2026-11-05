@@ -17,7 +17,111 @@ pub(crate) struct Files<'a> {
     pub(crate) cache_writes: &'a Mutex<()>,
 }
 
+#[derive(PartialEq)]
+struct RawStamp {
+    digest: [u8; 16],
+    modified: std::time::SystemTime,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64),
+}
+
+pub(crate) struct RawProof {
+    stamp: RawStamp,
+    checked: tokio::sync::OnceCell<bool>,
+}
+
 impl Files<'_> {
+    // A restored raw entry has only a length. Verify it once per file before handing it to a proxy.
+    pub(crate) async fn delivery_raw(&self, source: &crate::model::raw::RawSource) -> Result<bool> {
+        let id = source.location_id;
+        let Some((pin, CacheFile::Raw)) = self.pin(id).await else {
+            return Ok(false);
+        };
+        let Some(digest) = source
+            .digest
+            .as_deref()
+            .and_then(|hash| hash.try_into().ok())
+        else {
+            return Ok(false);
+        };
+        let path = CacheFile::Raw.path(self.root, id);
+        for directory in path.ancestors().skip(1).take(3) {
+            match tokio::fs::symlink_metadata(directory).await {
+                Ok(meta) => ensure!(meta.is_dir(), "invalid raw cache directory"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let verified = async {
+            let meta = tokio::fs::symlink_metadata(&path).await?;
+            ensure!(
+                meta.is_file() && meta.len() == source.size as u64,
+                "invalid raw cache file"
+            );
+            let modified = meta.modified()?;
+            #[cfg(unix)]
+            let identity = {
+                use std::os::unix::fs::MetadataExt;
+                (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec())
+            };
+            let proof = {
+                let mut fifo = self.fifo.lock().await;
+                let entry = fifo
+                    .entries
+                    .get_mut(&id)
+                    .filter(|entry| entry.valid && Arc::ptr_eq(&entry.pins, &pin.0))
+                    .ok_or_else(|| anyhow::anyhow!("raw cache entry changed"))?;
+                let stamp = RawStamp {
+                    digest,
+                    modified,
+                    #[cfg(unix)]
+                    identity,
+                };
+                if let Some(proof) = &entry.delivery
+                    && proof.stamp == stamp
+                {
+                    proof.clone()
+                } else {
+                    let proof = Arc::new(RawProof {
+                        stamp,
+                        checked: Default::default(),
+                    });
+                    entry.delivery = Some(proof.clone());
+                    proof
+                }
+            };
+            Ok::<_, anyhow::Error>(
+                *proof
+                    .checked
+                    .get_or_try_init(|| async {
+                        let _io = self.disk.io.acquire().await?;
+                        let mut file =
+                            super::raw::RawFile::Local(tokio::fs::File::open(&path).await?);
+                        Ok::<_, anyhow::Error>(
+                            super::raw::verify_file(&mut file, source, None)
+                                .await
+                                .is_ok(),
+                        )
+                    })
+                    .await?,
+            )
+        }
+        .await
+        .unwrap_or(false);
+        if !verified {
+            // A pending file with this ID must never be invalidated by a stale cache proof.
+            if let Some(entry) = self.fifo.lock().await.entries.get_mut(&id)
+                && Arc::ptr_eq(&entry.pins, &pin.0)
+            {
+                entry.valid = false;
+            }
+            let expected = pin.0.clone();
+            drop(pin);
+            let _ = self.invalidate(id, Some(&expected)).await;
+        }
+        Ok(verified)
+    }
+
     pub(crate) async fn pin(&self, id: Uuid) -> Option<(CachePin, CacheFile)> {
         let mut fifo = self.fifo.lock().await;
         let entry = fifo.entries.get_mut(&id)?;
@@ -360,6 +464,56 @@ mod tests {
             io: Arc::new(Semaphore::new(1)),
             pending: std::sync::Mutex::new(HashSet::new()),
         })
+    }
+
+    #[tokio::test]
+    async fn proxy_checks_complete_cache_files_before_delivery() -> Result<()> {
+        use md5::{Digest, Md5};
+        let root = std::env::temp_dir().join(format!("mokyu-delivery-{}", Uuid::new_v4()));
+        let disk = disk(&root);
+        disk.initialize().await?;
+        let fifo = Mutex::new(Fifo::default());
+        let writes = Mutex::new(());
+        let files = Files {
+            disk: &disk,
+            root: &root,
+            fifo: &fifo,
+            cache_writes: &writes,
+        };
+        let id = Uuid::new_v4();
+        let source = crate::model::raw::RawSource {
+            id: 1.into(),
+            location_id: id,
+            address: Some(Uuid::new_v4()),
+            storage_id: Uuid::new_v4(),
+            size: 4,
+            digest: Some(Md5::digest(b"data").to_vec()),
+            state: "ready".into(),
+            medium: "shared_s3".into(),
+            pending_upload: false,
+            revision: 1,
+            quarantine_code: None,
+        };
+        assert!(!files.delivery_raw(&source).await?);
+        for format in [CacheFile::PartialRaw, CacheFile::PendingRaw] {
+            fifo.lock().await.insert(id, 4, format);
+            assert!(!files.delivery_raw(&source).await?);
+            fifo.lock().await.remove(id);
+        }
+        let path = CacheFile::Raw.path(&root, id);
+        tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+        tokio::fs::write(&path, b"data").await?;
+        disk.reserve(Area::Cache, 4)?.commit();
+        fifo.lock().await.insert(id, 4, CacheFile::Raw);
+        assert!(files.delivery_raw(&source).await?);
+        assert!(files.delivery_raw(&source).await?);
+        let replacement = path.with_extension("tmp");
+        tokio::fs::write(&replacement, b"oops").await?;
+        tokio::fs::rename(replacement, &path).await?;
+        assert!(!files.delivery_raw(&source).await?);
+        assert!(files.pin(id).await.is_none());
+        tokio::fs::remove_dir_all(root).await?;
+        Ok(())
     }
 
     #[tokio::test]

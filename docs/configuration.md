@@ -124,7 +124,8 @@ runtime section 使用 revision 乐观并发。冲突返回当前 revision；重
 
 profile 是类型化字段，不是任意 JSON。字段包括：
 
-- `file_delivery` 默认 `application`；仅 local 可选 `x_accel_redirect` / `x_sendfile`，同时必须提供 `file_delivery_prefix`。前缀是代理内部 URI 或所见绝对目录，规范化为尾部 `/`，仅接受 3–512 字节的安全 ASCII 路径，拒绝根目录、点段、重复斜杠、编码字符及查询串。application 的前缀必须为 null；S3 不接受代理交付。开启后该存储不使用正文读缓存，回退请求仍流式读取，其他存储的缓存不受影响；预设不改变交付配置。条件、响应头、只读挂载与回收回退见[代理文件交付](local-nginx-deployment.md)
+- `file_delivery` 默认 `application`。开启 CDC 时使用应用流式交付。raw 本地存储可选 `x_accel_redirect` 或 `x_sendfile`，S3 存储可选 `x_accel_redirect` 交付服务节点的完整读缓存。代理交付须指定安全的绝对 `file_delivery_prefix`，应用交付的前缀为 null。代理模式关闭正文内存缓存，缓存未命中时由程序流式读取。[代理文件交付](local-nginx-deployment.md)
+- `http_compression_enabled` 默认 true，控制应用对公共 Web 和匿名 S3 的 HTTP 响应压缩。代理交付时必须为 false，对象存储的区块压缩由 `compression_enabled` 单独控制
 - `deduplication_enabled` 默认 false，仅控制 raw 的整文件去重；chunks 固定启用区块去重。更改仅影响新写入；关闭不会拆开已有共享文件；
 - `write_durability` 仅单容器可选，默认 `durable`。`buffered` 等待 local chunks/raw 或 S3 写缓存写完文件并提交映射，后台再同步磁盘。`volatile` 可用于本地 raw 和开启写缓存的 S3。普通部署通过 `instance.write_memory_size` 分配额度，testing 默认使用预算内最多 64 MiB。本地 raw 的普通 PUT 在关闭去重、已知长度且不超过 8 MiB 时可从 RAM 确认，正文与文件余量均计费。其他请求及额度不足时走文件。普通预设的取值见下表。
 - 最近的 buffered 写可能在系统故障时丢失，只在 RAM 中的 volatile 写可能在进程异常退出时丢失。SQLite 的同步设置独立生效。重启按原映射核验文件并隔离缺失来源。Multipart 分片、复制、迁移及显式排空沿用持久屏障。查看 `cli cache status` 的 `buffered_files.volatile`、`write_memory` 和 `fallbacks`，使用 `cli cache flush --wait` 等待排空。保存本地 volatile 策略的变更时会先等待在途接收并同步该后端的内存正文。

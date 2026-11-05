@@ -3733,6 +3733,7 @@ export interface components {
             deleted_chunk_retention: string;
             file_delivery?: string;
             file_delivery_prefix?: string | null;
+            http_compression_enabled?: boolean;
             integrity_bandwidth?: string | null;
             integrity_batch_timeout: string;
             integrity_byte_budget?: string | null;

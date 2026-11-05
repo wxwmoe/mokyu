@@ -104,6 +104,7 @@ pub(crate) struct Entry {
     pub(crate) pins: Arc<AtomicUsize>,
     pub(crate) queue: Queue,
     pub(crate) valid: bool,
+    pub(crate) delivery: Option<Arc<super::file_cache::RawProof>>,
 }
 pub(crate) struct CachePin(pub(crate) Arc<AtomicUsize>);
 impl Drop for CachePin {
@@ -348,6 +349,7 @@ impl Fifo {
                 pins: Arc::new(AtomicUsize::new(0)),
                 queue,
                 valid: true,
+                delivery: None,
             },
         );
     }

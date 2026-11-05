@@ -575,7 +575,7 @@ impl Reads {
                 &object,
                 &[],
             )?);
-            query.select(stream, &mut reply)?;
+            query.select(stream, &mut reply, Some(&policy))?;
             if !query.head && !reply.body_reused {
                 return Ok(None);
             }

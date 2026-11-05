@@ -75,6 +75,7 @@ impl PreparedRequest {
 }
 
 struct RequestRead {
+    proxy: bool,
     route: ReadRoute,
     input: wire::ReadRequest,
     prepared: Prepared,
@@ -272,6 +273,9 @@ impl Gateway {
             self.reads.open(input.clone()).await?
         };
         Ok(RequestRead {
+            proxy: anonymous
+                && !head
+                && super::delivery::proxy_request(&headers, "x_accel_redirect"),
             route: read_route,
             input,
             prepared,
@@ -307,6 +311,7 @@ impl Gateway {
             &self.reads,
             request.prepared,
             head,
+            request.proxy,
             overrides,
             request.compression,
             None,
@@ -394,6 +399,7 @@ impl Gateway {
                 let response = delivery::response(
                     &reads,
                     request.prepared,
+                    false,
                     false,
                     &HeaderMap::new(),
                     None,

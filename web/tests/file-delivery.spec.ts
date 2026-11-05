@@ -31,6 +31,8 @@ test('local proxy delivery and prefixes are explicit drafts independent of I/O p
       const editor = page.getByRole('dialog', { name: text.editStore, exact: true })
       await openStorageGroup(editor)
       const mode = editor.getByRole('combobox', { name: text.profile_file_delivery, exact: true })
+      await expect(mode).toBeDisabled()
+      await editor.getByRole('switch', { name: text.profile_cdc_enabled, exact: true }).click()
       await expect(mode).toContainText(text.storeDelivery_application)
       await expect(editor.getByRole('textbox', { name: text.profile_file_delivery_prefix, exact: true })).toHaveCount(0)
       for (const option of [text.storeDelivery_x_accel_redirect, text.storeDelivery_x_sendfile]) {
@@ -40,6 +42,7 @@ test('local proxy delivery and prefixes are explicit drafts independent of I/O p
         await page.getByRole('option', { name: option, exact: true }).focus()
         await page.keyboard.press('Enter')
         const prefix = editor.getByRole('textbox', { name: text.profile_file_delivery_prefix, exact: true })
+        await expect(editor.getByRole('switch', { name: text.profile_http_compression_enabled, exact: true })).toBeDisabled()
         await prefix.fill(option === text.storeDelivery_x_accel_redirect ? '/_mokyu_raw/' : '/srv/raw/')
         await expect(editor.getByText(text.storeDeliveryHint, { exact: true })).toBeVisible()
         for (const width of [1440, 768, 640, 390, 320]) {
@@ -57,6 +60,7 @@ test('local proxy delivery and prefixes are explicit drafts independent of I/O p
   const editor = page.getByRole('dialog', { name: ja.editStore, exact: true })
   await openStorageGroup(editor)
   const mode = editor.getByRole('combobox', { name: ja.profile_file_delivery, exact: true })
+  await editor.getByRole('switch', { name: ja.profile_cdc_enabled, exact: true }).click()
   await mode.click()
   await page.getByRole('option', { name: ja.storeDelivery_x_accel_redirect, exact: true }).click()
   await editor.getByRole('textbox', { name: ja.profile_file_delivery_prefix, exact: true }).fill('/_mokyu_raw')

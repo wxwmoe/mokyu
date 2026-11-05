@@ -189,7 +189,12 @@ impl Query {
         Ok(*blake3::hash(&bytes).as_bytes())
     }
 
-    pub(crate) fn select(&self, stream: &StoredStream, reply: &mut Reply) -> Result<()> {
+    pub(crate) fn select(
+        &self,
+        stream: &StoredStream,
+        reply: &mut Reply,
+        policy: Option<&Policy>,
+    ) -> Result<()> {
         use crate::http::{compression::Encoding, gateway, object};
         use axum::http::header;
         let encoding = if self.access.is_some() {
@@ -204,7 +209,7 @@ impl Query {
                 &self.headers,
                 &headers,
                 self.headers.contains_key("x-amz-checksum-mode"),
-                false,
+                !policy.is_some_and(|p| p.http_compression_enabled),
             ) else {
                 reply.outcome = Outcome::NotAcceptable;
                 reply.http_status = 406;
@@ -257,7 +262,8 @@ impl Query {
         };
         reply.offset = span.start;
         reply.length = span.end - span.start;
-        reply.body_reused = !self.head
+        reply.body_reused = policy.is_none_or(|p| p.body_cache_enabled)
+            && !self.head
             && self.body.as_ref().is_some_and(|body| {
                 reply.object.as_ref() == Some(&body.object)
                     && (body.representation == reply.representation
@@ -475,6 +481,8 @@ pub(crate) struct Policy {
     pub(crate) revision: i64,
     pub(crate) cors_cache_enabled: bool,
     pub(crate) public_cache_enabled: bool,
+    pub(crate) http_compression_enabled: bool,
+    pub(crate) body_cache_enabled: bool,
     pub(crate) refresh_seconds: u64,
     pub(crate) max_age_seconds: u64,
     pub(crate) read_integrity: String,
@@ -491,6 +499,8 @@ impl TryFrom<&StorageProfile> for Policy {
             cors_cache_enabled: profile.cors_cache_enabled
                 || profile.public_cache_validation == "background",
             public_cache_enabled: profile.public_cache_validation == "background",
+            http_compression_enabled: profile.http_compression_enabled,
+            body_cache_enabled: profile.file_delivery == "application",
             refresh_seconds: refresh,
             max_age_seconds: age,
             read_integrity: profile.read_integrity.clone(),

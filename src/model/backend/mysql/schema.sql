@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261103205120.
+-- Generated from the complete mysql migration chain through 20261105213227.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1574,6 +1574,7 @@ CREATE TABLE `storage_profiles` (
   `file_delivery` varchar(32) COLLATE ascii_bin NOT NULL DEFAULT 'application',
   `file_delivery_prefix` varchar(512) COLLATE ascii_bin DEFAULT NULL,
   `cors_cache_enabled` tinyint(1) NOT NULL DEFAULT '0',
+  `http_compression_enabled` tinyint(1) NOT NULL DEFAULT '1',
   PRIMARY KEY (`storage_id`),
   CONSTRAINT `storage_profiles_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE,
   CONSTRAINT `storage_background_scheduling` CHECK ((`background_scheduling` in (_ascii'balanced',_ascii'foreground'))),

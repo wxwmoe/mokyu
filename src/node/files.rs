@@ -307,7 +307,7 @@ impl Cache {
         })
     }
 
-    async fn initialize(&self) -> Result<()> {
+    pub(super) async fn initialize(&self) -> Result<()> {
         self.ready
             .get_or_try_init(|| async {
                 self.disk.initialize().await?;

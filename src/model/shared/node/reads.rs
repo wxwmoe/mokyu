@@ -198,13 +198,14 @@ pub(super) async fn open_in(
     if input.policy {
         include.push(MaterialType::Policy);
     }
-    let (mut reply, bucket) = super::node_requests::materials(
+    let (mut reply, bucket, policy) = super::node_requests::materials(
         tx,
         state,
         key,
         input.access.as_deref(),
         Some(&input.route),
         &include,
+        input.access.is_none(),
         &input.cached,
     )
     .await?;
@@ -260,7 +261,7 @@ pub(super) async fn open_in(
         &object,
         &input.cached,
     )?);
-    input.select(&stream, &mut reply)?;
+    input.select(&stream, &mut reply, policy.as_ref())?;
     if reply.body_reused {
         reply.body_reused = match node_read_body_matches(
             tx,

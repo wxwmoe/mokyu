@@ -431,12 +431,17 @@ async fn load(
                     bucket,
                     &request.input.cached,
                 )?);
-                if let Some(profile) = bucket.storage_id.and_then(|id| profiles.get(&id)) {
+                let policy = bucket
+                    .storage_id
+                    .and_then(|id| profiles.get(&id))
+                    .map(read::Policy::try_from)
+                    .transpose()?;
+                if let Some(policy) = &policy {
                     reply.policy = Some(reply.material(
                         deployment,
                         read::MaterialType::Policy,
-                        profile.storage_id.to_string(),
-                        &read::Policy::try_from(profile)?,
+                        policy.storage_id.to_string(),
+                        policy,
                         &request.input.cached,
                     )?);
                 }
@@ -454,7 +459,7 @@ async fn load(
                             &object,
                             &request.input.cached,
                         )?);
-                        query.select(stream, &mut reply)?;
+                        query.select(stream, &mut reply, policy.as_ref())?;
                         if reply.body_reused {
                             let body = query.body.as_ref().unwrap();
                             reply.body_reused = false;

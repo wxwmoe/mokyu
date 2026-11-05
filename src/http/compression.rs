@@ -51,30 +51,13 @@ impl AcceptEncoding {
             let Ok(value) = value.to_str() else { continue };
             for item in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
                 present = true;
-                let mut parts = item.split(';');
-                let name = parts.next().unwrap().trim();
+                let (name, weight) = weighted_coding(item);
                 let Some(index) = ["zstd", "br", "gzip", "identity", "*"]
                     .iter()
                     .position(|s| name.eq_ignore_ascii_case(s))
                 else {
                     continue;
                 };
-                let mut weight = Some(1000);
-                let mut parameter = false;
-                for part in parts {
-                    if parameter {
-                        weight = None;
-                        break;
-                    }
-                    parameter = true;
-                    weight = part.trim().split_once('=').and_then(|(key, value)| {
-                        key.trim()
-                            .eq_ignore_ascii_case("q")
-                            .then(|| quality(value.trim()))
-                            .flatten()
-                    });
-                }
-                let weight = weight.unwrap_or(0);
                 // A duplicate exclusion wins, including a malformed explicit weight.
                 weights[index] = Some(weights[index].map_or(weight, |old: u16| old.min(weight)));
             }
@@ -115,6 +98,44 @@ impl AcceptEncoding {
             (self.identity() && available(Encoding::Identity)).then_some(Encoding::Identity)
         })
     }
+}
+
+fn weighted_coding(item: &str) -> (&str, u16) {
+    let mut parts = item.trim().split(';');
+    let name = parts.next().unwrap().trim();
+    let Some(parameter) = parts.next() else {
+        return (name, 1000);
+    };
+    let weight = parameter.split_once('=').and_then(|(key, value)| {
+        (parts.next().is_none() && key.trim().eq_ignore_ascii_case("q"))
+            .then(|| quality(value.trim()))
+            .flatten()
+    });
+    (name, weight.unwrap_or(0))
+}
+
+pub(crate) fn accepts_stored(request: &HeaderMap, codings: &str) -> bool {
+    codings.split(',').all(|coding| {
+        let mut explicit = None;
+        let mut wildcard = None;
+        for field in request
+            .get_all(header::ACCEPT_ENCODING)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+        {
+            for (name, weight) in field.split(',').map(weighted_coding) {
+                let slot = if name.eq_ignore_ascii_case(coding.trim()) {
+                    &mut explicit
+                } else if name == "*" {
+                    &mut wildcard
+                } else {
+                    continue;
+                };
+                *slot = Some(slot.map_or(weight, |old: u16| old.min(weight)));
+            }
+        }
+        !coding.trim().is_empty() && explicit.or(wildcard).is_some_and(|weight| weight > 0)
+    })
 }
 
 fn quality(value: &str) -> Option<u16> {
@@ -209,8 +230,13 @@ pub(crate) fn no_transform(headers: &HeaderMap) -> bool {
         .get_all(header::CACHE_CONTROL)
         .iter()
         .filter_map(|v| v.to_str().ok())
-        .flat_map(|v| v.split(','))
-        .any(|v| v.trim().eq_ignore_ascii_case("no-transform"))
+        .any(no_transform_value)
+}
+
+pub(crate) fn no_transform_value(value: &str) -> bool {
+    value
+        .split(',')
+        .any(|part| part.trim().eq_ignore_ascii_case("no-transform"))
 }
 
 pub(crate) fn encoded_headers(headers: &mut HeaderMap, encoding: Encoding) {

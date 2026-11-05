@@ -72,7 +72,14 @@ impl Reads {
         encoding: Encoding,
         headers: &HeaderMap,
     ) -> Result<Option<Builder>> {
-        if prepared.reply.http_status != 200
+        if prepared
+            .reply
+            .policy
+            .as_ref()
+            .map(|version| prepared.material::<read::Policy>(version))
+            .transpose()?
+            .is_some_and(|p| !p.body_cache_enabled)
+            || prepared.reply.http_status != 200
             || !object::cacheable(headers)
             || prepared.reply.offset != 0
             || prepared.reply.length != object.size as u64

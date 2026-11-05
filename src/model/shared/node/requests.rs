@@ -15,8 +15,9 @@ pub(super) async fn materials(
     access: Option<&str>,
     route: Option<&crate::model::ReadRoute>,
     include: &[read::MaterialType],
+    read_policy: bool,
     cached: &[read::Version],
-) -> Result<(read::Reply, Option<Bucket>)> {
+) -> Result<(read::Reply, Option<Bucket>, Option<read::Policy>)> {
     let mut reply = read::Reply::new(read::Outcome::Ready);
     if include.contains(&read::MaterialType::Credential)
         && let Some(access) = access
@@ -26,7 +27,7 @@ pub(super) async fn materials(
             .await?
         else {
             reply.outcome = read::Outcome::AccessDenied;
-            return Ok((reply, None));
+            return Ok((reply, None, None));
         };
         let credential = read::Credential {
             access: access.to_owned(),
@@ -45,11 +46,11 @@ pub(super) async fn materials(
         include.contains(&read::MaterialType::Bucket)
             || include.contains(&read::MaterialType::Policy)
     }) else {
-        return Ok((reply, None));
+        return Ok((reply, None, None));
     };
     let Some(bucket) = q::node_read_bucket(route).fetch_optional(&mut *db).await? else {
         reply.outcome = read::Outcome::NoSuchBucket;
-        return Ok((reply, None));
+        return Ok((reply, None, None));
     };
     if include.contains(&read::MaterialType::Bucket) {
         reply.bucket = Some(reply.material(
@@ -60,19 +61,24 @@ pub(super) async fn materials(
             cached,
         )?);
     }
-    if include.contains(&read::MaterialType::Policy)
+    let mut policy = None;
+    if (read_policy || include.contains(&read::MaterialType::Policy))
         && let Some(storage) = bucket.storage_id
         && let Some(profile) = q::storage_profile(storage).fetch_optional(&mut *db).await?
     {
-        reply.policy = Some(reply.material(
-            node.deployment_id,
-            read::MaterialType::Policy,
-            storage.to_string(),
-            &read::Policy::try_from(&profile)?,
-            cached,
-        )?);
+        let value = read::Policy::try_from(&profile)?;
+        if include.contains(&read::MaterialType::Policy) {
+            reply.policy = Some(reply.material(
+                node.deployment_id,
+                read::MaterialType::Policy,
+                storage.to_string(),
+                &value,
+                cached,
+            )?);
+        }
+        policy = Some(value);
     }
-    Ok((reply, Some(bucket)))
+    Ok((reply, Some(bucket), policy))
 }
 
 #[async_trait::async_trait]
@@ -104,13 +110,14 @@ impl NodeRequests for Backend {
         input.validate()?;
         let mut tx = q::begin(self).await?;
         q::admit(self, &mut tx, node, key, input.run).await?;
-        let (mut context, bucket) = materials(
+        let (mut context, bucket, _) = materials(
             &mut tx,
             node,
             key,
             input.access.as_deref(),
             input.route.as_ref(),
             &input.include,
+            false,
             &input.cached,
         )
         .await?;

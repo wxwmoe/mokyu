@@ -9,7 +9,7 @@ use uuid::Uuid;
 pub(crate) struct StorageProfile {
     pub storage_id: Uuid,
     pub revision: i64,
-    #[serde(default = "cdc_enabled")]
+    #[serde(default = "enabled")]
     pub cdc_enabled: bool,
     #[serde(default)]
     pub deduplication_enabled: bool,
@@ -37,6 +37,8 @@ pub(crate) struct StorageProfile {
     pub source_validation_max_age: String,
     #[serde(default = "write_processing")]
     pub read_integrity: String,
+    #[serde(default = "enabled")]
+    pub http_compression_enabled: bool,
     #[serde(default = "file_delivery")]
     pub file_delivery: String,
     #[serde(default, deserialize_with = "delivery_prefix")]
@@ -129,7 +131,7 @@ fn valid_delivery_prefix(prefix: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-fn cdc_enabled() -> bool {
+fn enabled() -> bool {
     true
 }
 
@@ -346,7 +348,10 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         if profile.file_delivery == "application" {
             profile.file_delivery_prefix.is_none()
         } else {
-            storage_type == "local"
+            !profile.cdc_enabled
+                && !profile.http_compression_enabled
+                && (storage_type == "local"
+                    || storage_type == "s3" && profile.file_delivery == "x_accel_redirect")
                 && profile
                     .file_delivery_prefix
                     .as_deref()
@@ -354,7 +359,7 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         },
         s3s::s3_error!(
             InvalidArgument,
-            "proxy file delivery requires local storage and a safe absolute directory prefix"
+            "proxy delivery requires raw storage, disabled HTTP compression and a safe absolute prefix; S3 supports X-Accel-Redirect only"
         )
     );
     profile.public_cache_times()?;

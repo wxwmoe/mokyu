@@ -146,10 +146,22 @@ pub(crate) fn representation(
     force_identity: bool,
 ) -> Option<Encoding> {
     let accept = AcceptEncoding::new(request);
+    if !accept.identity()
+        && let Some(codings) = headers
+            .get(header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+        && compression::accepts_stored(request, codings)
+    {
+        // Identity here preserves the object's own Content-Encoding and strong ETag.
+        return Some(Encoding::Identity);
+    }
     let transform = !checksum
         && !compression::no_transform(request)
         && !compression::no_transform(headers)
-        && !compression::no_transform(&metadata_headers(metadata).ok()?)
+        && !metadata
+            .cache_control
+            .as_deref()
+            .is_some_and(compression::no_transform_value)
         && !headers.contains_key(header::CONTENT_ENCODING)
         && metadata.content_encoding.is_none();
     let prefer_identity = accept.identity()
@@ -284,7 +296,15 @@ pub(crate) async fn read(
     let accept = AcceptEncoding::new(request);
     let light = head || conditional(request);
     let public_snapshot = crate::app::reads::cached(bucket, key);
-    let cache_allowed = super::delivery::body_cache(app, bucket, key, bucket_info.storage_id);
+    let policy = bucket_info
+        .storage_id
+        .map(|id| app.storage.profile(id))
+        .transpose()?;
+    let proxy_delivery = policy
+        .as_ref()
+        .is_some_and(|profile| profile.file_delivery != "application");
+    let cache_allowed =
+        !proxy_delivery && super::delivery::body_cache(app, bucket, key, bucket_info.storage_id);
     let candidate = if cache_allowed
         && public_snapshot.is_none()
         && !light
@@ -334,7 +354,7 @@ pub(crate) async fn read(
         let (stream, pin) = app.current(bucket, key).await?;
         (stream, Some(pin))
     };
-    let mut force_identity = false;
+    let mut force_identity = policy.is_some_and(|profile| !profile.http_compression_enabled);
     loop {
         if !stream.public_read {
             return Err(s3s::s3_error!(AccessDenied).into());
@@ -419,16 +439,17 @@ pub(crate) async fn read(
             encoding: encoding.name(),
             policy: POLICY,
         };
-        if super::delivery::prepare(
-            app,
-            &stream,
-            &metadata,
-            request,
-            head,
-            checksum,
-            &mut headers,
-        )
-        .await?
+        if proxy_delivery
+            && super::delivery::prepare(
+                app,
+                &stream,
+                &metadata,
+                request,
+                head,
+                checksum,
+                &mut headers,
+            )
+            .await?
         {
             return Ok(Read {
                 status: StatusCode::OK,

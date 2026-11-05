@@ -1932,7 +1932,7 @@ impl Storage {
     pub(crate) async fn invalidate(&self, id: Uuid) -> Result<()> {
         self.invalidate_entry(id, None).await
     }
-    fn file_cache(&self) -> file_cache::Files<'_> {
+    pub(crate) fn file_cache(&self) -> file_cache::Files<'_> {
         file_cache::Files {
             disk: &self.disk,
             root: &self.disk.root,

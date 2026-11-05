@@ -94,6 +94,9 @@ for source in sources:
     assert response.status_code == 200 and data == original and 'content-encoding' not in response.headers
     response, data = wire(source, key='encoded')
     assert response.status_code == 200 and data == stored and response.headers['content-encoding'] == 'gzip' and not response.headers['etag'].startswith('W/')
+    response, data = wire(source, key='encoded', encoding='gzip, identity;q=0')
+    assert response.status_code == 200 and response.headers['content-encoding'] == 'gzip' and data == stored
+    assert wire(source, key='encoded', encoding='gzip;q=0, br, identity;q=0')[0].status_code == 406
     response, data = wire(source, key='small')
     assert data == b'small' and 'content-encoding' not in response.headers
     assert wire(source, key='private')[0].status_code == 403
@@ -108,7 +111,10 @@ assert requests.get(presigned + '0').status_code in (400, 403)
 response, data = wire(sources[0], **{'X-Amz-Checksum-Mode': 'ENABLED'})
 assert data == original and 'content-encoding' not in response.headers
 response, data = wire(sources[0], query='?' + urlencode({'response-cache-control': 'no-transform'}))
-assert response.status_code == 200 and data == original and 'content-encoding' not in response.headers
+assert response.status_code == 403
+override = client.get_object(Bucket=bucket, Key=prefix + 'text', ResponseCacheControl='no-transform')
+assert override['CacheControl'] == 'no-transform' and not override.get('ContentEncoding')
+assert override['Body'].read() == original
 
 if os.environ.get('MOKYU_TEST_DATABASE_FILE'):
     import psycopg

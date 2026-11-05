@@ -49,7 +49,7 @@ def main():
             draft.write_text(json.dumps(profile))
             cli('storage', 'profile', 'preview', 'primary', str(draft))
             saved = cli('storage', 'profile', 'set', 'primary', str(draft))
-            assert saved['file_delivery'] == 'x_accel_redirect' and not saved['cdc_enabled']
+            assert saved['file_delivery'] == 'x_accel_redirect' and not saved['cdc_enabled'] and not saved['http_compression_enabled']
             cli('bucket', 'create', 'media')
             credentials = cli('cred', 'create', 'media')
             cli('domain', 'set', 'media.example.com:8081', 'media')

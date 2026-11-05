@@ -218,9 +218,14 @@ def main():
             assert original['file_delivery'] == 'application' and original['file_delivery_prefix'] is None
             for prefix in ['/', '//host/', '/a/../b/', '/a/%2e/', '/a\\b/', '/a?b/', '/a\n/', 'relative']:
                 reply = fixture.session.put(fixture.web + base, headers=fixture.headers,
-                    json={**original, 'file_delivery': 'x_accel_redirect', 'file_delivery_prefix': prefix}, timeout=15)
+                    json={**original, 'http_compression_enabled': False, 'file_delivery': 'x_accel_redirect', 'file_delivery_prefix': prefix}, timeout=15)
                 assert reply.status_code == 400, (prefix, reply.text)
-            saved = policy(file_delivery='x_accel_redirect', file_delivery_prefix='/_mokyu_raw')
+            for cdc, compression in ((True, False), (False, True)):
+                reply = fixture.session.put(fixture.web + base, headers=fixture.headers,
+                    json={**original, 'cdc_enabled': cdc, 'http_compression_enabled': compression,
+                          'file_delivery': 'x_accel_redirect', 'file_delivery_prefix': '/_mokyu_raw/'}, timeout=15)
+                assert reply.status_code == 400, (cdc, compression, reply.text)
+            saved = policy(http_compression_enabled=False, file_delivery='x_accel_redirect', file_delivery_prefix='/_mokyu_raw')
             assert saved['file_delivery_prefix'] == '/_mokyu_raw/'
             before = status()['response_cache']['hits']
             assert read(**{'X-Mokyu-File-Delivery': 'x_accel_redirect'}).content == payload, 'inline verification was bypassed'
@@ -247,7 +252,7 @@ def main():
                 os.environ.pop('MOKYU_TEST_BACKEND')
                 profile = remote.cli('storage', 'profile', 'show', remote.name)
                 reply = remote.session.put(remote.web + '/api/v1/storages/' + remote.name + '/profile', headers=remote.headers,
-                    json={**profile, 'file_delivery': 'x_sendfile', 'file_delivery_prefix': '/srv/raw/'}, timeout=15)
+                    json={**profile, 'cdc_enabled': False, 'pack_enabled': False, 'pack_range_enabled': False, 'compression_enabled': False, 'http_compression_enabled': False, 'file_delivery': 'x_sendfile', 'file_delivery_prefix': '/srv/raw/'}, timeout=15)
                 assert reply.status_code == 400, reply.text
 
             if run := os.environ.get('MOKYU_TEST_PROXY_RUN'):
@@ -304,7 +309,8 @@ def main():
                     text = b'compressible response\n' * 8192
                     put('text', body=text, ContentType='text/plain')
                     actual = requests.get(f'http://{proxy}:8080/{fixture.name}/text', headers={'Accept-Encoding': 'gzip'}, timeout=20)
-                    assert actual.content == text and actual.headers['content-encoding'] == 'gzip'
+                    assert actual.content == text
+                    assert actual.headers.get('content-encoding') == ('gzip' if mode == 'x_accel_redirect' else None)
                     fixture.client.put_object_acl(Bucket=fixture.name, Key='text', ACL='private')
                     assert requests.get(f'http://{proxy}:8080/{fixture.name}/text', timeout=20).status_code == 403
                     fixture.client.delete_object(Bucket=fixture.name, Key='text')
