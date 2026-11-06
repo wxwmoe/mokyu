@@ -364,12 +364,22 @@ pub(in super::super) async fn claim_raw_processing(
     token: Uuid,
 ) -> Result<Option<crate::model::raw::RawProcessing>> {
     let mut tx = pool.begin().await?;
-    let Some(stream) = queries::raw_processing_due(single)
+    let Some(stream) = queries::raw_processing_due(single, None)
+        .build_query_scalar::<Id>()
         .fetch_optional(&mut *tx)
         .await?
     else {
         return Ok(None);
     };
+    // Recheck under the same stream-before-work lock order used when processing completes.
+    if queries::raw_processing_due(single, Some(stream))
+        .build_query_scalar::<Id>()
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
     queries::raw_processing_claim(stream, token, single)
         .execute(&mut *tx)
         .await?;

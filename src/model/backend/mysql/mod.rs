@@ -248,3 +248,7 @@ mod source_lock_tests;
 #[cfg(test)]
 #[path = "../../../../tests/recovery/mysql_notices.rs"]
 mod notice_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/recovery/mysql_raw_processing.rs"]
+mod raw_processing_tests;

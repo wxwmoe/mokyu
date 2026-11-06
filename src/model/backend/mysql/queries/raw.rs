@@ -783,8 +783,24 @@ pub(in super::super) fn raw_enqueue_processing(stream: Id, source: Id) -> Statem
     sqlx::query("INSERT INTO raw_processing(stream_id,source_id,payload_revision) SELECT id,?,payload_revision FROM streams WHERE id=?").bind(source).bind(stream)
 }
 
-pub(in super::super) fn raw_processing_due(single: bool) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT w.stream_id FROM raw_processing w JOIN streams s ON s.id=w.stream_id WHERE NOT EXISTS(SELECT 1 FROM mokyu_meta m WHERE m.deployment_mode='single_control' AND m.remote_work) AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=w.source_id) AND s.state<>'writing' AND (s.state<>'ready' OR EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id)) AND w.next_attempt_at<=UTC_TIMESTAMP(6) AND (? OR w.token IS NULL OR w.lease_expires_at<UTC_TIMESTAMP(6)) ORDER BY w.next_attempt_at,w.stream_id LIMIT 1 FOR UPDATE").bind(single)
+pub(in super::super) fn raw_processing_due(
+    single: bool,
+    locked: Option<Id>,
+) -> sqlx::QueryBuilder<MySql> {
+    let mut query = sqlx::QueryBuilder::new(if locked.is_some() {
+        "SELECT w.stream_id FROM streams s FORCE INDEX (PRIMARY) STRAIGHT_JOIN raw_processing w ON w.stream_id=s.id WHERE "
+    } else {
+        "SELECT w.stream_id FROM raw_processing w JOIN streams s ON s.id=w.stream_id WHERE "
+    });
+    if let Some(stream) = locked {
+        query.push("s.id=").push_bind(stream).push(" AND ");
+    }
+    query.push("NOT EXISTS(SELECT 1 FROM mokyu_meta m WHERE m.deployment_mode='single_control' AND m.remote_work) AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=w.source_id) AND s.state<>'writing' AND (s.state<>'ready' OR EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id)) AND w.next_attempt_at<=UTC_TIMESTAMP(6) AND (")
+        .push_bind(single).push(" OR w.token IS NULL OR w.lease_expires_at<UTC_TIMESTAMP(6)) ORDER BY w.next_attempt_at,w.stream_id LIMIT 1");
+    if locked.is_some() {
+        query.push(" FOR UPDATE");
+    }
+    query
 }
 
 pub(in super::super) fn raw_processing_claim(
