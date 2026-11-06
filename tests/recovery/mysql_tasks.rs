@@ -25,6 +25,7 @@ async fn mysql_task_control_contract() -> Result<()> {
     let backend = connection::open(&config, &secrets, &budget, "single").await?;
     let db = &backend.pool;
     let admin = backend.initialize_admin("admin", "password", false).await?;
+    external_task_scope(db).await?;
     let storage = super::storage_tests::fixture(&backend).await?;
     let bucket = BucketStore::create(
         &backend,
@@ -296,5 +297,64 @@ async fn mysql_task_control_contract() -> Result<()> {
     );
     assert!(!backend.other_integrity(sweep).await?);
     assert!(backend.sweep_preview(rewrite).await?.is_none());
+    Ok(())
+}
+
+async fn external_task_scope(db: &sqlx::MySqlPool) -> Result<()> {
+    use super::queries;
+    let mut tx = db.begin().await?;
+    let task = Uuid::new_v4();
+    let node = Uuid::new_v4();
+    sqlx::query("INSERT INTO tasks(id,task_type,state,detail) VALUES(?,'integrity','queued',?)")
+        .bind(task)
+        .bind(json!({"operation":"external_test","source_node":node}))
+        .execute(&mut *tx)
+        .await?;
+    assert!(
+        queries::claim_task_candidate(0, &[], false)
+            .build_query_scalar::<Uuid>()
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none()
+    );
+    sqlx::query("UPDATE mokyu_meta SET remote_work=TRUE WHERE id=1")
+        .execute(&mut *tx)
+        .await?;
+    assert!(
+        queries::work::next_task(0, Uuid::new_v4(), true)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none()
+    );
+    assert_eq!(
+        queries::work::next_task(0, node, true)
+            .fetch_one(&mut *tx)
+            .await?
+            .0,
+        task
+    );
+    sqlx::query("UPDATE tasks SET detail=? WHERE id=?")
+        .bind(json!({"operation":"external_test","source_node":null}))
+        .bind(task)
+        .execute(&mut *tx)
+        .await?;
+    assert_eq!(
+        queries::work::next_task(0, Uuid::new_v4(), true)
+            .fetch_one(&mut *tx)
+            .await?
+            .0,
+        task
+    );
+    sqlx::query("UPDATE mokyu_meta SET remote_work=FALSE WHERE id=1")
+        .execute(&mut *tx)
+        .await?;
+    assert_eq!(
+        queries::claim_task_candidate(0, &[], false)
+            .build_query_scalar::<Uuid>()
+            .fetch_one(&mut *tx)
+            .await?,
+        task
+    );
+    tx.rollback().await?;
     Ok(())
 }
