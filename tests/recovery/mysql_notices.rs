@@ -107,5 +107,32 @@ async fn mysql_notice_receipts_follow_publication_locks() -> Result<()> {
     notices::renew(consumer).execute(pool).await?;
     assert_eq!(acknowledge(pool, consumer, replacement).await?, 1);
     assert_eq!(acknowledge(pool, consumer, replacement).await?, 0);
+
+    let free = Uuid::new_v4();
+    let busy = Uuid::new_v4();
+    for (slot, id) in [(1, free), (2, busy)] {
+        sqlx::query("INSERT INTO node_notices(node_id,slot,generation,event_id,scope,resource_id,object_key,retry_at) VALUES(?,?,?,?,'reset',?,'',UTC_TIMESTAMP(6))")
+            .bind(consumer.node).bind(slot).bind(consumer.generation).bind(id).bind(consumer.node)
+            .execute(pool).await?;
+    }
+    let mut producer = pool.begin().await?;
+    sqlx::query("SELECT slot FROM node_notices WHERE node_id=? AND slot=2 FOR UPDATE")
+        .bind(consumer.node)
+        .fetch_one(&mut *producer)
+        .await?;
+    let mut batch = pool.begin().await?;
+    let ids = serde_json::to_string(&[busy.simple().to_string(), free.simple().to_string()])?;
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            notices::acknowledge(&mut batch, consumer, &ids)
+        )
+        .await??,
+        1
+    );
+    batch.commit().await?;
+    producer.commit().await?;
+    assert_eq!(acknowledge(pool, consumer, free).await?, 0);
+    assert_eq!(acknowledge(pool, consumer, busy).await?, 1);
     Ok(())
 }

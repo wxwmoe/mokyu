@@ -52,7 +52,35 @@ pub(in super::super) async fn acknowledge(
     {
         return Ok(0);
     }
-    Ok(sqlx::query("DELETE FROM node_notices WHERE node_id=? AND generation=? AND retry_at IS NOT NULL AND event_id IN (SELECT UNHEX(j.id) FROM JSON_TABLE(?, '$[*]' COLUMNS(id CHAR(32) PATH '$')) j) AND EXISTS(SELECT 1 FROM notification_consumers c JOIN nodes n ON n.id=c.node_id WHERE n.enabled AND c.node_id=node_notices.node_id AND c.generation=node_notices.generation AND c.expires_at>UTC_TIMESTAMP(6))").bind(c.node).bind(c.generation).bind(ids).execute(db).await?.rows_affected())
+    // A producer can update several slots in any order. Busy slots are delivered again.
+    let slots: Vec<i16> = sqlx::query_scalar(
+        "SELECT seen.slot FROM JSON_TABLE(?, '$[*]' COLUMNS(id CHAR(32) PATH '$')) j
+         STRAIGHT_JOIN node_notices seen FORCE INDEX (event_id) ON seen.event_id=UNHEX(j.id)
+         WHERE seen.node_id=? AND seen.event_id=(
+             SELECT n.event_id FROM node_notices n FORCE INDEX (PRIMARY)
+             WHERE n.node_id=seen.node_id AND n.slot=seen.slot AND n.generation=?
+               AND n.retry_at IS NOT NULL FOR UPDATE SKIP LOCKED)",
+    )
+    .bind(ids)
+    .bind(c.node)
+    .bind(c.generation)
+    .fetch_all(&mut *db)
+    .await?;
+    if slots.is_empty() {
+        return Ok(0);
+    }
+    Ok(sqlx::query(
+        "DELETE n FROM JSON_TABLE(?, '$[*]' COLUMNS(slot SMALLINT PATH '$')) j
+         STRAIGHT_JOIN node_notices n FORCE INDEX (PRIMARY) ON n.node_id=? AND n.slot=j.slot
+         WHERE n.generation=? AND EXISTS(SELECT 1 FROM notification_consumers c
+             WHERE c.node_id=n.node_id AND c.generation=n.generation AND c.expires_at>UTC_TIMESTAMP(6))",
+    )
+    .bind(sqlx::types::Json(slots))
+    .bind(c.node)
+    .bind(c.generation)
+    .execute(db)
+    .await?
+    .rows_affected())
 }
 pub(in super::super) fn has_expired() -> Scalar<'static, bool> {
     sqlx::query_scalar(
