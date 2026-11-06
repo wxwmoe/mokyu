@@ -51,6 +51,7 @@ pub fn schema() -> utoipa::openapi::OpenApi {
 pub(crate) fn testing_router(app: Arc<App>) -> Router {
     Router::new()
         .route("/api/v1/cli", axum::routing::post(cli::cli))
+        .layer(axum::middleware::from_fn(system::limit_body_time))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(app)
 }

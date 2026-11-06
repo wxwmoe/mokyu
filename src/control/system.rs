@@ -11,6 +11,47 @@ use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
 static ACTION_CONCURRENCY: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
+pub(super) async fn limit_body_time(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    use futures_util::StreamExt;
+    use hyper::body::Body as _;
+    use tokio::time::Instant;
+
+    if request.body().is_end_stream() {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    let close = parts.extensions.get::<Arc<tokio::sync::Notify>>().cloned();
+    let (expired, mut timeout) = tokio::sync::oneshot::channel();
+    let stream = async_stream::stream! {
+        let mut data = body.into_data_stream();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let idle = Instant::now() + Duration::from_secs(15);
+            match tokio::time::timeout_at(idle.min(deadline), data.next()).await {
+                Ok(Some(frame)) => yield frame,
+                Ok(None) => break,
+                Err(_) => {
+                    let _ = expired.send(());
+                    yield Err(axum::Error::new(std::io::Error::from(std::io::ErrorKind::TimedOut)));
+                    break;
+                }
+            }
+        }
+    };
+    let request = axum::extract::Request::from_parts(parts, Body::from_stream(stream));
+    let response = next.run(request).await;
+    if timeout.try_recv().is_ok() {
+        if let Some(close) = close {
+            close.notify_one();
+        }
+        return StatusCode::REQUEST_TIMEOUT.into_response();
+    }
+    response
+}
+
 #[utoipa::path(
     get,
     operation_id = "openapi",

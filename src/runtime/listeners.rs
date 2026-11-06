@@ -118,10 +118,15 @@ pub(super) async fn serve_http(
         let service = hyper_util::service::TowerToHyperService::new(router.clone());
         let first = Arc::new(Notify::new());
         let started = first.clone();
-        let service = hyper::service::service_fn(move |request| {
-            started.notify_one();
-            hyper::service::Service::call(&service, request)
-        });
+        let drain = Arc::new(Notify::new());
+        let close = drain.clone();
+        let service = hyper::service::service_fn(
+            move |mut request: hyper::Request<hyper::body::Incoming>| {
+                started.notify_one();
+                request.extensions_mut().insert(close.clone());
+                hyper::service::Service::call(&service, request)
+            },
+        );
         let mut stopping = stopping.clone();
         tokio::spawn(async move {
             let _permit = permit;
@@ -136,6 +141,14 @@ pub(super) async fn serve_http(
                 tokio::select! {
                     result = &mut connection => result,
                     _ = http::transport::first_request_timeout(first) => return,
+                    _ = drain.notified() => {
+                        connection.as_mut().graceful_shutdown();
+                        // An unresponsive HTTP/2 peer may never acknowledge graceful shutdown.
+                        match tokio::time::timeout(std::time::Duration::from_secs(2), connection).await {
+                            Ok(result) => result,
+                            Err(_) => return,
+                        }
+                    }
                     _ = stopping.changed() => {
                         connection.as_mut().graceful_shutdown();
                         connection.await

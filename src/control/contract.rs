@@ -226,11 +226,6 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::uploads::parts))
         .merge(
             OpenApiRouter::new()
-                .routes(routes!(super::uploads::put_part))
-                .layer(axum::extract::DefaultBodyLimit::disable()),
-        )
-        .merge(
-            OpenApiRouter::new()
                 .routes(routes!(super::uploads::complete))
                 .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
@@ -256,6 +251,12 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
             super::projects::get_mode,
             super::projects::set_mode
         ))
+        .layer(axum::middleware::from_fn(super::system::limit_body_time))
+        .merge(
+            OpenApiRouter::new()
+                .routes(routes!(super::uploads::put_part))
+                .layer(axum::extract::DefaultBodyLimit::disable()),
+        )
         .split_for_parts();
     api.info.title = "Mokyu management API".into();
     api.info.description = Some("Control endpoints accept a session cookie or a scoped Bearer token. Cookie mutations require the configured Origin and X-CSRF-Token. Account and token management require a session. S3 and public reads use separate listeners.".into());
