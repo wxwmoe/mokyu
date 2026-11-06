@@ -229,7 +229,7 @@ pub(in super::super) fn raw_continuity(stream: Id) -> Rows<'static, (i64, bool)>
 }
 
 pub(in super::super) fn raw_cleanup_ranges(stream: Id, batch: i64) -> Rows<'static, (i64, Id)> {
-    sqlx::query_as("SELECT offset_bytes,source_id FROM raw_ranges WHERE stream_id=? ORDER BY offset_bytes LIMIT ?").bind(stream).bind(batch)
+    sqlx::query_as("SELECT offset_bytes,source_id FROM raw_ranges FORCE INDEX (PRIMARY) WHERE stream_id=? ORDER BY offset_bytes LIMIT ? FOR UPDATE").bind(stream).bind(batch)
 }
 
 pub(in super::super) fn raw_touch_unreferenced(source: Id) -> Statement<'static> {
@@ -237,7 +237,7 @@ pub(in super::super) fn raw_touch_unreferenced(source: Id) -> Statement<'static>
 }
 
 pub(in super::super) fn raw_detach(stream: Id, end: i64) -> Statement<'static> {
-    sqlx::query("DELETE FROM raw_ranges WHERE stream_id=? AND offset_bytes<=?")
+    sqlx::query("DELETE e FROM raw_ranges e FORCE INDEX (PRIMARY) WHERE e.stream_id=? AND e.offset_bytes<=?")
         .bind(stream)
         .bind(end)
 }

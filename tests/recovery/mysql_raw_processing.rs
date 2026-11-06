@@ -117,5 +117,65 @@ async fn mysql_raw_claims_lock_only_the_selected_stream() -> Result<()> {
         transactions::claim_raw_processing(pool, false, Uuid::new_v4()),
     );
     assert_ne!(first?.is_some(), second?.is_some());
+    raw_cleanup_locks(pool, stream, uploading, source).await?;
+    Ok(())
+}
+
+async fn raw_cleanup_locks(
+    pool: &sqlx::MySqlPool,
+    stream: Id,
+    other: Id,
+    source: Id,
+) -> Result<()> {
+    for id in [stream, other] {
+        queries::raw_attach(id, source, 16).execute(pool).await?;
+    }
+    sqlx::query("INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id,source_offset) VALUES(?,16,16,?,16)")
+        .bind(stream).bind(source).execute(pool).await?;
+    let mut gc = pool.begin().await?;
+    assert_eq!(
+        queries::raw_cleanup_ranges(stream, 1)
+            .fetch_all(&mut *gc)
+            .await?,
+        [(0, source)]
+    );
+    // The collector owns the selected range before it locks the shared physical source.
+    let selected: Option<Id> = sqlx::query_scalar(
+        "SELECT source_id FROM raw_ranges WHERE stream_id=? AND offset_bytes=0 FOR UPDATE SKIP LOCKED",
+    ).bind(stream).fetch_optional(pool).await?;
+    assert_eq!(selected, None);
+    for (id, offset) in [(stream, 16), (other, 0)] {
+        let rows = tokio::time::timeout(
+            Duration::from_secs(2),
+            queries::node_read_raw(id, offset, offset + 16, 1).fetch_all(pool),
+        )
+        .await??;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].range.source.id, source);
+    }
+    queries::raw_source(source).fetch_one(&mut *gc).await?;
+    assert_eq!(
+        queries::raw_detach(stream, 0)
+            .execute(&mut *gc)
+            .await?
+            .rows_affected(),
+        1
+    );
+    gc.commit().await?;
+    assert!(
+        queries::node_read_raw(stream, 0, 16, 1)
+            .fetch_all(pool)
+            .await?
+            .is_empty()
+    );
+    assert_eq!(
+        queries::node_read_raw(other, 0, 16, 1)
+            .fetch_one(pool)
+            .await?
+            .range
+            .source
+            .id,
+        source
+    );
     Ok(())
 }
