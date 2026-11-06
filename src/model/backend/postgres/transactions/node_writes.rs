@@ -655,9 +655,22 @@ pub(super) async fn require_node_write(
     row: &queries::NodeWrite,
 ) -> Result<Id> {
     ensure!(
-        row.state == "active" && row.publish_hash.is_none() && row.valid_for_ms > 0,
+        row.state == "active" && row.publish_hash.is_none(),
         Error::NodeExpired
     );
+    if row.valid_for_ms <= 0 {
+        if row.owner_task_id.is_none()
+            && row.upload_id.is_none()
+            && row.completion_upload.is_none()
+            && let Some(lease) = row.lease_id
+            && queries::superseded_object(lease)
+                .fetch_one(&mut **db)
+                .await?
+        {
+            return Err(Error::OperationAborted.into());
+        }
+        return Err(Error::NodeExpired.into());
+    }
     ensure!(
         queries::node_read_admission().fetch_one(&mut **db).await?,
         Error::NodeInactive

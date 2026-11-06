@@ -34,6 +34,16 @@ pub(in super::super) fn node_write(node: Uuid, operation: Uuid) -> Rows<'static,
         .bind(node).bind(operation)
 }
 
+pub(in super::super) fn superseded_object(lease: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM stream_leases l JOIN streams s ON s.id=l.stream_id
+         JOIN objects o ON o.bucket_id=s.bucket_id AND o.object_key=s.object_key
+         WHERE l.id=$1 AND l.expires_at>clock_timestamp() AND s.state='writing'
+           AND o.write_token<>s.id)",
+    )
+    .bind(lease)
+}
+
 pub(in super::super) fn node_write_count(node: Uuid) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT count(*) FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.node_id=$1 AND w.state='active' AND w.lease_id IS NOT NULL AND l.expires_at>clock_timestamp()").bind(node)
 }

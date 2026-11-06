@@ -202,10 +202,19 @@ impl Write {
         run: Run,
     ) -> Result<Id> {
         self.owned(node, run)?;
-        ensure!(
-            self.phase == "active" && self.remaining > 0,
-            Error::NodeExpired
-        );
+        ensure!(self.phase == "active", Error::NodeExpired);
+        if self.remaining <= 0 {
+            if self.owner_task_id.is_none()
+                && self.intent.part.is_none()
+                && self.intent.completion.is_none()
+                && q::superseded_object(self.lease_id)
+                    .fetch_one(&mut **tx)
+                    .await?
+            {
+                return Err(Error::OperationAborted.into());
+            }
+            return Err(Error::NodeExpired.into());
+        }
         let stream = self.stream_id.ok_or(Error::NodeExpired)?;
         let authority = queries::write_authorization(stream)
             .fetch_one(&mut **tx)
