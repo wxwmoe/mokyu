@@ -394,9 +394,7 @@ impl NativeParts for Backend {
         );
         let token = Uuid::new_v4();
         let work = if let Some((upload, number, stream, file, size, etag)) =
-            q::due(node.node_id, input.stream)
-                .fetch_optional(&mut *tx)
-                .await?
+            q::due(&mut tx, node.node_id, input.stream).await?
         {
             let upload = q::upload(upload).fetch_one(&mut *tx).await?;
             let action = if upload.upstream.is_none() {

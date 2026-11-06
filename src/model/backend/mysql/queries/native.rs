@@ -62,11 +62,42 @@ pub(in super::super) fn ready(node: Uuid, stream: Id) -> Rows<'static, (bool, Op
     .bind(stream)
     .bind(node)
 }
-pub(in super::super) fn due(
+pub(in super::super) async fn due(
+    db: &mut sqlx::MySqlConnection,
     node: Uuid,
     target: Option<Id>,
-) -> Rows<'static, (Uuid, i32, Id, Option<Uuid>, i64, String)> {
-    sqlx::query_as("SELECT p.upload_id,p.part_number,p.stream_id,p.file_id,p.size,s.etag FROM native_parts p JOIN native_uploads n ON n.upload_id=p.upload_id JOIN parts a ON a.upload_id=p.upload_id AND a.part_number=p.part_number AND a.stream_id=p.stream_id JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id WHERE p.node_id=? AND (? IS NULL OR p.stream_id=?) AND u.state IN ('active','completing') AND p.remote_etag IS NULL AND p.retry_at<=UTC_TIMESTAMP(6) AND (p.expires_at IS NULL OR p.expires_at<=UTC_TIMESTAMP(6)) AND (n.upstream IS NOT NULL OR n.expires_at IS NULL OR n.expires_at<=UTC_TIMESTAMP(6)) ORDER BY p.retry_at,p.upload_id,p.part_number LIMIT 1 FOR UPDATE").bind(node).bind(target).bind(target)
+) -> anyhow::Result<Option<(Uuid, i32, Id, Option<Uuid>, i64, String)>> {
+    // Lock the published part before touching its native upload, as part registration does.
+    let candidate: Option<(Uuid, i32, Id)> = sqlx::query_as(
+        "SELECT p.upload_id,p.part_number,p.stream_id FROM native_parts p
+         JOIN native_uploads n ON n.upload_id=p.upload_id JOIN uploads u ON u.id=p.upload_id
+         WHERE p.node_id=? AND (? IS NULL OR p.stream_id=?) AND u.state IN ('active','completing')
+           AND p.remote_etag IS NULL AND p.retry_at<=UTC_TIMESTAMP(6)
+           AND (p.expires_at IS NULL OR p.expires_at<=UTC_TIMESTAMP(6))
+           AND (n.upstream IS NOT NULL OR n.expires_at IS NULL OR n.expires_at<=UTC_TIMESTAMP(6))
+           AND p.stream_id=(SELECT a.stream_id FROM parts a FORCE INDEX (PRIMARY)
+               WHERE a.upload_id=p.upload_id AND a.part_number=p.part_number FOR UPDATE SKIP LOCKED)
+         ORDER BY p.retry_at,p.upload_id,p.part_number LIMIT 1",
+    )
+    .bind(node)
+    .bind(target)
+    .bind(target)
+    .fetch_optional(&mut *db)
+    .await?;
+    let Some((upload, number, stream)) = candidate else {
+        return Ok(None);
+    };
+    Ok(sqlx::query_as(
+        "SELECT p.upload_id,p.part_number,p.stream_id,p.file_id,p.size,s.etag
+         FROM native_parts p JOIN native_uploads n ON n.upload_id=p.upload_id
+         JOIN uploads u ON u.id=p.upload_id JOIN streams s ON s.id=p.stream_id
+         WHERE p.upload_id=? AND p.part_number=? AND p.stream_id=? AND p.node_id=?
+           AND u.state IN ('active','completing') AND p.remote_etag IS NULL AND p.retry_at<=UTC_TIMESTAMP(6)
+           AND (p.expires_at IS NULL OR p.expires_at<=UTC_TIMESTAMP(6))
+           AND (n.upstream IS NOT NULL OR n.expires_at IS NULL OR n.expires_at<=UTC_TIMESTAMP(6))
+         FOR UPDATE SKIP LOCKED",
+    )
+    .bind(upload).bind(number).bind(stream).bind(node).fetch_optional(db).await?)
 }
 pub(in super::super) fn claim_init(upload: Uuid, token: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE native_uploads SET token=?,expires_at=UTC_TIMESTAMP(6)+INTERVAL 60 SECOND WHERE upload_id=? AND upstream IS NULL AND (expires_at IS NULL OR expires_at<=UTC_TIMESTAMP(6))").bind(token).bind(upload)
@@ -98,7 +129,17 @@ pub(in super::super) fn set_part<'a>(
 }
 pub(in super::super) fn abort_due() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
-        "SELECT n.upload_id FROM native_uploads n JOIN uploads u ON u.id=n.upload_id WHERE u.state IN ('aborted','completed') AND n.upstream IS NOT NULL AND (n.expires_at IS NULL OR n.expires_at<=UTC_TIMESTAMP(6)) ORDER BY u.touched_at,n.upload_id LIMIT 1 FOR UPDATE",
+        "SELECT n.upload_id FROM (
+             SELECT n.upload_id FROM native_uploads n JOIN uploads u ON u.id=n.upload_id
+             WHERE u.state IN ('aborted','completed') AND n.upstream IS NOT NULL
+               AND (n.expires_at IS NULL OR n.expires_at<=UTC_TIMESTAMP(6))
+             ORDER BY u.touched_at,n.upload_id LIMIT 1
+         ) candidate
+         STRAIGHT_JOIN uploads u FORCE INDEX (PRIMARY) ON u.id=candidate.upload_id
+         STRAIGHT_JOIN native_uploads n FORCE INDEX (PRIMARY) ON n.upload_id=u.id
+         WHERE u.state IN ('aborted','completed') AND n.upstream IS NOT NULL
+           AND (n.expires_at IS NULL OR n.expires_at<=UTC_TIMESTAMP(6))
+         FOR UPDATE SKIP LOCKED",
     )
 }
 pub(in super::super) fn claim_abort(upload: Uuid, token: Uuid) -> Statement<'static> {

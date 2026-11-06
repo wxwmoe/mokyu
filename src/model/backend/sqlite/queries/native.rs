@@ -66,11 +66,12 @@ pub(in super::super) fn ready(node: Uuid, stream: Id) -> Rows<'static, (bool, Op
     .bind(stream)
     .bind(node)
 }
-pub(in super::super) fn due(
+pub(in super::super) async fn due(
+    db: &mut sqlx::SqliteConnection,
     node: Uuid,
     target: Option<Id>,
-) -> Rows<'static, (Uuid, i32, Id, Option<Uuid>, i64, String)> {
-    sqlx::query_as("SELECT p.upload_id,p.part_number,p.stream_id,p.file_id,p.size,s.etag FROM native_parts p JOIN native_uploads n ON n.upload_id=p.upload_id JOIN parts a ON a.upload_id=p.upload_id AND a.part_number=p.part_number AND a.stream_id=p.stream_id JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id WHERE p.node_id=? AND (? IS NULL OR p.stream_id=?) AND u.state IN ('active','completing') AND p.remote_etag IS NULL AND p.retry_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND (p.expires_at IS NULL OR p.expires_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND (n.upstream IS NOT NULL OR n.expires_at IS NULL OR n.expires_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)) ORDER BY p.retry_at,p.upload_id,p.part_number LIMIT 1").bind(node).bind(target).bind(target)
+) -> anyhow::Result<Option<(Uuid, i32, Id, Option<Uuid>, i64, String)>> {
+    Ok(sqlx::query_as("SELECT p.upload_id,p.part_number,p.stream_id,p.file_id,p.size,s.etag FROM native_parts p JOIN native_uploads n ON n.upload_id=p.upload_id JOIN parts a ON a.upload_id=p.upload_id AND a.part_number=p.part_number AND a.stream_id=p.stream_id JOIN streams s ON s.id=p.stream_id JOIN uploads u ON u.id=p.upload_id WHERE p.node_id=? AND (? IS NULL OR p.stream_id=?) AND u.state IN ('active','completing') AND p.remote_etag IS NULL AND p.retry_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND (p.expires_at IS NULL OR p.expires_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND (n.upstream IS NOT NULL OR n.expires_at IS NULL OR n.expires_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)) ORDER BY p.retry_at,p.upload_id,p.part_number LIMIT 1").bind(node).bind(target).bind(target).fetch_optional(db).await?)
 }
 pub(in super::super) fn claim_init(upload: Uuid, token: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE native_uploads SET token=?,expires_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)+60000000 WHERE upload_id=? AND upstream IS NULL AND (expires_at IS NULL OR expires_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(token).bind(upload)

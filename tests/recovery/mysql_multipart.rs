@@ -52,6 +52,71 @@ async fn usage(backend: &Backend, bucket: Uuid, reserved: i64, inflight: i64) ->
     Ok(())
 }
 
+async fn native_claim_locks(
+    pool: &sqlx::MySqlPool,
+    upload: Uuid,
+    storage: Uuid,
+    stream: Id,
+) -> Result<()> {
+    use queries::native;
+    use std::time::Duration;
+
+    let node = Uuid::new_v4();
+    native::open(upload, storage, 1, Uuid::new_v4())
+        .execute(pool)
+        .await?;
+    native::queue(upload, 1, stream, None, node, 32, false)
+        .execute(pool)
+        .await?;
+    let mut publisher = pool.begin().await?;
+    sqlx::query("SELECT stream_id FROM parts WHERE upload_id=? AND part_number=1 FOR UPDATE")
+        .bind(upload)
+        .fetch_one(&mut *publisher)
+        .await?;
+    let mut poll = pool.begin().await?;
+    let deadline = Duration::from_secs(2);
+    assert!(
+        tokio::time::timeout(deadline, native::due(&mut poll, node, None))
+            .await??
+            .is_none()
+    );
+    assert!(
+        native::abort_due()
+            .fetch_optional(&mut *poll)
+            .await?
+            .is_none()
+    );
+    tokio::time::timeout(
+        deadline,
+        native::queue(upload, 1, stream, None, node, 32, false).execute(&mut *publisher),
+    )
+    .await??;
+    publisher.commit().await?;
+    poll.commit().await?;
+
+    let mut owner = pool.begin().await?;
+    let selected = native::due(&mut owner, node, Some(stream)).await?.unwrap();
+    assert_eq!((selected.0, selected.1, selected.2), (upload, 1, stream));
+    assert_eq!(
+        native::claim_part(upload, 1, stream, Uuid::new_v4())
+            .execute(&mut *owner)
+            .await?
+            .rows_affected(),
+        1
+    );
+    owner.commit().await?;
+    assert!(
+        native::due(&mut *pool.acquire().await?, node, Some(stream))
+            .await?
+            .is_none()
+    );
+    sqlx::query("DELETE FROM native_uploads WHERE upload_id=?")
+        .bind(upload)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 #[tokio::test]
 #[ignore = "requires MOKYU_TEST_MYSQL_CONFIG pointing to a fresh isolated MySQL or MariaDB database"]
 async fn mysql_multipart_contract() -> Result<()> {
@@ -199,6 +264,7 @@ async fn mysql_multipart_contract() -> Result<()> {
         backend.web_parts(id, 0).await?[0].sha256.as_deref(),
         Some("checksum")
     );
+    native_claim_locks(db, id, storage, original).await?;
     assert_eq!(backend.parts(id, 0, 10).await?[0].1, 32);
     assert_eq!(backend.pair(id, 1).await?.unwrap().1.len(), 1);
     let losing = part(&backend, &authority, key).await?;

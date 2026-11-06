@@ -143,9 +143,7 @@ impl RemoteParts for Backend {
     ) -> Result<Option<RemotePart>> {
         let mut tx = registry::begin(self).await?;
         let owner = primary(&mut tx, who).await?;
-        let Some((upload, number, stream, _, _, _)) =
-            q::due(owner, stream).fetch_optional(&mut *tx).await?
-        else {
+        let Some((upload, number, stream, _, _, _)) = q::due(&mut tx, owner, stream).await? else {
             return Ok(None);
         };
         let parent = q::upload(upload).fetch_one(&mut *tx).await?;
