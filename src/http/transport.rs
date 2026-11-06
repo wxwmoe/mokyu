@@ -3,15 +3,21 @@ use hyper_util::{
     rt::{TokioExecutor, TokioTimer},
     server::conn::auto::Builder,
 };
-use std::{sync::Arc, time::Duration};
-use tokio::sync::Notify;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+    time::Duration,
+};
+use tokio::sync::watch;
+
+const IDLE: Duration = Duration::from_secs(15);
 
 pub(crate) fn builder(streams: usize) -> Builder<TokioExecutor> {
     let mut builder = Builder::new(TokioExecutor::new());
     builder
         .http1()
         .timer(TokioTimer::new())
-        .header_read_timeout(Duration::from_secs(15))
+        .header_read_timeout(IDLE)
         .max_buf_size(32 * 1024);
     builder
         .http2()
@@ -26,13 +32,86 @@ pub(crate) fn builder(streams: usize) -> Builder<TokioExecutor> {
     builder
 }
 
-pub(crate) async fn first_request_timeout(first: Arc<Notify>) {
-    // HTTP/1 header timeouts do not cover protocol detection or an HTTP/2 preface.
-    if tokio::time::timeout(Duration::from_secs(15), first.notified())
-        .await
-        .is_ok()
-    {
-        std::future::pending::<()>().await;
+pub(crate) struct Requests(watch::Sender<Option<usize>>);
+
+impl Requests {
+    pub(crate) fn new() -> (Self, watch::Receiver<Option<usize>>) {
+        let (send, receive) = watch::channel(Some(0));
+        (Self(send), receive)
+    }
+
+    pub(crate) fn start(&self, version: Version) -> Option<Active> {
+        if version != Version::HTTP_2 {
+            // Hyper handles subsequent HTTP/1 headers and idle keep-alive.
+            if self.0.borrow().is_some() {
+                self.0.send_replace(None);
+            }
+            return None;
+        }
+        self.0.send_modify(|count| *count.get_or_insert(0) += 1);
+        Some(Active(self.0.clone()))
+    }
+}
+
+pub(crate) struct Active(watch::Sender<Option<usize>>);
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.0.send_modify(|count| {
+            if let Some(count) = count {
+                *count -= 1;
+            }
+        });
+    }
+}
+
+pub(crate) async fn idle(mut requests: watch::Receiver<Option<usize>>) {
+    loop {
+        let active = *requests.borrow_and_update();
+        match active {
+            None => std::future::pending::<()>().await,
+            Some(0) => match tokio::time::timeout(IDLE, requests.changed()).await {
+                Ok(Ok(())) => {}
+                _ => return,
+            },
+            Some(_) => {
+                if requests.changed().await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+pub(crate) struct ResponseBody<B> {
+    body: B,
+    _active: Option<Active>,
+}
+
+impl<B: hyper::body::Body> ResponseBody<B> {
+    pub(crate) fn new(body: B, active: Option<Active>) -> Self {
+        let active = active.filter(|_| !body.is_end_stream());
+        Self {
+            body,
+            _active: active,
+        }
+    }
+}
+
+impl<B: hyper::body::Body + Unpin> hyper::body::Body for ResponseBody<B> {
+    type Data = B::Data;
+    type Error = B::Error;
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<B::Data>, B::Error>>> {
+        Pin::new(&mut self.body).poll_frame(cx)
+    }
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.body.size_hint()
     }
 }
 

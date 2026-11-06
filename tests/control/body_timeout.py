@@ -18,6 +18,27 @@ def get(endpoint, path):
         return response.status
 
 
+def available_slots(web, s3, baseline, seconds):
+    target = urlsplit(web)
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            with ExitStack() as probes:
+                for _ in range(3):
+                    probe = probes.enter_context(socket.create_connection((target.hostname, target.port), timeout=3))
+                    probe.sendall(b'GET /api/v1/info HTTP/1.1\r\nHost: test\r\n\r\n')
+                    response = http.client.HTTPResponse(probe)
+                    response.begin()
+                    assert response.status == 200
+                    response.read()
+                assert get(web, '/api/v1/info') == 200 and get(s3, '/') == baseline
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(.1)
+
+
 def main():
     assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
     web, s3 = os.environ['MOKYU_TEST_WEB'], os.environ['MOKYU_TEST_ENDPOINT']
@@ -47,24 +68,15 @@ def main():
             assert response.status == 408, response.status
             response.read()
         # Prove all four permits return even if an h2c peer ignores GOAWAY.
-        deadline = time.monotonic() + 7
-        while True:
-            try:
-                with ExitStack() as probes:
-                    for _ in range(3):
-                        probe = probes.enter_context(socket.create_connection((target.hostname, target.port), timeout=3))
-                        probe.sendall(b'GET /api/v1/info HTTP/1.1\r\nHost: test\r\n\r\n')
-                        response = http.client.HTTPResponse(probe)
-                        response.begin()
-                        assert response.status == 200
-                        response.read()
-                    assert get(web, '/api/v1/info') == 200 and get(s3, '/') == baseline
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(.1)
+        available_slots(web, s3, baseline, 7)
     print('PASS stalled management bodies release connection slots')
+    with ExitStack() as held:
+        for endpoint, path, status in [(s3, '/', baseline), (web, '/api/v1/info', 200)] * 2:
+            client = held.enter_context(Client(endpoint))
+            assert int(client.request('GET', path)['headers'][':status']) == status
+        time.sleep(16)
+        available_slots(web, s3, baseline, 5)
+    print('PASS completed h2c requests release idle connections on both listeners')
 
 
 if __name__ == '__main__':

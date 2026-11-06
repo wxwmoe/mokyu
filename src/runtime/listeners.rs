@@ -36,11 +36,10 @@ pub(super) async fn serve_s3(
         let controls = controls.clone();
         let mut stopping = app.stop_connections.subscribe();
         let streams = app.budget.data_slots;
-        let first = Arc::new(Notify::new());
-        let started = first.clone();
+        let (requests, activity) = http::transport::Requests::new();
         let service = hyper::service::service_fn(
             move |mut request: hyper::Request<hyper::body::Incoming>| {
-                started.notify_one();
+                let active = requests.start(request.version());
                 let app = app.clone();
                 let s3 = s3.clone();
                 let controls = controls.clone();
@@ -55,7 +54,11 @@ pub(super) async fn serve_s3(
                         .instrument(observation.span.clone())
                         .await;
                     stats::s3_request_id(&mut response, &observation.context.id);
-                    Ok::<_, std::convert::Infallible>(observation.response(response, true))
+                    Ok::<_, std::convert::Infallible>(
+                        observation
+                            .response(response, true)
+                            .map(|body| http::transport::ResponseBody::new(body, active)),
+                    )
                 }
             },
         );
@@ -71,7 +74,7 @@ pub(super) async fn serve_s3(
             } else {
                 tokio::select! {
                     result = &mut connection => result,
-                    _ = http::transport::first_request_timeout(first) => return,
+                    _ = http::transport::idle(activity) => return,
                     _ = stopping.changed() => {
                         connection.as_mut().graceful_shutdown();
                         connection.await
@@ -116,15 +119,19 @@ pub(super) async fn serve_http(
             Err(_) => continue,
         };
         let service = hyper_util::service::TowerToHyperService::new(router.clone());
-        let first = Arc::new(Notify::new());
-        let started = first.clone();
+        let (requests, activity) = http::transport::Requests::new();
         let drain = Arc::new(Notify::new());
         let close = drain.clone();
         let service = hyper::service::service_fn(
             move |mut request: hyper::Request<hyper::body::Incoming>| {
-                started.notify_one();
+                let active = requests.start(request.version());
                 request.extensions_mut().insert(close.clone());
-                hyper::service::Service::call(&service, request)
+                let response = hyper::service::Service::call(&service, request);
+                async move {
+                    response.await.map(|response| {
+                        response.map(|body| http::transport::ResponseBody::new(body, active))
+                    })
+                }
             },
         );
         let mut stopping = stopping.clone();
@@ -140,7 +147,7 @@ pub(super) async fn serve_http(
             } else {
                 tokio::select! {
                     result = &mut connection => result,
-                    _ = http::transport::first_request_timeout(first) => return,
+                    _ = http::transport::idle(activity) => return,
                     _ = drain.notified() => {
                         connection.as_mut().graceful_shutdown();
                         // An unresponsive HTTP/2 peer may never acknowledge graceful shutdown.
