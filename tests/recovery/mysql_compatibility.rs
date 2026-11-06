@@ -18,6 +18,7 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
     let backend = connection::open(&config, &secrets, &budget, "single").await?;
     backend.recover(false).await?;
     let db = &backend.pool;
+    external_grant_ids(db).await?;
     let node = Uuid::new_v4();
     queries::node_registry::insert(node, "pulse-race", "data", &[1])
         .execute(db)
@@ -123,6 +124,85 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
         b.rollback().await?;
         a.rollback().await?;
     }
+    Ok(())
+}
+
+async fn external_grant_ids(db: &sqlx::MySqlPool) -> Result<()> {
+    use crate::authorization::{Action, Principal};
+
+    let ids = |n: u128| Uuid::from_u128(0x0180ff00_0000_7000_8000_000000000000 + n);
+    let (user, token, project, bucket) = (ids(1), ids(2), ids(3), ids(4));
+    let mut tx = db.begin().await?;
+    sqlx::query("INSERT INTO projects(id,name) VALUES(?,'external-ids')")
+        .bind(project)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO web_users(id,username,password_hash) VALUES(?,'external-member','test')",
+    )
+    .bind(user)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO project_members(user_id,project_id,role,scope) VALUES(?,?,'reader','all')",
+    )
+    .bind(user)
+    .bind(project)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO external_buckets(id,project_id,name,connection,access_encrypted,secret_encrypted) VALUES(?,?,'external',?,X'01',X'02')")
+        .bind(bucket).bind(project).bind(sqlx::types::Json(json!({"endpoint_url":"https://s3.example.test","region":"east","bucket":"archive"}))).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO api_tokens(id,user_id,label,token_hash,prefix,auth_revision) VALUES(?,?,'external',?, 'test',0)")
+        .bind(token).bind(user).bind([1u8; 32].as_slice()).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO token_external_grants(token_id,bucket_id,actions) VALUES(?,?,2)")
+        .bind(token)
+        .bind(bucket)
+        .execute(&mut *tx)
+        .await?;
+    let member = Principal::User {
+        id: user,
+        session: ids(5),
+        revision: 0,
+    };
+    let scoped = Principal::Token {
+        id: token,
+        user,
+        revision: 0,
+        user_revision: 0,
+    };
+    for (principal, actions) in [
+        (&member, vec![Action::List, Action::Read]),
+        (&scoped, vec![Action::Read]),
+    ] {
+        for (filter, after, id) in [
+            (None, None, None),
+            (Some(project), Some(ids(0)), Some(bucket)),
+        ] {
+            let row = queries::external::page(principal, false, filter, after, id, 10)
+                .fetch_one(&mut *tx)
+                .await?
+                .view()?;
+            assert_eq!(row.id, bucket);
+            assert_eq!(row.actions, actions);
+        }
+        assert!(
+            queries::external::page(principal, false, None, Some(bucket), None, 10)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none()
+        );
+    }
+    sqlx::query("DELETE FROM token_external_grants WHERE token_id=?")
+        .bind(token)
+        .execute(&mut *tx)
+        .await?;
+    assert!(
+        queries::external::page(&scoped, false, None, None, Some(bucket), 10)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_none()
+    );
+    tx.rollback().await?;
     Ok(())
 }
 
