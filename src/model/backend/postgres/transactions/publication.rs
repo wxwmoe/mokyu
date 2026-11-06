@@ -61,6 +61,11 @@ pub(in super::super) async fn publish_in(
             .fetch_one(&mut **tx)
             .await?;
     authority.lock(tx).await?;
+    // Replacing the write token locks the object before its quota trigger references the old stream.
+    let old = queries::lock_publish_object(id)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or_else(|| s3s::s3_error!(OperationAborted, "write was superseded"))?;
     let (bucket, object_key, state, size, payload_type, marked, publication) =
         queries::lock_writing_stream(id)
             .fetch_one(&mut **tx)
@@ -82,10 +87,7 @@ pub(in super::super) async fn publish_in(
     )
     .await?;
     super::super::transactions::redundancy::accept_origin(tx, bucket, marked).await?;
-    let (old, epoch): (Option<Id>, Id) = queries::lock_object_version(bucket, &object_key)
-        .fetch_one(&mut **tx)
-        .await?;
-    if epoch != id || state != "writing" {
+    if state != "writing" {
         return Err(s3s::s3_error!(OperationAborted, "write was superseded").into());
     }
     if let Some((upload, _, _, _)) = &completion {

@@ -41,6 +41,15 @@ pub(in super::super) fn write_authorization(id: Id) -> Scalar<'static, sqlx::typ
     sqlx::query_scalar("SELECT write_authorization FROM streams WHERE id=$1").bind(id)
 }
 
+pub(in super::super) fn lock_publish_object(id: Id) -> Scalar<'static, Option<Id>> {
+    sqlx::query_scalar(
+        "SELECT o.stream_id FROM streams s JOIN objects o
+           ON o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id
+         WHERE s.id=$1 FOR UPDATE OF o",
+    )
+    .bind(id)
+}
+
 pub(in super::super) fn lock_writing_stream(
     id: Id,
 ) -> Rows<'static, (Uuid, String, String, i64, String, bool, Option<Uuid>)> {
