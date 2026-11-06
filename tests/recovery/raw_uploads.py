@@ -281,6 +281,7 @@ def main():
         with physical.open('r+b') as file:
             file.write(b'?')
         rejected(lambda: fixture.read('corrupt', corrupt))
+        rejected(lambda: fixture.client.get_object(Bucket=fixture.name, Key='corrupt', Range='bytes=0-7'))
         marker.unlink()
         wait(lambda: database.query('SELECT attempts FROM raw_uploads WHERE source_id=%s', row('corrupt')['id'])[0]['attempts'] > 0,
              'corrupt cache was not rejected by the worker')

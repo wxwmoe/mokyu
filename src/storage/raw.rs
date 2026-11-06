@@ -628,6 +628,16 @@ impl Storage {
         Ok(reader)
     }
 
+    pub(crate) async fn uploaded_raw(&self, source: &RawSource) -> Result<Option<RawSource>> {
+        Ok(self.raw_store.current(source.id).await?.filter(|r| {
+            !r.pending_upload
+                && r.location_id == source.location_id
+                && r.storage_id == source.storage_id
+                && r.size == source.size
+                && r.digest == source.digest
+        }))
+    }
+
     async fn raw_reader_inner(
         self: &Arc<Self>,
         source: &RawSource,
@@ -649,14 +659,7 @@ impl Storage {
                     });
                 }
                 Err(error) => {
-                    let current = self.raw_store.current(source.id).await?;
-                    if let Some(current) = current.filter(|r| {
-                        !r.pending_upload
-                            && r.location_id == source.location_id
-                            && r.storage_id == source.storage_id
-                            && r.size == source.size
-                            && r.digest == source.digest
-                    }) {
+                    if let Some(current) = self.uploaded_raw(source).await? {
                         return Box::pin(self.raw_reader_inner(&current, verify)).await;
                     }
                     if self.cluster_mode

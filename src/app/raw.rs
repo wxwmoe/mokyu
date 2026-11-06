@@ -187,6 +187,9 @@ impl App {
             &self.config.requests.read_idle_timeout,
         )?);
         let recovery = crate::storage::read_retry::Recovery::new(idle);
+        let verify_first = ranges
+            .first()
+            .is_some_and(|(row, mode)| row.source.pending_upload && mode == "inline");
         let first = if let Some((first, _)) = ranges.first() {
             Some(
                 pin.borrow()
@@ -217,6 +220,7 @@ impl App {
                 let mut reader=if let Some(first)=first.take(){first}else{
                     _pin.with_read_lease(app.storage.raw_reader(&row.source,false)).await?
                 };
+                let mut cache_fallback=matches!(&reader.file,crate::storage::raw::RawFile::Cached{..});
                 let mut remote=reader.range_source();let mut partial=remote.as_ref().and_then(|_| app.storage.partial(&row.source));
                 let from_backend=remote.is_some() || (!row.source.pending_upload && matches!(&reader.file,crate::storage::raw::RawFile::Local(_)));
                 let mut check=if mode=="background" && complete {Some(app.read_checks.raw(&row.source,remote.is_some()))} else{None};
@@ -238,7 +242,7 @@ impl App {
                         hashes.map(|bytes|segments::Proof::new(&span,bytes,app.storage.cpu.clone()).map(Arc::new)).transpose()?
                     }else{None};
                     if strict && proof.is_none(){Err(crate::model::Error::SourceUnavailable)?;}
-                    let cached=matches!(&reader.file,crate::storage::raw::RawFile::Cached{..});let mut rejected=false;
+                    let mut rejected=None;
                     let mut output=if let Some(remote)=&remote {
                         let io=app.storage.raw_range_io(row.source.storage_id);
                         if let Some(cache)=&partial {cache.clone().stream(remote.clone(),span,strict,proof,app.budget.storage_read_slots,io,retain.clone(),recovery.clone())}
@@ -247,7 +251,7 @@ impl App {
                         segments::local(&mut reader.file,span,row.source.size as u64,proof,retain.clone()).map_ok(move |v|(v,from_backend)).boxed()
                     };
                     while let Some(bytes)=tokio::time::timeout(idle,_pin.with_read_lease(async {Ok(output.next().await)})).await?? {
-                        let (bytes,from_backend)=match bytes {Err(_) if cached=>{rejected=true;break},other=>other?};let count=bytes.len();offset+=count as u64;
+                        let (bytes,from_backend)=match bytes {Err(error) if cache_fallback=>{rejected=Some(error);break},other=>other?};let count=bytes.len();offset+=count as u64;
                         if offset>end { Err(crate::content::codec::IntegrityError::Length)?; }
                         if from_backend { app.storage.backend_read_bytes.fetch_add(count as u64,std::sync::atomic::Ordering::Relaxed); }
                         else { app.storage.cache_hit_bytes.fetch_add(count as u64,std::sync::atomic::Ordering::Relaxed); }
@@ -261,8 +265,14 @@ impl App {
                         yield bytes;
                     }
                     drop(output);
-                    if rejected {
-                        reader=_pin.with_read_lease(app.storage.raw_reader_uncached(&row.source,false)).await?;
+                    if let Some(error)=rejected {
+                        cache_fallback=false;
+                        let uploaded;
+                        let origin=if row.source.pending_upload {
+                            uploaded=app.storage.uploaded_raw(&row.source).await?.ok_or(error)?;
+                            &uploaded
+                        } else { &row.source };
+                        reader=_pin.with_read_lease(app.storage.raw_reader_uncached(origin,false)).await?;
                         app.storage.reject_raw_cache(row.source.location_id).await;
                         remote=reader.range_source();partial=remote.as_ref().and_then(|_|app.storage.partial(&row.source));
                         continue;
@@ -271,14 +281,20 @@ impl App {
                 }
             }
         };
-        let body =
-            Mutex::new(Box::pin(body.map(|result: Result<Bytes>| {
-                result.map_err(std::io::Error::other)
-            })));
+        let mut body = Box::pin(body);
+        // Verify the first requested pending page before committing a successful response.
+        let first = if verify_first {
+            body.try_next().await?
+        } else {
+            None
+        };
+        let body = Mutex::new(
+            futures_util::stream::iter(first.map(Ok))
+                .chain(body)
+                .map(|result: Result<Bytes>| result.map_err(std::io::Error::other)),
+        );
         Ok(s3s::dto::StreamingBlob::wrap(
-            futures_util::stream::poll_fn(move |cx| {
-                futures_util::Stream::poll_next(body.lock().unwrap().as_mut(), cx)
-            }),
+            futures_util::stream::poll_fn(move |cx| body.lock().unwrap().poll_next_unpin(cx)),
         ))
     }
 }
