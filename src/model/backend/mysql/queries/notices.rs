@@ -39,8 +39,20 @@ pub(in super::super) fn pending(nodes: &str) -> Rows<'_, (Uuid, Uuid, Uuid, Stri
 pub(in super::super) fn claimed(ids: &str) -> Statement<'_> {
     sqlx::query("UPDATE node_notices SET retry_at=UTC_TIMESTAMP(6)+INTERVAL 2 SECOND WHERE event_id IN (SELECT UNHEX(j.id) FROM JSON_TABLE(?, '$[*]' COLUMNS(id CHAR(32) PATH '$')) j)").bind(ids)
 }
-pub(in super::super) fn acknowledge(c: Consumer, ids: &str) -> Statement<'_> {
-    sqlx::query("DELETE FROM node_notices WHERE node_id=? AND generation=? AND retry_at IS NOT NULL AND event_id IN (SELECT UNHEX(j.id) FROM JSON_TABLE(?, '$[*]' COLUMNS(id CHAR(32) PATH '$')) j) AND EXISTS(SELECT 1 FROM notification_consumers c JOIN nodes n ON n.id=c.node_id WHERE n.enabled AND c.node_id=node_notices.node_id AND c.generation=node_notices.generation AND c.expires_at>UTC_TIMESTAMP(6))").bind(c.node).bind(c.generation).bind(ids)
+pub(in super::super) async fn acknowledge(
+    db: &mut sqlx::MySqlConnection,
+    c: Consumer,
+    ids: &str,
+) -> Result<u64> {
+    // Producers lock their node before writing notices, so receipts must take the same order.
+    if sqlx::query_scalar::<_, Uuid>("SELECT id FROM nodes WHERE id=? AND enabled LOCK IN SHARE MODE")
+        .bind(c.node).fetch_optional(&mut *db).await?.is_none()
+        || sqlx::query_scalar::<_, Uuid>("SELECT node_id FROM notification_consumers WHERE node_id=? AND generation=? AND expires_at>UTC_TIMESTAMP(6) LOCK IN SHARE MODE")
+            .bind(c.node).bind(c.generation).fetch_optional(&mut *db).await?.is_none()
+    {
+        return Ok(0);
+    }
+    Ok(sqlx::query("DELETE FROM node_notices WHERE node_id=? AND generation=? AND retry_at IS NOT NULL AND event_id IN (SELECT UNHEX(j.id) FROM JSON_TABLE(?, '$[*]' COLUMNS(id CHAR(32) PATH '$')) j) AND EXISTS(SELECT 1 FROM notification_consumers c JOIN nodes n ON n.id=c.node_id WHERE n.enabled AND c.node_id=node_notices.node_id AND c.generation=node_notices.generation AND c.expires_at>UTC_TIMESTAMP(6))").bind(c.node).bind(c.generation).bind(ids).execute(db).await?.rows_affected())
 }
 pub(in super::super) fn has_expired() -> Scalar<'static, bool> {
     sqlx::query_scalar(

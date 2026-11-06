@@ -37,8 +37,12 @@ pub(in super::super) fn pending(nodes: &str) -> Rows<'_, (Uuid, Uuid, Uuid, Stri
 pub(in super::super) fn claimed(ids: &str) -> Statement<'_> {
     sqlx::query("UPDATE node_notices SET retry_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)+2000000 WHERE event_id IN (SELECT unhex(value) FROM json_each(?))").bind(ids)
 }
-pub(in super::super) fn acknowledge(c: Consumer, ids: &str) -> Statement<'_> {
-    sqlx::query("DELETE FROM node_notices WHERE node_id=? AND generation=? AND retry_at IS NOT NULL AND event_id IN (SELECT unhex(value) FROM json_each(?)) AND EXISTS(SELECT 1 FROM notification_consumers c JOIN nodes n ON n.id=c.node_id WHERE n.enabled AND c.node_id=node_notices.node_id AND c.generation=node_notices.generation AND c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(c.node).bind(c.generation).bind(ids)
+pub(in super::super) async fn acknowledge(
+    db: &mut sqlx::SqliteConnection,
+    c: Consumer,
+    ids: &str,
+) -> Result<u64> {
+    Ok(sqlx::query("DELETE FROM node_notices WHERE node_id=? AND generation=? AND retry_at IS NOT NULL AND event_id IN (SELECT unhex(value) FROM json_each(?)) AND EXISTS(SELECT 1 FROM notification_consumers c JOIN nodes n ON n.id=c.node_id WHERE n.enabled AND c.node_id=node_notices.node_id AND c.generation=node_notices.generation AND c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))").bind(c.node).bind(c.generation).bind(ids).execute(db).await?.rows_affected())
 }
 pub(in super::super) fn has_expired() -> Scalar<'static, bool> {
     sqlx::query_scalar(

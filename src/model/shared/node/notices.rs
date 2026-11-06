@@ -80,10 +80,7 @@ impl NodeNotices for Single {
         );
         let events = ids(events.iter().copied())?;
         let mut tx = q::begin(&self.0).await?;
-        let count = q::acknowledge(consumer, &events)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        let count = q::acknowledge(&mut tx, consumer, &events).await?;
         tx.commit().await?;
         Ok(count)
     }

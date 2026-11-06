@@ -244,3 +244,7 @@ mod bootstrap_tests;
 #[cfg(test)]
 #[path = "../../../../tests/recovery/mysql_source_locks.rs"]
 mod source_lock_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/recovery/mysql_notices.rs"]
+mod notice_tests;
