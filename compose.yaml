@@ -1,6 +1,6 @@
 services:
   mokyu:
-    image: wxwmoe/mokyu:0.0.6
+    image: wxwmoe/mokyu:0.0.7
     pull_policy: never
     container_name: mokyu
     restart: unless-stopped
