@@ -272,28 +272,37 @@ pub(in super::super) fn remove_fragment_row(id: Id) -> Statement<'static> {
     sqlx::query("DELETE FROM fragments WHERE id=?").bind(id)
 }
 
+pub(in super::super) fn lock_tombstones(
+    storage: Option<Uuid>,
+    batch: i64,
+) -> Rows<'static, (Uuid, Vec<u8>)> {
+    // The outer scan must not lock the stream index before a writer's object row.
+    sqlx::query_as("SELECT scan.bucket_id,scan.object_key FROM objects scan WHERE scan.stream_id IS NULL AND (? IS NULL OR EXISTS(SELECT 1 FROM buckets b WHERE b.id=scan.bucket_id AND b.storage_id=?)) AND scan.write_token=(SELECT o.write_token FROM objects o FORCE INDEX (PRIMARY) WHERE o.bucket_id=scan.bucket_id AND o.object_key=scan.object_key AND o.stream_id IS NULL AND NOT EXISTS(SELECT 1 FROM streams s WHERE s.bucket_id=o.bucket_id AND s.object_key=o.object_key AND s.state='writing') FOR UPDATE SKIP LOCKED) ORDER BY scan.bucket_id,scan.object_key LIMIT ?").bind(storage).bind(storage).bind(batch)
+}
+
+pub(in super::super) fn delete_tombstones(rows: Vec<(Uuid, Vec<u8>)>) -> Statement<'static> {
+    let keys = rows
+        .into_iter()
+        .map(|(bucket, key)| (bucket.simple().to_string(), hex::encode(key)))
+        .collect::<Vec<_>>();
+    sqlx::query("DELETE o FROM JSON_TABLE(?, '$[*]' COLUMNS(bucket_hex CHAR(32) PATH '$[0]',key_hex VARCHAR(2048) PATH '$[1]')) k STRAIGHT_JOIN objects o FORCE INDEX (PRIMARY) ON o.bucket_id=UNHEX(k.bucket_hex) AND o.object_key=UNHEX(k.key_hex)").bind(sqlx::types::Json(keys))
+}
+
 pub(in super::super) async fn remove_tombstones(
     connection: &mut sqlx::MySqlConnection,
     storage: Option<Uuid>,
     batch: i64,
 ) -> Result<u64> {
-    let rows:Vec<(Uuid,Vec<u8>)>=sqlx::query_as("SELECT o.bucket_id,o.object_key FROM objects o WHERE (? IS NULL OR EXISTS(SELECT 1 FROM buckets b WHERE b.id=o.bucket_id AND b.storage_id=?)) AND o.stream_id IS NULL AND NOT EXISTS(SELECT 1 FROM streams s WHERE s.bucket_id=o.bucket_id AND s.object_key=o.object_key AND s.state='writing') ORDER BY o.bucket_id,o.object_key LIMIT ? FOR UPDATE SKIP LOCKED").bind(storage).bind(storage).bind(batch).fetch_all(&mut *connection).await?;
+    let rows = lock_tombstones(storage, batch)
+        .fetch_all(&mut *connection)
+        .await?;
     if rows.is_empty() {
         return Ok(0);
     }
-    let mut query =
-        sqlx::QueryBuilder::new("DELETE FROM objects WHERE (bucket_id,object_key) IN (");
-    let mut values = query.separated(",");
-    for (bucket, key) in rows {
-        values
-            .push("(")
-            .push_bind_unseparated(bucket)
-            .push_unseparated(",")
-            .push_bind_unseparated(key)
-            .push_unseparated(")");
-    }
-    values.push_unseparated(")");
-    Ok(query.build().execute(connection).await?.rows_affected())
+    Ok(delete_tombstones(rows)
+        .execute(connection)
+        .await?
+        .rows_affected())
 }
 
 pub(in super::super) fn lock_reclaim_chunk(

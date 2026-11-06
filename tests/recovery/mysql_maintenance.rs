@@ -22,6 +22,94 @@ async fn history(backend: &Backend, section: &str, batch: i64) -> Result<u64> {
 
 #[tokio::test]
 #[ignore = "requires MOKYU_TEST_MYSQL_CONFIG pointing to a fresh isolated MySQL or MariaDB database"]
+async fn mysql_tombstone_cleanup_skips_busy_objects() -> Result<()> {
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
+    let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
+    let backend = connection::open(&config, &secrets, &budget, "single").await?;
+    backend.initialize_admin("admin", "password", false).await?;
+    let storage = super::storage_tests::fixture(&backend).await?;
+    let bucket = BucketStore::create(
+        &backend,
+        &Principal::Local,
+        CreateBucket {
+            name: "tombstone-locks".into(),
+            project_id: None,
+            storage_id: Some(storage),
+        },
+    )
+    .await?
+    .id;
+    let db = &backend.pool;
+    let stream = cache_tests::stream(&backend, bucket, "in-flight").await?;
+    let busy = b"a".as_slice();
+    let first = b"b\0 ".to_vec();
+    let last = vec![b'z'; 1024];
+    for key in [busy, &first, &last] {
+        sqlx::query("INSERT INTO objects(bucket_id,object_key,write_token) VALUES(?,?,1)")
+            .bind(bucket)
+            .bind(key)
+            .execute(db)
+            .await?;
+    }
+    let mut writer = db.begin().await?;
+    sqlx::query("SELECT write_token FROM objects FORCE INDEX (PRIMARY) WHERE bucket_id=? AND object_key=? FOR UPDATE")
+        .bind(bucket).bind(busy).fetch_one(&mut *writer).await?;
+    let mut gc = db.begin().await?;
+    let rows = queries::lock_tombstones(Some(storage), 2)
+        .fetch_all(&mut *gc)
+        .await?;
+    assert_eq!(rows, [(bucket, first.clone()), (bucket, last)]);
+    let mut contender = db.begin().await?;
+    assert!(
+        sqlx::query(
+            "SELECT write_token FROM objects WHERE bucket_id=? AND object_key=? FOR UPDATE NOWAIT"
+        )
+        .bind(bucket)
+        .bind(&first)
+        .fetch_one(&mut *contender)
+        .await
+        .is_err()
+    );
+    contender.rollback().await?;
+
+    let deadline = std::time::Duration::from_secs(2);
+    tokio::time::timeout(
+        deadline,
+        sqlx::query("UPDATE objects SET stream_id=? WHERE bucket_id=? AND object_key=?")
+            .bind(stream)
+            .bind(bucket)
+            .bind(busy)
+            .execute(&mut *writer),
+    )
+    .await??;
+    assert_eq!(
+        tokio::time::timeout(deadline, queries::delete_tombstones(rows).execute(&mut *gc))
+            .await??
+            .rows_affected(),
+        2
+    );
+    gc.commit().await?;
+    writer.commit().await?;
+    assert_eq!(backend.cleanup_tombstones(Some(storage), 2).await?, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, Id>(
+            "SELECT stream_id FROM objects WHERE bucket_id=? AND object_key=?"
+        )
+        .bind(bucket)
+        .bind(busy)
+        .fetch_one(db)
+        .await?,
+        stream
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MOKYU_TEST_MYSQL_CONFIG pointing to a fresh isolated MySQL or MariaDB database"]
 async fn mysql_maintenance_contract() -> Result<()> {
     assert_eq!(
         std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,

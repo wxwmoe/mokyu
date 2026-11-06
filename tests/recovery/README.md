@@ -15,6 +15,7 @@ Run `python -m tests.recovery.single_control_status single_control --counts 2 1 
 - `mysql_sources_lock_only_referenced_chunks` checks that source validation avoids unrelated chunk locks with a non-semijoin query plan
 - `mysql_notice_receipts_follow_publication_locks` checks receipt lock order, superseded events and consumer validity
 - `mysql_raw_claims_lock_only_the_selected_stream` checks queue selection, concurrent claims and eligibility changes before the claim lock
+- `mysql_tombstone_cleanup_skips_busy_objects` checks cleanup alongside a publisher and batched deletion of binary keys
 
 Validate database changes on PostgreSQL 18, MySQL 8.0.19 and MariaDB 10.6.3 as well as supported maintenance releases. Run all MySQL contracts against MariaDB with `MOKYU_TEST_MYSQL_CONFIG`. `mysql_dialect_and_lock_scope_contract` checks JSON, case/trailing-space comparisons and claim lock scope. `migrations.py` checks refusal before writes on empty PostgreSQL 17 and bootstrap, restart and history validation on supported PostgreSQL. Run `mysql_owner_continues_after_local_task_cleanup` to check owner-only queue hints, empty receipts, replay and the handoff after a raw upload. Run `mysql_write_cleanup_skips_busy_receipts` to check expiry and pruning against a concurrent writer. Run `mysql_work_recovery_skips_live_tasks` to check that recovery queues only expired work owned by the current task token. Run `mysql_read_cleanup_preserves_busy_grants` for concurrent read renewal and expiry. Each test needs a separate fresh database.
 
