@@ -294,6 +294,7 @@ pub(crate) trait RawStore: Send + Sync {
         node: Processor<'_>,
     ) -> Result<()>;
     async fn uploads(&self, after: Id, owner: Option<Uuid>) -> Result<Vec<RawUpload>>;
+    async fn pending_uploads(&self, sources: &[Id]) -> Result<Vec<Id>>;
     async fn claim_upload(
         &self,
         token: Uuid,

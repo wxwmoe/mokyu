@@ -16,17 +16,16 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
 
 async fn uploads(app: Arc<App>) -> Result<()> {
     let mut reconciled = tokio::time::Instant::now();
+    let mut after = None;
     loop {
         if app.ensure_mode().is_ok()
             && !app.maintenance.load(Ordering::Acquire)
             && !app.draining.load(Ordering::Acquire)
         {
             if reconciled.elapsed() >= Duration::from_secs(5) {
-                let _coord = app.coord.lock().await;
-                if let Err(error) = app.storage.reconcile_raw_uploads().await {
+                if let Err(error) = reconcile(&app, &mut after).await {
                     tracing::warn!(%error,"raw upload pins will be reconciled again");
                 }
-                drop(_coord);
                 if let Err(error) = app.remote_housekeeping().await {
                     tracing::warn!(%error,"native multipart cleanup will retry");
                 }
@@ -51,6 +50,32 @@ async fn uploads(app: Arc<App>) -> Result<()> {
             _=tokio::time::sleep(Duration::from_secs(1))=>{},
         }
     }
+}
+
+async fn reconcile(app: &App, after: &mut Option<(Uuid, Uuid)>) -> Result<()> {
+    let Some((end, pins)) = app.storage.raw_pin_batch(*after) else {
+        *after = None;
+        return Ok(());
+    };
+    let ids: Vec<_> = pins.iter().map(|(_, source)| *source).collect();
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("raw-pin-scan").await;
+    let pending: std::collections::HashSet<_> =
+        app.raw.pending_uploads(&ids).await?.into_iter().collect();
+    let mut checked = 0;
+    for (location, source) in pins {
+        *after = (location < end).then_some((location, end));
+        if !pending.contains(&source) {
+            app.storage
+                .release_finished_raw(source, location, Some(app.coord.lock().await))
+                .await?;
+            checked += 1;
+            if checked == 8 {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn tick(app: &App, before: Option<chrono::DateTime<chrono::Utc>>) -> Result<bool> {
@@ -95,7 +120,7 @@ pub(crate) async fn tick(app: &App, before: Option<chrono::DateTime<chrono::Utc>
             .await?;
     }
     app.storage
-        .release_finished_raw(work.source.id, work.source.location_id)
+        .release_finished_raw(work.source.id, work.source.location_id, None)
         .await?;
     Ok(true)
 }

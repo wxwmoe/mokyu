@@ -64,7 +64,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
@@ -135,7 +135,7 @@ pub struct Storage {
     cache_writes: tokio::sync::Mutex<()>,
     upload_pins: Mutex<UploadPins>,
     released_uploads: Mutex<HashMap<Uuid, Option<Uuid>>>,
-    raw_upload_pins: Mutex<HashMap<Uuid, (crate::model::Id, UploadPin)>>,
+    raw_upload_pins: Mutex<BTreeMap<Uuid, (crate::model::Id, UploadPin)>>,
     remote_charges: Mutex<HashMap<Id, UploadCharge>>,
     fills: Arc<Semaphore>,
     cache_fills: Arc<Mutex<HashSet<Uuid>>>,
@@ -512,7 +512,7 @@ impl Storage {
             cache_writes: tokio::sync::Mutex::new(()),
             upload_pins: Mutex::default(),
             released_uploads: Mutex::new(HashMap::new()),
-            raw_upload_pins: Mutex::new(HashMap::new()),
+            raw_upload_pins: Mutex::new(BTreeMap::new()),
             remote_charges: Mutex::new(HashMap::new()),
             fills: Arc::new(Semaphore::new(budget.cpu_jobs)),
             cache_fills: Arc::new(Mutex::new(HashSet::new())),

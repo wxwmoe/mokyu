@@ -441,6 +441,10 @@ impl RawStore for Backend {
     async fn uploads(&self, after: Id, _owner: Option<Uuid>) -> Result<Vec<RawUpload>> {
         Ok(raw_uploads(after).fetch_all(&self.pool).await?)
     }
+    async fn pending_uploads(&self, sources: &[Id]) -> Result<Vec<Id>> {
+        Ok(sqlx::query_scalar("SELECT r.id FROM JSON_TABLE(?, '$[*]' COLUMNS(id BIGINT PATH '$')) j JOIN raw_sources r ON r.id=j.id WHERE r.pending_upload")
+            .bind(sqlx::types::Json(sources)).fetch_all(&self.pool).await?)
+    }
     async fn claim_upload(
         &self,
         token: Uuid,

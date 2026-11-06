@@ -533,72 +533,62 @@ impl Storage {
         Ok(())
     }
 
-    pub(crate) async fn reconcile_raw_uploads(self: &std::sync::Arc<Self>) -> Result<()> {
-        let mut after = Id::default();
-        let mut pending = std::collections::HashSet::new();
-        loop {
-            let rows = self
-                .raw_store
-                .uploads(after, self.node_id.get().copied())
-                .await?;
-            if rows.is_empty() {
-                break;
-            }
-            for work in rows {
-                after = work.source.id;
-                if work.source.pending_upload {
-                    pending.insert(work.source.location_id);
-                }
-            }
-        }
-        let pins: Vec<_> = self
-            .raw_upload_pins
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(location, _)| !pending.contains(location))
-            .map(|(location, (source, _))| (*source, *location))
+    pub(crate) fn raw_pin_batch(
+        &self,
+        cursor: Option<(Uuid, Uuid)>,
+    ) -> Option<(Uuid, Vec<(Uuid, Id)>)> {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        let pins = self.raw_upload_pins.lock().unwrap();
+        let (start, end) = match cursor {
+            Some((after, end)) => (Excluded(after), end),
+            None => (Unbounded, *pins.last_key_value()?.0),
+        };
+        let batch: Vec<_> = pins
+            .range((start, Included(end)))
+            .take(128)
+            .map(|(location, (source, _))| (*location, *source))
             .collect();
-        for (source, location) in pins {
-            self.release_finished_raw(source, location).await?;
-        }
-        Ok(())
+        (!batch.is_empty()).then_some((end, batch))
     }
 
     pub(crate) async fn release_finished_raw(
         self: &std::sync::Arc<Self>,
         source: Id,
         location: Uuid,
+        coord: Option<tokio::sync::MutexGuard<'_, ()>>,
     ) -> Result<()> {
         let storage = self.clone();
+        let current = storage.raw_store.current(source).await?;
+        if current
+            .as_ref()
+            .is_some_and(|source| source.state == "writing" || source.pending_upload)
+            || storage.raw_store.has_upload(source).await?
+            || storage
+                .raw_store
+                .cached_checkpoint(location)
+                .await?
+                .is_some()
+        {
+            return Ok(());
+        }
+        let held = storage
+            .raw_upload_pins
+            .lock()
+            .unwrap()
+            .get(&location)
+            .filter(|(id, _)| *id == source)
+            .map(|(_, pin)| {
+                (
+                    pin._pin.as_ref().map(|pin| pin.0.clone()),
+                    pin._charge.as_ref().map(|charge| charge.storage),
+                )
+            });
+        let Some((owner, target)) = held else {
+            return Ok(());
+        };
+        // The cache checks the pin identity again before touching the file.
+        drop(coord);
         tokio::spawn(async move {
-            let current = storage.raw_store.current(source).await?;
-            if current
-                .as_ref()
-                .is_some_and(|source| source.state == "writing" || source.pending_upload)
-                || storage.raw_store.has_upload(source).await?
-                || storage
-                    .raw_store
-                    .cached_checkpoint(location)
-                    .await?
-                    .is_some()
-            {
-                return Ok(());
-            }
-            let held = storage
-                .raw_upload_pins
-                .lock()
-                .unwrap()
-                .get(&location)
-                .map(|(_, pin)| {
-                    (
-                        pin._pin.as_ref().map(|pin| pin.0.clone()),
-                        pin._charge.as_ref().map(|charge| charge.storage),
-                    )
-                });
-            let Some((owner, target)) = held else {
-                return Ok(());
-            };
             let destination = current
                 .as_ref()
                 .filter(|source| source.validate().is_ok() && source.medium == "shared_s3")
@@ -622,7 +612,19 @@ impl Storage {
                     .promote(location, destination, owner.as_ref(), policy)
                     .await?
             {
-                storage.raw_upload_pins.lock().unwrap().remove(&location);
+                let mut pins = storage.raw_upload_pins.lock().unwrap();
+                if pins.get(&location).is_some_and(|(id, pin)| {
+                    *id == source
+                        && match (&pin._pin, &owner) {
+                            (Some(current), Some(owner)) => {
+                                std::sync::Arc::ptr_eq(&current.0, owner)
+                            }
+                            (None, None) => true,
+                            _ => false,
+                        }
+                }) {
+                    pins.remove(&location);
+                }
             }
             Ok::<_, anyhow::Error>(())
         })

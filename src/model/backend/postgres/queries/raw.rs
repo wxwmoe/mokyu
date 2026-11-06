@@ -380,6 +380,14 @@ impl RawStore for Backend {
     async fn uploads(&self, after: Id, owner: Option<Uuid>) -> Result<Vec<RawUpload>> {
         Ok(raw_uploads(after, owner).fetch_all(&self.pool).await?)
     }
+    async fn pending_uploads(&self, sources: &[Id]) -> Result<Vec<Id>> {
+        Ok(
+            sqlx::query_scalar("SELECT id FROM raw_sources WHERE id=ANY($1) AND pending_upload")
+                .bind(sources)
+                .fetch_all(&self.pool)
+                .await?,
+        )
+    }
     async fn claim_upload(
         &self,
         token: Uuid,
