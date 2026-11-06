@@ -28,21 +28,32 @@ pub(in super::super) fn source_locks(
     phase: u8,
 ) -> sqlx::QueryBuilder<MySql> {
     let mut query = sqlx::QueryBuilder::new(match phase {
-        0 => "SELECT c.id FROM chunks c WHERE ",
-        1 => {
-            // A scan of the ready-state index can lock encodings belonging to other chunks.
-            "SELECT l.encoding_id FROM chunks c STRAIGHT_JOIN chunk_encodings l FORCE INDEX (encodings_ready) ON l.ready_chunk=c.id WHERE "
-        }
-        2 => {
-            "SELECT p.id FROM packs p WHERE p.state='ready' AND p.id IN (SELECT c.pack_id FROM chunks c WHERE "
-        }
+        0 => "SELECT c.id FROM (",
+        1 => "SELECT l.encoding_id FROM (",
+        2 => "SELECT p.id FROM (",
         _ => unreachable!(),
     });
-    source_scope(&mut query, stream, chunks);
+    // Materialize only the requested IDs before locking rows; secondary scans can lock other chunks.
+    if let Some(stream) = stream {
+        query
+            .push("SELECT DISTINCT chunk_id AS id FROM extents WHERE stream_id=")
+            .push_bind(stream);
+    } else {
+        query
+            .push("SELECT DISTINCT id FROM JSON_TABLE(")
+            .push_bind(sqlx::types::Json(chunks.to_vec()))
+            .push(", '$[*]' COLUMNS(id BIGINT PATH '$')) ids");
+    }
+    query.push(") target STRAIGHT_JOIN chunks c FORCE INDEX (PRIMARY) ON c.id=target.id");
+    query.push(match phase {
+        0 => "",
+        1 => " STRAIGHT_JOIN chunk_encodings l FORCE INDEX (encodings_ready) ON l.ready_chunk=c.id",
+        _ => " STRAIGHT_JOIN packs p FORCE INDEX (PRIMARY) ON p.id=c.pack_id AND p.state='ready'",
+    });
     query.push(match phase {
         0 => " ORDER BY c.id LOCK IN SHARE MODE",
         1 => " ORDER BY l.encoding_id LOCK IN SHARE MODE",
-        _ => ") ORDER BY p.id LOCK IN SHARE MODE",
+        _ => " ORDER BY p.id LOCK IN SHARE MODE",
     });
     query
 }

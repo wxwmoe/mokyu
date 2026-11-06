@@ -240,3 +240,7 @@ mod compatibility_tests;
 #[cfg(test)]
 #[path = "../../../../tests/recovery/mysql_bootstrap.rs"]
 mod bootstrap_tests;
+
+#[cfg(test)]
+#[path = "../../../../tests/recovery/mysql_source_locks.rs"]
+mod source_lock_tests;
