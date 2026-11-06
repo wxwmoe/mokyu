@@ -190,7 +190,7 @@ async fn process(app: &App, work: &RawUpload) -> Result<()> {
             .into_iter()
             .filter(|stream| !app.is_active(*stream))
             .collect();
-        let _cache = app.public_reads.changing();
+        let _cache = app.public_reads.changing_raw(work.source.id, &streams);
         if app
             .raw
             .reuse_upload(work, &hash, &streams, processor(app))
@@ -229,7 +229,7 @@ async fn process(app: &App, work: &RawUpload) -> Result<()> {
     } else {
         None
     };
-    let _cache = app.public_reads.changing();
+    let _cache = app.public_reads.changing_raw(work.source.id, &[]);
     app.raw
         .complete_upload(
             work,

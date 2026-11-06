@@ -45,17 +45,79 @@ struct Index {
     _memory: Vec<Memory>,
     entries: HashMap<Key, Arc<Entry>>,
     paths: HashMap<Key, usize>,
+    raw_routes: HashMap<RawRef, Vec<Key>>,
     order: VecDeque<Key>,
     buckets: HashMap<Key, Weak<Entry>>,
     pending: HashSet<Key>,
     refreshes: HashMap<Key, Weak<Refresh>>,
     generation: u64,
     changing: usize,
+    raw_changes: HashMap<u64, RawUpdate>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+enum RawRef {
+    Source(crate::model::Id),
+    Stream(crate::model::Id),
+}
+
+fn raw_refs(snapshot: &ReadSnapshot) -> impl Iterator<Item = RawRef> {
+    snapshot
+        .raw
+        .as_ref()
+        .map(|r| RawRef::Source(r.source.id))
+        .into_iter()
+        .chain(
+            snapshot
+                .stream
+                .as_ref()
+                .filter(|s| s.payload_type == "raw")
+                .map(|s| RawRef::Stream(s.id)),
+        )
+}
+
+struct RawUpdate {
+    source: crate::model::Id,
+    streams: Vec<crate::model::Id>,
+}
+
+impl RawUpdate {
+    fn affects(&self, snapshot: &ReadSnapshot) -> bool {
+        snapshot
+            .raw
+            .as_ref()
+            .is_some_and(|row| row.source.id == self.source)
+            || snapshot
+                .stream
+                .as_ref()
+                .is_some_and(|row| self.streams.contains(&row.id))
+    }
+}
+
+pub(crate) struct RawChange<'a> {
+    cache: &'a Cache,
+    generation: u64,
+}
+
+impl Drop for RawChange<'_> {
+    fn drop(&mut self) {
+        let mut index = self.cache.index.lock().unwrap();
+        index.raw_changes.remove(&self.generation);
+        index.generation = index.generation.wrapping_add(1);
+    }
 }
 
 impl Index {
     fn remove(&mut self, key: Key) {
         if let Some(entry) = self.entries.remove(&key) {
+            for id in raw_refs(&entry.snapshot) {
+                if let Some(routes) = self.raw_routes.get_mut(&id) {
+                    routes.retain(|route| *route != key);
+                    if routes.is_empty() {
+                        self.raw_routes.remove(&id);
+                    }
+                }
+            }
             let stream = entry.snapshot.stream.as_ref().unwrap();
             let path = super::responses::path_key(entry.snapshot.bucket.id, &stream.object_key);
             if let Some(count) = self.paths.get_mut(&path) {
@@ -207,6 +269,7 @@ fn invalidate(index: &mut Index, object: Option<(Uuid, &str)>) {
     } else {
         index.entries.clear();
         index.paths.clear();
+        index.raw_routes.clear();
         index.order.clear();
         index.buckets.clear();
     }
@@ -353,6 +416,39 @@ impl Cache {
 
     pub fn changing_object<'a>(&'a self, bucket: Uuid, key: &'a str) -> Change<'a> {
         self.object_change(bucket, key, false)
+    }
+
+    pub(crate) fn changing_raw(
+        &self,
+        source: crate::model::Id,
+        streams: &[crate::model::Id],
+    ) -> RawChange<'_> {
+        let update = RawUpdate {
+            source,
+            streams: streams.to_vec(),
+        };
+        let mut index = self.index.lock().unwrap();
+        let removed: Vec<_> = std::iter::once(RawRef::Source(source))
+            .chain(streams.iter().copied().map(RawRef::Stream))
+            .filter_map(|id| index.raw_routes.get(&id))
+            .flatten()
+            .copied()
+            .collect();
+        if !removed.is_empty() {
+            for key in removed {
+                index.remove(key);
+            }
+            let index = &mut *index;
+            index.order.retain(|key| index.entries.contains_key(key));
+            index.buckets.retain(|_, entry| entry.strong_count() > 0);
+        }
+        index.generation = index.generation.wrapping_add(1);
+        let generation = index.generation;
+        index.raw_changes.insert(generation, update);
+        RawChange {
+            cache: self,
+            generation,
+        }
     }
 
     pub(crate) fn object_change<'a>(
@@ -726,6 +822,10 @@ impl Cache {
         if index.changing != 0
             || index.generation != generation
             || index
+                .raw_changes
+                .values()
+                .any(|update| update.affects(&snapshot))
+            || index
                 .entries
                 .get(&key(route))
                 .is_some_and(|entry| entry.verified > verified)
@@ -757,6 +857,9 @@ impl Cache {
                     index
                         .buckets
                         .insert(bucket_key(route), Arc::downgrade(&entry));
+                }
+                for id in raw_refs(&entry.snapshot) {
+                    index.raw_routes.entry(id).or_default().push(key);
                 }
                 index.entries.insert(key, entry);
                 *index.paths.entry(path).or_default() += 1;
@@ -1050,6 +1153,78 @@ mod tests {
     use super::*;
     use crate::app::{Bucket, StoredStream};
     use serde_json::json;
+
+    #[test]
+    fn raw_updates_keep_unrelated_entries_and_cors() {
+        use crate::model::{
+            Id,
+            raw::{RawRange, RawSource},
+        };
+        let (cors, _) = crate::http::cors::Cache::new(1024 * 1024, 256);
+        let (cache, _) = Cache::new(cors.clone(), &super::super::responses::Cache::new(0));
+        let (route, base) = fixture();
+        let mut raw = (*base).clone();
+        raw.raw = Some(RawRange {
+            source: RawSource {
+                id: Id::Integer(7),
+                location_id: Uuid::new_v4(),
+                home_storage_id: None,
+                address: None,
+                storage_id: raw.bucket.storage_id.unwrap(),
+                size: 1,
+                digest: Some(vec![0; 16]),
+                state: "ready".into(),
+                medium: "shared_s3".into(),
+                pending_upload: true,
+                revision: 1,
+                quarantine_code: None,
+            },
+            offset_bytes: 0,
+            length: 1,
+            source_offset: 0,
+        });
+        let raw = Arc::new(raw);
+        let alias = ReadRoute::Host {
+            host: "alias.test".into(),
+            key: "object".into(),
+        };
+        let (_, mut other) = fixture();
+        let other_route = ReadRoute::Host {
+            host: "other.test".into(),
+            key: "object".into(),
+        };
+        Arc::make_mut(&mut other).stream.as_mut().unwrap().id = Id::Integer(17);
+        let put = |route: &ReadRoute, snapshot: &Arc<ReadSnapshot>, generation| {
+            cache.put(
+                route,
+                snapshot.clone(),
+                None,
+                vec![],
+                (30, 60),
+                (Instant::now(), generation),
+            )
+        };
+        let old = cache.generation();
+        let cors_version = cors.generation();
+        put(&route, &raw, old);
+        put(&alias, &raw, old);
+        put(&other_route, &other, old);
+        let change = cache.changing_raw(Id::Integer(7), &[]);
+        let concurrent = cache.generation();
+        let overlapping = cache.changing_raw(Id::Integer(7), &[]);
+        drop(change);
+        put(&route, &raw, cache.generation());
+        assert!(cache.entry(&route).is_none() && cache.entry(&alias).is_none());
+        assert!(cache.get_with(&other_route, |_| true).is_some());
+        drop(overlapping);
+        put(&route, &raw, concurrent);
+        assert!(cache.entry(&route).is_none());
+        put(&route, &raw, cache.generation());
+        assert!(cache.entry(&route).is_some());
+        let _reuse = cache.changing_raw(Id::Integer(8), &[Id::Integer(17)]);
+        assert!(cache.entry(&route).is_some() && cache.entry(&other_route).is_none());
+        assert_eq!(cors.generation(), cors_version);
+    }
 
     #[tokio::test]
     async fn notification_batches_cover_resident_hotsets() {
