@@ -169,6 +169,7 @@ pub(super) mod sources;
 pub(super) use sources::{NodeReadChunk, NodeReadFragment, NodeReadRaw};
 pub(super) mod journal;
 pub(super) mod journal_restore;
+pub(super) mod journal_snapshots;
 pub(super) mod tier;
 pub(super) mod tier_reads;
 pub(super) mod transfer;

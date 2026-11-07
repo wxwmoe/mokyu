@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261107122341.
+-- Generated from the complete postgres migration chain through 20261107134057.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1122,6 +1122,7 @@ CREATE TABLE public.journal_buckets (
     prepared_generation bigint DEFAULT 0 NOT NULL,
     prepare_error text,
     flush_seq bigint DEFAULT 0 NOT NULL,
+    confirmed_log_bytes bigint DEFAULT 0 NOT NULL,
     CONSTRAINT journal_buckets_check CHECK (((published_seq >= 0) AND (published_seq <= last_seq))),
     CONSTRAINT journal_buckets_flush_seq_check CHECK ((flush_seq >= 0)),
     CONSTRAINT journal_buckets_generation_check CHECK ((generation > 0)),
@@ -1263,10 +1264,23 @@ CREATE TABLE public.journal_restore_materials (
     content_hash bytea NOT NULL
 );
 
+CREATE TABLE public.journal_snapshot_holds (
+    bucket_id uuid NOT NULL,
+    seq bigint NOT NULL,
+    storage_id uuid NOT NULL,
+    unit text NOT NULL,
+    address uuid NOT NULL,
+    block_key uuid
+);
+
 CREATE VIEW public.journal_protected_addresses AS
  SELECT journal_holds.address,
     journal_holds.unit
    FROM public.journal_holds
+UNION ALL
+ SELECT journal_snapshot_holds.address,
+    journal_snapshot_holds.unit
+   FROM public.journal_snapshot_holds
 UNION ALL
  SELECT m.address,
     m.unit
@@ -1328,6 +1342,128 @@ CREATE TABLE public.journal_restore_scopes (
     protect_unknown boolean DEFAULT true NOT NULL
 );
 
+CREATE TABLE public.journal_snapshot_buckets (
+    snapshot_id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    bucket_name text NOT NULL,
+    generation bigint NOT NULL,
+    watermark bigint NOT NULL,
+    included boolean NOT NULL,
+    mode_revision bigint NOT NULL
+);
+
+CREATE TABLE public.journal_snapshot_current (
+    storage_id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    generation bigint NOT NULL,
+    seq bigint NOT NULL,
+    deleted boolean NOT NULL
+);
+
+CREATE TABLE public.journal_snapshot_gc (
+    storage_id uuid NOT NULL,
+    object_id uuid NOT NULL,
+    page_no bigint NOT NULL,
+    kind text NOT NULL,
+    file_path text NOT NULL,
+    etag text NOT NULL,
+    remote_version text,
+    byte_count bigint NOT NULL,
+    reclaim_at timestamp with time zone NOT NULL,
+    CONSTRAINT journal_snapshot_gc_kind_check CHECK ((kind = ANY (ARRAY['segment'::text, 'page'::text, 'manifest'::text, 'checkpoint'::text])))
+);
+
+CREATE TABLE public.journal_snapshot_inputs (
+    bucket_id uuid NOT NULL,
+    seq bigint NOT NULL,
+    page integer NOT NULL,
+    encrypted bytea NOT NULL
+);
+
+CREATE TABLE public.journal_snapshot_members (
+    owner uuid NOT NULL,
+    family bigint NOT NULL,
+    bucket_id uuid NOT NULL,
+    generation bigint NOT NULL,
+    seq bigint NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    deleted boolean NOT NULL,
+    encoded_bytes bigint NOT NULL
+);
+
+CREATE TABLE public.journal_snapshot_pages (
+    owner uuid NOT NULL,
+    page_no bigint NOT NULL,
+    family bigint NOT NULL,
+    bucket_id uuid NOT NULL,
+    description jsonb NOT NULL,
+    encrypted bytea,
+    byte_count bigint NOT NULL,
+    etag text,
+    remote_version text,
+    gc_state text DEFAULT 'live'::text NOT NULL,
+    CONSTRAINT journal_snapshot_pages_gc_state_check CHECK ((gc_state = ANY (ARRAY['live'::text, 'pending'::text, 'gone'::text])))
+);
+
+CREATE TABLE public.journal_snapshot_refs (
+    snapshot_id uuid NOT NULL,
+    position_no bigint NOT NULL,
+    owner uuid NOT NULL,
+    page_no bigint NOT NULL
+);
+
+CREATE TABLE public.journal_snapshot_usage (
+    storage_id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    page_bytes bigint NOT NULL,
+    invalid_bytes bigint NOT NULL
+);
+
+CREATE TABLE public.journal_snapshot_work (
+    snapshot_id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    generation bigint NOT NULL,
+    seq bigint NOT NULL,
+    deleted boolean NOT NULL,
+    output_row boolean DEFAULT true NOT NULL
+);
+
+CREATE TABLE public.journal_snapshots (
+    encrypt_frames boolean DEFAULT false NOT NULL,
+    id uuid NOT NULL,
+    storage_id uuid NOT NULL,
+    kind text NOT NULL,
+    state text NOT NULL,
+    parent uuid,
+    revision bigint DEFAULT 0 NOT NULL,
+    sequence_no bigint DEFAULT 0 NOT NULL,
+    digest bytea,
+    epoch uuid,
+    page_limit bigint DEFAULT 0 NOT NULL,
+    covered_bytes bigint DEFAULT 0 NOT NULL,
+    manifest bytea,
+    root_index bytea,
+    manifest_etag text,
+    manifest_version text,
+    index_etag text,
+    checkpoint_etag text,
+    checkpoint_version text,
+    manifest_size bigint DEFAULT 0 NOT NULL,
+    index_size bigint DEFAULT 0 NOT NULL,
+    planned_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    confirmed_at timestamp with time zone,
+    gc_after timestamp with time zone,
+    lease_token uuid,
+    lease_until timestamp with time zone,
+    attempts bigint DEFAULT 0 NOT NULL,
+    retry_after timestamp with time zone,
+    error_detail text,
+    CONSTRAINT journal_snapshots_kind_check CHECK ((kind = ANY (ARRAY['append'::text, 'compact'::text, 'new'::text]))),
+    CONSTRAINT journal_snapshots_state_check CHECK ((state = ANY (ARRAY['queued'::text, 'building'::text, 'prepared'::text, 'current'::text, 'retained'::text, 'failed'::text, 'gone'::text])))
+);
+
 CREATE TABLE public.journal_stores (
     storage_id uuid NOT NULL,
     policy jsonb NOT NULL,
@@ -1346,6 +1482,15 @@ CREATE TABLE public.journal_stores (
     flush_requested boolean DEFAULT false NOT NULL,
     confirmed_at timestamp with time zone,
     last_error text,
+    snapshot_id uuid,
+    snapshot_revision bigint DEFAULT 0 NOT NULL,
+    snapshot_log_bytes bigint DEFAULT 0 NOT NULL,
+    snapshot_auto_due boolean DEFAULT false NOT NULL,
+    snapshot_delete_bytes bigint DEFAULT 0 NOT NULL,
+    snapshot_invalid_bytes bigint DEFAULT 0 NOT NULL,
+    snapshot_token uuid,
+    snapshot_lease_until timestamp with time zone,
+    snapshot_gc_error text,
     CONSTRAINT journal_stores_allocated_seq_check CHECK ((allocated_seq >= 0)),
     CONSTRAINT journal_stores_emitted_seq_check CHECK ((emitted_seq >= 0)),
     CONSTRAINT journal_stores_revision_check CHECK ((revision > 0))
@@ -3037,6 +3182,45 @@ ALTER TABLE ONLY public.journal_restore_ranges
 ALTER TABLE ONLY public.journal_restore_scopes
     ADD CONSTRAINT journal_restore_scopes_pkey PRIMARY KEY (storage_id, job);
 
+ALTER TABLE ONLY public.journal_snapshot_buckets
+    ADD CONSTRAINT journal_snapshot_buckets_pkey PRIMARY KEY (snapshot_id, bucket_id);
+
+ALTER TABLE ONLY public.journal_snapshot_current
+    ADD CONSTRAINT journal_snapshot_current_pkey PRIMARY KEY (storage_id, bucket_id, object_key);
+
+ALTER TABLE ONLY public.journal_snapshot_gc
+    ADD CONSTRAINT journal_snapshot_gc_pkey PRIMARY KEY (storage_id, object_id, kind, page_no);
+
+ALTER TABLE ONLY public.journal_snapshot_holds
+    ADD CONSTRAINT journal_snapshot_holds_pkey PRIMARY KEY (bucket_id, seq, storage_id, unit, address);
+
+ALTER TABLE ONLY public.journal_snapshot_inputs
+    ADD CONSTRAINT journal_snapshot_inputs_pkey PRIMARY KEY (bucket_id, seq, page);
+
+ALTER TABLE ONLY public.journal_snapshot_members
+    ADD CONSTRAINT journal_snapshot_members_pkey PRIMARY KEY (owner, family, bucket_id, seq);
+
+ALTER TABLE ONLY public.journal_snapshot_pages
+    ADD CONSTRAINT journal_snapshot_pages_pkey PRIMARY KEY (owner, page_no);
+
+ALTER TABLE ONLY public.journal_snapshot_refs
+    ADD CONSTRAINT journal_snapshot_refs_pkey PRIMARY KEY (snapshot_id, position_no);
+
+ALTER TABLE ONLY public.journal_snapshot_refs
+    ADD CONSTRAINT journal_snapshot_refs_snapshot_id_owner_page_no_key UNIQUE (snapshot_id, owner, page_no);
+
+ALTER TABLE ONLY public.journal_snapshot_usage
+    ADD CONSTRAINT journal_snapshot_usage_pkey PRIMARY KEY (storage_id, bucket_id);
+
+ALTER TABLE ONLY public.journal_snapshot_work
+    ADD CONSTRAINT journal_snapshot_work_pkey PRIMARY KEY (snapshot_id, bucket_id, object_key);
+
+ALTER TABLE ONLY public.journal_snapshots
+    ADD CONSTRAINT journal_snapshots_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.journal_snapshots
+    ADD CONSTRAINT journal_snapshots_storage_id_id_key UNIQUE (storage_id, id);
+
 ALTER TABLE ONLY public.journal_stores
     ADD CONSTRAINT journal_stores_pkey PRIMARY KEY (storage_id);
 
@@ -3531,6 +3715,18 @@ CREATE INDEX journal_recoveries_source ON public.journal_recoveries USING btree 
 CREATE INDEX journal_recoveries_work ON public.journal_recoveries USING btree (state, created_at);
 
 CREATE INDEX journal_restore_addresses ON public.journal_restore_materials USING btree (address);
+
+CREATE INDEX journal_snapshot_family ON public.journal_snapshot_pages USING btree (owner, family);
+
+CREATE INDEX journal_snapshot_gc_due ON public.journal_snapshot_gc USING btree (storage_id, reclaim_at);
+
+CREATE INDEX journal_snapshot_hold_address ON public.journal_snapshot_holds USING btree (address, unit);
+
+CREATE INDEX journal_snapshot_member_key ON public.journal_snapshot_members USING btree (bucket_id, object_key, seq);
+
+CREATE INDEX journal_snapshot_queue ON public.journal_snapshots USING btree (storage_id, state, planned_at);
+
+CREATE INDEX journal_snapshot_ref_owner ON public.journal_snapshot_refs USING btree (owner, page_no);
 
 CREATE INDEX key_replacements_expiry ON public.key_replacements USING btree (expires_at);
 
@@ -4071,6 +4267,27 @@ ALTER TABLE ONLY public.journal_restore_ranges
 
 ALTER TABLE ONLY public.journal_restore_scopes
     ADD CONSTRAINT journal_restore_scopes_job_fkey FOREIGN KEY (job) REFERENCES public.journal_recoveries(id);
+
+ALTER TABLE ONLY public.journal_snapshot_buckets
+    ADD CONSTRAINT journal_snapshot_buckets_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES public.journal_snapshots(id);
+
+ALTER TABLE ONLY public.journal_snapshot_members
+    ADD CONSTRAINT journal_snapshot_members_owner_family_fkey FOREIGN KEY (owner, family) REFERENCES public.journal_snapshot_pages(owner, page_no);
+
+ALTER TABLE ONLY public.journal_snapshot_pages
+    ADD CONSTRAINT journal_snapshot_pages_owner_fkey FOREIGN KEY (owner) REFERENCES public.journal_snapshots(id);
+
+ALTER TABLE ONLY public.journal_snapshot_refs
+    ADD CONSTRAINT journal_snapshot_refs_owner_page_no_fkey FOREIGN KEY (owner, page_no) REFERENCES public.journal_snapshot_pages(owner, page_no);
+
+ALTER TABLE ONLY public.journal_snapshot_refs
+    ADD CONSTRAINT journal_snapshot_refs_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES public.journal_snapshots(id);
+
+ALTER TABLE ONLY public.journal_snapshot_work
+    ADD CONSTRAINT journal_snapshot_work_snapshot_id_fkey FOREIGN KEY (snapshot_id) REFERENCES public.journal_snapshots(id);
+
+ALTER TABLE ONLY public.journal_snapshots
+    ADD CONSTRAINT journal_snapshots_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.journal_stores(storage_id);
 
 ALTER TABLE ONLY public.journal_stores
     ADD CONSTRAINT journal_stores_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);

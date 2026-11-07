@@ -3,6 +3,7 @@ pub(crate) mod gc;
 pub(crate) mod integrity;
 pub(crate) mod journal;
 mod journal_restore;
+mod journal_snapshots;
 pub(crate) mod lifecycle;
 pub(crate) mod maintenance;
 pub(crate) mod migration;

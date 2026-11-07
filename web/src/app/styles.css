@@ -220,6 +220,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .journal-panels .section-heading, .journal-panels h2 { margin: 0; }
 .journal-panels .facts { margin: 20px 0; align-items: baseline; }
 .journal-panels .facts dd { font-weight: var(--ui-weight, 700); font-variant-numeric: tabular-nums; }
+.journal-panels .badge { align-self: flex-start; }
 .journal-panels .actions { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line-soft); gap: 8px; }
 .journal-panels .actions button { max-width: 100%; }
 .object-path { overflow-wrap: anywhere; font-size: var(--small-size, 12px); padding-top: 8px; }

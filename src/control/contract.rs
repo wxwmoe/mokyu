@@ -127,6 +127,10 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::storage::check, super::storage::update))
         .routes(routes!(super::journal::get, super::journal::set))
         .routes(routes!(super::journal::flush))
+        .routes(routes!(
+            super::journal::snapshot_get,
+            super::journal::snapshot_post
+        ))
         .routes(routes!(super::recovery::probe_route))
         .routes(routes!(super::recovery::list_route))
         .routes(routes!(super::recovery::status_route))

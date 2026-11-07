@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261107122341.
+-- Generated from the complete mysql migration chain through 20261107134057.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -402,6 +402,7 @@ CREATE TABLE `journal_buckets` (
   `prepared_generation` bigint NOT NULL DEFAULT '0',
   `prepare_error` varchar(1024) COLLATE utf8mb4_bin DEFAULT NULL,
   `flush_seq` bigint NOT NULL DEFAULT '0',
+  `confirmed_log_bytes` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`bucket_id`),
   KEY `journal_buckets_storage` (`storage_id`,`bucket_id`),
   KEY `journal_buckets_scan` (`scanning`,`bucket_id`),
@@ -649,6 +650,163 @@ CREATE TABLE `journal_restore_scopes` (
   CONSTRAINT `journal_restore_scopes_ibfk_1` FOREIGN KEY (`job`) REFERENCES `journal_recoveries` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `journal_snapshot_buckets` (
+  `snapshot_id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `bucket_name` varchar(255) COLLATE utf8mb4_bin NOT NULL,
+  `generation` bigint NOT NULL,
+  `watermark` bigint NOT NULL,
+  `included` tinyint(1) NOT NULL,
+  `mode_revision` bigint NOT NULL,
+  PRIMARY KEY (`snapshot_id`,`bucket_id`),
+  CONSTRAINT `journal_snapshot_buckets_ibfk_1` FOREIGN KEY (`snapshot_id`) REFERENCES `journal_snapshots` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_current` (
+  `storage_id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `generation` bigint NOT NULL,
+  `seq` bigint NOT NULL,
+  `deleted` tinyint(1) NOT NULL,
+  PRIMARY KEY (`storage_id`,`bucket_id`,`object_key`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_gc` (
+  `storage_id` binary(16) NOT NULL,
+  `object_id` binary(16) NOT NULL,
+  `page_no` bigint NOT NULL,
+  `kind` varchar(32) COLLATE utf8mb4_bin NOT NULL,
+  `file_path` varchar(512) COLLATE utf8mb4_bin NOT NULL,
+  `etag` varchar(255) COLLATE utf8mb4_bin NOT NULL,
+  `remote_version` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `byte_count` bigint NOT NULL,
+  `reclaim_at` datetime(6) NOT NULL,
+  PRIMARY KEY (`storage_id`,`object_id`,`kind`,`page_no`),
+  KEY `journal_snapshot_gc_due` (`storage_id`,`reclaim_at`),
+  CONSTRAINT `journal_snapshot_gc_chk_1` CHECK ((`kind` in (_utf8mb4'segment',_utf8mb4'page',_utf8mb4'manifest',_utf8mb4'checkpoint')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_holds` (
+  `bucket_id` binary(16) NOT NULL,
+  `seq` bigint NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `unit` varchar(32) COLLATE utf8mb4_bin NOT NULL,
+  `address` binary(16) NOT NULL,
+  `block_key` binary(16) DEFAULT NULL,
+  PRIMARY KEY (`bucket_id`,`seq`,`storage_id`,`unit`,`address`),
+  KEY `journal_snapshot_hold_address` (`address`,`unit`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_inputs` (
+  `bucket_id` binary(16) NOT NULL,
+  `seq` bigint NOT NULL,
+  `page` int NOT NULL,
+  `encrypted` longblob NOT NULL,
+  PRIMARY KEY (`bucket_id`,`seq`,`page`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_members` (
+  `owner` binary(16) NOT NULL,
+  `family` bigint NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `generation` bigint NOT NULL,
+  `seq` bigint NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `deleted` tinyint(1) NOT NULL,
+  `encoded_bytes` bigint NOT NULL,
+  PRIMARY KEY (`owner`,`family`,`bucket_id`,`seq`),
+  KEY `journal_snapshot_member_key` (`bucket_id`,`object_key`,`seq`),
+  CONSTRAINT `journal_snapshot_members_ibfk_1` FOREIGN KEY (`owner`, `family`) REFERENCES `journal_snapshot_pages` (`owner`, `page_no`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_pages` (
+  `owner` binary(16) NOT NULL,
+  `page_no` bigint NOT NULL,
+  `family` bigint NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `description` json NOT NULL,
+  `encrypted` longblob,
+  `byte_count` bigint NOT NULL,
+  `etag` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `remote_version` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `gc_state` varchar(32) COLLATE utf8mb4_bin NOT NULL DEFAULT 'live',
+  PRIMARY KEY (`owner`,`page_no`),
+  KEY `journal_snapshot_family` (`owner`,`family`),
+  CONSTRAINT `journal_snapshot_pages_ibfk_1` FOREIGN KEY (`owner`) REFERENCES `journal_snapshots` (`id`),
+  CONSTRAINT `journal_snapshot_pages_chk_1` CHECK ((`gc_state` in (_utf8mb4'live',_utf8mb4'pending',_utf8mb4'gone')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_refs` (
+  `snapshot_id` binary(16) NOT NULL,
+  `position_no` bigint NOT NULL,
+  `owner` binary(16) NOT NULL,
+  `page_no` bigint NOT NULL,
+  PRIMARY KEY (`snapshot_id`,`position_no`),
+  UNIQUE KEY `snapshot_id` (`snapshot_id`,`owner`,`page_no`),
+  KEY `journal_snapshot_ref_owner` (`owner`,`page_no`),
+  CONSTRAINT `journal_snapshot_refs_ibfk_1` FOREIGN KEY (`owner`, `page_no`) REFERENCES `journal_snapshot_pages` (`owner`, `page_no`),
+  CONSTRAINT `journal_snapshot_refs_ibfk_2` FOREIGN KEY (`snapshot_id`) REFERENCES `journal_snapshots` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_usage` (
+  `storage_id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `page_bytes` bigint NOT NULL,
+  `invalid_bytes` bigint NOT NULL,
+  PRIMARY KEY (`storage_id`,`bucket_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshot_work` (
+  `snapshot_id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `generation` bigint NOT NULL,
+  `seq` bigint NOT NULL,
+  `deleted` tinyint(1) NOT NULL,
+  `output_row` tinyint(1) NOT NULL DEFAULT '1',
+  PRIMARY KEY (`snapshot_id`,`bucket_id`,`object_key`),
+  CONSTRAINT `journal_snapshot_work_ibfk_1` FOREIGN KEY (`snapshot_id`) REFERENCES `journal_snapshots` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_snapshots` (
+  `encrypt_frames` tinyint(1) NOT NULL DEFAULT '0',
+  `id` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `kind` varchar(32) COLLATE utf8mb4_bin NOT NULL,
+  `state` varchar(32) COLLATE utf8mb4_bin NOT NULL,
+  `parent` binary(16) DEFAULT NULL,
+  `revision` bigint NOT NULL DEFAULT '0',
+  `sequence_no` bigint NOT NULL DEFAULT '0',
+  `digest` binary(32) DEFAULT NULL,
+  `epoch` binary(16) DEFAULT NULL,
+  `page_limit` bigint NOT NULL DEFAULT '0',
+  `covered_bytes` bigint NOT NULL DEFAULT '0',
+  `manifest` longblob,
+  `root_index` longblob,
+  `manifest_etag` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `manifest_version` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `index_etag` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `checkpoint_etag` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `checkpoint_version` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `manifest_size` bigint NOT NULL DEFAULT '0',
+  `index_size` bigint NOT NULL DEFAULT '0',
+  `planned_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `confirmed_at` datetime(6) DEFAULT NULL,
+  `gc_after` datetime(6) DEFAULT NULL,
+  `lease_token` binary(16) DEFAULT NULL,
+  `lease_until` datetime(6) DEFAULT NULL,
+  `attempts` bigint NOT NULL DEFAULT '0',
+  `retry_after` datetime(6) DEFAULT NULL,
+  `error_detail` text COLLATE utf8mb4_bin,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `storage_id` (`storage_id`,`id`),
+  KEY `journal_snapshot_queue` (`storage_id`,`state`,`planned_at`),
+  CONSTRAINT `journal_snapshots_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `journal_stores` (`storage_id`),
+  CONSTRAINT `journal_snapshots_chk_1` CHECK ((`kind` in (_utf8mb4'append',_utf8mb4'compact',_utf8mb4'new'))),
+  CONSTRAINT `journal_snapshots_chk_2` CHECK ((`state` in (_utf8mb4'queued',_utf8mb4'building',_utf8mb4'prepared',_utf8mb4'current',_utf8mb4'retained',_utf8mb4'failed',_utf8mb4'gone')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `journal_stores` (
   `storage_id` binary(16) NOT NULL,
   `policy` json NOT NULL,
@@ -667,6 +825,15 @@ CREATE TABLE `journal_stores` (
   `flush_requested` tinyint(1) NOT NULL DEFAULT '0',
   `confirmed_at` datetime(6) DEFAULT NULL,
   `last_error` varchar(1024) COLLATE utf8mb4_bin DEFAULT NULL,
+  `snapshot_id` binary(16) DEFAULT NULL,
+  `snapshot_revision` bigint NOT NULL DEFAULT '0',
+  `snapshot_log_bytes` bigint NOT NULL DEFAULT '0',
+  `snapshot_auto_due` tinyint(1) NOT NULL DEFAULT '0',
+  `snapshot_delete_bytes` bigint NOT NULL DEFAULT '0',
+  `snapshot_invalid_bytes` bigint NOT NULL DEFAULT '0',
+  `snapshot_token` binary(16) DEFAULT NULL,
+  `snapshot_lease_until` datetime(6) DEFAULT NULL,
+  `snapshot_gc_error` text COLLATE utf8mb4_bin,
   PRIMARY KEY (`storage_id`),
   CONSTRAINT `journal_stores_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
   CONSTRAINT `journal_stores_chk_1` CHECK ((`revision` > 0)),
@@ -2418,7 +2585,7 @@ INSERT INTO `usage_summary` (`id`, `requested_at`, `as_of`, `data`) VALUES ('glo
 
 SET foreign_key_checks=@mokyu_schema_foreign_keys;
 
-CREATE SQL SECURITY DEFINER VIEW `journal_protected_addresses` AS select `journal_holds`.`address` AS `address`,`journal_holds`.`unit` AS `unit` from `journal_holds` union all select `m`.`address` AS `address`,`m`.`unit` AS `unit` from (`journal_restore_materials` `m` join `journal_recoveries` `j` on((`j`.`id` = `m`.`job`))) where (`j`.`state` not in ('completed','cancelled'));
+CREATE SQL SECURITY DEFINER VIEW `journal_protected_addresses` AS select `journal_holds`.`address` AS `address`,`journal_holds`.`unit` AS `unit` from `journal_holds` union all select `journal_snapshot_holds`.`address` AS `address`,`journal_snapshot_holds`.`unit` AS `unit` from `journal_snapshot_holds` union all select `m`.`address` AS `address`,`m`.`unit` AS `unit` from (`journal_restore_materials` `m` join `journal_recoveries` `j` on((`j`.`id` = `m`.`job`))) where (`j`.`state` not in ('completed','cancelled'));
 
 CREATE SQL SECURITY DEFINER VIEW `user_bucket_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 67 when 'writer' then 95 when 'maintainer' then 127 else 0 end) & if((`m`.`scope` = 'all'),127,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_bucket_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
 

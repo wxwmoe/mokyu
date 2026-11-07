@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261107122341.
+-- Generated from the complete sqlite migration chain through 20261107134057.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -292,7 +292,7 @@ CREATE TABLE journal_buckets (
     scan_after BLOB,
     scan_until BLOB,
     dirty INTEGER NOT NULL DEFAULT FALSE
-, prepared_generation INTEGER NOT NULL DEFAULT 0 CHECK (prepared_generation>=0), prepare_error TEXT, flush_seq INTEGER NOT NULL DEFAULT 0 CHECK (flush_seq>=0)) STRICT, WITHOUT ROWID;
+, prepared_generation INTEGER NOT NULL DEFAULT 0 CHECK (prepared_generation>=0), prepare_error TEXT, flush_seq INTEGER NOT NULL DEFAULT 0 CHECK (flush_seq>=0), confirmed_log_bytes INTEGER NOT NULL DEFAULT 0) STRICT, WITHOUT ROWID;
 
 CREATE TABLE journal_dictionary (
     storage_id BLOB NOT NULL,
@@ -495,6 +495,147 @@ CREATE TABLE journal_restore_scopes (
     FOREIGN KEY (job) REFERENCES journal_recoveries(id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE journal_snapshot_buckets (
+    snapshot_id BLOB NOT NULL REFERENCES journal_snapshots(id),
+    bucket_id BLOB NOT NULL,
+    bucket_name TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    watermark INTEGER NOT NULL,
+    included INTEGER NOT NULL,
+    mode_revision INTEGER NOT NULL,
+    PRIMARY KEY (snapshot_id,bucket_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_current (
+    storage_id BLOB NOT NULL,
+    bucket_id BLOB NOT NULL,
+    object_key BLOB NOT NULL,
+    generation INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    deleted INTEGER NOT NULL,
+    PRIMARY KEY (storage_id,bucket_id,object_key)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_gc (
+    storage_id BLOB NOT NULL,
+    object_id BLOB NOT NULL,
+    page_no INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('segment','page','manifest','checkpoint')),
+    file_path TEXT NOT NULL,
+    etag TEXT NOT NULL,
+    remote_version TEXT,
+    byte_count INTEGER NOT NULL,
+    reclaim_at INTEGER NOT NULL,
+    PRIMARY KEY (storage_id,object_id,kind,page_no)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_holds (
+    bucket_id BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    storage_id BLOB NOT NULL,
+    unit TEXT NOT NULL,
+    address BLOB NOT NULL,
+    block_key BLOB,
+    PRIMARY KEY (bucket_id,seq,storage_id,unit,address)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_inputs (
+    bucket_id BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    page INTEGER NOT NULL,
+    encrypted BLOB NOT NULL,
+    PRIMARY KEY (bucket_id,seq,page)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_members (
+    owner BLOB NOT NULL,
+    family INTEGER NOT NULL,
+    bucket_id BLOB NOT NULL,
+    generation INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    object_key BLOB NOT NULL,
+    deleted INTEGER NOT NULL,
+    encoded_bytes INTEGER NOT NULL,
+    PRIMARY KEY (owner,family,bucket_id,seq),
+    FOREIGN KEY (owner,family) REFERENCES journal_snapshot_pages(owner,page_no)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_pages (
+    owner BLOB NOT NULL REFERENCES journal_snapshots(id),
+    page_no INTEGER NOT NULL,
+    family INTEGER NOT NULL,
+    bucket_id BLOB NOT NULL,
+    description TEXT NOT NULL,
+    encrypted BLOB,
+    byte_count INTEGER NOT NULL,
+    etag TEXT,
+    remote_version TEXT,
+    gc_state TEXT NOT NULL DEFAULT 'live' CHECK (gc_state IN ('live','pending','gone')),
+    PRIMARY KEY (owner,page_no)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_refs (
+    snapshot_id BLOB NOT NULL REFERENCES journal_snapshots(id),
+    position_no INTEGER NOT NULL,
+    owner BLOB NOT NULL,
+    page_no INTEGER NOT NULL,
+    PRIMARY KEY (snapshot_id,position_no),
+    UNIQUE (snapshot_id,owner,page_no),
+    FOREIGN KEY (owner,page_no) REFERENCES journal_snapshot_pages(owner,page_no)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_usage (
+    storage_id BLOB NOT NULL,
+    bucket_id BLOB NOT NULL,
+    page_bytes INTEGER NOT NULL,
+    invalid_bytes INTEGER NOT NULL,
+    PRIMARY KEY (storage_id,bucket_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshot_work (
+    snapshot_id BLOB NOT NULL REFERENCES journal_snapshots(id),
+    bucket_id BLOB NOT NULL,
+    object_key BLOB NOT NULL,
+    generation INTEGER NOT NULL,
+    seq INTEGER NOT NULL,
+    deleted INTEGER NOT NULL,
+    output_row INTEGER NOT NULL DEFAULT TRUE,
+    PRIMARY KEY (snapshot_id,bucket_id,object_key)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE journal_snapshots (
+    encrypt_frames INTEGER NOT NULL DEFAULT 0 CHECK (encrypt_frames IN (0,1)),
+    id BLOB PRIMARY KEY NOT NULL,
+    storage_id BLOB NOT NULL REFERENCES journal_stores(storage_id),
+    kind TEXT NOT NULL CHECK (kind IN ('append','compact','new')),
+    state TEXT NOT NULL CHECK (state IN ('queued','building','prepared','current','retained','failed','gone')),
+    parent BLOB,
+    revision INTEGER NOT NULL DEFAULT 0,
+    sequence_no INTEGER NOT NULL DEFAULT 0,
+    digest BLOB,
+    epoch BLOB,
+    page_limit INTEGER NOT NULL DEFAULT 0,
+    covered_bytes INTEGER NOT NULL DEFAULT 0,
+    manifest BLOB,
+    root_index BLOB,
+    manifest_etag TEXT,
+    manifest_version TEXT,
+    index_etag TEXT,
+    checkpoint_etag TEXT,
+    checkpoint_version TEXT,
+    manifest_size INTEGER NOT NULL DEFAULT 0,
+    index_size INTEGER NOT NULL DEFAULT 0,
+    planned_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    confirmed_at INTEGER,
+    gc_after INTEGER,
+    lease_token BLOB,
+    lease_until INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    retry_after INTEGER,
+    error_detail TEXT,
+    UNIQUE (storage_id,id)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE journal_stores (
     storage_id BLOB NOT NULL PRIMARY KEY,
     policy TEXT NOT NULL,
@@ -512,7 +653,7 @@ CREATE TABLE journal_stores (
     lease_until INTEGER,
     flush_requested INTEGER NOT NULL DEFAULT FALSE,
     confirmed_at INTEGER,
-    last_error TEXT,
+    last_error TEXT, snapshot_id BLOB, snapshot_revision INTEGER NOT NULL DEFAULT 0, snapshot_log_bytes INTEGER NOT NULL DEFAULT 0, snapshot_auto_due INTEGER NOT NULL DEFAULT FALSE, snapshot_delete_bytes INTEGER NOT NULL DEFAULT 0, snapshot_invalid_bytes INTEGER NOT NULL DEFAULT 0, snapshot_token BLOB, snapshot_lease_until INTEGER, snapshot_gc_error TEXT,
     FOREIGN KEY (storage_id) REFERENCES storages(id)
 ) STRICT, WITHOUT ROWID;
 
@@ -1947,6 +2088,18 @@ CREATE INDEX journal_recoveries_work ON journal_recoveries(state,created_at);
 
 CREATE INDEX journal_restore_addresses ON journal_restore_materials(address);
 
+CREATE INDEX journal_snapshot_family ON journal_snapshot_pages(owner,family);
+
+CREATE INDEX journal_snapshot_gc_due ON journal_snapshot_gc(storage_id,reclaim_at);
+
+CREATE INDEX journal_snapshot_hold_address ON journal_snapshot_holds(address,unit);
+
+CREATE INDEX journal_snapshot_member_key ON journal_snapshot_members(bucket_id,object_key,seq);
+
+CREATE INDEX journal_snapshot_queue ON journal_snapshots(storage_id,state,planned_at);
+
+CREATE INDEX journal_snapshot_ref_owner ON journal_snapshot_refs(owner,page_no);
+
 CREATE INDEX key_replacements_expiry ON key_replacements(expires_at);
 
 CREATE INDEX maintenance_previews_expiry ON maintenance_previews(expires_at);
@@ -2219,6 +2372,8 @@ CREATE UNIQUE INDEX web_uploads_client ON web_uploads(user_id,client_id);
 
 CREATE VIEW journal_protected_addresses AS
 SELECT address,unit FROM journal_holds
+UNION ALL
+SELECT address,unit FROM journal_snapshot_holds
 UNION ALL
 SELECT m.address,m.unit FROM journal_restore_materials m JOIN journal_recoveries j ON j.id=m.job
 WHERE j.state NOT IN ('completed','cancelled');

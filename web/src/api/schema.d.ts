@@ -1984,6 +1984,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storages/{name}/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["metadata_snapshots_status"];
+        put?: never;
+        post: operations["metadata_snapshot_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storages/{name}/unpack": {
         parameters: {
             query?: never;
@@ -3135,6 +3151,28 @@ export interface components {
             exclusive_takeover?: boolean;
             /** Format: uuid */
             project: string;
+        };
+        /** @enum {string} */
+        MetadataSnapshotAction: "append" | "compact" | "new";
+        MetadataSnapshotRequest: {
+            action: components["schemas"]["MetadataSnapshotAction"];
+        };
+        MetadataSnapshotStatus: {
+            /** Format: uuid */
+            current?: string | null;
+            delete_log_bytes: string;
+            error?: string | null;
+            gc_bytes: string;
+            invalid_bytes: string;
+            operation?: string | null;
+            pages: string;
+            pending_log_bytes: string;
+            revision: string;
+            snapshot_deletions: string;
+            source_entries: string;
+            /** Format: uuid */
+            task?: string | null;
+            task_state?: string | null;
         };
         /** @enum {string} */
         Mode: "metadata" | "head" | "full";
@@ -8154,6 +8192,52 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+        };
+    };
+    metadata_snapshots_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataSnapshotStatus"];
+                };
+            };
+        };
+    };
+    metadata_snapshot_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MetadataSnapshotRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataSnapshotStatus"];
                 };
             };
         };

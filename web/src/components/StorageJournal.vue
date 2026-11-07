@@ -9,6 +9,7 @@ import { notify, report } from '../app/feedback'
 import ErrorNotice from './ErrorNotice.vue'
 import UiSelect from './ui/UiSelect.vue'
 import UiDialog from './ui/UiDialog.vue'
+import StorageSnapshots from './StorageSnapshots.vue'
 
 type Status = components['schemas']['MetadataJournalStatus']
 type Policy = Required<components['schemas']['MetadataJournalPolicy']>
@@ -75,6 +76,7 @@ async function flush() {
         <button type="button" :disabled="!status.data.value || busy" @click="edit"><Settings2 :size="16" />{{ t('journalSettings') }}</button>
       </div>
     </section>
+    <StorageSnapshots :name="name" :enabled="!!status.data.value && Number(status.data.value.emitted_sequence) > 0" />
   </div>
   <UiDialog v-model:open="open" medium :busy="busy" :title="t('journalSettings')">
     <form v-if="draft" class="form-stack" @submit.prevent="save">

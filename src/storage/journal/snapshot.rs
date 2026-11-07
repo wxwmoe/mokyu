@@ -79,6 +79,8 @@ pub(crate) struct Index {
     pub manifest_digest: [u8; 32],
     pub buckets: Vec<BucketCut>,
     pub bucket_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<BucketCut>,
 }
 
 pub(crate) fn page_path(owner: Uuid, number: u32) -> String {
@@ -86,6 +88,9 @@ pub(crate) fn page_path(owner: Uuid, number: u32) -> String {
 }
 pub(crate) fn manifest_path(owner: Uuid) -> String {
     format!("{ROOT}/snapshots/{}/manifest", owner.simple())
+}
+pub(crate) fn checkpoint_path(epoch: Uuid, revision: u64) -> String {
+    format!("{ROOT}/checkpoints/{}/{revision:020}", epoch.simple())
 }
 pub(crate) fn index_path() -> String {
     format!("{ROOT}/index")
@@ -235,3 +240,6 @@ pub(crate) fn decode_page(
     ensure!(first - 1 == page.items, "snapshot page length mismatch");
     Ok(())
 }
+#[cfg(test)]
+#[path = "../../../tests/recovery/snapshot_pages.rs"]
+mod large_tests;

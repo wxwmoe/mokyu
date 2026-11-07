@@ -421,6 +421,10 @@ pub enum Recoveries {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Journals {
     Show,
+    Snapshots {
+        #[arg(value_parser=["append","compact","new"])]
+        action: Option<String>,
+    },
     Set {
         file: PathBuf,
         #[arg(skip)]
@@ -716,7 +720,7 @@ impl Command {
                     command: Recoveries::Show { .. },
                 }
                 | Storages::Journal {
-                    command: Journals::Show,
+                    command: Journals::Show | Journals::Snapshots { action: None },
                     ..
                 },
             )

@@ -12,10 +12,12 @@ use uuid::Uuid;
 #[derive(Default)]
 pub(crate) struct Catalog {
     pub keys: BTreeMap<Uuid, BlockKey>,
+    selected: Option<std::collections::BTreeSet<Uuid>>,
     pub materials: BTreeMap<Reference, Material>,
     pub buckets: BTreeMap<Uuid, Bucket>,
     working: BTreeMap<Uuid, Bucket>,
     watermarks: BTreeMap<Uuid, i64>,
+    excluded: BTreeMap<Uuid, i64>,
     ranges: BTreeMap<(Uuid, i64, i64), ObjectRanges>,
     changes: BTreeMap<(Uuid, i64), Change>,
     accepted: BTreeMap<(Uuid, i64), [u8; 32]>,
@@ -64,6 +66,9 @@ impl Bucket {
 }
 
 impl Catalog {
+    pub fn select(&mut self, buckets: Option<&std::collections::BTreeSet<Uuid>>) {
+        self.selected = buckets.cloned();
+    }
     pub fn required_keys(&self, bucket: &Bucket) -> Result<std::collections::BTreeSet<Uuid>> {
         let mut ids = std::collections::BTreeSet::new();
         for change in bucket.objects.values() {
@@ -82,6 +87,12 @@ impl Catalog {
                         })
                         .context("missing recovery pack")?;
                 }
+                ensure!(
+                    span.source_offset
+                        .checked_add(span.length)
+                        .is_some_and(|end| end <= self.materials[&span.material].size()),
+                    "snapshot range exceeds material"
+                );
                 if let Some(id) = m.hold()?.and_then(|h| h.key) {
                     ensure!(self.keys.contains_key(&id), "missing recovery block key");
                     ids.insert(id);
@@ -89,6 +100,39 @@ impl Catalog {
             }
         }
         Ok(ids)
+    }
+
+    pub fn replace_scope(
+        &mut self,
+        cuts: &[super::snapshot::BucketCut],
+        excluded: &[super::snapshot::BucketCut],
+    ) -> Result<()> {
+        let replaced: std::collections::BTreeSet<_> =
+            cuts.iter().chain(excluded).map(|c| c.id).collect();
+        for id in &replaced {
+            self.buckets.remove(id);
+            self.working.remove(id);
+            self.watermarks.remove(id);
+            self.excluded.remove(id);
+        }
+        self.accepted.retain(|(id, _), _| !replaced.contains(id));
+        self.ranges.retain(|(id, _, _), _| !replaced.contains(id));
+        self.seed(cuts)?;
+        self.exclude(excluded)
+    }
+
+    pub fn exclude(&mut self, cuts: &[super::snapshot::BucketCut]) -> Result<()> {
+        for c in cuts {
+            ensure!(
+                !c.id.is_nil()
+                    && c.generation > 0
+                    && c.sequence > 0
+                    && self.watermarks.insert(c.id, c.sequence).is_none(),
+                "duplicate excluded snapshot bucket"
+            );
+            self.excluded.insert(c.id, c.generation);
+        }
+        Ok(())
     }
 
     pub fn seed(&mut self, cuts: &[super::snapshot::BucketCut]) -> Result<()> {
@@ -192,6 +236,16 @@ impl Catalog {
     }
 
     pub fn stage(&mut self, record: Record, format: &Format<'_>) -> Result<()> {
+        if let Some(ids) = &self.selected {
+            let id = match &record {
+                Record::Change { value, .. } => Some(value.bucket),
+                Record::Ranges { bucket, .. } => Some(*bucket),
+                _ => None,
+            };
+            if id.is_some_and(|b| !ids.contains(&b)) {
+                return Ok(());
+            }
+        }
         match record {
             Record::Key(wrapped) => {
                 let key = wrapped.open(format)?;
@@ -285,7 +339,7 @@ impl Catalog {
                     .working
                     .get(&id)
                     .or_else(|| self.buckets.get(&id))
-                    .map_or(0, |b| b.generation);
+                    .map_or_else(|| self.excluded.remove(&id).unwrap_or(0), |b| b.generation);
                 ensure!(
                     change.generation == generation + 1,
                     "journal baseline generation mismatch"
@@ -300,6 +354,13 @@ impl Catalog {
                         paused: false,
                         objects: BTreeMap::new(),
                     },
+                );
+                continue;
+            }
+            if let Some(generation) = self.excluded.get(&id) {
+                ensure!(
+                    change.generation == *generation,
+                    "unexpected excluded bucket generation"
                 );
                 continue;
             }

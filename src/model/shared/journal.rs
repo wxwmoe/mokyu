@@ -219,6 +219,18 @@ pub(super) async fn acknowledge(
             .await?;
     }
     q::emitted(&actual).execute(&mut *db).await?;
+    super::queries::journal_snapshots::bucket_log(actual.id, actual.id, 1)
+        .execute(&mut *db)
+        .await?;
+    super::queries::journal_snapshots::count_log(
+        actual.byte_count,
+        actual.id,
+        actual.byte_count,
+        i64::try_from(ledger.policy.snapshot_trigger_bytes)?,
+        storage,
+    )
+    .execute(&mut *db)
+    .await?;
     q::drop_frames(file.id).execute(&mut *db).await?;
     q::apply_policy(storage).execute(&mut *db).await?;
     q::finish_flush(storage).execute(&mut *db).await?;

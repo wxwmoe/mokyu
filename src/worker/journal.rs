@@ -264,6 +264,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
     tokio::try_join!(
         scan(app.clone()),
         super::journal_restore::run(app.clone()),
+        super::journal_snapshots::run(app.clone()),
         publish(app)
     )?;
     Ok(())

@@ -101,3 +101,48 @@ pub(crate) async fn flush(
     actor.recent(&app).await?;
     Ok(Json(force(&app, &actor.principal, &name).await?))
 }
+use crate::model::journal::snapshots::{Action as SnapshotAction, Status as SnapshotStatus};
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as=MetadataSnapshotRequest)]
+pub(crate) struct SnapshotRequest {
+    action: SnapshotAction,
+}
+
+pub(super) async fn snapshots(
+    app: &App,
+    principal: &Principal,
+    name: &str,
+    action: Option<SnapshotAction>,
+) -> Result<SnapshotStatus> {
+    app.authorization.admin(principal).await?.finish().await?;
+    let storage = id(app, name).await?;
+    if let Some(action) = action {
+        app.writable()?;
+        app.journal
+            .snapshot_request(principal, storage, action)
+            .await?;
+        app.wake_maintenance.notify_waiters();
+    }
+    app.journal.snapshot_status(storage).await
+}
+#[utoipa::path(get,operation_id="metadata_snapshots_status",path="/api/v1/storages/{name}/snapshots",params(("name"=String,Path)),responses((status=200,body=SnapshotStatus)))]
+pub(crate) async fn snapshot_get(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(name): Path<String>,
+) -> Result<Json<SnapshotStatus>, HttpError> {
+    Ok(Json(snapshots(&app, &actor.principal, &name, None).await?))
+}
+#[utoipa::path(post,operation_id="metadata_snapshot_create",path="/api/v1/storages/{name}/snapshots",params(("name"=String,Path)),request_body=SnapshotRequest,responses((status=200,body=SnapshotStatus)))]
+pub(crate) async fn snapshot_post(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(name): Path<String>,
+    Json(input): Json<SnapshotRequest>,
+) -> Result<Json<SnapshotStatus>, HttpError> {
+    actor.recent(&app).await?;
+    Ok(Json(
+        snapshots(&app, &actor.principal, &name, Some(input.action)).await?,
+    ))
+}

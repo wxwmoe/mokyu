@@ -343,6 +343,14 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                             )
                             .await?
                         }
+                        Journals::Snapshots { action } => {
+                            let mode = action
+                                .map(|s| serde_json::from_value(serde_json::Value::String(s)))
+                                .transpose()?;
+                            return Ok(serde_json::to_value(
+                                super::journal::snapshots(app, principal, &name, mode).await?,
+                            )?);
+                        }
                         Journals::Flush => super::journal::force(app, principal, &name).await?,
                     })?)
                 }

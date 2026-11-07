@@ -2,6 +2,7 @@ pub(crate) mod policy;
 pub(crate) mod publication;
 pub(crate) mod record;
 pub(crate) mod restore;
+pub(crate) mod snapshots;
 
 use crate::{
     config::Secrets,
@@ -89,7 +90,9 @@ pub(crate) struct Status {
 }
 
 #[async_trait]
-pub(crate) trait JournalStore: restore::RecoveryStore + Send + Sync {
+pub(crate) trait JournalStore:
+    restore::RecoveryStore + snapshots::SnapshotStore + Send + Sync
+{
     async fn bucket(&self, bucket: uuid::Uuid) -> Result<Option<BucketJournal>>;
     async fn marker_intents(&self) -> Result<Vec<Uuid>>;
     async fn installed(

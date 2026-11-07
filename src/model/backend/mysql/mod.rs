@@ -7,6 +7,8 @@ mod image_transactions;
 mod journal;
 #[path = "../../shared/journal_restore.rs"]
 mod journal_restore;
+#[path = "../../shared/journal_snapshots.rs"]
+mod journal_snapshots;
 mod migration;
 #[path = "../../shared/node/native_parts.rs"]
 mod native_parts;

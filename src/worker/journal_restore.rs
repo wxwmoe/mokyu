@@ -82,9 +82,14 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
             );
         }
     }
+    let selected = buckets.keys().copied().collect::<BTreeSet<_>>();
     let (catalog, cut) = unlocked
         .source
-        .read(origin.as_ref(), Some(&unlocked.cut))
+        .read_selected(
+            origin.as_ref(),
+            Some(&unlocked.cut),
+            (!exclusive_takeover).then_some(&selected),
+        )
         .await?;
     let mut required = BTreeSet::new();
     for bucket in buckets.keys() {

@@ -30,6 +30,8 @@ pub(crate) struct Source {
 pub(crate) struct Cut {
     pub point: EpochCut,
     pub checkpoint: Option<(Uuid, [u8; 32])>,
+    #[serde(default)]
+    pub checkpoint_revision: Option<(Uuid, u64)>,
 }
 
 pub(crate) fn options() -> model::Options {
@@ -191,6 +193,7 @@ impl Source {
                 salvaged,
             },
             checkpoint: old.checkpoint,
+            checkpoint_revision: old.checkpoint_revision,
         })
     }
 
@@ -199,110 +202,49 @@ impl Source {
         store: &dyn ObjectStore,
         fixed: Option<&Cut>,
     ) -> Result<(Catalog, Cut)> {
+        self.read_selected(store, fixed, None).await
+    }
+    pub async fn read_selected(
+        &self,
+        store: &dyn ObjectStore,
+        fixed: Option<&Cut>,
+        buckets: Option<&std::collections::BTreeSet<Uuid>>,
+    ) -> Result<(Catalog, Cut)> {
         let key = Key::new("aes-256-gcm", self.material)?;
         let history = super::history::chain(store, &self.journal, self.connection.id, &key).await?;
         let mut catalog = Catalog::default();
+        catalog.select(buckets);
         let mut checkpoint = None;
-        let mut seed = None;
+        let mut checkpoint_revision = None;
         let index_path = snapshot::index_path();
-        if let Some(encoded) = bytes(
-            store,
-            &index_path,
-            (super::FRAME_LIMIT + Format::overhead(false)) as u64,
-        )
-        .await?
+        let limit = (super::FRAME_LIMIT + Format::overhead(false)) as u64;
+        let mut current = None;
+        if fixed.is_none()
+            && let Some(data) = bytes(store, &index_path, limit).await?
         {
-            let mut index = None;
             for epoch in std::iter::once(self.journal.writer_epoch)
-                .chain(history.iter().rev().map(|v| v.epoch))
+                .chain(history.iter().rev().map(|p| p.epoch))
             {
-                let format = Format {
+                let f = Format {
                     storage: self.connection.id,
                     encrypted: true,
                     journal: self.journal.journal_id,
                     epoch,
                     key: &key,
                 };
-                if let Ok((revision, entry)) = snapshot::open_envelope::<snapshot::Index>(
-                    &format,
+                if let Ok((revision, index)) = snapshot::open_envelope::<snapshot::Index>(
+                    &f,
                     FrameType::Index,
                     &index_path,
-                    &encoded,
+                    &data,
                 ) {
-                    ensure!(
-                        entry.format_version == 1
-                            && revision == entry.revision
-                            && entry.bucket_count == entry.buckets.len() as u64,
-                        "invalid journal checkpoint"
-                    );
-                    index = Some((epoch, entry));
+                    ensure!(revision == index.revision, "invalid checkpoint revision");
+                    current = Some((epoch, index));
                     break;
                 }
             }
-            let (epoch, index) = index.context("cannot authenticate recovery index")?;
-            let format = Format {
-                storage: self.connection.id,
-                encrypted: true,
-                journal: self.journal.journal_id,
-                epoch,
-                key: &key,
-            };
-            checkpoint = Some((index.snapshot, index.manifest_digest));
-            let path = snapshot::manifest_path(index.snapshot);
-            let manifest = bytes(
-                store,
-                &path,
-                (super::FRAME_LIMIT + Format::overhead(false)) as u64,
-            )
-            .await?
-            .context("missing snapshot manifest")?;
-            ensure!(
-                *blake3::hash(&manifest).as_bytes() == index.manifest_digest,
-                "snapshot manifest digest mismatch"
-            );
-            let (_, manifest) = snapshot::open_envelope::<snapshot::Manifest>(
-                &format,
-                FrameType::Manifest,
-                &path,
-                &manifest,
-            )?;
-            ensure!(
-                manifest.format_version == 1
-                    && manifest.id == index.snapshot
-                    && manifest.sequence == index.sequence,
-                "invalid snapshot manifest"
-            );
-            catalog.seed(&index.buckets)?;
-            let mut decoder = Decoder::default();
-            let mut seen = std::collections::HashSet::new();
-            for page in manifest.pages {
-                ensure!(
-                    seen.insert((page.owner, page.number)) && page.bytes <= u64::from(MAX_LIMIT),
-                    "invalid snapshot page reference"
-                );
-                let path = snapshot::page_path(page.owner, page.number);
-                let data = bytes(store, &path, page.bytes)
-                    .await?
-                    .context("missing snapshot page")?;
-                snapshot::decode_page(&format, &page, &data, &mut decoder, |row| {
-                    catalog.snapshot_row(row, &format)
-                })?;
-            }
-            ensure!(decoder.complete(), "incomplete snapshot record");
-            seed = Some(EpochCut {
-                epoch,
-                sequence: manifest.sequence,
-                tail: manifest.tail,
-                salvaged: None,
-            });
+            ensure!(current.is_some(), "cannot authenticate recovery index");
         }
-        if let Some(fixed) = fixed {
-            ensure!(
-                fixed.checkpoint == checkpoint,
-                "recovery checkpoint changed; repeat preview"
-            );
-        }
-        let mut reached = seed.is_none();
         let mut last = None;
         for (epoch, end) in history
             .iter()
@@ -312,13 +254,127 @@ impl Source {
                 fixed.map(|c| &c.point),
             )))
         {
-            let start = seed.as_ref().filter(|s| s.epoch == epoch);
-            reached |= start.is_some();
-            if !reached {
-                continue;
+            let format = Format {
+                storage: self.connection.id,
+                encrypted: true,
+                journal: self.journal.journal_id,
+                epoch,
+                key: &key,
+            };
+            let mut root = current
+                .as_ref()
+                .filter(|(e, _)| *e == epoch)
+                .map(|(_, i)| i.clone());
+            let pinned = fixed
+                .and_then(|c| c.checkpoint_revision)
+                .filter(|(e, _)| *e == epoch)
+                .map(|(_, r)| r);
+            let mut best = pinned;
+            if pinned.is_none() && (fixed.is_none() || epoch != self.journal.writer_epoch) {
+                let prefix = Path::from(format!("{ROOT}/checkpoints/{}", epoch.simple()));
+                let mut anchors = store.list(Some(&prefix));
+                while let Some(entry) = anchors.try_next().await? {
+                    let path = entry.location.as_ref();
+                    let revision = path
+                        .rsplit('/')
+                        .next()
+                        .context("unexpected checkpoint file")?
+                        .parse::<u64>()?;
+                    ensure!(
+                        revision > 0 && path == snapshot::checkpoint_path(epoch, revision),
+                        "invalid checkpoint filename"
+                    );
+                    best = Some(best.unwrap_or(0).max(revision));
+                }
             }
-            let mut sequence = start.map_or(0, |s| s.sequence);
-            let mut tail = start.map_or([0; 32], |s| s.tail);
+            if let Some(revision) = best
+                && root.as_ref().is_none_or(|r| r.revision < revision)
+            {
+                let path = snapshot::checkpoint_path(epoch, revision);
+                let data = match bytes(store, &path, limit).await? {
+                    Some(data) => data,
+                    None if pinned == Some(revision) => bytes(store, &index_path, limit)
+                        .await?
+                        .context("missing pinned recovery index")?,
+                    None => anyhow::bail!("missing confirmed checkpoint"),
+                };
+                let (r, index) = snapshot::open_envelope::<snapshot::Index>(
+                    &format,
+                    FrameType::Index,
+                    &index_path,
+                    &data,
+                )?;
+                ensure!(
+                    r == revision && index.revision == revision,
+                    "checkpoint filename and record differ"
+                );
+                root = Some(index);
+            }
+            let (mut sequence, mut tail) = (0, [0; 32]);
+            if let Some(index) = root {
+                ensure!(
+                    index.format_version == 1
+                        && index.bucket_count == index.buckets.len() as u64
+                        && end.is_none_or(|e| index.sequence <= e.sequence),
+                    "invalid journal checkpoint"
+                );
+                checkpoint = Some((index.snapshot, index.manifest_digest));
+                checkpoint_revision = Some((epoch, index.revision));
+                let path = snapshot::manifest_path(index.snapshot);
+                let manifest = bytes(store, &path, limit)
+                    .await?
+                    .context("missing snapshot manifest")?;
+                ensure!(
+                    *blake3::hash(&manifest).as_bytes() == index.manifest_digest,
+                    "snapshot manifest digest mismatch"
+                );
+                let (revision, manifest) = snapshot::open_envelope::<snapshot::Manifest>(
+                    &format,
+                    FrameType::Manifest,
+                    &path,
+                    &manifest,
+                )?;
+                ensure!(
+                    revision == index.revision
+                        && manifest.format_version == 1
+                        && manifest.id == index.snapshot
+                        && manifest.sequence == index.sequence,
+                    "invalid snapshot manifest"
+                );
+                catalog.replace_scope(&index.buckets, &index.excluded)?;
+                let mut decoder = Decoder::default();
+                let mut seen = std::collections::HashSet::new();
+                for page in manifest.pages {
+                    ensure!(
+                        seen.insert((page.owner, page.number))
+                            && page.bytes <= u64::from(MAX_LIMIT),
+                        "invalid snapshot page reference"
+                    );
+                    if let Some(selected) = buckets
+                        && page.first_bucket == page.last_bucket
+                        && page.first_bucket.is_some_and(|id| !selected.contains(&id))
+                    {
+                        ensure!(
+                            decoder.complete(),
+                            "snapshot record crosses bucket boundary"
+                        );
+                        continue;
+                    }
+                    let data = bytes(
+                        store,
+                        &snapshot::page_path(page.owner, page.number),
+                        page.bytes,
+                    )
+                    .await?
+                    .context("missing snapshot page")?;
+                    snapshot::decode_page(&format, &page, &data, &mut decoder, |r| {
+                        catalog.snapshot_row(r, &format)
+                    })?;
+                }
+                ensure!(decoder.complete(), "incomplete snapshot record");
+                sequence = manifest.sequence;
+                tail = manifest.tail;
+            }
             let prefix = Path::from(format!("{ROOT}/changes/{}", epoch.simple()));
             let mut listed = store.list(Some(&prefix));
             let mut paths = BTreeMap::new();
@@ -388,11 +444,18 @@ impl Source {
             ensure!(end.is_none_or(|v| v == &point), "recovery cut changed");
             last = Some(point);
         }
+        if let Some(fixed) = fixed {
+            ensure!(
+                fixed.checkpoint == checkpoint,
+                "fixed recovery checkpoint changed"
+            );
+        }
         Ok((
             catalog,
             Cut {
                 point: last.context("unknown checkpoint epoch")?,
                 checkpoint,
+                checkpoint_revision,
             },
         ))
     }

@@ -861,14 +861,25 @@ impl Client {
     #[cfg(test)]
     pub(crate) async fn delete(&self, key: &str, object: &Object) -> Result<()> {
         object.validate()?;
-        let query: Vec<_> = object
-            .version
-            .as_deref()
+        self.delete_version(key, &object.etag, object.version.as_deref())
+            .await
+    }
+    pub(crate) async fn delete_version(
+        &self,
+        key: &str,
+        etag: &str,
+        version: Option<&str>,
+    ) -> Result<()> {
+        ensure!(
+            strong_etag(etag) && version.is_none_or(opaque),
+            "invalid deletion receipt"
+        );
+        let query: Vec<_> = version
             .map(|version| ("versionId", version))
             .into_iter()
             .collect();
         let mut headers = HeaderMap::new();
-        headers.insert(header::IF_MATCH, object.etag.parse()?);
+        headers.insert(header::IF_MATCH, etag.parse()?);
         let reply = self
             .bytes(Method::DELETE, Some(key), &query, headers, Bytes::new())
             .await?;
