@@ -210,6 +210,22 @@ impl Source {
         fixed: Option<&Cut>,
         buckets: Option<&std::collections::BTreeSet<Uuid>>,
     ) -> Result<(Catalog, Cut)> {
+        let local = super::local::Local::new(&self.connection)?;
+        let _pin = match &local {
+            Some(local) => Some(local.lock(false).await?),
+            None => None,
+        };
+        self.read_locked(store, fixed, buckets, local.as_ref())
+            .await
+    }
+
+    pub(crate) async fn read_locked(
+        &self,
+        store: &dyn ObjectStore,
+        fixed: Option<&Cut>,
+        buckets: Option<&std::collections::BTreeSet<Uuid>>,
+        local: Option<&super::local::Local>,
+    ) -> Result<(Catalog, Cut)> {
         let key = Key::new("aes-256-gcm", self.material)?;
         let history = super::history::chain(store, &self.journal, self.connection.id, &key).await?;
         let mut catalog = Catalog::default();
@@ -376,70 +392,99 @@ impl Source {
                 tail = manifest.tail;
             }
             let prefix = Path::from(format!("{ROOT}/changes/{}", epoch.simple()));
+            let head = local.map(|l| l.head(&format)).transpose()?.flatten();
             let mut listed = store.list(Some(&prefix));
             let mut paths = BTreeMap::new();
             while let Some(meta) = listed.try_next().await? {
-                let path = meta.location.to_string();
-                let first = path
+                let name = meta.location.to_string();
+                let active = local.is_some() && name.ends_with(".part");
+                let logical = if active {
+                    name.strip_suffix(".part").unwrap()
+                } else {
+                    &name
+                };
+                let first = logical
                     .rsplit('/')
                     .next()
                     .context("unexpected journal file")?
                     .parse::<u64>()?;
                 ensure!(
-                    first > 0 && path == segment_path(epoch, first),
+                    first > 0 && logical == segment_path(epoch, first),
                     "invalid journal segment path"
                 );
+                if active && head.is_none_or(|h| h.first != first) {
+                    continue;
+                }
                 if first > sequence && end.is_none_or(|p| first <= p.sequence) {
                     ensure!(
-                        paths.insert(first, path).is_none(),
+                        paths.insert(first, name).is_none(),
                         "duplicate journal segment"
                     );
                 }
             }
-            let format = Format {
-                storage: self.connection.id,
-                encrypted: true,
-                journal: self.journal.journal_id,
-                epoch,
-                key: &key,
-            };
             let mut decoder = Decoder::default();
-            for (first, path) in paths {
+            let mut salvaged = end.and_then(|p| p.salvaged.clone());
+            for (first, physical) in paths {
+                let path = segment_path(epoch, first);
                 ensure!(
                     sequence.checked_add(1) == Some(first),
                     "missing journal segment"
                 );
-                let data = bytes(store, &path, u64::from(MAX_LIMIT))
-                    .await?
-                    .context("missing journal segment")?;
-                (sequence, tail) = if let Some(rescue) = end
-                    .and_then(|p| p.salvaged.as_ref())
-                    .filter(|s| s.first == first)
-                {
-                    let prefix = data
-                        .get(..usize::try_from(rescue.bytes)?)
-                        .context("missing salvaged journal prefix")?;
+                let pinned = salvaged.as_ref().filter(|s| s.first == first);
+                let open = head.filter(|h| h.first == first && !h.sealed);
+                let prefix_len = pinned.map(|v| v.bytes).or_else(|| open.map(|h| h.bytes));
+                (sequence, tail) = if let Some(size) = prefix_len {
                     ensure!(
-                        *blake3::hash(prefix).as_bytes() == rescue.digest,
+                        size > 0 && size <= u64::from(MAX_LIMIT),
+                        "invalid recovery prefix length"
+                    );
+                    let data = store.get_range(&Path::from(physical), 0..size).await?;
+                    let digest = *blake3::hash(&data).as_bytes();
+                    ensure!(
+                        data.len() as u64 == size && pinned.is_none_or(|s| s.digest == digest),
                         "salvaged prefix changed"
                     );
-                    super::verify_prefix(&format, &path, prefix, first, tail, true, |f| {
-                        decoder.read(&f.bytes, f.sequence.last - f.sequence.first + 1, |r| {
-                            catalog.stage(r, &format)
-                        })
-                    })?
+                    let point =
+                        super::verify_prefix(&format, &path, &data, first, tail, true, |f| {
+                            decoder.read(&f.bytes, f.sequence.last - f.sequence.first + 1, |r| {
+                                catalog.stage(r, &format)
+                            })
+                        })?;
+                    if pinned.is_none() {
+                        ensure!(
+                            open.is_some_and(|h| h.last == point.0 && h.tail == point.1),
+                            "local journal frontier disagrees"
+                        );
+                        salvaged = Some(marker::Salvaged {
+                            first,
+                            bytes: size,
+                            digest,
+                        });
+                    }
+                    point
                 } else {
+                    let data = bytes(store, &physical, u64::from(MAX_LIMIT))
+                        .await?
+                        .context("missing journal segment")?;
                     replay::stage_segment(&format, &path, &data, first, tail, &mut decoder, |r| {
                         catalog.stage(r, &format)
                     })?
                 };
                 catalog.apply()?;
             }
+            if end.is_none()
+                && let Some(h) = head
+            {
+                ensure!(
+                    sequence == h.last && tail == h.tail,
+                    "missing confirmed local journal prefix"
+                );
+            }
             let point = EpochCut {
                 epoch,
                 sequence,
                 tail,
-                salvaged: end.and_then(|v| v.salvaged.clone()),
+                salvaged,
             };
             ensure!(end.is_none_or(|v| v == &point), "recovery cut changed");
             last = Some(point);

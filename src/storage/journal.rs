@@ -2,6 +2,7 @@
 pub(crate) mod batch;
 pub(crate) mod history;
 pub(crate) mod import;
+pub(crate) mod local;
 pub(crate) mod remote;
 pub(crate) mod replay;
 pub(crate) mod snapshot;
@@ -231,13 +232,40 @@ pub(crate) fn verify_prefix(
     first: u64,
     previous: [u8; 32],
     part_prefix: bool,
+    visit: impl FnMut(Frame) -> Result<()>,
+) -> Result<(u64, [u8; 32])> {
+    let last = first
+        .checked_sub(1)
+        .context("invalid first journal sequence")?;
+    verify_frames(
+        format,
+        path,
+        data,
+        Sequence {
+            first,
+            last,
+            previous,
+        },
+        part_prefix,
+        visit,
+    )
+}
+
+fn verify_frames(
+    format: &Format<'_>,
+    path: &str,
+    mut rest: &[u8],
+    confirmed: Sequence,
+    part_prefix: bool,
     mut visit: impl FnMut(Frame) -> Result<()>,
 ) -> Result<(u64, [u8; 32])> {
-    ensure!(first > 0, "invalid first journal sequence");
-    let mut rest = data;
-    let mut next = first;
-    let mut prior = previous;
-    let mut part_end = first - 1;
+    let first = confirmed.first;
+    let mut next = confirmed
+        .last
+        .checked_add(1)
+        .context("journal sequence exhausted")?;
+    let mut prior = confirmed.previous;
+    let mut part_end = confirmed.last;
     loop {
         if rest.get(8) == Some(&(FrameType::PartCommit as u8)) {
             let part = format.decode(FrameType::PartCommit, path, rest)?;

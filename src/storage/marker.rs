@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-const MAX_BYTES: usize = 16 * 1024;
+pub(super) const MAX_BYTES: usize = 16 * 1024;
 const VERSION: u32 = 6;
 
 #[derive(Deserialize, Serialize)]
@@ -253,11 +253,7 @@ impl Document {
         Ok(None)
     }
 
-    pub async fn set_journal(
-        mut self,
-        backend: &dyn ObjectStore,
-        descriptor: &Journal,
-    ) -> Result<Value> {
+    fn journal_body(&mut self, descriptor: &Journal) -> Result<Vec<u8>> {
         journal(&self.value)?;
         ensure!(
             self.version.e_tag.is_some() || self.version.version.is_some(),
@@ -278,6 +274,33 @@ impl Document {
         fields.extend(known);
         let body = serde_json::to_vec(&self.value)?;
         ensure!(body.len() <= MAX_BYTES, "storage mokyu.json exceeds limit");
+        Ok(body)
+    }
+
+    pub async fn set_local_locked(
+        mut self,
+        backend: &dyn ObjectStore,
+        local: &super::journal::local::Local,
+        descriptor: &Journal,
+    ) -> Result<Value> {
+        let current = Self::read(backend)
+            .await?
+            .context("missing storage marker")?;
+        ensure!(
+            current.value == self.value && current.version.e_tag == self.version.e_tag,
+            "storage marker changed"
+        );
+        let body = self.journal_body(descriptor)?;
+        local.replace(&local.root.join("mokyu.json"), &body)?;
+        Ok(self.value)
+    }
+
+    pub async fn set_journal(
+        mut self,
+        backend: &dyn ObjectStore,
+        descriptor: &Journal,
+    ) -> Result<Value> {
+        let body = self.journal_body(descriptor)?;
         backend
             .put_opts(
                 &Path::from("mokyu.json"),
