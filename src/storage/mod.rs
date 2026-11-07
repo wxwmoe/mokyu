@@ -10,9 +10,11 @@ pub(crate) mod diagnostics;
 pub(crate) mod external;
 pub(crate) mod external_test;
 pub(crate) mod file_cache;
+pub(crate) mod journal;
 pub(crate) mod local;
 pub(crate) mod local_memory;
 pub(crate) mod location;
+pub(crate) mod marker;
 mod memory;
 pub(crate) mod model;
 mod multipart;
@@ -1067,30 +1069,7 @@ impl Storage {
     async fn check_storage_inner(&self, target: &StoreBackend) -> Result<()> {
         // A restarting control must verify the marker while data nodes still hold read permits.
         let _permit = target.controls.acquire().await?;
-        let result = target
-            .backend
-            .get(&Path::from("meta.json"))
-            .await
-            .context("storage mokyu.json is required; restore it before using this store")?;
-        ensure!(
-            result.meta.size <= 16 * 1024,
-            "storage meta.json exceeds limit"
-        );
-        let mut data = Vec::new();
-        let mut stream = result.into_stream();
-        while let Some(bytes) = stream.try_next().await? {
-            ensure!(
-                data.len() + bytes.len() <= 16 * 1024,
-                "storage meta.json exceeds limit"
-            );
-            data.extend_from_slice(&bytes);
-        }
-        let actual: serde_json::Value =
-            serde_json::from_slice(&data).context("invalid storage meta.json")?;
-        ensure!(
-            actual == target.identity_marker,
-            "storage identity marker does not match this store"
-        );
+        marker::verify_store(target.backend.as_ref(), &target.identity_marker).await?;
         target.identity_ready.store(true, Ordering::Release);
         Ok(())
     }
@@ -2752,7 +2731,7 @@ impl Storage {
         let target = self.store_backend(snapshot.scope.storage_id)?;
         ensure!(
             target.revision == snapshot.storage_revision
-                && target.identity_marker == snapshot.identity_marker,
+                && marker::verify(&target.identity_marker, &snapshot.identity_marker).is_ok(),
             crate::model::Error::OperationAborted
         );
         self.check_storage_inner(&target).await
@@ -2766,7 +2745,7 @@ impl Storage {
         ensure!(
             target.revision == snapshot.physical_revision()?
                 && (storage != snapshot.scope.storage_id
-                    || target.identity_marker == snapshot.identity_marker),
+                    || marker::verify(&target.identity_marker, &snapshot.identity_marker).is_ok()),
             crate::model::Error::OperationAborted
         );
         self.check_storage_inner(&target).await?;

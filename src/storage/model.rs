@@ -5,7 +5,6 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
 use futures_util::TryStreamExt;
 use object_store::{
     ClientOptions, ObjectStore, ObjectStoreExt, PutMode, PutOptions, RetryConfig,
@@ -32,29 +31,7 @@ pub(crate) struct Record {
     pub enabled: bool,
 }
 
-#[derive(Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-struct IdentityMarker {
-    format_version: u32,
-    deployment_id: Uuid,
-    storage_id: Uuid,
-    chunk_layout: String,
-    pack_layout: String,
-    created_at: DateTime<Utc>,
-    created_by: String,
-}
-
-pub(crate) fn identity_marker(deployment: Uuid, id: Uuid) -> Result<Value> {
-    Ok(serde_json::to_value(IdentityMarker {
-        format_version: 4,
-        deployment_id: deployment,
-        storage_id: id,
-        chunk_layout: "uuid-suffix2".into(),
-        pack_layout: "uuid-suffix2-pack".into(),
-        created_at: Utc::now(),
-        created_by: format!("{}/{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
-    })?)
-}
+pub(crate) use super::marker::create as identity_marker;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Options {
@@ -147,15 +124,12 @@ impl Store {
     }
 
     pub(crate) fn connect(row: &Connection, options: Options) -> Result<Self> {
-        let meta: IdentityMarker = serde_json::from_value(row.identity_marker.clone())
-            .context("storage identity marker is missing or invalid")?;
+        let marker = super::marker::identity(&row.identity_marker)?;
         ensure!(
-            meta.format_version == 4
-                && meta.storage_id == row.id
-                && meta.chunk_layout == "uuid-suffix2"
-                && meta.pack_layout == "uuid-suffix2-pack",
-            "unsupported storage identity marker"
+            marker.storage_id == row.id,
+            "storage identity does not match its record"
         );
+        super::marker::journal(&row.identity_marker)?;
         let mut multipart: Option<Arc<dyn object_store::multipart::MultipartStore>> = None;
         let mut streaming = None;
         let prefix = Path::parse(&row.prefix)?;
@@ -244,33 +218,7 @@ impl Store {
     }
 
     pub async fn verify(&self) -> Result<()> {
-        let result = self
-            .backend
-            .get(&Path::from("meta.json"))
-            .await
-            .context("storage meta.json is required; restore it before using this store")?;
-        ensure!(
-            result.meta.size <= 16 * 1024,
-            "storage meta.json exceeds limit"
-        );
-        let mut data = Vec::new();
-        let mut stream = result.into_stream();
-        while let Some(bytes) = stream.try_next().await? {
-            ensure!(
-                data.len() + bytes.len() <= 16 * 1024,
-                "storage meta.json exceeds limit"
-            );
-            data.extend_from_slice(&bytes);
-        }
-        let actual: IdentityMarker =
-            serde_json::from_slice(&data).context("invalid storage meta.json")?;
-        let expected: IdentityMarker = serde_json::from_value(self.identity_marker.clone())
-            .context("invalid configured storage identity marker")?;
-        ensure!(
-            actual == expected,
-            "storage meta.json does not match this store"
-        );
-        Ok(())
+        super::marker::verify_store(self.backend.as_ref(), &self.identity_marker).await
     }
 
     pub(crate) async fn verify_relocation(
@@ -338,15 +286,15 @@ impl Store {
     }
 
     pub async fn initialize(&self) -> Result<()> {
-        let mut objects = self.backend.list(None);
         ensure!(
-            objects.try_next().await?.is_none(),
+            super::marker::Document::probe(self.backend.as_ref())
+                .await?
+                .is_none(),
             crate::model::InputDetail::storage(
                 "storage namespace is not empty",
                 s3s::S3ErrorCode::OperationAborted
             )
         );
-        drop(objects);
         let created = self
             .backend
             .put_opts(

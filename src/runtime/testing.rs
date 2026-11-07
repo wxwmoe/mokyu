@@ -177,7 +177,7 @@ impl Installation {
         if let Some(row) = row {
             ensure!(
                 row.id == self.storage
-                    && row.identity_marker == *marker
+                    && crate::storage::marker::verify(&row.identity_marker, marker).is_ok()
                     && row.r#type == "local"
                     && row.enabled,
                 "testing storage identity mismatch"
