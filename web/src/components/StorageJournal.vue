@@ -14,7 +14,7 @@ import StorageSnapshots from './StorageSnapshots.vue'
 type Status = components['schemas']['MetadataJournalStatus']
 type Policy = Required<components['schemas']['MetadataJournalPolicy']>
 type Quantity = Exclude<keyof Policy, 'mode'>
-const props = defineProps<{ name: string }>()
+const props = defineProps<{ name: string; local: boolean }>()
 const path = computed(() => `/api/v1/storages/${encodeURIComponent(props.name)}/journal`)
 const status = useQuery({ queryKey: computed(() => ['storage-journal', props.name]), queryFn: ({ signal }) => api<Status>(path.value, { signal }) })
 const open = ref(false), busy = ref(false), draft = ref<Policy>(), revision = ref('')
@@ -29,9 +29,9 @@ function edit() {
 const modes = computed(() => [{ value: 'put', label: t('journalPut') }, { value: 'multipart', label: t('journalMultipart') }])
 const fields = computed(() => {
   const result: { key: Quantity; label: string; unit: number; optional?: boolean }[] = []
-  if (draft.value?.mode === 'put') {
+  if (!props.local && draft.value?.mode === 'put') {
     result.push({ key: 'put_target_bytes', label: t('journalPutTarget'), unit: 1024 }, { key: 'put_max_wait_seconds', label: t('journalWait'), unit: 1, optional: true })
-  } else {
+  } else if (!props.local) {
     result.push({ key: 'part_target_bytes', label: t('journalPartTarget'), unit: 1048576 }, { key: 'part_max_wait_seconds', label: t('journalWait'), unit: 1, optional: true }, { key: 'multipart_max_open_seconds', label: t('journalOpenFor'), unit: 1, optional: true })
   }
   return [...result, { key: 'segment_bytes' as Quantity, label: t('journalSegmentLimit'), unit: 1048576 },
@@ -46,7 +46,9 @@ async function save() {
   if (!draft.value || busy.value) return
   busy.value = true
   try {
-    await write<Status>(path.value, { revision: revision.value, policy: draft.value }, 'PUT')
+    const { segment_bytes, snapshot_page_bytes, snapshot_trigger_bytes } = draft.value
+    const policy = props.local ? { segment_bytes, snapshot_page_bytes, snapshot_trigger_bytes } : draft.value
+    await write<Status>(path.value, { revision: revision.value, policy }, 'PUT')
     open.value = false
     await status.refetch()
     notify(t('journalSaved'))
@@ -66,7 +68,9 @@ async function flush() {
       <ErrorNotice :error="status.error.value" />
       <div v-if="status.isPending.value" class="skeleton-row" />
       <dl v-if="status.data.value" class="facts">
-        <dt>{{ t('journalWriteMode') }}</dt><dd>{{ t(status.data.value.policy.mode === 'multipart' ? 'journalMultipart' : 'journalPut') }}</dd>
+        <template v-if="!local">
+          <dt>{{ t('journalWriteMode') }}</dt><dd>{{ t(status.data.value.policy.mode === 'multipart' ? 'journalMultipart' : 'journalPut') }}</dd>
+        </template>
         <dt>{{ t('journalSequence') }}</dt><dd>{{ status.data.value.emitted_sequence }}</dd>
       </dl>
       <p v-if="status.data.value?.pending_policy" class="field-help" role="status">{{ t('journalPolicyPending') }}</p>
@@ -80,7 +84,7 @@ async function flush() {
   </div>
   <UiDialog v-model:open="open" medium :busy="busy" :title="t('journalSettings')">
     <form v-if="draft" class="form-stack" @submit.prevent="save">
-      <label class="field"><span>{{ t('journalWriteMode') }}</span><UiSelect :model-value="draft.mode" :options="modes" :label="t('journalWriteMode')" @update:model-value="draft.mode = $event === 'multipart' ? 'multipart' : 'put'" /></label>
+      <label v-if="!local" class="field"><span>{{ t('journalWriteMode') }}</span><UiSelect :model-value="draft.mode" :options="modes" :label="t('journalWriteMode')" @update:model-value="draft.mode = $event === 'multipart' ? 'multipart' : 'put'" /></label>
       <div class="form-pair">
         <label v-for="field in fields" :key="field.key" class="field"><span>{{ field.label }}</span>
           <input type="number" :step="1 / field.unit" :min="1 / field.unit" :required="!field.optional"

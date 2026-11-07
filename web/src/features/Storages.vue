@@ -207,7 +207,7 @@ async function save() {
     const body = editing.value
       ? { ...input(), enabled: draft.enabled, profile }
       : { name: draft.name.trim(), initialize: draft.initialize, profile, ...input() }
-    if (!editing.value && draft.type === 's3') {
+    if (!editing.value && (draft.type === 's3' || draft.type === 'local')) {
       const found = await write<ProbeResult>('/api/v1/storage-recoveries/probe', { storage: body })
       if (found.state !== 'empty') { recovery.value = found; return }
     }
