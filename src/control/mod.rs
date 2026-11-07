@@ -20,6 +20,7 @@ pub(crate) mod objects;
 pub(crate) mod operations;
 pub(crate) mod projects;
 pub(crate) mod quotas;
+pub(crate) mod recovery;
 mod redundancy;
 mod replication;
 pub(crate) mod service;

@@ -23,7 +23,7 @@ impl ManagedKeyStore for Backend {
     }
 
     async fn nonce_observations(&self) -> Result<Vec<crate::model::key_usage::NonceRow>> {
-        Ok(sqlx::query_as("SELECT k.id,k.name,c.reserved_id,p.reserved_id,(SELECT count(*) FROM storages s WHERE s.block_key_id=k.id),EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state='uploading') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state='preparing') OR EXISTS(SELECT 1 FROM chunks c WHERE c.block_key_id=k.id AND c.state IN ('preparing','uploading')) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),o.data,o.revision FROM managed_keys k LEFT JOIN nonce_counters c ON c.block_key_id=k.id AND c.type_tag=0 LEFT JOIN nonce_counters p ON p.block_key_id=k.id AND p.type_tag=1 LEFT JOIN nonce_observations o ON o.block_key_id=k.id WHERE k.purpose='block' AND k.revoked_at IS NULL ORDER BY k.id").fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT k.id,k.name,c.reserved_id,p.reserved_id,(SELECT count(*) FROM storages s WHERE s.block_key_id=k.id),EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state='uploading') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state='preparing') OR EXISTS(SELECT 1 FROM chunks c WHERE c.block_key_id=k.id AND c.state IN ('preparing','uploading')) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),o.data,o.revision FROM managed_keys k LEFT JOIN nonce_counters c ON c.block_key_id=k.id AND c.type_tag=0 LEFT JOIN nonce_counters p ON p.block_key_id=k.id AND p.type_tag=1 LEFT JOIN nonce_observations o ON o.block_key_id=k.id WHERE k.purpose='block' AND NOT k.recovery_read_only AND k.revoked_at IS NULL ORDER BY k.id").fetch_all(&self.pool).await?)
     }
     async fn save_nonce_history(
         &self,
@@ -48,6 +48,14 @@ impl ManagedKeyStore for Backend {
                 name,
                 algorithm,
             }))
+    }
+    async fn read_block_name(&self, id: Uuid) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT name FROM managed_keys WHERE id=$1 AND purpose='block' AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
     }
     async fn active_block(&self, id: Uuid) -> Result<Option<(String, String)>> {
         Ok(active_block_key(id).fetch_optional(&self.pool).await?)
@@ -80,7 +88,7 @@ pub(in super::super) fn replacement_storages(source: Uuid) -> Rows<'static, KeyR
 }
 
 pub(in super::super) fn replacement_key(id: Uuid) -> Rows<'static, (String, String)> {
-    sqlx::query_as("SELECT name,key_algorithm FROM managed_keys WHERE id=$1 AND purpose='block' AND revoked_at IS NULL FOR UPDATE").bind(id)
+    sqlx::query_as("SELECT name,key_algorithm FROM managed_keys WHERE id=$1 AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL FOR UPDATE").bind(id)
 }
 
 pub(in super::super) fn replacement_capacity(id: Uuid) -> Scalar<'static, bool> {

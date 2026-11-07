@@ -422,7 +422,7 @@ pub(in super::super) fn storage_mode_lock() -> Rows<'static, (Uuid, String)> {
 }
 
 pub(in super::super) fn valid_storage_key(id: Uuid) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT id FROM managed_keys WHERE id=? AND purpose='block' AND revoked_at IS NULL LOCK IN SHARE MODE").bind(id)
+    sqlx::query_scalar("SELECT id FROM managed_keys WHERE id=? AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL LOCK IN SHARE MODE").bind(id)
 }
 
 pub(in super::super) fn insert_storage_record(

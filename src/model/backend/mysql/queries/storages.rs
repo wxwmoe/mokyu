@@ -18,7 +18,7 @@ pub(in super::super) fn update_storage_record(
 }
 
 pub(in super::super) fn current_storage_key(id: Option<Uuid>, name: &str) -> Scalar<'_, Uuid> {
-    sqlx::query_scalar("SELECT id FROM managed_keys WHERE (id=? OR name=?) AND purpose='block' AND revoked_at IS NULL LOCK IN SHARE MODE").bind(id).bind(name)
+    sqlx::query_scalar("SELECT id FROM managed_keys WHERE (id=? OR name=?) AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL LOCK IN SHARE MODE").bind(id).bind(name)
 }
 
 pub(in super::super) fn update_storage_key(id: Uuid, key: Option<Uuid>) -> Statement<'static> {

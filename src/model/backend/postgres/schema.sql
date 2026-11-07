@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261107104724.
+-- Generated from the complete postgres migration chain through 20261107122341.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1236,6 +1236,98 @@ CREATE TABLE public.journal_parts (
     CONSTRAINT journal_parts_number_check CHECK (((number >= 1) AND (number <= 10000)))
 );
 
+CREATE TABLE public.journal_recoveries (
+    id uuid NOT NULL,
+    state text NOT NULL,
+    source bytea NOT NULL,
+    selection jsonb,
+    progress jsonb NOT NULL,
+    error_detail text,
+    revision bigint DEFAULT 1 NOT NULL,
+    source_storage uuid NOT NULL,
+    target_storage uuid,
+    lease_token uuid,
+    lease_until timestamp with time zone,
+    created_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    updated_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT journal_recoveries_revision_check CHECK ((revision > 0)),
+    CONSTRAINT journal_recoveries_state_check CHECK ((state = ANY (ARRAY['locked'::text, 'preview'::text, 'queued'::text, 'verifying'::text, 'importing'::text, 'claiming'::text, 'completed'::text, 'failed'::text, 'cancelled'::text])))
+);
+
+CREATE TABLE public.journal_restore_materials (
+    job uuid NOT NULL,
+    identity_hash bytea NOT NULL,
+    unit text NOT NULL,
+    address uuid NOT NULL,
+    native_id uuid NOT NULL,
+    content_hash bytea NOT NULL
+);
+
+CREATE VIEW public.journal_protected_addresses AS
+ SELECT journal_holds.address,
+    journal_holds.unit
+   FROM public.journal_holds
+UNION ALL
+ SELECT m.address,
+    m.unit
+   FROM (public.journal_restore_materials m
+     JOIN public.journal_recoveries j ON ((j.id = m.job)))
+  WHERE (j.state <> ALL (ARRAY['completed'::text, 'cancelled'::text]));
+
+CREATE TABLE public.journal_restore_buckets (
+    job uuid NOT NULL,
+    source_bucket uuid NOT NULL,
+    target_bucket uuid NOT NULL,
+    target_name text NOT NULL,
+    generation bigint NOT NULL,
+    watermark bigint NOT NULL,
+    state text NOT NULL,
+    next_key text,
+    restored_objects bigint DEFAULT 0 NOT NULL,
+    restored_bytes bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT journal_restore_buckets_state_check CHECK ((state = ANY (ARRAY['planned'::text, 'building'::text, 'published'::text])))
+);
+
+CREATE TABLE public.journal_restore_items (
+    job uuid NOT NULL,
+    source_bucket uuid NOT NULL,
+    object_key text NOT NULL,
+    size bigint NOT NULL,
+    etag text NOT NULL,
+    metadata jsonb NOT NULL,
+    checksums jsonb NOT NULL,
+    payload text NOT NULL,
+    modified_us bigint NOT NULL,
+    content_type text NOT NULL,
+    category text NOT NULL
+);
+
+CREATE TABLE public.journal_restore_orphans (
+    job uuid NOT NULL,
+    address uuid NOT NULL,
+    file_path text NOT NULL,
+    byte_count bigint NOT NULL,
+    CONSTRAINT journal_restore_orphans_byte_count_check CHECK ((byte_count >= 0))
+);
+
+CREATE TABLE public.journal_restore_ranges (
+    job uuid NOT NULL,
+    source_bucket uuid NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    offset_bytes bigint NOT NULL,
+    length bigint NOT NULL,
+    source_offset bigint NOT NULL,
+    kind text NOT NULL,
+    native_id uuid NOT NULL,
+    CONSTRAINT journal_restore_ranges_kind_check CHECK ((kind = ANY (ARRAY['raw'::text, 'chunk'::text, 'fragment'::text])))
+);
+
+CREATE TABLE public.journal_restore_scopes (
+    storage_id uuid NOT NULL,
+    job uuid NOT NULL,
+    protect_unknown boolean DEFAULT true NOT NULL
+);
+
 CREATE TABLE public.journal_stores (
     storage_id uuid NOT NULL,
     policy jsonb NOT NULL,
@@ -1303,6 +1395,7 @@ CREATE TABLE public.managed_keys (
     fingerprint bytea NOT NULL,
     created_at timestamp with time zone DEFAULT now() NOT NULL,
     revoked_at timestamp with time zone,
+    recovery_read_only boolean DEFAULT false NOT NULL,
     CONSTRAINT managed_keys_algorithm_check CHECK ((key_algorithm = ANY (ARRAY['raw'::text, 'aes-256-gcm'::text, 'chacha20-poly1305'::text]))),
     CONSTRAINT managed_keys_fingerprint_check CHECK ((octet_length(fingerprint) = 32)),
     CONSTRAINT managed_keys_name_check CHECK (((octet_length(name) >= 1) AND (octet_length(name) <= 128))),
@@ -2920,6 +3013,30 @@ ALTER TABLE ONLY public.journal_holds
 ALTER TABLE ONLY public.journal_parts
     ADD CONSTRAINT journal_parts_pkey PRIMARY KEY (file_id, number);
 
+ALTER TABLE ONLY public.journal_recoveries
+    ADD CONSTRAINT journal_recoveries_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.journal_restore_buckets
+    ADD CONSTRAINT journal_restore_buckets_pkey PRIMARY KEY (job, source_bucket);
+
+ALTER TABLE ONLY public.journal_restore_buckets
+    ADD CONSTRAINT journal_restore_buckets_target_bucket_key UNIQUE (target_bucket);
+
+ALTER TABLE ONLY public.journal_restore_items
+    ADD CONSTRAINT journal_restore_items_pkey PRIMARY KEY (job, source_bucket, object_key);
+
+ALTER TABLE ONLY public.journal_restore_materials
+    ADD CONSTRAINT journal_restore_materials_pkey PRIMARY KEY (job, identity_hash);
+
+ALTER TABLE ONLY public.journal_restore_orphans
+    ADD CONSTRAINT journal_restore_orphans_pkey PRIMARY KEY (job, address);
+
+ALTER TABLE ONLY public.journal_restore_ranges
+    ADD CONSTRAINT journal_restore_ranges_pkey PRIMARY KEY (job, source_bucket, object_key, offset_bytes);
+
+ALTER TABLE ONLY public.journal_restore_scopes
+    ADD CONSTRAINT journal_restore_scopes_pkey PRIMARY KEY (storage_id, job);
+
 ALTER TABLE ONLY public.journal_stores
     ADD CONSTRAINT journal_stores_pkey PRIMARY KEY (storage_id);
 
@@ -3408,6 +3525,12 @@ CREATE INDEX journal_held_address ON public.journal_holds USING btree (storage_i
 CREATE INDEX journal_held_identity ON public.journal_holds USING btree (address, unit);
 
 CREATE INDEX journal_held_key ON public.journal_holds USING btree (block_key);
+
+CREATE INDEX journal_recoveries_source ON public.journal_recoveries USING btree (source_storage, state);
+
+CREATE INDEX journal_recoveries_work ON public.journal_recoveries USING btree (state, created_at);
+
+CREATE INDEX journal_restore_addresses ON public.journal_restore_materials USING btree (address);
 
 CREATE INDEX key_replacements_expiry ON public.key_replacements USING btree (expires_at);
 
@@ -3930,6 +4053,24 @@ ALTER TABLE ONLY public.journal_holds
 
 ALTER TABLE ONLY public.journal_parts
     ADD CONSTRAINT journal_parts_file_id_fkey FOREIGN KEY (file_id) REFERENCES public.journal_files(id);
+
+ALTER TABLE ONLY public.journal_restore_buckets
+    ADD CONSTRAINT journal_restore_buckets_job_fkey FOREIGN KEY (job) REFERENCES public.journal_recoveries(id);
+
+ALTER TABLE ONLY public.journal_restore_items
+    ADD CONSTRAINT journal_restore_items_job_source_bucket_fkey FOREIGN KEY (job, source_bucket) REFERENCES public.journal_restore_buckets(job, source_bucket);
+
+ALTER TABLE ONLY public.journal_restore_materials
+    ADD CONSTRAINT journal_restore_materials_job_fkey FOREIGN KEY (job) REFERENCES public.journal_recoveries(id);
+
+ALTER TABLE ONLY public.journal_restore_orphans
+    ADD CONSTRAINT journal_restore_orphans_job_fkey FOREIGN KEY (job) REFERENCES public.journal_recoveries(id);
+
+ALTER TABLE ONLY public.journal_restore_ranges
+    ADD CONSTRAINT journal_restore_ranges_job_source_bucket_object_key_fkey FOREIGN KEY (job, source_bucket, object_key) REFERENCES public.journal_restore_items(job, source_bucket, object_key) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.journal_restore_scopes
+    ADD CONSTRAINT journal_restore_scopes_job_fkey FOREIGN KEY (job) REFERENCES public.journal_recoveries(id);
 
 ALTER TABLE ONLY public.journal_stores
     ADD CONSTRAINT journal_stores_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);

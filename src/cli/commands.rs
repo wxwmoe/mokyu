@@ -280,6 +280,10 @@ pub enum Tasks {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Storages {
     List,
+    Recovery {
+        #[command(subcommand)]
+        command: Recoveries,
+    },
     Journal {
         name: String,
         #[command(subcommand)]
@@ -381,6 +385,37 @@ pub enum Storages {
         confirm_prefix: Option<String>,
         #[arg(long = "age", default_value = "48h")]
         older_than: String,
+    },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Recoveries {
+    Probe {
+        file: PathBuf,
+        #[arg(long, conflicts_with = "key_stdin")]
+        unlock: bool,
+        #[arg(long)]
+        key_stdin: bool,
+        #[arg(skip)]
+        document: Option<Value>,
+        #[arg(skip)]
+        deployment_key: Option<String>,
+    },
+    Start {
+        id: Uuid,
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Show {
+        id: Uuid,
+    },
+    Cancel {
+        id: Uuid,
+        revision: String,
+    },
+    Retry {
+        id: Uuid,
+        revision: String,
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
@@ -677,6 +712,9 @@ impl Command {
             | Self::Storages(
                 Storages::List
                 | Storages::Show { .. }
+                | Storages::Recovery {
+                    command: Recoveries::Show { .. },
+                }
                 | Storages::Journal {
                     command: Journals::Show,
                     ..

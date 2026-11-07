@@ -267,7 +267,7 @@ pub(in super::super) struct Block {
     pub(in super::super) algorithm: String,
 }
 pub(in super::super) fn storage_key(storage: Uuid) -> Rows<'static, Block> {
-    sqlx::query_as("SELECT k.id,k.key_algorithm AS algorithm FROM storages s JOIN managed_keys k ON k.id=s.block_key_id WHERE s.id=? AND k.purpose='block' AND k.revoked_at IS NULL").bind(storage)
+    sqlx::query_as("SELECT k.id,k.key_algorithm AS algorithm FROM storages s JOIN managed_keys k ON k.id=s.block_key_id WHERE s.id=? AND k.purpose='block' AND NOT k.recovery_read_only AND k.revoked_at IS NULL").bind(storage)
 }
 pub(in super::super) async fn clock(db: &mut Connection) -> Result<DateTime<Utc>> {
     let n: i64 =

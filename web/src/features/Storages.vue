@@ -15,6 +15,7 @@ import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
 import UiByteInput from '../components/ui/UiByteInput.vue'
 import StoragePolicy from './StoragePolicy.vue'
+import StorageRecovery from '../components/StorageRecovery.vue'
 
 type Storage = components['schemas']['StorageView']
 type StorageProfile = components['schemas']['StorageProfile']
@@ -25,6 +26,14 @@ const route = useRoute(), router = useRouter()
 const { status } = useDeployment()
 const storages = useQuery({ queryKey: ['storages'], queryFn: ({ signal }) => api<Storage[]>('/api/v1/storages', { signal }) })
 const keys = useQuery({ queryKey: ['managed-keys'], queryFn: ({ signal }) => api<ManagedKey[]>('/api/v1/keys', { signal }) })
+type ProbeResult = components['schemas']['StorageRecoveryProbeResult']
+const recovery = ref<ProbeResult | null>(null)
+const recent = useQuery({ queryKey:['storage-recoveries'], queryFn:({signal})=>api<components['schemas']['MetadataRecovery'][]>('/api/v1/storage-recoveries',{signal}) })
+function revisit(job:components['schemas']['MetadataRecovery']) {
+  editing.value = null
+  recovery.value = {state:job.state,recovery:job,storage:null}
+  open.value=true
+}
 const profileRevision = ref(1)
 const single = computed(() => status.data.value?.deployment_mode === 'single')
 const open = ref(false), editing = ref<Storage | null>(null), busy = ref(false), checking = ref('')
@@ -35,7 +44,7 @@ const draft = reactive({ name: '', type: 's3', path: '/data/storage', endpoint: 
 const canBufferInMemory = computed(() => draft.type === 'local' ? profileDraft.value?.cdc_enabled === false : Boolean(profileDraft.value?.upload_cache))
 const durabilityOptions = computed(() => (canBufferInMemory.value ? ['durable', 'buffered', 'volatile'] : ['durable', 'buffered']).map(value => ({ value, label: t('storeDurability_' + value) })))
 const types = computed(() => (single.value ? ['local', 's3'] : ['s3']).map(value => ({ value, label: t('storeType_' + value) })))
-const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
+const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.recovery_read_only && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
 const profileFields: ProfileField[] = [
   { key: 'connect_timeout', valueType: 'text' }, { key: 'request_timeout', valueType: 'text' }, { key: 'max_retries', valueType: 'number' }, { key: 'retry_timeout', valueType: 'text' }, { key: 'priority_aging', valueType: 'text' },
   { key: 'min_storage_duration', valueType: 'text' }, { key: 'unreferenced_grace', valueType: 'text' }, { key: 'deleted_chunk_retention', valueType: 'text' }, { key: 'upload_retention', valueType: 'text' }, { key: 'multipart_idle_timeout', valueType: 'text' }, { key: 'min_free_space', valueType: 'text' },
@@ -89,7 +98,7 @@ async function revealChangedFields() {
 }
 const profileLabel = (key: string) => t('profile_' + key)
 const profileUnit = (key: string) => key.endsWith('_percent') ? '%' : key === 'integrity_bandwidth' ? '/s' : key === 'integrity_rps' ? t('unitRequestsPerSecond') : ''
-const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purpose === 'block' && !row.revoked_at))
+const hasBlockKeys = computed(() => (keys.data.value || []).some(row => row.purpose === 'block' && !row.recovery_read_only && !row.revoked_at))
 
 function profileDefaults(type: string): Record<ProfileKey, string | number | boolean | null> {
   const s3 = type !== 'local'
@@ -112,6 +121,7 @@ function profileDefaults(type: string): Record<ProfileKey, string | number | boo
   } as Record<ProfileKey, string | number | boolean | null>
 }
 async function edit(row?: Storage) {
+  recovery.value = null
   editing.value = row || null
   profileRevision.value = row?.profile_revision || 1
   Object.assign(draft, { name: row?.name || '', type: row?.type || 's3', path: row?.path || '/data/storage', endpoint: row?.endpoint || '', bucket: row?.bucket || '', region: row?.region || '', prefix: row?.prefix || '', access_key: '', secret_key: '', block_key_id: row?.block_key_id || '', enabled: row?.enabled ?? true, initialize: true })
@@ -197,6 +207,10 @@ async function save() {
     const body = editing.value
       ? { ...input(), enabled: draft.enabled, profile }
       : { name: draft.name.trim(), initialize: draft.initialize, profile, ...input() }
+    if (!editing.value && draft.type === 's3') {
+      const found = await write<ProbeResult>('/api/v1/storage-recoveries/probe', { storage: body })
+      if (found.state !== 'empty') { recovery.value = found; return }
+    }
     await write<Storage>('/api/v1/storages' + (editing.value ? '/' + encodeURIComponent(editing.value.name) : ''), body, editing.value ? 'PUT' : 'POST')
     open.value = false
     await queries.invalidateQueries({ queryKey: ['storages'] })
@@ -229,8 +243,12 @@ async function toggle(row: Storage) {
     </article>
   </div>
   <EmptyState v-else :title="t('noStores')" :description="t('noStoresHint')" />
-  <UiDialog v-model:open="open" :title="t(editing ? 'editStore' : 'createStore')" :description="t('storeEditorHint')" :busy="busy" wide>
-    <form ref="form" @submit.prevent="save" @invalid.capture="revealInvalid">
+  <details v-if="recent.data.value?.length" class="section-card"><summary>{{ t('recoveryHistory') }}</summary>
+    <div v-for="job in recent.data.value" :key="job.id" class="form-footer"><span>{{ job.progress.buckets.map(b => b.name).join(', ') }}</span><button type="button" @click="revisit(job)">{{ t('recoveryDetails') }}</button></div>
+  </details>
+  <UiDialog v-model:open="open" :title="t(recovery ? 'recoverBuckets' : editing ? 'editStore' : 'createStore')" :description="recovery ? undefined : t('storeEditorHint')" :busy="busy" wide>
+    <StorageRecovery v-if="recovery" :probe="recovery" :connection="{ ...input(), name: draft.name.trim(), initialize: false }" :stores="storages.data.value || []" @back="recovery = null" @close="open = false; void storages.refetch(); void recent.refetch()" />
+    <form v-else ref="form" @submit.prevent="save" @invalid.capture="revealInvalid">
       <p class="store-draft-note"><Pencil :size="15" />{{ t('storeDraftHint') }}</p>
       <div class="store-form-grid">
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeConnection') }}</h3><p class="field-help">{{ t('storeConnectionHint') }}</p></div></div>

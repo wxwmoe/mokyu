@@ -588,7 +588,7 @@ impl PackingStore for Backend {
 }
 
 pub(in super::super) fn resolve_block_key<'q>(name: &'q str) -> Rows<'q, (Uuid, String, String)> {
-    sqlx::query_as("SELECT id,name,key_algorithm FROM managed_keys WHERE (id=$1::uuid OR name=$2) AND purpose='block' AND revoked_at IS NULL").bind(name.parse::<Uuid>().ok()).bind(name)
+    sqlx::query_as("SELECT id,name,key_algorithm FROM managed_keys WHERE (id=$1::uuid OR name=$2) AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL").bind(name.parse::<Uuid>().ok()).bind(name)
 }
 
 pub(in super::super) fn rewrite_counts<'q>(
@@ -644,7 +644,7 @@ pub(in super::super) fn complete_empty_rewrite(id: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn active_block_key(id: Uuid) -> Rows<'static, (String, String)> {
-    sqlx::query_as("SELECT name,key_algorithm FROM managed_keys WHERE id=$1 AND purpose='block' AND revoked_at IS NULL").bind(id)
+    sqlx::query_as("SELECT name,key_algorithm FROM managed_keys WHERE id=$1 AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL").bind(id)
 }
 
 pub(in super::super) async fn rewrite_loose_candidate(

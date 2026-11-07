@@ -1,8 +1,11 @@
 //! Authenticated records shared by the metadata journal and its snapshots.
 pub(crate) mod batch;
+pub(crate) mod history;
+pub(crate) mod import;
 pub(crate) mod remote;
 pub(crate) mod replay;
 pub(crate) mod snapshot;
+pub(crate) mod source;
 
 use crate::content::codec::Key;
 use anyhow::{Context, Result, ensure};
@@ -216,6 +219,18 @@ pub(crate) fn verify_segment(
     data: &[u8],
     first: u64,
     previous: [u8; 32],
+    visit: impl FnMut(Frame) -> Result<()>,
+) -> Result<(u64, [u8; 32])> {
+    verify_prefix(format, path, data, first, previous, false, visit)
+}
+
+pub(crate) fn verify_prefix(
+    format: &Format<'_>,
+    path: &str,
+    data: &[u8],
+    first: u64,
+    previous: [u8; 32],
+    part_prefix: bool,
     mut visit: impl FnMut(Frame) -> Result<()>,
 ) -> Result<(u64, [u8; 32])> {
     ensure!(first > 0, "invalid first journal sequence");
@@ -238,6 +253,9 @@ pub(crate) fn verify_segment(
             part_end = next - 1;
             prior = part.digest;
             rest = &rest[part.consumed..];
+            if part_prefix && rest.is_empty() {
+                return Ok((next - 1, prior));
+            }
             continue;
         }
         if rest.get(8) == Some(&(FrameType::Seal as u8)) {

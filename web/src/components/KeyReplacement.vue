@@ -19,7 +19,7 @@ const props = defineProps<{ source: Key | null; keys: Key[] }>()
 const open = defineModel<boolean>('open', { required: true })
 const route = useRoute(), router = useRouter(), queries = useQueryClient(), { cluster } = useDeployment()
 const target = ref('new'), name = ref(''), busy = ref(false), preview = ref<Preview | null>(null), result = ref<Result | null>(null), applied = ref<Applied | null>(null)
-const options = computed(() => [{ value: 'new', label: t('replaceCreate') }, ...props.keys.filter(key => key.purpose === 'block' && !key.revoked_at && key.id !== props.source?.id).map(key => ({ value: key.id, label: `${key.name} · ${key.algorithm}` }))])
+const options = computed(() => [{ value: 'new', label: t('replaceCreate') }, ...props.keys.filter(key => key.purpose === 'block' && !key.recovery_read_only && !key.revoked_at && key.id !== props.source?.id).map(key => ({ value: key.id, label: `${key.name} · ${key.algorithm}` }))])
 const selected = computed(() => props.keys.find(key => key.id === target.value))
 watch([open, () => props.source?.id], async ([value]) => {
   if (!value) return

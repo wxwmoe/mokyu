@@ -2480,13 +2480,11 @@ impl Storage {
         }
         let name = match self.secrets.key_name(Some(id)) {
             Some(name) => name,
-            None => {
-                self.managed_keys
-                    .active_block(id)
-                    .await?
-                    .context("block key was not found")?
-                    .0
-            }
+            None => self
+                .managed_keys
+                .read_block_name(id)
+                .await?
+                .context("block key was not found")?,
         };
         self.managed_keys.ensure_loaded(&self.secrets, &name).await
     }

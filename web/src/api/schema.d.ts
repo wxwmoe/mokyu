@@ -1696,6 +1696,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storage-recoveries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_recovery_list"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-recoveries/probe": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_recovery_probe"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-recoveries/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_recovery_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-recoveries/{id}/action": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_recovery_action"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-recoveries/{id}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_recovery_start"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storage/packs": {
         parameters: {
             query?: never;
@@ -2916,6 +2996,7 @@ export interface components {
             name: string;
             nonce_capacity?: components["schemas"]["NonceCapacity"] | null;
             purpose: string;
+            recovery_read_only: boolean;
             /** Format: date-time */
             revoked_at?: string | null;
         };
@@ -3015,6 +3096,46 @@ export interface components {
         };
         /** @enum {string} */
         MetadataJournalWriteMode: "put" | "multipart";
+        MetadataRecovery: {
+            error?: string | null;
+            /** Format: uuid */
+            id: string;
+            progress: components["schemas"]["MetadataRecoveryProgress"];
+            revision: string;
+            state: string;
+        };
+        MetadataRecoveryBucket: {
+            generation: string;
+            /** Format: uuid */
+            id: string;
+            logical_bytes: string;
+            name: string;
+            objects: string;
+            sequence: string;
+            stopped: boolean;
+        };
+        MetadataRecoveryProgress: {
+            buckets: components["schemas"]["MetadataRecoveryBucket"][];
+            /** Format: int64 */
+            candidate_files: number;
+            conflicts: string[];
+            /** Format: int32 */
+            pending_uploads?: number | null;
+            recovered_buckets: string[];
+            /** Format: int32 */
+            required_keys: number;
+        };
+        MetadataRecoverySelection: {
+            buckets: {
+                [key: string]: string;
+            };
+            complete_journal_upload?: boolean;
+            /** Format: uuid */
+            destination?: string | null;
+            exclusive_takeover?: boolean;
+            /** Format: uuid */
+            project: string;
+        };
         /** @enum {string} */
         Mode: "metadata" | "head" | "full";
         ModeInput: {
@@ -3907,6 +4028,24 @@ export interface components {
             write_durability?: string | null;
             write_flush_interval?: string;
             write_processing?: string;
+        };
+        StorageRecoveryAction: {
+            action: string;
+            revision: string;
+        };
+        StorageRecoveryProbe: {
+            deployment_key?: string | null;
+            storage: components["schemas"]["StorageInput"];
+        };
+        StorageRecoveryProbeResult: {
+            recovery?: components["schemas"]["MetadataRecovery"] | null;
+            state: string;
+            /** Format: uuid */
+            storage?: string | null;
+        };
+        StorageRecoveryStart: {
+            revision: string;
+            selection: components["schemas"]["MetadataRecoverySelection"];
         };
         StorageUnpackInput: {
             action: string;
@@ -7465,6 +7604,119 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["IoPresets"];
+                };
+            };
+        };
+    };
+    storage_recovery_list: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataRecovery"][];
+                };
+            };
+        };
+    };
+    storage_recovery_probe: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageRecoveryProbe"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageRecoveryProbeResult"];
+                };
+            };
+        };
+    };
+    storage_recovery_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataRecovery"];
+                };
+            };
+        };
+    };
+    storage_recovery_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageRecoveryAction"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataRecovery"];
+                };
+            };
+        };
+    };
+    storage_recovery_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageRecoveryStart"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataRecovery"];
                 };
             };
         };

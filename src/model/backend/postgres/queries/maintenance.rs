@@ -44,7 +44,7 @@ pub(in super::super) fn complete_running_task(id: Execution) -> Statement<'stati
 }
 
 pub(in super::super) fn physical_indexed(location: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM journal_holds h WHERE h.address=$1) OR EXISTS(SELECT 1 FROM chunk_encodings u WHERE u.encoding_id=$1 AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=u.encoding_id)) OR EXISTS(SELECT 1 FROM packs u WHERE u.id=$1 AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=u.id)) OR EXISTS(SELECT 1 FROM tier_locations WHERE address=$1) OR EXISTS(SELECT 1 FROM tier_moves WHERE source_address=$1) OR EXISTS(SELECT 1 FROM tier_moves WHERE target_address=$1)").bind(location)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM journal_protected_addresses h WHERE h.address=$1) OR EXISTS(SELECT 1 FROM chunk_encodings u WHERE u.encoding_id=$1 AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=u.encoding_id)) OR EXISTS(SELECT 1 FROM packs u WHERE u.id=$1 AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=u.id)) OR EXISTS(SELECT 1 FROM tier_locations WHERE address=$1) OR EXISTS(SELECT 1 FROM tier_moves WHERE source_address=$1) OR EXISTS(SELECT 1 FROM tier_moves WHERE target_address=$1)").bind(location)
 }
 
 pub(in super::super) fn task_progress<'q>(
@@ -224,7 +224,7 @@ pub(in super::super) fn lock_cleanup_fragment(
         Option<Uuid>,
     ),
 > {
-    sqlx::query_as("SELECT id,sealed,owner_stream,staging_storage_id,staging_object_key,file_id FROM fragments f WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='fragment' AND n.location_id=f.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM journal_holds h WHERE h.unit='fragment' AND h.address=f.id) AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) FOR UPDATE SKIP LOCKED").bind(id)
+    sqlx::query_as("SELECT id,sealed,owner_stream,staging_storage_id,staging_object_key,file_id FROM fragments f WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='fragment' AND n.location_id=f.id AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM journal_protected_addresses h WHERE h.unit='fragment' AND h.address=f.id) AND NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) FOR UPDATE SKIP LOCKED").bind(id)
 }
 
 pub(in super::super) fn remove_fragment_row(id: Id) -> Statement<'static> {
@@ -376,7 +376,7 @@ fn physical_table(packed: bool) -> (&'static str, &'static str, &'static str) {
 
 fn node_read_source_guard(kind: &str, location: &str) -> String {
     format!(
-        "NOT EXISTS(SELECT 1 FROM journal_holds h WHERE h.unit='{kind}' AND h.address={location}) AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='{kind}' AND n.location_id={location} AND l.expires_at>clock_timestamp())"
+        "NOT EXISTS(SELECT 1 FROM journal_protected_addresses h WHERE h.unit='{kind}' AND h.address={location}) AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='{kind}' AND n.location_id={location} AND l.expires_at>clock_timestamp())"
     )
 }
 

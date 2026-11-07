@@ -173,6 +173,12 @@ impl App {
             .as_str()
             .context("missing sweep store")?
             .parse()?;
+        if destructive {
+            ensure!(
+                !self.journal.recovery_protects(storage_id).await?,
+                "destructive sweep is frozen by metadata recovery"
+            );
+        }
         let prefix = self.storage.namespace_for(storage_id)?;
         ensure!(detail["prefix"] == prefix, "backend namespace changed");
         let cutoff = chrono::DateTime::parse_from_rfc3339(

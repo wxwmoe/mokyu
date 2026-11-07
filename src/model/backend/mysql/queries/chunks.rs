@@ -38,7 +38,7 @@ pub(in super::super) fn complete_encoding(encoding: Id) -> Statement<'static> {
 }
 
 pub(in super::super) fn encoding_key(id: Uuid, algorithm: &str) -> Scalar<'_, Uuid> {
-    sqlx::query_scalar("SELECT id FROM managed_keys WHERE id=? AND key_algorithm=? AND purpose='block' AND revoked_at IS NULL LOCK IN SHARE MODE").bind(id).bind(algorithm)
+    sqlx::query_scalar("SELECT id FROM managed_keys WHERE id=? AND key_algorithm=? AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL LOCK IN SHARE MODE").bind(id).bind(algorithm)
 }
 
 pub(in super::super) fn copy_extents(

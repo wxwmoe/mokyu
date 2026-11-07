@@ -267,6 +267,67 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 Ok(value)
             };
             match command {
+                Storages::Recovery { command } => {
+                    use super::recovery;
+                    use crate::cli::Recoveries;
+                    Ok(match command {
+                        Recoveries::Probe {
+                            document,
+                            deployment_key,
+                            ..
+                        } => serde_json::to_value(
+                            recovery::probe(
+                                app,
+                                principal,
+                                recovery::Probe {
+                                    storage: serde_json::from_value(
+                                        document.context("missing storage connection")?,
+                                    )?,
+                                    deployment_key,
+                                },
+                            )
+                            .await?,
+                        )?,
+                        Recoveries::Show { id } => {
+                            serde_json::to_value(recovery::status(app, principal, id).await?)?
+                        }
+                        Recoveries::Start { id, document, .. } => serde_json::to_value(
+                            recovery::start(
+                                app,
+                                principal,
+                                id,
+                                serde_json::from_value(
+                                    document.context("missing recovery selection")?,
+                                )?,
+                            )
+                            .await?,
+                        )?,
+                        Recoveries::Cancel { id, revision } => serde_json::to_value(
+                            recovery::control(
+                                app,
+                                principal,
+                                id,
+                                recovery::Action {
+                                    revision,
+                                    action: "cancel".into(),
+                                },
+                            )
+                            .await?,
+                        )?,
+                        Recoveries::Retry { id, revision } => serde_json::to_value(
+                            recovery::control(
+                                app,
+                                principal,
+                                id,
+                                recovery::Action {
+                                    revision,
+                                    action: "retry".into(),
+                                },
+                            )
+                            .await?,
+                        )?,
+                    })
+                }
                 Storages::Journal { name, command } => {
                     use crate::cli::Journals;
                     Ok(serde_json::to_value(match command {
@@ -426,27 +487,38 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     } else {
                         None
                     };
-                    let row = super::storage::create_record(
-                        app,
-                        super::storage::StorageInput {
-                            profile: None,
-                            name,
-                            storage_type: r#type,
-                            path: path.map(|value| value.to_string_lossy().into_owned()),
-                            endpoint,
-                            bucket,
-                            region,
-                            prefix,
-                            block_key_id,
-                            initialize,
-                            access_key,
-                            secret_key,
-                            read_concurrency,
-                            upload_concurrency,
-                            control_concurrency,
-                        },
-                    )
-                    .await?;
+                    let input = super::storage::StorageInput {
+                        profile: None,
+                        name,
+                        storage_type: r#type,
+                        path: path.map(|value| value.to_string_lossy().into_owned()),
+                        endpoint,
+                        bucket,
+                        region,
+                        prefix,
+                        block_key_id,
+                        initialize,
+                        access_key,
+                        secret_key,
+                        read_concurrency,
+                        upload_concurrency,
+                        control_concurrency,
+                    };
+                    if input.storage_type == "s3" {
+                        let result = super::recovery::probe(
+                            app,
+                            principal,
+                            super::recovery::Probe {
+                                storage: input.clone(),
+                                deployment_key: None,
+                            },
+                        )
+                        .await?;
+                        if result.state != "empty" {
+                            return Ok(serde_json::to_value(result)?);
+                        }
+                    }
+                    let row = super::storage::create_record(app, input).await?;
                     Ok(serde_json::to_value(row)?)
                 }
                 Storages::Update {

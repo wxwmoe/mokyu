@@ -5,6 +5,8 @@ mod embedded_native;
 mod image_transactions;
 #[path = "../../shared/journal.rs"]
 mod journal;
+#[path = "../../shared/journal_restore.rs"]
+mod journal_restore;
 mod migration;
 #[path = "../../shared/node/native_parts.rs"]
 mod native_parts;

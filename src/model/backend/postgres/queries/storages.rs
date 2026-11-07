@@ -322,7 +322,7 @@ pub(in super::super) fn save_storage_profile(
 }
 
 pub(in super::super) fn valid_storage_key(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM managed_keys WHERE id=$1 AND purpose='block' AND revoked_at IS NULL)").bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM managed_keys WHERE id=$1 AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL)").bind(id)
 }
 
 pub(in super::super) fn storage_mode_lock() -> Rows<'static, (Uuid, String)> {
@@ -389,7 +389,7 @@ pub(in super::super) fn current_storage_key<'q>(
     id: Option<Uuid>,
     name: &'q str,
 ) -> Scalar<'q, Uuid> {
-    sqlx::query_scalar("SELECT id FROM managed_keys WHERE ((($1::uuid IS NOT NULL AND id=$1) OR name=$2) AND purpose='block' AND revoked_at IS NULL)").bind(id).bind(name)
+    sqlx::query_scalar("SELECT id FROM managed_keys WHERE ((($1::uuid IS NOT NULL AND id=$1) OR name=$2) AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL)").bind(id).bind(name)
 }
 
 pub(in super::super) fn update_storage_key(id: Uuid, key: Option<Uuid>) -> Statement<'static> {

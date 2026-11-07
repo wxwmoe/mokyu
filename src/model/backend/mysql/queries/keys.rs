@@ -35,7 +35,7 @@ impl ManagedKeyStore for Backend {
     }
 
     async fn nonce_observations(&self) -> Result<Vec<crate::model::key_usage::NonceRow>> {
-        Ok(sqlx::query_as("SELECT k.id,k.name,c.reserved_id,p.reserved_id,(SELECT count(*) FROM storages s WHERE s.block_key_id=k.id),EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state='uploading') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state='preparing') OR EXISTS(SELECT 1 FROM chunks c WHERE c.block_key_id=k.id AND c.state IN ('preparing','uploading')) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE UNHEX(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.target_key_id')),'-',''))=k.id AND t.state IN ('queued','running','paused','failed')),o.data,o.revision FROM managed_keys k LEFT JOIN nonce_counters c ON c.block_key_id=k.id AND c.type_tag=0 LEFT JOIN nonce_counters p ON p.block_key_id=k.id AND p.type_tag=1 LEFT JOIN nonce_observations o ON o.block_key_id=k.id WHERE k.purpose='block' AND k.revoked_at IS NULL ORDER BY k.id").fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT k.id,k.name,c.reserved_id,p.reserved_id,(SELECT count(*) FROM storages s WHERE s.block_key_id=k.id),EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state='uploading') OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state='preparing') OR EXISTS(SELECT 1 FROM chunks c WHERE c.block_key_id=k.id AND c.state IN ('preparing','uploading')) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tasks t WHERE UNHEX(REPLACE(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.target_key_id')),'-',''))=k.id AND t.state IN ('queued','running','paused','failed')),o.data,o.revision FROM managed_keys k LEFT JOIN nonce_counters c ON c.block_key_id=k.id AND c.type_tag=0 LEFT JOIN nonce_counters p ON p.block_key_id=k.id AND p.type_tag=1 LEFT JOIN nonce_observations o ON o.block_key_id=k.id WHERE k.purpose='block' AND NOT k.recovery_read_only AND k.revoked_at IS NULL ORDER BY k.id").fetch_all(&self.pool).await?)
     }
     async fn save_nonce_history(
         &self,
@@ -56,13 +56,21 @@ impl ManagedKeyStore for Backend {
     }
 
     async fn resolve_block(&self, name: &str) -> Result<Option<ManagedKeyRecord>> {
-        Ok(sqlx::query_as("SELECT id,name,key_algorithm AS algorithm FROM managed_keys WHERE name=? AND purpose='block' AND revoked_at IS NULL").bind(name).fetch_optional(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT id,name,key_algorithm AS algorithm FROM managed_keys WHERE name=? AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL").bind(name).fetch_optional(&self.pool).await?)
+    }
+    async fn read_block_name(&self, id: Uuid) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT name FROM managed_keys WHERE id=? AND purpose='block' AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?)
     }
     async fn active_block(&self, id: Uuid) -> Result<Option<(String, String)>> {
-        Ok(sqlx::query_as("SELECT name,key_algorithm FROM managed_keys WHERE id=? AND purpose='block' AND revoked_at IS NULL").bind(id).fetch_optional(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT name,key_algorithm FROM managed_keys WHERE id=? AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL").bind(id).fetch_optional(&self.pool).await?)
     }
     async fn for_storage(&self, storage: Uuid) -> Result<Option<ManagedKeyRecord>> {
-        Ok(sqlx::query_as("SELECT k.id,k.name,k.key_algorithm AS algorithm FROM storages s JOIN managed_keys k ON k.id=s.block_key_id WHERE s.id=? AND k.purpose='block' AND k.revoked_at IS NULL").bind(storage).fetch_optional(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT k.id,k.name,k.key_algorithm AS algorithm FROM storages s JOIN managed_keys k ON k.id=s.block_key_id WHERE s.id=? AND k.purpose='block' AND NOT k.recovery_read_only AND k.revoked_at IS NULL").bind(storage).fetch_optional(&self.pool).await?)
     }
     async fn material(&self, name: &str) -> Result<Option<ManagedKeyMaterial>> {
         Ok(sqlx::query_as("SELECT id,name,purpose,key_algorithm,secret_encrypted,fingerprint FROM managed_keys WHERE name=? AND secret_encrypted IS NOT NULL").bind(name).fetch_optional(&self.pool).await?)
@@ -91,6 +99,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for ManagedKeyView {
             purpose: row.try_get("purpose")?,
             algorithm: row.try_get("algorithm")?,
             in_use: row.try_get("in_use")?,
+            recovery_read_only: row.try_get("recovery_read_only")?,
             fingerprint: row.try_get("fingerprint")?,
             created_at: row.try_get("created_at")?,
             revoked_at: row.try_get("revoked_at")?,

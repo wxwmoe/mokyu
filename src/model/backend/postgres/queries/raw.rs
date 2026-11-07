@@ -791,7 +791,7 @@ pub(in super::super) fn renew_raw_processing(work: &RawProcessing) -> Statement<
 }
 
 pub(in super::super) fn nonce_counter(key: Uuid, type_tag: u8) -> Scalar<'static, i64> {
-    sqlx::query_scalar("SELECT n.reserved_id FROM nonce_counters n JOIN managed_keys k ON k.id=n.block_key_id WHERE n.block_key_id=$1 AND n.type_tag=$2 AND k.purpose='block' AND k.revoked_at IS NULL FOR UPDATE OF n,k").bind(key).bind(i64::from(type_tag))
+    sqlx::query_scalar("SELECT n.reserved_id FROM nonce_counters n JOIN managed_keys k ON k.id=n.block_key_id WHERE n.block_key_id=$1 AND n.type_tag=$2 AND k.purpose='block' AND NOT k.recovery_read_only AND k.revoked_at IS NULL FOR UPDATE OF n,k").bind(key).bind(i64::from(type_tag))
 }
 
 pub(in super::super) fn advance_nonce(

@@ -306,7 +306,7 @@ pub(in super::super) fn extent_continuity(id: Id) -> Rows<'static, (i64, bool)> 
     sqlx::query_as("SELECT COALESCE(MAX(offset_bytes+length),0),COALESCE(MIN(offset_bytes=previous_end),1)<>0 FROM (SELECT offset_bytes,length,LAG(offset_bytes+length,1,0) OVER(ORDER BY offset_bytes) AS previous_end FROM extents WHERE stream_id=?) e").bind(id)
 }
 
-pub(super) fn catalog_category(key: &str, mime: &str) -> &'static str {
+pub(in super::super) fn catalog_category(key: &str, mime: &str) -> &'static str {
     let extension = key
         .rsplit_once('.')
         .map(|(_, e)| e.to_ascii_lowercase())

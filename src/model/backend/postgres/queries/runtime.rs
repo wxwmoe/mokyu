@@ -9,7 +9,7 @@ pub(in super::super) fn enabled_storage(id: Uuid) -> Rows<'static, StorageRecord
 }
 
 pub(in super::super) fn storage_key(id: Uuid) -> Rows<'static, ManagedKeyRecord> {
-    sqlx::query_as("SELECT k.id,k.name,k.key_algorithm AS algorithm FROM storages s JOIN managed_keys k ON k.id=s.block_key_id WHERE s.id=$1 AND k.purpose='block' AND k.revoked_at IS NULL")
+    sqlx::query_as("SELECT k.id,k.name,k.key_algorithm AS algorithm FROM storages s JOIN managed_keys k ON k.id=s.block_key_id WHERE s.id=$1 AND k.purpose='block' AND NOT k.recovery_read_only AND k.revoked_at IS NULL")
         .bind(id)
 }
 
@@ -264,11 +264,12 @@ pub(in super::super) type ManagedKeyViewRow = (
     Vec<u8>,
     DateTime<Utc>,
     Option<DateTime<Utc>>,
+    bool,
 );
 
 pub(in super::super) fn managed_key_views() -> Rows<'static, ManagedKeyViewRow> {
     sqlx::query_as(
-        "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tier_locations h WHERE h.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tier_moves m WHERE m.source_key=k.id OR m.target_key=k.id) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state<>'deleted' AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=e.encoding_id)) OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state<>'deleted' AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=p.id)) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.block_key_id=k.id AND w.state='active' AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),k.fingerprint,k.created_at,k.revoked_at FROM managed_keys k ORDER BY k.name",
+        "SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,EXISTS(SELECT 1 FROM storages s WHERE s.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tier_locations h WHERE h.block_key_id=k.id) OR EXISTS(SELECT 1 FROM tier_moves m WHERE m.source_key=k.id OR m.target_key=k.id) OR EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.block_key_id=k.id AND e.state<>'deleted' AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=e.encoding_id)) OR EXISTS(SELECT 1 FROM packs p WHERE p.block_key_id=k.id AND p.state<>'deleted' AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=p.id)) OR EXISTS(SELECT 1 FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE c.block_key_id=k.id) OR EXISTS(SELECT 1 FROM node_writes w JOIN stream_leases l ON l.id=w.lease_id WHERE w.block_key_id=k.id AND w.state='active' AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM tasks t WHERE t.detail->>'target_key_id'=k.id::text AND t.state IN ('queued','running','paused','failed')),k.fingerprint,k.created_at,k.revoked_at,k.recovery_read_only FROM managed_keys k ORDER BY k.name",
     )
 }
 
@@ -283,7 +284,7 @@ pub(in super::super) fn lock_managed_key(id: Uuid) -> Scalar<'static, bool> {
 pub(in super::super) fn insert_managed_key(
     input: &ManagedKeyCreate,
 ) -> Rows<'_, ManagedKeyViewRow> {
-    sqlx::query_as("INSERT INTO managed_keys(id,name,purpose,key_algorithm,secret_encrypted,fingerprint) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,purpose,key_algorithm AS algorithm,false,fingerprint,created_at,revoked_at").bind(input.id).bind(input.name.trim()).bind(&input.purpose).bind(&input.algorithm).bind(&input.protected).bind(input.fingerprint.as_slice())
+    sqlx::query_as("INSERT INTO managed_keys(id,name,purpose,key_algorithm,secret_encrypted,fingerprint) VALUES($1,$2,$3,$4,$5,$6) RETURNING id,name,purpose,key_algorithm AS algorithm,false,fingerprint,created_at,revoked_at,recovery_read_only").bind(input.id).bind(input.name.trim()).bind(&input.purpose).bind(&input.algorithm).bind(&input.protected).bind(input.fingerprint.as_slice())
 }
 
 pub(in super::super) fn revoke_managed_key(id: Uuid) -> Statement<'static> {
@@ -291,7 +292,7 @@ pub(in super::super) fn revoke_managed_key(id: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn managed_key_view(
-    (id, name, purpose, algorithm, active, fingerprint, created_at, revoked_at): ManagedKeyViewRow,
+    (id, name, purpose, algorithm, active, fingerprint, created_at, revoked_at,recovery_read_only): ManagedKeyViewRow,
 ) -> ManagedKeyView {
     ManagedKeyView {
         nonce_capacity: None,
@@ -300,6 +301,7 @@ pub(in super::super) fn managed_key_view(
         purpose,
         algorithm,
         in_use: active,
+        recovery_read_only,
         fingerprint: hex::encode(fingerprint),
         created_at,
         revoked_at,

@@ -54,7 +54,7 @@ pub(super) fn secret_value(
     ensure!(!value.is_empty(), "{name} must not be empty");
     Ok(value)
 }
-fn deployment_key(value: &str) -> Result<[u8; 32]> {
+pub(crate) fn deployment_key(value: &str) -> Result<[u8; 32]> {
     let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(value.as_bytes())
         .context("deployment_key must be URL-safe base64")?;

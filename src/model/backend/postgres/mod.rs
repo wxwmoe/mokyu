@@ -5,6 +5,8 @@ mod connection;
 mod image_transactions;
 #[path = "../../shared/journal.rs"]
 mod journal;
+#[path = "../../shared/journal_restore.rs"]
+mod journal_restore;
 mod migration;
 #[path = "../../shared/node/reads.rs"]
 mod node_reads;

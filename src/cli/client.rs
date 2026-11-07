@@ -26,7 +26,37 @@ pub async fn client(path: Option<&Path>, mut command: Command) -> Result<()> {
         return super::styles::execute(path, styles).await;
     }
     match &mut command {
-        Command::User(Users::Membership { file, document, .. })
+        Command::Storages(Storages::Recovery {
+            command:
+                Recoveries::Probe {
+                    file,
+                    unlock,
+                    key_stdin,
+                    document,
+                    deployment_key,
+                },
+        }) => {
+            ensure!(
+                !*key_stdin || file != Path::new("-"),
+                "source connection and deployment key cannot both use stdin"
+            );
+            *document = Some(read_json(file, 512 * 1024, "storage connection")?);
+            if *key_stdin {
+                let mut input = String::new();
+                std::io::stdin().take(256).read_to_string(&mut input)?;
+                *deployment_key = Some(input.trim_end_matches(['\r', '\n']).to_owned());
+            } else if *unlock {
+                ensure!(
+                    std::io::stdin().is_terminal(),
+                    "use --key-stdin for noninteractive recovery"
+                );
+                *deployment_key = Some(rpassword::prompt_password("Source deployment key: ")?);
+            }
+        }
+        Command::Storages(Storages::Recovery {
+            command: Recoveries::Start { file, document, .. },
+        })
+        | Command::User(Users::Membership { file, document, .. })
         | Command::Bucket(Buckets::Tiering {
             command: Tiering::Set { file, document } | Tiering::Preview { file, document },
             ..

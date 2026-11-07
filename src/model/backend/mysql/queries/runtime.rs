@@ -153,7 +153,7 @@ pub(in super::super) async fn managed_key_views(
 fn managed_key_query() -> sqlx::QueryBuilder<MySql> {
     let mut query =
         sqlx::QueryBuilder::new("SELECT k.id,k.name,k.purpose,k.key_algorithm AS algorithm,");
-    query.push(KEY_REFERENCES).push(" AS in_use,LOWER(HEX(k.fingerprint)) AS fingerprint,k.created_at,k.revoked_at FROM managed_keys k");
+    query.push(KEY_REFERENCES).push(" AS in_use,k.recovery_read_only,LOWER(HEX(k.fingerprint)) AS fingerprint,k.created_at,k.revoked_at FROM managed_keys k");
     query
 }
 

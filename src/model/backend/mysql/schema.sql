@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261107104724.
+-- Generated from the complete mysql migration chain through 20261107122341.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -550,6 +550,105 @@ CREATE TABLE `journal_parts` (
   CONSTRAINT `journal_parts_chk_3` CHECK ((`byte_count` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `journal_recoveries` (
+  `id` binary(16) NOT NULL,
+  `state` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `source` longblob NOT NULL,
+  `selection` json DEFAULT NULL,
+  `progress` json NOT NULL,
+  `error_detail` varchar(1024) COLLATE utf8mb4_bin DEFAULT NULL,
+  `revision` bigint NOT NULL DEFAULT '1',
+  `source_storage` binary(16) NOT NULL,
+  `target_storage` binary(16) DEFAULT NULL,
+  `lease_token` binary(16) DEFAULT NULL,
+  `lease_until` datetime(6) DEFAULT NULL,
+  `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`id`),
+  KEY `journal_recoveries_work` (`state`,`created_at`),
+  KEY `journal_recoveries_source` (`source_storage`,`state`),
+  CONSTRAINT `journal_recoveries_chk_1` CHECK ((`state` in (_utf8mb4'locked',_utf8mb4'preview',_utf8mb4'queued',_utf8mb4'verifying',_utf8mb4'importing',_utf8mb4'claiming',_utf8mb4'completed',_utf8mb4'failed',_utf8mb4'cancelled'))),
+  CONSTRAINT `journal_recoveries_chk_2` CHECK ((`revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_restore_buckets` (
+  `job` binary(16) NOT NULL,
+  `source_bucket` binary(16) NOT NULL,
+  `target_bucket` binary(16) NOT NULL,
+  `target_name` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `generation` bigint NOT NULL,
+  `watermark` bigint NOT NULL,
+  `state` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `next_key` varbinary(1024) DEFAULT NULL,
+  `restored_objects` bigint NOT NULL DEFAULT '0',
+  `restored_bytes` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`job`,`source_bucket`),
+  UNIQUE KEY `target_bucket` (`target_bucket`),
+  CONSTRAINT `journal_restore_buckets_ibfk_1` FOREIGN KEY (`job`) REFERENCES `journal_recoveries` (`id`),
+  CONSTRAINT `journal_restore_buckets_chk_1` CHECK ((`state` in (_utf8mb4'planned',_utf8mb4'building',_utf8mb4'published')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_restore_items` (
+  `job` binary(16) NOT NULL,
+  `source_bucket` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `size` bigint NOT NULL,
+  `etag` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `metadata` json NOT NULL,
+  `checksums` json NOT NULL,
+  `payload` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `modified_us` bigint NOT NULL,
+  `content_type` text COLLATE utf8mb4_bin NOT NULL,
+  `category` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`job`,`source_bucket`,`object_key`),
+  CONSTRAINT `journal_restore_items_ibfk_1` FOREIGN KEY (`job`, `source_bucket`) REFERENCES `journal_restore_buckets` (`job`, `source_bucket`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_restore_materials` (
+  `job` binary(16) NOT NULL,
+  `identity_hash` binary(32) NOT NULL,
+  `unit` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `address` binary(16) NOT NULL,
+  `native_id` bigint NOT NULL,
+  `content_hash` binary(32) NOT NULL,
+  PRIMARY KEY (`job`,`identity_hash`),
+  KEY `journal_restore_addresses` (`address`),
+  CONSTRAINT `journal_restore_materials_ibfk_1` FOREIGN KEY (`job`) REFERENCES `journal_recoveries` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_restore_orphans` (
+  `job` binary(16) NOT NULL,
+  `address` binary(16) NOT NULL,
+  `file_path` varchar(1024) COLLATE utf8mb4_bin NOT NULL,
+  `byte_count` bigint NOT NULL,
+  PRIMARY KEY (`job`,`address`),
+  CONSTRAINT `journal_restore_orphans_ibfk_1` FOREIGN KEY (`job`) REFERENCES `journal_recoveries` (`id`),
+  CONSTRAINT `journal_restore_orphans_chk_1` CHECK ((`byte_count` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_restore_ranges` (
+  `job` binary(16) NOT NULL,
+  `source_bucket` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `offset_bytes` bigint NOT NULL,
+  `length` bigint NOT NULL,
+  `source_offset` bigint NOT NULL,
+  `kind` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `native_id` bigint NOT NULL,
+  PRIMARY KEY (`job`,`source_bucket`,`object_key`,`offset_bytes`),
+  CONSTRAINT `journal_restore_ranges_ibfk_1` FOREIGN KEY (`job`, `source_bucket`, `object_key`) REFERENCES `journal_restore_items` (`job`, `source_bucket`, `object_key`) ON DELETE CASCADE,
+  CONSTRAINT `journal_restore_ranges_chk_1` CHECK ((`kind` in (_utf8mb4'raw',_utf8mb4'chunk',_utf8mb4'fragment')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_restore_scopes` (
+  `storage_id` binary(16) NOT NULL,
+  `job` binary(16) NOT NULL,
+  `protect_unknown` tinyint(1) NOT NULL DEFAULT '1',
+  PRIMARY KEY (`storage_id`,`job`),
+  KEY `job` (`job`),
+  CONSTRAINT `journal_restore_scopes_ibfk_1` FOREIGN KEY (`job`) REFERENCES `journal_recoveries` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `journal_stores` (
   `storage_id` binary(16) NOT NULL,
   `policy` json NOT NULL,
@@ -623,6 +722,7 @@ CREATE TABLE `managed_keys` (
   `fingerprint` binary(32) NOT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `revoked_at` datetime(6) DEFAULT NULL,
+  `recovery_read_only` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`),
   UNIQUE KEY `managed_keys_fingerprint` (`fingerprint`),
@@ -2317,6 +2417,8 @@ INSERT INTO `redundancy_catalog` (`singleton`) VALUES ('1');
 INSERT INTO `usage_summary` (`id`, `requested_at`, `as_of`, `data`) VALUES ('global', CURRENT_TIMESTAMP(6), NULL, NULL);
 
 SET foreign_key_checks=@mokyu_schema_foreign_keys;
+
+CREATE SQL SECURITY DEFINER VIEW `journal_protected_addresses` AS select `journal_holds`.`address` AS `address`,`journal_holds`.`unit` AS `unit` from `journal_holds` union all select `m`.`address` AS `address`,`m`.`unit` AS `unit` from (`journal_restore_materials` `m` join `journal_recoveries` `j` on((`j`.`id` = `m`.`job`))) where (`j`.`state` not in ('completed','cancelled'));
 
 CREATE SQL SECURITY DEFINER VIEW `user_bucket_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 67 when 'writer' then 95 when 'maintainer' then 127 else 0 end) & if((`m`.`scope` = 'all'),127,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_bucket_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
 

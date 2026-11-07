@@ -77,7 +77,7 @@ pub(in super::super) fn append(candidate: Id, value: &Prepared) -> sqlx::QueryBu
 }
 
 pub(in super::super) fn encoding(storage: Uuid) -> Rows<'static, (String, Option<Uuid>)> {
-    sqlx::query_as("SELECT COALESCE(k.key_algorithm,'none'),s.block_key_id FROM storages s LEFT JOIN managed_keys k ON k.id=s.block_key_id WHERE s.id=$1 AND s.enabled AND (s.block_key_id IS NULL OR (k.purpose='block' AND k.revoked_at IS NULL)) FOR SHARE OF s").bind(storage)
+    sqlx::query_as("SELECT COALESCE(k.key_algorithm,'none'),s.block_key_id FROM storages s LEFT JOIN managed_keys k ON k.id=s.block_key_id WHERE s.id=$1 AND s.enabled AND (s.block_key_id IS NULL OR (k.purpose='block' AND NOT k.recovery_read_only AND k.revoked_at IS NULL)) FOR SHARE OF s").bind(storage)
 }
 
 pub(in super::super) fn candidate(unit: Id, stream: Id) -> Statement<'static> {

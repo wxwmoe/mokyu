@@ -21,10 +21,28 @@ pub(crate) struct Identity {
     created_by: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct Salvaged {
+    pub first: u64,
+    pub bytes: u64,
+    pub digest: [u8; 32],
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct EpochCut {
+    pub epoch: Uuid,
+    pub sequence: u64,
+    pub tail: [u8; 32],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub salvaged: Option<Salvaged>,
+}
+
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Journal {
     pub journal_id: Uuid,
     pub writer_epoch: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_head: Option<String>,
     wrapped_journal_key: String,
 }
 
@@ -34,6 +52,9 @@ impl Journal {
         for id in [storage, self.journal_id, self.writer_epoch] {
             binding.extend_from_slice(id.as_bytes());
         }
+        if let Some(head) = &self.history_head {
+            binding.extend_from_slice(head.as_bytes());
+        }
         binding
     }
 
@@ -41,6 +62,7 @@ impl Journal {
         let mut journal = Self {
             journal_id: Uuid::new_v4(),
             writer_epoch: Uuid::new_v4(),
+            history_head: None,
             wrapped_journal_key: String::new(),
         };
         let mut material = [0; 32];
@@ -48,6 +70,44 @@ impl Journal {
             .map_err(|_| anyhow::anyhow!("journal key generation failed"))?;
         journal.wrap(storage, deployment_key, &material)?;
         Ok(journal)
+    }
+
+    pub fn head(&self) -> Result<Option<[u8; 32]>> {
+        self.history_head
+            .as_ref()
+            .map(|value| {
+                ensure!(
+                    value.len() == 64
+                        && value
+                            .bytes()
+                            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+                    "invalid history head"
+                );
+                let hash = *blake3::Hash::from_hex(value)?.as_bytes();
+                ensure!(hash != [0; 32], "invalid history head");
+                Ok(hash)
+            })
+            .transpose()
+    }
+
+    pub fn transfer(
+        &self,
+        storage: Uuid,
+        next: Uuid,
+        head: [u8; 32],
+        target: &Key,
+        journal_key: &Key,
+    ) -> Result<Self> {
+        ensure!(
+            !next.is_nil() && self.writer_epoch != next,
+            "invalid journal takeover epoch"
+        );
+        let mut descriptor = self.clone();
+        descriptor.writer_epoch = next;
+        descriptor.history_head = Some(hex::encode(head));
+        descriptor.head()?;
+        descriptor.wrap(storage, target, &journal_key.material)?;
+        Ok(descriptor)
     }
 
     fn wrap(&mut self, storage: Uuid, key: &Key, material: &[u8; 32]) -> Result<()> {
@@ -79,6 +139,7 @@ impl Journal {
             URL_SAFE_NO_PAD.decode(&journal.wrapped_journal_key)?.len() == 60,
             "invalid wrapped journal key"
         );
+        journal.head()?;
         Ok(journal)
     }
 }

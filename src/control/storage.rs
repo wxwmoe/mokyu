@@ -24,7 +24,7 @@ use uuid::Uuid;
 pub(crate) use crate::model::storage::StorageView;
 use crate::model::storage::{StorageEdit, StorageRow};
 use crate::storage::profile::validate as validate_profile;
-#[derive(Deserialize, ToSchema)]
+#[derive(Clone, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StorageInput {
     pub(crate) profile: Option<StorageProfile>,
@@ -92,7 +92,7 @@ pub(crate) struct StorageUnpackInput {
     confirmation: Option<String>,
 }
 
-fn validate_name(value: &str) -> anyhow::Result<String> {
+pub(super) fn validate_name(value: &str) -> anyhow::Result<String> {
     let value = value.trim();
     anyhow::ensure!(
         (1..=128).contains(&value.len())
@@ -111,7 +111,7 @@ fn validate_storage_type(value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn normalize_prefix(value: String) -> anyhow::Result<String> {
+pub(super) fn normalize_prefix(value: String) -> anyhow::Result<String> {
     let value = value.trim_matches('/').to_owned();
     if value.is_empty() {
         return Ok(value);
@@ -152,7 +152,7 @@ fn endpoint(value: String) -> anyhow::Result<String> {
     Ok(value)
 }
 
-fn build_record(
+pub(super) fn build_record(
     app: &App,
     id: Uuid,
     name: String,

@@ -6,7 +6,7 @@ pub(in super::super) fn storage_deployment() -> Rows<'static, (Uuid, String)> {
 
 pub(in super::super) fn valid_storage_key(id: Uuid) -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
-        "SELECT id FROM managed_keys WHERE id=? AND purpose='block' AND revoked_at IS NULL",
+        "SELECT id FROM managed_keys WHERE id=? AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL",
     )
     .bind(id)
 }
@@ -36,7 +36,7 @@ pub(in super::super) fn update_storage_record(
 }
 
 pub(in super::super) fn current_storage_key(id: Option<Uuid>, name: &str) -> Scalar<'_, Uuid> {
-    sqlx::query_scalar("SELECT id FROM managed_keys WHERE (id=? OR name=?) AND purpose='block' AND revoked_at IS NULL").bind(id).bind(name)
+    sqlx::query_scalar("SELECT id FROM managed_keys WHERE (id=? OR name=?) AND purpose='block' AND NOT recovery_read_only AND revoked_at IS NULL").bind(id).bind(name)
 }
 
 pub(in super::super) fn update_storage_key(id: Uuid, key: Option<Uuid>) -> Statement<'static> {

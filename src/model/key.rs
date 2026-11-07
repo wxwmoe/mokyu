@@ -65,6 +65,7 @@ pub(crate) trait ManagedKeyStore: Send + Sync {
     }
     async fn reserve_nonce(&self, key: Uuid, type_tag: u8, units: u32) -> Result<(i64, i64)>;
     async fn resolve_block(&self, name: &str) -> Result<Option<ManagedKeyRecord>>;
+    async fn read_block_name(&self, id: Uuid) -> Result<Option<String>>;
     async fn active_block(&self, id: Uuid) -> Result<Option<(String, String)>>;
     async fn for_storage(&self, storage_id: Uuid) -> Result<Option<ManagedKeyRecord>>;
     async fn list(&self, principal: &Principal) -> Result<Vec<ManagedKeyView>>;
@@ -112,6 +113,7 @@ pub(crate) struct ManagedKeyView {
     pub purpose: String,
     pub algorithm: String,
     pub in_use: bool,
+    pub recovery_read_only: bool,
     pub fingerprint: String,
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,

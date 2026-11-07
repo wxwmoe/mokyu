@@ -5,7 +5,7 @@ use super::{
 };
 use crate::model::journal::record::{BlockKey, Change, Kind, Material, Operation, Reference};
 use anyhow::{Context, Result, ensure};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -30,7 +30,7 @@ pub(crate) struct Bucket {
     pub objects: BTreeMap<String, Change>,
 }
 
-#[derive(Clone, Serialize, utoipa::ToSchema)]
+#[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
 #[schema(as = MetadataRecoveryBucket)]
 pub(crate) struct Summary {
     pub id: Uuid,
@@ -64,6 +64,133 @@ impl Bucket {
 }
 
 impl Catalog {
+    pub fn required_keys(&self, bucket: &Bucket) -> Result<std::collections::BTreeSet<Uuid>> {
+        let mut ids = std::collections::BTreeSet::new();
+        for change in bucket.objects.values() {
+            for span in &change.ranges {
+                let mut m = self
+                    .materials
+                    .get(&span.material)
+                    .context("missing recovery material")?;
+                if let Material::Member { pack, .. } = m {
+                    m = self
+                        .materials
+                        .get(&Reference {
+                            kind: Kind::Pack,
+                            id: *pack,
+                            member: None,
+                        })
+                        .context("missing recovery pack")?;
+                }
+                if let Some(id) = m.hold()?.and_then(|h| h.key) {
+                    ensure!(self.keys.contains_key(&id), "missing recovery block key");
+                    ids.insert(id);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
+    pub fn seed(&mut self, cuts: &[super::snapshot::BucketCut]) -> Result<()> {
+        for cut in cuts {
+            ensure!(
+                cut.generation > 0
+                    && cut.sequence > 0
+                    && !cut.id.is_nil()
+                    && s3s::path::check_bucket_name(&cut.name),
+                "invalid snapshot bucket"
+            );
+            ensure!(
+                self.watermarks.insert(cut.id, cut.sequence).is_none(),
+                "duplicate snapshot bucket"
+            );
+            self.buckets.insert(
+                cut.id,
+                Bucket {
+                    id: cut.id,
+                    name: cut.name.clone(),
+                    generation: cut.generation,
+                    sequence: cut.sequence,
+                    paused: cut.stopped,
+                    objects: BTreeMap::new(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub fn snapshot_row(&mut self, row: super::snapshot::Row, format: &Format<'_>) -> Result<()> {
+        use super::snapshot::Row;
+        match row {
+            Row::Key(key) => self.stage(Record::Key(key), format),
+            Row::Material(material) => self.stage(Record::Material(material), format),
+            Row::Bucket(_) | Row::Drop { .. } => Ok(()),
+            Row::Ranges {
+                bucket,
+                seq,
+                offset,
+                ranges,
+                ..
+            } => self
+                .ranges
+                .entry((bucket, 0, seq))
+                .or_default()
+                .append(offset, ranges),
+            Row::Object {
+                bucket,
+                key,
+                generation,
+                seq,
+                attributes,
+                range_count,
+                range_digest,
+            } => {
+                let ranges = self.ranges.remove(&(bucket, 0, seq)).unwrap_or_default();
+                let Some(state) = self.buckets.get_mut(&bucket) else {
+                    return Ok(());
+                };
+                if generation != state.generation {
+                    return Ok(());
+                }
+                ensure!(seq <= state.sequence, "snapshot object beyond cut");
+                let change = ranges.finish(
+                    Change {
+                        bucket,
+                        name: state.name.clone(),
+                        generation,
+                        seq,
+                        operation: Operation::Put,
+                        key: Some(key.clone()),
+                        attributes: Some(attributes),
+                        ranges: Vec::new(),
+                    },
+                    range_count,
+                    range_digest,
+                )?;
+                if state.objects.get(&key).is_none_or(|old| old.seq < seq) {
+                    state.objects.insert(key, change);
+                }
+                Ok(())
+            }
+            Row::Delete {
+                bucket,
+                key,
+                generation,
+                seq,
+            } => {
+                if let Some(state) = self.buckets.get_mut(&bucket)
+                    && generation == state.generation
+                {
+                    ensure!(seq <= state.sequence, "snapshot deletion beyond cut");
+                    if state.objects.get(&key).is_some_and(|row| row.seq <= seq) {
+                        state.objects.remove(&key);
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn stage(&mut self, record: Record, format: &Format<'_>) -> Result<()> {
         match record {
             Record::Key(wrapped) => {
@@ -75,9 +202,7 @@ impl Catalog {
                 crate::content::codec::Key::new(&key.algorithm, key.material)?;
                 if let Some(old) = self.keys.get(&key.id) {
                     ensure!(
-                        old.material == key.material
-                            && old.algorithm == key.algorithm
-                            && old.name == key.name,
+                        old.material == key.material && old.algorithm == key.algorithm,
                         "conflicting recovery key"
                     );
                 } else {
@@ -266,4 +391,58 @@ pub(crate) fn stage_segment(
             &mut stage,
         )
     })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn historical_key_alias_may_change_across_writers() {
+        let mut catalog = Catalog::default();
+        let root = crate::content::codec::Key::new("aes-256-gcm", [0x1a; 32]).unwrap();
+        let format = Format {
+            storage: Uuid::new_v4(),
+            journal: Uuid::new_v4(),
+            epoch: Uuid::new_v4(),
+            key: &root,
+            encrypted: false,
+        };
+        let wrapped = |key: &BlockKey| {
+            Record::Key(crate::model::journal::record::WrappedKey::seal(key, &format).unwrap())
+        };
+        let mut key = BlockKey {
+            id: Uuid::new_v4(),
+            name: "old".into(),
+            algorithm: "aes-256-gcm".into(),
+            material: [4; 32],
+        };
+        let sealed = crate::model::journal::record::WrappedKey::seal(&key, &format).unwrap();
+        let value = serde_json::to_value(&sealed).unwrap();
+        assert!(value.get("material").is_none());
+        assert_eq!(value["wrapped_material"].as_str().unwrap().len(), 80);
+        let later = Format {
+            epoch: Uuid::new_v4(),
+            ..format
+        };
+        assert_eq!(sealed.open(&later).unwrap().material, key.material);
+        for wrong in [
+            Format {
+                journal: Uuid::new_v4(),
+                ..format
+            },
+            Format {
+                storage: Uuid::new_v4(),
+                ..format
+            },
+        ] {
+            assert!(sealed.open(&wrong).is_err());
+        }
+        let mut changed = sealed.clone();
+        changed.id = Uuid::new_v4();
+        assert!(changed.open(&format).is_err());
+        catalog.stage(wrapped(&key), &format).unwrap();
+        key.name = "restored".into();
+        catalog.stage(wrapped(&key), &format).unwrap();
+        key.material = [7; 32];
+        assert!(catalog.stage(wrapped(&key), &format).is_err());
+    }
 }
