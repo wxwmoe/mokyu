@@ -32,9 +32,11 @@ use std::{
 use uuid::Uuid;
 
 struct Target {
-    id: Uuid,
     backend: Arc<dyn ObjectStore>,
-    client: Client,
+    client: Option<Client>,
+    local: Option<Arc<crate::storage::journal::local::Local>>,
+    storage: Arc<crate::storage::Storage>,
+    id: Uuid,
     descriptor: marker::Journal,
     key: Key,
     grace: i64,
@@ -61,9 +63,13 @@ impl Target {
                 .max(profile.min_storage_seconds()?),
         )?;
         Ok(Self {
-            id,
             backend,
-            client: source::client(&connection)?,
+            client: (connection.r#type == "s3")
+                .then(|| source::client(&connection))
+                .transpose()?,
+            local: crate::storage::journal::local::Local::new(&connection)?.map(Arc::new),
+            storage: app.storage.clone(),
+            id,
             descriptor,
             key,
             grace,
@@ -81,11 +87,53 @@ impl Target {
     async fn put(&self, path: &str, data: Vec<u8>, condition: Condition) -> Result<Written> {
         let size = data.len();
         let digest = blake3::hash(&data);
-        match self
-            .client
-            .put(path, &condition, &BTreeMap::new(), None, Bytes::from(data))
-            .await
-        {
+        let _guard = match &self.local {
+            Some(l) => Some(l.lock(true).await?),
+            None => None,
+        };
+        let result = if let Some(local) = &self.local {
+            local.verify_owner(&self.descriptor)?;
+            let location = Path::from(path);
+            let etag = match self.backend.head(&location).await {
+                Ok(m) => Some(m.e_tag.context("missing local snapshot revision")?),
+                Err(object_store::Error::NotFound { .. }) => None,
+                Err(e) => return Err(e.into()),
+            };
+            let expected = match &condition {
+                Condition::Absent => None,
+                Condition::Match(s) => Some(s),
+            };
+            if etag.as_ref() == expected {
+                let target = self.storage.store_backend(self.id)?;
+                let space = self.storage.local_space(&target, size as u64)?;
+                let physical = local.root.join(path);
+                let local = local.clone();
+                let _lock = tokio::task::spawn_blocking(move || {
+                    let _space = space;
+                    local.replace(&physical, &data)?;
+                    Ok::<_, anyhow::Error>(_guard)
+                })
+                .await??;
+                Ok(Written {
+                    etag: self
+                        .backend
+                        .head(&location)
+                        .await?
+                        .e_tag
+                        .context("missing local snapshot revision")?,
+                    version: None,
+                })
+            } else {
+                Err(anyhow::anyhow!("local snapshot revision changed"))
+            }
+        } else {
+            self.client
+                .as_ref()
+                .context("missing S3 snapshot client")?
+                .put(path, &condition, &BTreeMap::new(), None, Bytes::from(data))
+                .await
+        };
+        match result {
             Ok(receipt) => Ok(receipt),
             Err(cause) => {
                 let result = match self.backend.get(&Path::from(path)).await {
@@ -531,6 +579,14 @@ async fn step(app: &App, storage: Uuid, token: Uuid) -> Result<()> {
     }
     let batch = db.snapshot_gc(storage, token, remote.grace).await?;
     if !batch.is_empty() {
+        let _guard = match &remote.local {
+            Some(local) => {
+                let lock = local.lock(true).await?;
+                local.verify_owner(&remote.descriptor)?;
+                Some(lock)
+            }
+            None => None,
+        };
         let current = db
             .snapshot_status(storage)
             .await?
@@ -556,13 +612,37 @@ async fn step(app: &App, storage: Uuid, token: Uuid) -> Result<()> {
             anyhow::bail!("journal checkpoint changed");
         }
         for file in batch {
-            if let Err(cause) = remote
+            if let Some(local) = &remote.local {
+                let path = Path::parse(&file.file_path)?;
+                match remote.backend.head(&path).await {
+                    Ok(m) => {
+                        if m.e_tag.as_ref() != Some(&file.etag) {
+                            db.snapshot_gc_failure(
+                                storage,
+                                token,
+                                "cleanup object changed; journal GC paused",
+                            )
+                            .await?;
+                            anyhow::bail!("local cleanup object changed");
+                        }
+                        let physical = local.root.join(path.as_ref());
+                        tokio::fs::remove_file(&physical).await?;
+                        crate::storage::raw::sync_directory(physical.parent().unwrap()).await?;
+                    }
+                    Err(object_store::Error::NotFound { .. }) => (),
+                    Err(e) => return Err(e.into()),
+                }
+            } else if let Err(cause) = remote
                 .client
+                .as_ref()
+                .context("missing S3 snapshot client")?
                 .delete_version(&file.file_path, &file.etag, file.remote_version.as_deref())
                 .await
             {
                 match remote
                     .client
+                    .as_ref()
+                    .context("missing S3 snapshot client")?
                     .head(&file.file_path, file.remote_version.as_deref())
                     .await?
                 {
