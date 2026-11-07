@@ -111,7 +111,11 @@ connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）
 
 `GET /api/v1/storages/{name}/journal` 返回数据库记录的策略、修订、已发布序、开放段、最近确认时间与错误。管理员以 `PUT` 提交 `{revision,policy}`，修订不符返回 412。开放段按原策略封存后启用新策略，等待期间 `pending_policy` 为 true。`POST /api/v1/storages/{name}/journal/flush` 请求后台追平各桶在操作时的提交序。
 
-`mode` 可选 `put` 或 `multipart`。大小以字节表示，等待以秒表示。两种写法分别配置 `put_target_bytes`、`put_max_wait_seconds` 及 `part_target_bytes`、`part_max_wait_seconds`。Multipart 另有 `multipart_max_open_seconds`。等待值为 null 表示不限。日志段硬上限为 `segment_bytes`。桶选项和状态见下节。
+S3 的 `mode` 可选 `put` 或 `multipart`。大小以字节表示，等待以秒表示。两种写法分别配置 `put_target_bytes`、`put_max_wait_seconds` 及 `part_target_bytes`、`part_max_wait_seconds`。Multipart 另有 `multipart_max_open_seconds`。等待值为 null 表示不限。日志段硬上限为 `segment_bytes`。桶选项和状态见下节。
+
+本地后端的日志策略可只提交 `segment_bytes`、`snapshot_page_bytes` 和 `snapshot_trigger_bytes`。S3 的写入模式、聚合大小、分片大小与等待时间仅适用于远端发布。
+
+通过 `POST /api/v1/storage-recoveries/probe` 提交来源连接可获取预览。用 `POST /api/v1/storage-recoveries/{id}/start` 指定桶、项目和恢复目标，`GET /api/v1/storage-recoveries/{id}` 返回进度。未封存的本地段按预览时已确认的字节边界读取。S3 独占接管可选择完成未关闭的日志 Multipart。
 
 ## 存储桶
 
@@ -129,7 +133,7 @@ connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）
 
 域名绑定由管理员统一维护：`GET/POST /api/v1/domains` 列举或创建 `{host,bucket_id}` 绑定，`DELETE /api/v1/domains/{host}` 删除绑定。一个 host 只能指向一个桶；删除桶或转移项目不会静默抢占域名。
 
-`GET /api/v1/buckets/{bucket}/settings` 同时返回 `metadata_journal_enabled`，托管 S3 后端为 boolean，本地后端为 null。保存时可携带该字段，省略则沿用原值。`metadata_journal` 返回捕获代次、业务序、已发布序、待同步条数和初始扫描状态，序号与计数使用十进制字符串。日志默认关闭，首次开启会分页捕获已有对象，随后在对象发布事务内捕获变更。停用保留已有恢复点，停用期间有对象变化时重新开启会补建基线。
+`GET /api/v1/buckets/{bucket}/settings` 同时返回 `metadata_journal_enabled`，托管 S3 和本地后端均返回 boolean。保存时可携带该字段，省略则沿用原值。`metadata_journal` 返回捕获代次、业务序、已发布序、待同步条数和初始扫描状态，序号与计数使用十进制字符串。日志默认关闭，首次开启会分页捕获已有对象，随后在对象发布事务内捕获变更。停用保留已有恢复点，停用期间有对象变化时重新开启会补建基线。
 
 桶信息含 id、name、project_id、actions、status、revision、uploads_paused、public_base_url、CORS 和网站设置。统一保存携带读取时的 revision；并发改变返回 412。成员需要 bucket.settings，可改 CORS、网站与元数据日志。域名、公共 URL 和暂停新上传限管理员。
 
