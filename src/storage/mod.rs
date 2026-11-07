@@ -179,34 +179,12 @@ async fn build_store(
     defaults: (usize, usize, usize),
     permit_holder: Uuid,
 ) -> Result<StoreBackend> {
-    let crate::model::StorageRecord {
-        id,
-        store_type,
-        path,
-        endpoint,
-        bucket,
-        region,
-        prefix,
-        access,
-        secret,
-        identity_marker,
-        revision,
-    } = row;
-    let is_local = store_type == "local";
-    let record = StoreRecord {
-        id,
-        name: String::new(),
-        r#type: store_type,
-        path,
-        endpoint_url: endpoint,
-        remote_bucket_name: bucket,
-        region,
-        prefix: prefix.clone(),
-        access_key_encrypted: access,
-        secret_key_encrypted: secret,
-        identity_marker: identity_marker.clone(),
-        enabled: true,
-    };
+    let id = row.id;
+    let revision = row.revision;
+    let record = StoreRecord::from(row);
+    let prefix = record.prefix.clone();
+    let identity_marker = record.identity_marker.clone();
+    let is_local = record.r#type == "local";
     let target = VerifiedStore::build(&record, options, secrets)?;
     let raw_root = record.path.as_ref().map(|path| {
         PathBuf::from(path)
@@ -1069,7 +1047,22 @@ impl Storage {
     async fn check_storage_inner(&self, target: &StoreBackend) -> Result<()> {
         // A restarting control must verify the marker while data nodes still hold read permits.
         let _permit = target.controls.acquire().await?;
-        marker::verify_store(target.backend.as_ref(), &target.identity_marker).await?;
+        let document = marker::Document::read(target.backend.as_ref())
+            .await?
+            .context("storage mokyu.json is required; restore it before using this store")?;
+        if let Err(error) = marker::verify(&document.value, &target.identity_marker) {
+            // A registered journal may have won its marker CAS while this profile was still cached.
+            let Some(intent) = self
+                .record_store
+                .journal_descriptor(target.profile.storage_id)
+                .await?
+            else {
+                return Err(error);
+            };
+            let mut authorized = target.identity_marker.clone();
+            authorized["metadata_journal"] = serde_json::to_value(intent)?;
+            marker::verify(&document.value, &authorized)?;
+        }
         target.identity_ready.store(true, Ordering::Release);
         Ok(())
     }

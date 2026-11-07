@@ -11,6 +11,7 @@ mod contract;
 mod external;
 pub(crate) mod image_styles;
 pub(crate) mod insights;
+pub(crate) mod journal;
 pub(crate) mod keys;
 mod maintenance;
 pub(crate) mod managed_keys;

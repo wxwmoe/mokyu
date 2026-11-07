@@ -311,6 +311,7 @@ impl App {
         lock: std::fs::File,
     ) -> Result<(Arc<Self>, Box<dyn crate::model::runtime::Owner>)> {
         let (stores, owner) = crate::model::connect(&config, &mut secrets, &budget, role).await?;
+        crate::storage::journal::remote::resume_markers(&stores, &secrets).await?;
         let defaults = crate::model::runtime_defaults(&config);
         stores.runtime_settings.ensure(&defaults).await?;
         let runtime_defaults = defaults

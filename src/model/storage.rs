@@ -20,8 +20,29 @@ pub(crate) struct StorageRecord {
     pub(crate) revision: i64,
 }
 
+impl From<StorageRecord> for BackendRecord {
+    fn from(row: StorageRecord) -> Self {
+        Self {
+            id: row.id,
+            name: String::new(),
+            r#type: row.store_type,
+            path: row.path,
+            endpoint_url: row.endpoint,
+            remote_bucket_name: row.bucket,
+            region: row.region,
+            prefix: row.prefix,
+            access_key_encrypted: row.access,
+            secret_key_encrypted: row.secret,
+            identity_marker: row.identity_marker,
+            enabled: true,
+        }
+    }
+}
+
 #[async_trait]
 pub(crate) trait StorageRecordStore: Send + Sync {
+    async fn journal_descriptor(&self, id: Uuid)
+    -> Result<Option<crate::storage::marker::Journal>>;
     async fn list(&self) -> Result<Vec<StorageView>>;
     async fn view(&self, id: Uuid) -> Result<StorageView>;
     async fn named(&self, name: &str) -> Result<Option<StorageView>>;

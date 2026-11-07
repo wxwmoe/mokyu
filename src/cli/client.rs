@@ -32,6 +32,10 @@ pub async fn client(path: Option<&Path>, mut command: Command) -> Result<()> {
             ..
         })
         | Command::Quota(Quotas::Set { file, document, .. })
+        | Command::Storages(Storages::Journal {
+            command: Journals::Set { file, document },
+            ..
+        })
         | Command::Storages(Storages::Profile {
             command:
                 StorageProfiles::Set { file, document, .. }

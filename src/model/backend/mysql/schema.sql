@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261107092631.
+-- Generated from the complete mysql migration chain through 20261107104724.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -399,13 +399,47 @@ CREATE TABLE `journal_buckets` (
   `scan_after` varbinary(1024) DEFAULT NULL,
   `scan_until` varbinary(1024) DEFAULT NULL,
   `dirty` tinyint(1) NOT NULL DEFAULT '0',
+  `prepared_generation` bigint NOT NULL DEFAULT '0',
+  `prepare_error` varchar(1024) COLLATE utf8mb4_bin DEFAULT NULL,
+  `flush_seq` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`bucket_id`),
   KEY `journal_buckets_storage` (`storage_id`,`bucket_id`),
   KEY `journal_buckets_scan` (`scanning`,`bucket_id`),
   CONSTRAINT `journal_buckets_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
   CONSTRAINT `journal_buckets_chk_1` CHECK ((`generation` > 0)),
   CONSTRAINT `journal_buckets_chk_2` CHECK ((`last_seq` >= 0)),
-  CONSTRAINT `journal_buckets_chk_3` CHECK (((`published_seq` >= 0) and (`published_seq` <= `last_seq`)))
+  CONSTRAINT `journal_buckets_chk_3` CHECK (((`published_seq` >= 0) and (`published_seq` <= `last_seq`))),
+  CONSTRAINT `journal_buckets_chk_4` CHECK ((`prepared_generation` >= 0)),
+  CONSTRAINT `journal_buckets_chk_5` CHECK ((`flush_seq` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_dictionary` (
+  `storage_id` binary(16) NOT NULL,
+  `epoch` binary(16) NOT NULL,
+  `identity_hash` binary(32) NOT NULL,
+  `content_hash` binary(32) NOT NULL,
+  `first_file` binary(16) NOT NULL,
+  PRIMARY KEY (`storage_id`,`epoch`,`identity_hash`),
+  KEY `first_file` (`first_file`),
+  CONSTRAINT `journal_dictionary_ibfk_1` FOREIGN KEY (`first_file`) REFERENCES `journal_files` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_drafts` (
+  `bucket_id` binary(16) NOT NULL,
+  `seq` bigint NOT NULL,
+  `page` int NOT NULL,
+  `end_offset` bigint NOT NULL,
+  `range_count` bigint NOT NULL,
+  `range_digest` binary(32) NOT NULL,
+  `source_revision` bigint DEFAULT NULL,
+  `final_page` tinyint(1) NOT NULL,
+  `ready_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `assigned` tinyint(1) NOT NULL DEFAULT '0',
+  `encrypted` longblob NOT NULL,
+  PRIMARY KEY (`bucket_id`,`seq`,`page`),
+  KEY `journal_draft_queue` (`assigned`,`bucket_id`,`seq`,`page`),
+  KEY `journal_complete_draft` (`bucket_id`,`seq`,`final_page`),
+  CONSTRAINT `journal_drafts_ibfk_1` FOREIGN KEY (`bucket_id`, `seq`) REFERENCES `journal_entries` (`bucket_id`, `seq`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `journal_entries` (
@@ -426,6 +460,119 @@ CREATE TABLE `journal_entries` (
   CONSTRAINT `journal_entries_chk_1` CHECK ((`seq` > 0)),
   CONSTRAINT `journal_entries_chk_2` CHECK ((`generation` > 0)),
   CONSTRAINT `journal_entries_chk_3` CHECK ((`operation` in (_utf8mb4'start',_utf8mb4'ready',_utf8mb4'put',_utf8mb4'delete',_utf8mb4'pause',_utf8mb4'resume',_utf8mb4'drop')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_file_entries` (
+  `file_id` binary(16) NOT NULL,
+  `bucket_id` binary(16) NOT NULL,
+  `seq` bigint NOT NULL,
+  `byte_offset` bigint NOT NULL,
+  `encoded_bytes` bigint NOT NULL,
+  `page` int NOT NULL,
+  `final_page` tinyint(1) NOT NULL,
+  `part_number` int DEFAULT NULL,
+  PRIMARY KEY (`file_id`,`bucket_id`,`seq`,`page`,`byte_offset`),
+  KEY `journal_file_entry` (`bucket_id`,`seq`),
+  CONSTRAINT `journal_file_entries_ibfk_1` FOREIGN KEY (`file_id`) REFERENCES `journal_files` (`id`),
+  CONSTRAINT `journal_file_entries_ibfk_2` FOREIGN KEY (`bucket_id`, `seq`) REFERENCES `journal_entries` (`bucket_id`, `seq`),
+  CONSTRAINT `journal_file_entries_chk_1` CHECK ((`byte_offset` >= 0)),
+  CONSTRAINT `journal_file_entries_chk_2` CHECK ((`encoded_bytes` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_file_frames` (
+  `file_id` binary(16) NOT NULL,
+  `byte_offset` bigint NOT NULL,
+  `encoded` longblob NOT NULL,
+  PRIMARY KEY (`file_id`,`byte_offset`),
+  CONSTRAINT `journal_file_frames_ibfk_1` FOREIGN KEY (`file_id`) REFERENCES `journal_files` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_files` (
+  `encrypt_frames` tinyint(1) NOT NULL DEFAULT '0',
+  `id` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `epoch` binary(16) NOT NULL,
+  `first_seq` bigint NOT NULL,
+  `last_seq` bigint NOT NULL,
+  `previous_digest` binary(32) NOT NULL,
+  `digest` binary(32) NOT NULL,
+  `byte_count` bigint NOT NULL DEFAULT '0',
+  `oldest_at` datetime(6) NOT NULL,
+  `part_cut` bigint NOT NULL DEFAULT '0',
+  `part_since_us` bigint DEFAULT NULL,
+  `upload_opened_at` datetime(6) DEFAULT NULL,
+  `mode` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `state` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `opened_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `upload_id` varchar(1024) COLLATE utf8mb4_bin DEFAULT NULL,
+  `etag` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  `object_version` varchar(1024) COLLATE utf8mb4_bin DEFAULT NULL,
+  `confirmed_at` datetime(6) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `storage_id` (`storage_id`,`epoch`,`first_seq`),
+  KEY `journal_files_state` (`storage_id`,`state`,`first_seq`),
+  CONSTRAINT `journal_files_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `journal_stores` (`storage_id`),
+  CONSTRAINT `journal_files_chk_1` CHECK ((`first_seq` > 0)),
+  CONSTRAINT `journal_files_chk_2` CHECK ((`byte_count` >= 0)),
+  CONSTRAINT `journal_files_chk_3` CHECK ((`part_cut` >= 0)),
+  CONSTRAINT `journal_files_chk_4` CHECK ((`mode` in (_utf8mb4'put',_utf8mb4'multipart'))),
+  CONSTRAINT `journal_files_chk_5` CHECK ((`state` in (_utf8mb4'open',_utf8mb4'sealed',_utf8mb4'published',_utf8mb4'gc',_utf8mb4'gone')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_holds` (
+  `bucket_id` binary(16) NOT NULL,
+  `seq` bigint NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `unit` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `address` binary(16) NOT NULL,
+  `block_key` binary(16) DEFAULT NULL,
+  PRIMARY KEY (`bucket_id`,`seq`,`storage_id`,`unit`,`address`),
+  KEY `journal_held_address` (`storage_id`,`unit`,`address`),
+  KEY `journal_held_identity` (`address`,`unit`),
+  KEY `journal_held_key` (`block_key`),
+  CONSTRAINT `journal_holds_ibfk_1` FOREIGN KEY (`bucket_id`, `seq`) REFERENCES `journal_entries` (`bucket_id`, `seq`),
+  CONSTRAINT `journal_holds_ibfk_2` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT `journal_holds_ibfk_3` FOREIGN KEY (`block_key`) REFERENCES `managed_keys` (`id`),
+  CONSTRAINT `journal_holds_chk_1` CHECK ((`unit` in (_utf8mb4'chunk',_utf8mb4'pack',_utf8mb4'raw',_utf8mb4'fragment')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_parts` (
+  `file_id` binary(16) NOT NULL,
+  `number` int NOT NULL,
+  `byte_offset` bigint NOT NULL,
+  `byte_count` bigint NOT NULL,
+  `digest` binary(32) NOT NULL,
+  `etag` varchar(255) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`file_id`,`number`),
+  CONSTRAINT `journal_parts_ibfk_1` FOREIGN KEY (`file_id`) REFERENCES `journal_files` (`id`),
+  CONSTRAINT `journal_parts_chk_1` CHECK ((`number` between 1 and 10000)),
+  CONSTRAINT `journal_parts_chk_2` CHECK ((`byte_offset` >= 0)),
+  CONSTRAINT `journal_parts_chk_3` CHECK ((`byte_count` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_stores` (
+  `storage_id` binary(16) NOT NULL,
+  `policy` json NOT NULL,
+  `pending_policy` json DEFAULT NULL,
+  `revision` bigint NOT NULL DEFAULT '1',
+  `descriptor` json DEFAULT NULL,
+  `marker_installed` tinyint(1) NOT NULL DEFAULT '0',
+  `emitted_seq` bigint NOT NULL DEFAULT '0',
+  `seal_digest` binary(32) DEFAULT NULL,
+  `allocated_seq` bigint NOT NULL DEFAULT '0',
+  `allocated_digest` binary(32) DEFAULT NULL,
+  `open_file` binary(16) DEFAULT NULL,
+  `last_bucket` binary(16) DEFAULT NULL,
+  `lease_token` binary(16) DEFAULT NULL,
+  `lease_until` datetime(6) DEFAULT NULL,
+  `flush_requested` tinyint(1) NOT NULL DEFAULT '0',
+  `confirmed_at` datetime(6) DEFAULT NULL,
+  `last_error` varchar(1024) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`storage_id`),
+  CONSTRAINT `journal_stores_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT `journal_stores_chk_1` CHECK ((`revision` > 0)),
+  CONSTRAINT `journal_stores_chk_2` CHECK ((`emitted_seq` >= 0)),
+  CONSTRAINT `journal_stores_chk_3` CHECK ((`allocated_seq` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `key_replacements` (

@@ -125,6 +125,8 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
             super::external::delete
         ))
         .routes(routes!(super::storage::check, super::storage::update))
+        .routes(routes!(super::journal::get, super::journal::set))
+        .routes(routes!(super::journal::flush))
         .routes(routes!(super::storage::profile))
         .routes(routes!(super::storage::update_profile_route))
         .routes(routes!(super::storage_policy::templates_route))

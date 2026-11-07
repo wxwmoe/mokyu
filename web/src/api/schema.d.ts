@@ -1792,6 +1792,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storages/{name}/journal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["metadata_journal_status"];
+        put: operations["metadata_journal_update"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storages/{name}/journal/flush": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["metadata_journal_flush"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storages/{name}/key": {
         parameters: {
             query?: never;
@@ -2242,8 +2274,10 @@ export interface components {
             writing_streams: string;
         };
         BucketJournal: {
+            baseline_ready: boolean;
             captured_sequence: string;
             dirty: boolean;
+            error?: string | null;
             generation: string;
             pending_records: string;
             published_sequence: string;
@@ -2920,6 +2954,67 @@ export interface components {
             role: string;
             scope: string;
         };
+        MetadataJournalPolicy: {
+            /** @default put */
+            mode: components["schemas"]["MetadataJournalWriteMode"];
+            /**
+             * Format: int32
+             * @default 3600
+             */
+            multipart_max_open_seconds: number | null;
+            /**
+             * Format: int32
+             * @default 600
+             */
+            part_max_wait_seconds: number | null;
+            /**
+             * Format: int32
+             * @default 5242880
+             */
+            part_target_bytes: number;
+            /**
+             * Format: int32
+             * @default 600
+             */
+            put_max_wait_seconds: number | null;
+            /**
+             * Format: int32
+             * @default 131072
+             */
+            put_target_bytes: number;
+            /**
+             * Format: int32
+             * @default 33554432
+             */
+            segment_bytes: number;
+            /**
+             * Format: int32
+             * @default 33554432
+             */
+            snapshot_page_bytes: number;
+            /**
+             * Format: int64
+             * @default 33554432
+             */
+            snapshot_trigger_bytes: number;
+        };
+        MetadataJournalStatus: {
+            /** Format: date-time */
+            confirmed_at?: string | null;
+            emitted_sequence: string;
+            error?: string | null;
+            /** Format: uuid */
+            open_file?: string | null;
+            pending_policy: boolean;
+            policy: components["schemas"]["MetadataJournalPolicy"];
+            revision: string;
+        };
+        MetadataJournalUpdate: {
+            policy: components["schemas"]["MetadataJournalPolicy"];
+            revision: string;
+        };
+        /** @enum {string} */
+        MetadataJournalWriteMode: "put" | "multipart";
         /** @enum {string} */
         Mode: "metadata" | "head" | "full";
         ModeInput: {
@@ -7558,6 +7653,73 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    metadata_journal_status: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataJournalStatus"];
+                };
+            };
+        };
+    };
+    metadata_journal_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MetadataJournalUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataJournalStatus"];
+                };
+            };
+        };
+    };
+    metadata_journal_flush: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetadataJournalStatus"];
                 };
             };
         };

@@ -280,6 +280,11 @@ pub enum Tasks {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Storages {
     List,
+    Journal {
+        name: String,
+        #[command(subcommand)]
+        command: Journals,
+    },
     Create {
         name: String,
         #[arg(value_parser = ["local", "s3"])]
@@ -377,6 +382,16 @@ pub enum Storages {
         #[arg(long = "age", default_value = "48h")]
         older_than: String,
     },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Journals {
+    Show,
+    Set {
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Flush,
 }
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum StorageKey {
@@ -659,7 +674,14 @@ impl Command {
             | Self::Integrity(Integrity::Issues { .. } | Integrity::Quarantines { .. })
             | Self::Pack(Packs::Status)
             | Self::Cache(Cache::Status)
-            | Self::Storages(Storages::List | Storages::Show { .. })
+            | Self::Storages(
+                Storages::List
+                | Storages::Show { .. }
+                | Storages::Journal {
+                    command: Journals::Show,
+                    ..
+                },
+            )
             | Self::Storages(Storages::Profile {
                 command:
                     StorageProfiles::Show { .. }

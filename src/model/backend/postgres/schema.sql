@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261107092631.
+-- Generated from the complete postgres migration chain through 20261107104724.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1119,9 +1119,36 @@ CREATE TABLE public.journal_buckets (
     scan_after text,
     scan_until text,
     dirty boolean DEFAULT false NOT NULL,
+    prepared_generation bigint DEFAULT 0 NOT NULL,
+    prepare_error text,
+    flush_seq bigint DEFAULT 0 NOT NULL,
     CONSTRAINT journal_buckets_check CHECK (((published_seq >= 0) AND (published_seq <= last_seq))),
+    CONSTRAINT journal_buckets_flush_seq_check CHECK ((flush_seq >= 0)),
     CONSTRAINT journal_buckets_generation_check CHECK ((generation > 0)),
-    CONSTRAINT journal_buckets_last_seq_check CHECK ((last_seq >= 0))
+    CONSTRAINT journal_buckets_last_seq_check CHECK ((last_seq >= 0)),
+    CONSTRAINT journal_buckets_prepared_generation_check CHECK ((prepared_generation >= 0))
+);
+
+CREATE TABLE public.journal_dictionary (
+    storage_id uuid NOT NULL,
+    epoch uuid NOT NULL,
+    identity_hash bytea NOT NULL,
+    content_hash bytea NOT NULL,
+    first_file uuid NOT NULL
+);
+
+CREATE TABLE public.journal_drafts (
+    bucket_id uuid NOT NULL,
+    seq bigint NOT NULL,
+    page integer NOT NULL,
+    end_offset bigint NOT NULL,
+    range_count bigint NOT NULL,
+    range_digest bytea NOT NULL,
+    source_revision bigint,
+    final_page boolean NOT NULL,
+    ready_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    assigned boolean DEFAULT false NOT NULL,
+    encrypted bytea NOT NULL
 );
 
 CREATE TABLE public.journal_entries (
@@ -1138,6 +1165,98 @@ CREATE TABLE public.journal_entries (
     CONSTRAINT journal_entries_generation_check CHECK ((generation > 0)),
     CONSTRAINT journal_entries_operation_check CHECK ((operation = ANY (ARRAY['start'::text, 'ready'::text, 'put'::text, 'delete'::text, 'pause'::text, 'resume'::text, 'drop'::text]))),
     CONSTRAINT journal_entries_seq_check CHECK ((seq > 0))
+);
+
+CREATE TABLE public.journal_file_entries (
+    file_id uuid NOT NULL,
+    bucket_id uuid NOT NULL,
+    seq bigint NOT NULL,
+    byte_offset bigint NOT NULL,
+    encoded_bytes bigint NOT NULL,
+    page integer NOT NULL,
+    final_page boolean NOT NULL,
+    part_number integer,
+    CONSTRAINT journal_file_entries_byte_offset_check CHECK ((byte_offset >= 0)),
+    CONSTRAINT journal_file_entries_encoded_bytes_check CHECK ((encoded_bytes > 0))
+);
+
+CREATE TABLE public.journal_file_frames (
+    file_id uuid NOT NULL,
+    byte_offset bigint NOT NULL,
+    encoded bytea NOT NULL
+);
+
+CREATE TABLE public.journal_files (
+    encrypt_frames boolean DEFAULT false NOT NULL,
+    id uuid NOT NULL,
+    storage_id uuid NOT NULL,
+    epoch uuid NOT NULL,
+    first_seq bigint NOT NULL,
+    last_seq bigint NOT NULL,
+    previous_digest bytea NOT NULL,
+    digest bytea NOT NULL,
+    byte_count bigint DEFAULT 0 NOT NULL,
+    oldest_at timestamp with time zone NOT NULL,
+    part_cut bigint DEFAULT 0 NOT NULL,
+    part_since_us bigint,
+    upload_opened_at timestamp with time zone,
+    mode text NOT NULL,
+    state text NOT NULL,
+    opened_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    upload_id text,
+    etag text,
+    object_version text,
+    confirmed_at timestamp with time zone,
+    CONSTRAINT journal_files_byte_count_check CHECK ((byte_count >= 0)),
+    CONSTRAINT journal_files_first_seq_check CHECK ((first_seq > 0)),
+    CONSTRAINT journal_files_mode_check CHECK ((mode = ANY (ARRAY['put'::text, 'multipart'::text]))),
+    CONSTRAINT journal_files_part_cut_check CHECK ((part_cut >= 0)),
+    CONSTRAINT journal_files_state_check CHECK ((state = ANY (ARRAY['open'::text, 'sealed'::text, 'published'::text, 'gc'::text, 'gone'::text])))
+);
+
+CREATE TABLE public.journal_holds (
+    bucket_id uuid NOT NULL,
+    seq bigint NOT NULL,
+    storage_id uuid NOT NULL,
+    unit text NOT NULL,
+    address uuid NOT NULL,
+    block_key uuid,
+    CONSTRAINT journal_holds_unit_check CHECK ((unit = ANY (ARRAY['chunk'::text, 'pack'::text, 'raw'::text, 'fragment'::text])))
+);
+
+CREATE TABLE public.journal_parts (
+    file_id uuid NOT NULL,
+    number integer NOT NULL,
+    byte_offset bigint NOT NULL,
+    byte_count bigint NOT NULL,
+    digest bytea NOT NULL,
+    etag text,
+    CONSTRAINT journal_parts_byte_count_check CHECK ((byte_count > 0)),
+    CONSTRAINT journal_parts_byte_offset_check CHECK ((byte_offset >= 0)),
+    CONSTRAINT journal_parts_number_check CHECK (((number >= 1) AND (number <= 10000)))
+);
+
+CREATE TABLE public.journal_stores (
+    storage_id uuid NOT NULL,
+    policy jsonb NOT NULL,
+    pending_policy jsonb,
+    revision bigint DEFAULT 1 NOT NULL,
+    descriptor jsonb,
+    marker_installed boolean DEFAULT false NOT NULL,
+    emitted_seq bigint DEFAULT 0 NOT NULL,
+    seal_digest bytea,
+    allocated_seq bigint DEFAULT 0 NOT NULL,
+    allocated_digest bytea,
+    open_file uuid,
+    last_bucket uuid,
+    lease_token uuid,
+    lease_until timestamp with time zone,
+    flush_requested boolean DEFAULT false NOT NULL,
+    confirmed_at timestamp with time zone,
+    last_error text,
+    CONSTRAINT journal_stores_allocated_seq_check CHECK ((allocated_seq >= 0)),
+    CONSTRAINT journal_stores_emitted_seq_check CHECK ((emitted_seq >= 0)),
+    CONSTRAINT journal_stores_revision_check CHECK ((revision > 0))
 );
 
 CREATE TABLE public.key_fingerprints (
@@ -2774,8 +2893,35 @@ ALTER TABLE ONLY public.integrity_packs
 ALTER TABLE ONLY public.journal_buckets
     ADD CONSTRAINT journal_buckets_pkey PRIMARY KEY (bucket_id);
 
+ALTER TABLE ONLY public.journal_dictionary
+    ADD CONSTRAINT journal_dictionary_pkey PRIMARY KEY (storage_id, epoch, identity_hash);
+
+ALTER TABLE ONLY public.journal_drafts
+    ADD CONSTRAINT journal_drafts_pkey PRIMARY KEY (bucket_id, seq, page);
+
 ALTER TABLE ONLY public.journal_entries
     ADD CONSTRAINT journal_entries_pkey PRIMARY KEY (bucket_id, seq);
+
+ALTER TABLE ONLY public.journal_file_entries
+    ADD CONSTRAINT journal_file_entries_pkey PRIMARY KEY (file_id, bucket_id, seq, page, byte_offset);
+
+ALTER TABLE ONLY public.journal_file_frames
+    ADD CONSTRAINT journal_file_frames_pkey PRIMARY KEY (file_id, byte_offset);
+
+ALTER TABLE ONLY public.journal_files
+    ADD CONSTRAINT journal_files_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.journal_files
+    ADD CONSTRAINT journal_files_storage_id_epoch_first_seq_key UNIQUE (storage_id, epoch, first_seq);
+
+ALTER TABLE ONLY public.journal_holds
+    ADD CONSTRAINT journal_holds_pkey PRIMARY KEY (bucket_id, seq, storage_id, unit, address);
+
+ALTER TABLE ONLY public.journal_parts
+    ADD CONSTRAINT journal_parts_pkey PRIMARY KEY (file_id, number);
+
+ALTER TABLE ONLY public.journal_stores
+    ADD CONSTRAINT journal_stores_pkey PRIMARY KEY (storage_id);
 
 ALTER TABLE ONLY public.key_fingerprints
     ADD CONSTRAINT key_fingerprints_pkey PRIMARY KEY (key_id);
@@ -3247,7 +3393,21 @@ CREATE INDEX journal_buckets_scan ON public.journal_buckets USING btree (scannin
 
 CREATE INDEX journal_buckets_storage ON public.journal_buckets USING btree (storage_id, bucket_id);
 
+CREATE INDEX journal_complete_draft ON public.journal_drafts USING btree (bucket_id, seq, final_page);
+
+CREATE INDEX journal_draft_queue ON public.journal_drafts USING btree (assigned, bucket_id, seq, page);
+
 CREATE INDEX journal_entries_stream ON public.journal_entries USING btree (stream_id);
+
+CREATE INDEX journal_file_entry ON public.journal_file_entries USING btree (bucket_id, seq);
+
+CREATE INDEX journal_files_state ON public.journal_files USING btree (storage_id, state, first_seq);
+
+CREATE INDEX journal_held_address ON public.journal_holds USING btree (storage_id, unit, address);
+
+CREATE INDEX journal_held_identity ON public.journal_holds USING btree (address, unit);
+
+CREATE INDEX journal_held_key ON public.journal_holds USING btree (block_key);
 
 CREATE INDEX key_replacements_expiry ON public.key_replacements USING btree (expires_at);
 
@@ -3735,11 +3895,44 @@ ALTER TABLE ONLY public.integrity_packs
 ALTER TABLE ONLY public.journal_buckets
     ADD CONSTRAINT journal_buckets_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
 
+ALTER TABLE ONLY public.journal_dictionary
+    ADD CONSTRAINT journal_dictionary_first_file_fkey FOREIGN KEY (first_file) REFERENCES public.journal_files(id);
+
+ALTER TABLE ONLY public.journal_drafts
+    ADD CONSTRAINT journal_drafts_bucket_id_seq_fkey FOREIGN KEY (bucket_id, seq) REFERENCES public.journal_entries(bucket_id, seq);
+
 ALTER TABLE ONLY public.journal_entries
     ADD CONSTRAINT journal_entries_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.journal_buckets(bucket_id);
 
 ALTER TABLE ONLY public.journal_entries
     ADD CONSTRAINT journal_entries_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.journal_file_entries
+    ADD CONSTRAINT journal_file_entries_bucket_id_seq_fkey FOREIGN KEY (bucket_id, seq) REFERENCES public.journal_entries(bucket_id, seq);
+
+ALTER TABLE ONLY public.journal_file_entries
+    ADD CONSTRAINT journal_file_entries_file_id_fkey FOREIGN KEY (file_id) REFERENCES public.journal_files(id);
+
+ALTER TABLE ONLY public.journal_file_frames
+    ADD CONSTRAINT journal_file_frames_file_id_fkey FOREIGN KEY (file_id) REFERENCES public.journal_files(id);
+
+ALTER TABLE ONLY public.journal_files
+    ADD CONSTRAINT journal_files_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.journal_stores(storage_id);
+
+ALTER TABLE ONLY public.journal_holds
+    ADD CONSTRAINT journal_holds_block_key_fkey FOREIGN KEY (block_key) REFERENCES public.managed_keys(id);
+
+ALTER TABLE ONLY public.journal_holds
+    ADD CONSTRAINT journal_holds_bucket_id_seq_fkey FOREIGN KEY (bucket_id, seq) REFERENCES public.journal_entries(bucket_id, seq);
+
+ALTER TABLE ONLY public.journal_holds
+    ADD CONSTRAINT journal_holds_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.journal_parts
+    ADD CONSTRAINT journal_parts_file_id_fkey FOREIGN KEY (file_id) REFERENCES public.journal_files(id);
+
+ALTER TABLE ONLY public.journal_stores
+    ADD CONSTRAINT journal_stores_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
 
 ALTER TABLE ONLY public.maintenance_previews
     ADD CONSTRAINT maintenance_previews_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.web_users(id) ON DELETE CASCADE;

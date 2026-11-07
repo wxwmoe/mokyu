@@ -1,4 +1,9 @@
 //! Authenticated records shared by the metadata journal and its snapshots.
+pub(crate) mod batch;
+pub(crate) mod remote;
+pub(crate) mod replay;
+pub(crate) mod snapshot;
+
 use crate::content::codec::Key;
 use anyhow::{Context, Result, ensure};
 use uuid::Uuid;
@@ -19,6 +24,9 @@ pub(crate) enum FrameType {
     Manifest = 4,
     Index = 5,
     Watermark = 6,
+    Draft = 7,
+    PartCommit = 8,
+    History = 9,
 }
 
 #[derive(Clone, Copy)]
@@ -47,6 +55,10 @@ pub(crate) struct Format<'a> {
 
 pub(crate) fn segment_path(epoch: Uuid, first: u64) -> String {
     format!("{ROOT}/changes/{}/{first:020}", epoch.simple())
+}
+
+pub(crate) fn draft_path(bucket: Uuid, seq: i64, page: i32) -> String {
+    format!("{ROOT}/draft/{}/{seq:020}/{page:08}", bucket.simple())
 }
 
 impl Format<'_> {
@@ -193,6 +205,10 @@ impl Format<'_> {
     }
 }
 
+#[cfg(test)]
+#[path = "../../tests/storage/journal.rs"]
+mod publication_tests;
+
 /// Stage visited frames and publish them only after the final seal has been verified.
 pub(crate) fn verify_segment(
     format: &Format<'_>,
@@ -206,7 +222,24 @@ pub(crate) fn verify_segment(
     let mut rest = data;
     let mut next = first;
     let mut prior = previous;
+    let mut part_end = first - 1;
     loop {
+        if rest.get(8) == Some(&(FrameType::PartCommit as u8)) {
+            let part = format.decode(FrameType::PartCommit, path, rest)?;
+            ensure!(
+                next > first
+                    && next - 1 > part_end
+                    && part.sequence.first == first
+                    && part.sequence.last == next - 1
+                    && part.sequence.previous == prior
+                    && part.bytes.is_empty(),
+                "invalid journal part boundary"
+            );
+            part_end = next - 1;
+            prior = part.digest;
+            rest = &rest[part.consumed..];
+            continue;
+        }
         if rest.get(8) == Some(&(FrameType::Seal as u8)) {
             let seal = format.decode(FrameType::Seal, path, rest)?;
             ensure!(

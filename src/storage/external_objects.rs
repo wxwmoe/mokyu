@@ -524,7 +524,6 @@ impl Client {
         created_upload(&self.bounded(reply.into_body(), 64 * 1024).await?, &full)
     }
 
-    #[cfg(test)]
     pub(crate) async fn upload_part(
         &self,
         key: &str,
@@ -776,7 +775,6 @@ impl Client {
         )
     }
 
-    #[cfg(test)]
     pub(crate) async fn uploads(&self, key: &str) -> Result<(Vec<String>, bool)> {
         let full = self.full_key(key)?;
         let reply = self

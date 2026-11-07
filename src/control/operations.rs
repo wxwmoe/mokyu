@@ -267,6 +267,24 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 Ok(value)
             };
             match command {
+                Storages::Journal { name, command } => {
+                    use crate::cli::Journals;
+                    Ok(serde_json::to_value(match command {
+                        Journals::Show => super::journal::inspect(app, principal, &name).await?,
+                        Journals::Set { document, .. } => {
+                            super::journal::configure(
+                                app,
+                                principal,
+                                &name,
+                                serde_json::from_value(
+                                    document.context("missing journal policy")?,
+                                )?,
+                            )
+                            .await?
+                        }
+                        Journals::Flush => super::journal::force(app, principal, &name).await?,
+                    })?)
+                }
                 Storages::List => {
                     let rows = app.storage_records.list().await?;
                     Ok(json!(

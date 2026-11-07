@@ -7,7 +7,7 @@ pub(in super::super) async fn protected(
     db: &mut Connection,
     address: uuid::Uuid,
 ) -> anyhow::Result<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.location_id=$1 AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM node_work w WHERE w.result_hash IS NULL AND w.expires_at>clock_timestamp() AND jsonb_path_exists(w.plan,'$.** ? (@ == $v)',jsonb_build_object('v',$1::uuid::text)))").bind(address).fetch_one(&mut *db).await?)
+    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM journal_holds h WHERE h.address=$1) OR EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.location_id=$1 AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM node_work w WHERE w.result_hash IS NULL AND w.expires_at>clock_timestamp() AND jsonb_path_exists(w.plan,'$.** ? (@ == $v)',jsonb_build_object('v',$1::uuid::text)))").bind(address).fetch_one(&mut *db).await?)
 }
 pub(in super::super) async fn changed(
     db: &mut Connection,

@@ -107,6 +107,12 @@ connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）
 
 测试只在 prefix 下随机的 `.mokyu-tests/<任务 UUID>/` 写入小对象，按已记录的对象版本和上传 ID 清理。未完成或仍需清理的测试阻止同一连接再次测试和删除；可通过后台任务接口暂停/恢复。停止自动恢复仅适用于 queued/paused/failed 且无有效节点分配的测试，会清除执行凭据并拒绝再次恢复，保留 `stopped=true`、原报告及待处理位置；不会把残留标成清理成功。
 
+### 后端元数据日志
+
+`GET /api/v1/storages/{name}/journal` 返回数据库记录的策略、修订、已发布序、开放段、最近确认时间与错误。管理员以 `PUT` 提交 `{revision,policy}`，修订不符返回 412。开放段按原策略封存后启用新策略，等待期间 `pending_policy` 为 true。`POST /api/v1/storages/{name}/journal/flush` 请求后台追平各桶在操作时的提交序。
+
+`mode` 可选 `put` 或 `multipart`。大小以字节表示，等待以秒表示。两种写法分别配置 `put_target_bytes`、`put_max_wait_seconds` 及 `part_target_bytes`、`part_max_wait_seconds`。Multipart 另有 `multipart_max_open_seconds`。等待值为 null 表示不限。日志段硬上限为 `segment_bytes`。桶选项和状态见下节。
+
 ## 存储桶
 
 | 方法与路径 | 用途 |

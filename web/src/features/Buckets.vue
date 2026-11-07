@@ -4,7 +4,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useQuery, type Query } from '@tanstack/vue-query'
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { TabsRoot, TabsList, TabsTrigger, TabsContent } from 'reka-ui'
-import { Settings2, Globe, ShieldCheck, Flower2, Images, HardDrive, Layers, Trash2, Save, RefreshCw, ArrowUpRight, CircleCheck, CirclePause, Clock3 } from 'lucide-vue-next'
+import { Settings2, Globe, ShieldCheck, Flower2, Images, HardDrive, Layers, Trash2, Save, RefreshCw, ArrowUpRight, CircleCheck, CirclePause, CircleAlert, Clock3 } from 'lucide-vue-next'
 import { api, write, queries, session, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
@@ -42,7 +42,8 @@ const journalStatus = computed(() => {
   const journal = value?.metadata_journal
   if (!journal) return
   if (!value.metadata_journal_enabled) return { label: t('metadataJournalStopped'), tone: 'gray', icon: CirclePause }
-  if (journal.scanning) return { label: t('metadataJournalInitial'), tone: 'sky', icon: RefreshCw }
+  if (journal.error) return { label: t('journalBlocked'), tone: 'rose', icon: CircleAlert, reason: journal.error }
+  if (!journal.baseline_ready || journal.scanning) return { label: t('metadataJournalInitial'), tone: 'sky', icon: RefreshCw }
   if (journal.pending_records !== '0') return { label: t('metadataJournalPending', { count: journal.pending_records }), tone: 'cream', icon: Clock3 }
   return { label: t('metadataJournalSynced'), tone: 'mint', icon: CircleCheck }
 })
@@ -102,6 +103,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
               <span>{{ t('journalSyncStatus') }}</span>
               <span class="badge node-state" :data-tone="journalStatus.tone"><component :is="journalStatus.icon" :size="14" aria-hidden="true" />{{ journalStatus.label }}</span>
             </div>
+            <p v-if="journalStatus?.reason" class="error" role="alert">{{ journalStatus.reason }}</p>
           </div>
         </TabsContent>
         <TabsContent value="cors"><div class="section-heading"><h2>{{ t('corsTitle') }}</h2><button type="button" :disabled="draft.cors.length >= 100" @click="addRule(true)">{{ t('corsPreset') }}</button></div><p class="field-help">{{ t('corsHint') }}</p><p v-if="!draft.cors.length" class="info-callout cors-off"><ShieldCheck :size="18" aria-hidden="true" />{{ t('corsOff') }}</p><section v-for="(rule, index) in draft.cors" :key="index" class="cors-rule"><div class="section-heading"><h3>{{ t('corsRule', { count: index + 1 }) }}</h3><button type="button" class="icon-button" :aria-label="t('removeCorsRule', { count: index + 1 })" @click="draft.cors.splice(index, 1)"><Trash2 :size="16" /></button></div><div class="form-pair"><label class="field"><span>{{ t('corsOrigins') }}</span><textarea :value="rule.origins.join('\n')" rows="3" placeholder="https://example.com" @input="rule.origins = lines(($event.target as HTMLTextAreaElement).value)" /></label><label class="field"><span>{{ t('corsHeaders') }}</span><textarea :value="(rule.headers || []).join('\n')" rows="3" placeholder="*" @input="rule.headers = lines(($event.target as HTMLTextAreaElement).value)" /></label></div><p class="field-help">{{ t('onePerLine') }}</p><div class="cors-methods"><UiCheckbox v-for="verb in methods" :key="verb" :label="verb" :model-value="rule.methods.includes(verb)" @update:model-value="method(rule, verb, $event)" /></div><div class="form-pair"><label class="field"><span>{{ t('corsExpose') }}</span><textarea :value="(rule.expose || []).join('\n')" rows="2" placeholder="ETag" @input="rule.expose = lines(($event.target as HTMLTextAreaElement).value)" /></label><label class="field"><span>{{ t('corsMaxAge') }}</span><input v-model.number="rule.max_age" type="number" min="0" max="86400" step="1"></label></div></section><button type="button" :disabled="draft.cors.length >= 100" @click="addRule()"><Plus :size="16" />{{ t('addCorsRule') }}</button></TabsContent>

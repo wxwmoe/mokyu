@@ -215,6 +215,13 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .preview-placeholder { height: 220px; border: 1px solid var(--line-soft); border-radius: 17px; display: flex; align-items: center; justify-content: center; background: radial-gradient(circle, var(--rose-soft), var(--surface-soft)); margin-bottom: 20px; }
 .facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 15px 22px; font-size: var(--small-size, 12px); margin: 20px 0; }
 .facts dt { color: var(--muted); } .facts dd { margin: 0; overflow-wrap: anywhere; text-align: right; }
+.journal-panels { grid-template-columns: repeat(auto-fit, minmax(min(100%, 24rem), 1fr)); margin-top: 18px; }
+.journal-panels > section { min-width: 0; display: flex; flex-direction: column; }
+.journal-panels .section-heading, .journal-panels h2 { margin: 0; }
+.journal-panels .facts { margin: 20px 0; align-items: baseline; }
+.journal-panels .facts dd { font-weight: var(--ui-weight, 700); font-variant-numeric: tabular-nums; }
+.journal-panels .actions { margin-top: auto; padding-top: 16px; border-top: 1px solid var(--line-soft); gap: 8px; }
+.journal-panels .actions button { max-width: 100%; }
 .object-path { overflow-wrap: anywhere; font-size: var(--small-size, 12px); padding-top: 8px; }
 .field-help { color: var(--muted); font-size: var(--small-size, 12px); }
 .check-field { display: flex; align-items: center; gap: 9px; margin: 12px 0; font-size: var(--small-size, 12px); font-weight: var(--ui-weight, 600); cursor: pointer; }
@@ -473,6 +480,7 @@ details > summary { cursor: pointer; font-size: var(--small-size, 12px); color: 
 .bucket-journal-option .field-help { margin: 0; }
 .bucket-journal-state { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; color: var(--muted); font-size: var(--small-size, 12px); }
 .bucket-journal-state svg { flex-shrink: 0; }
+.bucket-journal > .error { flex-basis: 100%; margin: 0; }
 .bucket-fields .field { margin-top: 18px; }
 .input-action { display: flex; align-items: center; gap: 8px; }
 .input-action input { min-width: 0; flex: 1; }

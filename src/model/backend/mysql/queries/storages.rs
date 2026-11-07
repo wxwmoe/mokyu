@@ -83,6 +83,18 @@ const VIEW_BY_NAME: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.e
 
 #[async_trait::async_trait]
 impl StorageRecordStore for Backend {
+    async fn journal_descriptor(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<crate::storage::marker::Journal>> {
+        let value: Option<sqlx::types::Json<crate::storage::marker::Journal>> = sqlx::query_scalar(
+            "SELECT descriptor FROM journal_stores WHERE storage_id=? AND descriptor IS NOT NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(value.map(|v| v.0))
+    }
     async fn list(&self) -> Result<Vec<StorageView>> {
         Ok(sqlx::query_as(VIEW_ORDERED).fetch_all(&self.pool).await?)
     }

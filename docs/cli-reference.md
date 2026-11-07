@@ -64,6 +64,9 @@ mokyu cli styles export --bucket photos --name-prefix q90. --output styles.txt
 | --- | --- |
 | `storage list` | 列出存储名称、类型、连接范围、当前区块 key、三项存储并发上限、启用状态和更新时间；不返回凭据 |
 | `storage show NAME` | 显示一个存储的当前配置，不执行连接检查 |
+| `storage journal NAME show` | 查看托管 S3 的日志写入方式、配置修订和已发布序号 |
+| `storage journal NAME set FILE` | 保存含 `revision` 和 `policy` 的日志设置。文件名 `-` 从标准输入读取。开放中的段先按原策略发布 |
+| `storage journal NAME flush` | 请求发布当前待同步的日志，返回后台状态 |
 | `storage create NAME local --init [--key KEY] [--path PATH] [--prefix PREFIX]` | 明确初始化空的本地存储；省略 `--path` 使用 `/data/storage`，返回存储信息 |
 | `storage create NAME s3 --init [--key KEY] -e URL -b NAME -r REGION -a KEY -s SECRET [-p PREFIX]` | 明确初始化空的 S3 存储并写入 `mokyu.json`，返回存储信息 |
 | `storage update NAME [--type local\|s3] [--key KEY] [--path PATH] [-e URL] [-b NAME] [-r REGION] [-p PREFIX] [-a KEY] [-s SECRET] [--read N\|--clear-read-concurrency] [--upload N\|--clear-upload-concurrency] [--control N\|--clear-control-concurrency] [--enabled true\|false]` | 修改存储连接信息、当前 block key、并发上限或启停；切换 type 需单容器维护状态并排空上传、任务及待写来源，成功后重启；保存前核对已有 `mokyu.json`，不返回凭据 |
