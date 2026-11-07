@@ -1,4 +1,4 @@
-use super::{Format, FrameType, ROOT, Sequence, source};
+use super::{Format, FrameType, ROOT, Sequence, local::Local, source};
 use crate::{
     content::codec::Key,
     storage::marker::{EpochCut, Journal},
@@ -88,25 +88,30 @@ impl Claim {
         Ok(())
     }
 
-    pub async fn publish(&self, store: &dyn ObjectStore) -> Result<()> {
+    pub async fn publish(&self, store: &dyn ObjectStore, local: Option<&Local>) -> Result<()> {
         let key = path(self.descriptor.writer_epoch);
         let want = self.descriptor.head()?.context("missing takeover digest")?;
         ensure!(
             *blake3::hash(&self.bytes).as_bytes() == want,
             "invalid takeover intent"
         );
-        let result: Result<()> = store
-            .put_opts(
-                &Path::from(key.as_str()),
-                Bytes::copy_from_slice(&self.bytes).into(),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                },
-            )
-            .await
-            .map(|_| ())
-            .map_err(Into::into);
+        let result: Result<()> = if let Some(local) = local {
+            local.create(&local.root.join(&key), &self.bytes)?;
+            Ok(())
+        } else {
+            store
+                .put_opts(
+                    &Path::from(key.as_str()),
+                    Bytes::copy_from_slice(&self.bytes).into(),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(Into::into)
+        };
         match source::bytes(store, &key, MAX_BYTES).await? {
             Some(bytes) => ensure!(bytes == self.bytes, "conflicting journal takeover"),
             None => {
@@ -194,8 +199,8 @@ mod tests {
             false,
             (Some("a".into()), None),
         )?;
-        first.publish(&store).await?;
-        first.publish(&store).await?;
+        first.publish(&store, None).await?;
+        first.publish(&store, None).await?;
         assert!(chain(&store, &root, storage, &key).await?.is_empty());
         let middle = &first.descriptor;
         assert!(middle.unlock(storage, &original).is_err());
@@ -210,7 +215,7 @@ mod tests {
             true,
             (Some("b".into()), None),
         )?;
-        second.publish(&store).await?;
+        second.publish(&store, None).await?;
         assert_eq!(chain(&store, middle, storage, &key).await?, [a.clone()]);
         assert_eq!(
             chain(&store, &second.descriptor, storage, &key).await?,
@@ -225,7 +230,7 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(first.publish(&store).await.is_err());
+        assert!(first.publish(&store, None).await.is_err());
         store.delete(&first_path).await?;
         assert!(
             chain(&store, &second.descriptor, storage, &key)

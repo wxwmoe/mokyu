@@ -98,8 +98,9 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
     app.authorization.admin(principal).await?.finish().await?;
     let info = input.storage;
     ensure!(
-        info.storage_type == "s3",
-        "metadata recovery requires managed S3"
+        info.storage_type == "s3"
+            || info.storage_type == "local" && app.deployment_mode() == "single",
+        "unsupported metadata recovery storage"
     );
     let name = storage::validate_name(&info.name)?;
     let tmp = Uuid::new_v4();
@@ -118,6 +119,12 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
         marker::create(tmp, tmp)?,
     )?;
     let mut conn = model::Connection::unprotect(&row, &app.secrets.credential_key)?;
+    if conn.r#type == "local"
+        && !std::path::Path::new(conn.path.as_deref().context("missing local storage path")?)
+            .try_exists()?
+    {
+        return Ok(response("empty", None, None));
+    }
     let store = model::Store::connect(&conn, source::options())?;
     let Some(doc) = marker::Document::probe(store.backend.as_ref())
         .await
@@ -181,17 +188,19 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
             progress.conflicts.push(id.to_string())
         }
     }
-    let next = cut
-        .point
-        .sequence
-        .checked_add(1)
-        .context("journal sequence exhausted")?;
-    progress.pending_uploads = source
-        .client()?
-        .uploads(&segment_path(cut.point.epoch, next))
-        .await
-        .ok()
-        .and_then(|(v, more)| (!more).then_some(v.len() as u32));
+    if source.connection.r#type == "s3" {
+        let next = cut
+            .point
+            .sequence
+            .checked_add(1)
+            .context("journal sequence exhausted")?;
+        progress.pending_uploads = source
+            .client()?
+            .uploads(&segment_path(cut.point.epoch, next))
+            .await
+            .ok()
+            .and_then(|(v, more)| (!more).then_some(v.len() as u32));
+    }
     let id = Uuid::new_v4();
     let unlocked = Unlocked {
         source,
@@ -239,7 +248,8 @@ pub(crate) async fn start(app: &App, p: &Principal, id: Uuid, input: Start) -> R
     ensure!(
         !selection.buckets.is_empty()
             && selection.exclusive_takeover == selection.destination.is_none()
-            && (!selection.complete_journal_upload || selection.exclusive_takeover),
+            && (!selection.complete_journal_upload
+                || selection.exclusive_takeover && unlocked.source.connection.r#type == "s3"),
         "choose a recovery destination or confirm exclusive source ownership"
     );
     let mut names = BTreeSet::new();
@@ -266,11 +276,31 @@ pub(crate) async fn start(app: &App, p: &Principal, id: Uuid, input: Start) -> R
             .await?
             .context("destination storage unavailable")?;
         ensure!(
-            target_row.store_type == "s3",
-            "recovery copy requires managed S3"
+            target_row.store_type == "s3"
+                || target_row.store_type == "local" && app.deployment_mode() == "single",
+            "unsupported recovery destination"
         );
         let origin = &unlocked.source.connection;
-        if target_row.endpoint == origin.endpoint_url
+        if origin.r#type == "local" && target_row.store_type == "local" {
+            let from = crate::storage::journal::local::Local::new(origin)?
+                .context("missing local source")?
+                .root
+                .canonicalize()?;
+            let backend = app.storage.store_backend(target)?;
+            let to = backend
+                .raw_root
+                .as_deref()
+                .and_then(std::path::Path::parent)
+                .context("missing local destination")?
+                .canonicalize()?;
+            ensure!(
+                !to.starts_with(&from) && !from.starts_with(&to),
+                "recovery storage namespaces overlap"
+            );
+        }
+        if origin.r#type == "s3"
+            && target_row.store_type == "s3"
+            && target_row.endpoint == origin.endpoint_url
             && target_row.bucket == origin.remote_bucket_name
         {
             let a = format!("{}/", target_row.prefix.trim_matches('/'));
@@ -337,7 +367,7 @@ pub(crate) async fn register(
         c.id,
         unlocked.storage_name.clone(),
         c.r#type.clone(),
-        None,
+        c.path.clone(),
         c.endpoint_url.clone(),
         c.remote_bucket_name.clone(),
         c.region.clone(),

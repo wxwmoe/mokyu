@@ -163,6 +163,15 @@ impl RecoveryStore for Backend {
         tx.commit().await?;
         Ok(())
     }
+    async fn recovery_location_conflict(
+        &self,
+        target: Uuid,
+        kind: crate::model::journal::record::Kind,
+        ids: &[Uuid],
+    ) -> Result<bool> {
+        q::location_conflict(self, target, kind, ids).await
+    }
+
     async fn recovery_material(
         &self,
         job: Uuid,
@@ -205,7 +214,7 @@ impl RecoveryStore for Backend {
                     )
                     .execute(&mut *tx)
                     .await?;
-                    let id = q::chunk_id(chunk.uuid).fetch_one(&mut *tx).await?;
+                    let id = q::chunk_id(chunk.uuid, target).fetch_one(&mut *tx).await?;
                     if let Some((pack, ordinal, offset)) = pack {
                         let retired = Uuid::new_v4();
                         q::packed_encoding(retired, id, target)

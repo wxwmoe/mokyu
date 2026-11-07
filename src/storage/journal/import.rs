@@ -67,7 +67,7 @@ pub(crate) struct Import<'a> {
     pub target_layout: Layout,
     pub origin: Arc<dyn ObjectStore>,
     pub destination: Arc<dyn ObjectStore>,
-    pub client: Client,
+    pub client: Option<Client>,
     pub keys: BTreeMap<Uuid, codec::Key>,
     pub locations: BTreeMap<Reference, Id>,
 }
@@ -86,6 +86,8 @@ impl Import<'_> {
     async fn put(&self, key: &str, data: Vec<u8>) -> Result<()> {
         let digest = blake3::hash(&data);
         let size = data.len();
+        let backend = self.app.storage.store_backend(self.target)?;
+        let _space = self.app.storage.local_space(&backend, size as u64)?;
         let result = self
             .destination
             .put_opts(
@@ -138,8 +140,56 @@ impl Import<'_> {
         };
         let writing = copy && !existed;
         let part_bytes = usize::try_from(size.div_ceil(9999).max(8 * 1024 * 1024))?;
-        let upload = if writing && size > part_bytes as u64 {
-            Some(self.client.start_upload(to, &BTreeMap::new(), None).await?)
+        let backend = self.app.storage.store_backend(self.target)?;
+        let _space = if writing {
+            self.app.storage.local_space(&backend, size)?
+        } else {
+            None
+        };
+        let local_paths = if copy && backend.is_local {
+            let root = backend
+                .raw_root
+                .as_ref()
+                .context("missing local raw namespace")?;
+            let dest = root.join(
+                to.strip_prefix("raw/")
+                    .context("invalid recovered raw path")?,
+            );
+            let parent = dest.parent().context("missing raw directory")?;
+            crate::storage::raw::directory(root).await?;
+            crate::storage::raw::directory(parent).await?;
+            Some((
+                dest.with_extension(format!("{}.recover", self.job.simple())),
+                dest,
+            ))
+        } else {
+            None
+        };
+        let mut local = if let Some((temp, _)) = local_paths.as_ref().filter(|_| writing) {
+            let mut options = tokio::fs::OpenOptions::new();
+            options.write(true).create(true).truncate(false);
+            #[cfg(unix)]
+            options.custom_flags(libc::O_NOFOLLOW);
+            let file = options.open(&temp).await?.into_std().await;
+            file.try_lock()?;
+            #[cfg(unix)]
+            ensure!(
+                std::os::unix::fs::MetadataExt::nlink(&file.metadata()?) == 1,
+                "aliased recovery temporary file"
+            );
+            file.set_len(0)?;
+            Some(tokio::fs::File::from_std(file))
+        } else {
+            None
+        };
+        let client = self.client.as_ref();
+        let upload = if writing && local.is_none() && size > part_bytes as u64 {
+            Some(
+                client
+                    .context("missing S3 recovery client")?
+                    .start_upload(to, &BTreeMap::new(), None)
+                    .await?,
+            )
         } else {
             None
         };
@@ -155,13 +205,16 @@ impl Import<'_> {
                 ensure!(read <= size, "raw file grew");
                 pages.feed(&bytes).await?;
                 hasher.update(&bytes);
-                if writing {
+                if let Some(out) = &mut local {
+                    tokio::io::AsyncWriteExt::write_all(out, &bytes).await?;
+                } else if writing {
                     buffer.extend_from_slice(&bytes);
                     if let Some(upload) = &upload {
                         while buffer.len() >= part_bytes {
                             let data = buffer.split_to(part_bytes).freeze();
                             parts.push(
-                                self.client
+                                client
+                                    .context("missing S3 recovery client")?
                                     .upload_part(to, upload, u16::try_from(parts.len() + 1)?, data)
                                     .await?,
                             );
@@ -176,7 +229,8 @@ impl Import<'_> {
             if let Some(upload) = &upload {
                 if !buffer.is_empty() {
                     parts.push(
-                        self.client
+                        client
+                            .context("missing S3 recovery client")?
                             .upload_part(
                                 to,
                                 upload,
@@ -186,9 +240,15 @@ impl Import<'_> {
                             .await?,
                     )
                 }
-                self.client
+                client
+                    .context("missing S3 recovery client")?
                     .complete_upload(to, upload, &parts, &Condition::Absent)
                     .await?;
+            } else if let Some(out) = &mut local {
+                let (temp, destination) = local_paths.as_ref().context("missing local raw path")?;
+                tokio::io::AsyncWriteExt::flush(out).await?;
+                out.sync_all().await?;
+                tokio::fs::hard_link(temp, destination).await?;
             } else if writing {
                 self.put(to, buffer.to_vec()).await?;
             }
@@ -203,13 +263,24 @@ impl Import<'_> {
                     "destination raw digest mismatch"
                 );
             }
+            if let Some((temp, dest)) = &local_paths {
+                match tokio::fs::remove_file(temp).await {
+                    Ok(()) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(e.into()),
+                }
+                crate::storage::raw::sync_directory(dest.parent().unwrap()).await?;
+            }
             Ok(())
         }
         .await;
         if result.is_err()
             && let Some(upload) = &upload
         {
-            let _ = self.client.abort_upload(to, upload).await;
+            let _ = client
+                .context("missing S3 recovery client")?
+                .abort_upload(to, upload)
+                .await;
         }
         result?;
         let id = self.save(mat, None).await?;

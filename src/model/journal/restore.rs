@@ -164,6 +164,12 @@ pub(crate) trait RecoveryStore: Send + Sync {
         protected: &[u8],
     ) -> Result<()>;
     async fn recovery_key_conflict(&self, key: &BlockKey) -> Result<bool>;
+    async fn recovery_location_conflict(
+        &self,
+        target: Uuid,
+        kind: super::record::Kind,
+        ids: &[Uuid],
+    ) -> Result<bool>;
     async fn recovery_material(
         &self,
         job: Uuid,

@@ -136,8 +136,36 @@ pub(in super::super) fn chunk_by_hash<'a>(
     sqlx::query_scalar("SELECT id FROM chunks WHERE storage_id=? AND hash=? AND raw_size=? AND state='ready' FOR UPDATE").bind(storage).bind(hash).bind(size)
 }
 
-pub(in super::super) fn chunk_id(uuid: Uuid) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT id FROM chunks WHERE uuid=?").bind(uuid)
+pub(in super::super) async fn location_conflict(
+    b: &Backend,
+    target: Uuid,
+    kind: crate::model::journal::record::Kind,
+    ids: &[Uuid],
+) -> Result<bool> {
+    use crate::model::journal::record::Kind;
+    let (table, address, storage) = match kind {
+        Kind::Member => return Ok(false),
+        Kind::Chunk => ("chunk_encodings", "location_id", "storage_id"),
+        Kind::Pack => ("packs", "location_id", "storage_id"),
+        Kind::Raw => ("raw_sources", "location_id", "storage_id"),
+        Kind::Fragment => ("fragments", "location_id", "staging_storage_id"),
+    };
+    let mut sql = sqlx::QueryBuilder::<sqlx::MySql>::new(format!(
+        "SELECT EXISTS(SELECT 1 FROM {table} WHERE ({storage} IS NULL OR {storage}<>"
+    ));
+    sql.push_bind(target).push(format!(") AND {address} IN ("));
+    let mut list = sql.separated(",");
+    for id in ids {
+        list.push_bind(*id);
+    }
+    sql.push("))");
+    Ok(sql.build_query_scalar().fetch_one(read(b)).await?)
+}
+
+pub(in super::super) fn chunk_id(uuid: Uuid, target: Uuid) -> Scalar<'static, Id> {
+    sqlx::query_scalar("SELECT id FROM chunks WHERE uuid=? AND storage_id=?")
+        .bind(uuid)
+        .bind(target)
 }
 
 pub(in super::super) fn encoding_id(uuid: Uuid) -> Scalar<'static, Id> {
@@ -231,7 +259,7 @@ pub(in super::super) fn insert_raw<'a>(
     digest: Option<&'a [u8]>,
     profile: Uuid,
 ) -> Statement<'a> {
-    sqlx::query("INSERT INTO raw_sources(location_id,storage_id,size,digest,profile_revision,medium,state) SELECT ?,?,?,?,revision,'shared_s3','ready' FROM storage_profiles WHERE storage_id=?").bind(uid).bind(storage).bind(size).bind(digest).bind(profile)
+    sqlx::query("INSERT INTO raw_sources(location_id,storage_id,size,digest,profile_revision,medium,state) SELECT ?,?,?,?,p.revision,CASE WHEN s.type='local' THEN 'local' ELSE 'shared_s3' END,'ready' FROM storage_profiles p JOIN storages s ON s.id=p.storage_id WHERE p.storage_id=?").bind(uid).bind(storage).bind(size).bind(digest).bind(profile)
 }
 
 pub(in super::super) fn insert_fragment<'a>(

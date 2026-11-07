@@ -55,6 +55,11 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
     let target = job.target_storage.context("missing recovery target")?;
     let origin = unlocked.source.connect()?;
     let source_storage = unlocked.source.connection.id;
+    let local = crate::storage::journal::local::Local::new(&unlocked.source.connection)?;
+    let mut pin = match &local {
+        Some(l) => Some(l.lock(exclusive_takeover).await?),
+        None => None,
+    };
     let doc = marker::Document::probe(origin.as_ref())
         .await?
         .context("missing recovery marker")?;
@@ -68,14 +73,19 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                     .is_some_and(|claim| claim.descriptor == existing)),
         "source ownership changed"
     );
-    if unlocked.claim.is_none() && exclusive_takeover {
+    if exclusive_takeover
+        && (unlocked.claim.is_none() || local.is_some() && existing == unlocked.source.journal)
+    {
         if complete_journal_upload {
             unlocked.cut = unlocked
                 .source
                 .salvage(origin.as_ref(), &unlocked.cut)
                 .await?;
         } else {
-            let (_, latest) = unlocked.source.read(origin.as_ref(), None).await?;
+            let (_, latest) = unlocked
+                .source
+                .read_locked(origin.as_ref(), None, None, local.as_ref())
+                .await?;
             ensure!(
                 latest == unlocked.cut,
                 "journal advanced after exclusive preview"
@@ -85,12 +95,16 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
     let selected = buckets.keys().copied().collect::<BTreeSet<_>>();
     let (catalog, cut) = unlocked
         .source
-        .read_selected(
+        .read_locked(
             origin.as_ref(),
             Some(&unlocked.cut),
             (!exclusive_takeover).then_some(&selected),
+            local.as_ref(),
         )
         .await?;
+    if !exclusive_takeover {
+        drop(pin.take());
+    }
     let mut required = BTreeSet::new();
     for bucket in buckets.keys() {
         required.extend(
@@ -101,6 +115,58 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                     .context("bucket missing at selected recovery point")?,
             )?,
         );
+    }
+    // Native physical IDs are unique within a deployment. Check before taking ownership.
+    if unlocked.claim.is_none() {
+        use crate::model::journal::record::Kind;
+        let mut ids: BTreeMap<Kind, BTreeSet<Uuid>> = BTreeMap::new();
+        for bucket in &selected {
+            for object in catalog.buckets[bucket].objects.values() {
+                for span in &object.ranges {
+                    match &catalog.materials[&span.material] {
+                        Material::Chunk { chunk } => {
+                            ids.entry(Kind::Member).or_default().insert(chunk.uuid);
+                            ids.entry(Kind::Chunk)
+                                .or_default()
+                                .insert(chunk.location_id);
+                        }
+                        Material::Member { pack, chunk } => {
+                            ids.entry(Kind::Member).or_default().insert(chunk.uuid);
+                            let reference = crate::model::journal::record::Reference {
+                                kind: Kind::Pack,
+                                id: *pack,
+                                member: None,
+                            };
+                            if let Material::Pack { pack } = catalog
+                                .materials
+                                .get(&reference)
+                                .context("missing recovery pack")?
+                            {
+                                ids.entry(Kind::Pack).or_default().insert(pack.location_id);
+                            }
+                        }
+                        Material::Raw { source } => {
+                            ids.entry(Kind::Raw).or_default().insert(source.location_id);
+                        }
+                        Material::Fragment { id, .. } => {
+                            ids.entry(Kind::Fragment).or_default().insert(*id);
+                        }
+                        Material::Pack { .. } => anyhow::bail!("invalid standalone pack range"),
+                    }
+                }
+            }
+        }
+        for (kind, ids) in ids {
+            let ids: Vec<_> = ids.into_iter().collect();
+            for page in ids.chunks(256) {
+                ensure!(
+                    !app.journal
+                        .recovery_location_conflict(target, kind, page)
+                        .await?,
+                    "recovery data is already registered on another storage in this deployment"
+                );
+            }
+        }
     }
     for key in &required {
         ensure!(
@@ -138,10 +204,17 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                 existing == unlocked.source.journal && claim.revision == doc.revision(),
                 "takeover source revision changed"
             );
-            claim.publish(origin.as_ref()).await?;
+            claim.publish(origin.as_ref(), local.as_ref()).await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("journal-takeover-history").await;
-            match doc.set_journal(origin.as_ref(), descriptor).await {
+            let write = match &local {
+                Some(local) => {
+                    doc.set_local_locked(origin.as_ref(), local, descriptor)
+                        .await
+                }
+                None => doc.set_journal(origin.as_ref(), descriptor).await,
+            };
+            match write {
                 Ok(updated) => updated,
                 Err(error) => {
                     let read = marker::Document::read(origin.as_ref())
@@ -154,6 +227,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                 }
             }
         };
+        drop(pin.take());
         let write_key = if required.is_empty() {
             None
         } else {
@@ -203,7 +277,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
             "recovery key material differs"
         );
     }
-    let source_layout = crate::storage::location::Layout::S3;
+    let source_layout = crate::storage::location::Layout::for_local(local.is_some());
     let mut import = Import {
         source_layout,
         target_layout: crate::storage::location::Layout::for_local(to.r#type == "local"),
@@ -214,7 +288,9 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
         same: exclusive_takeover,
         origin: origin.clone(),
         destination: destination_store,
-        client: source::client(&to)?,
+        client: (to.r#type == "s3")
+            .then(|| source::client(&to))
+            .transpose()?,
         keys,
         locations: BTreeMap::new(),
     };
