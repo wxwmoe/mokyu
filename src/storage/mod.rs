@@ -599,7 +599,11 @@ impl Storage {
             .cloned()
             .with_context(|| format!("store {storage_id} is not enabled"))
     }
-    fn local_space(&self, target: &StoreBackend, bytes: u64) -> Result<Option<local::Space>> {
+    pub(crate) fn local_space(
+        &self,
+        target: &StoreBackend,
+        bytes: u64,
+    ) -> Result<Option<local::Space>> {
         if !target.is_local {
             return Ok(None);
         }

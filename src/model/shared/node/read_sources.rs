@@ -139,13 +139,16 @@ impl Sources {
         stream: &StoredStream,
         start: i64,
         end: i64,
+        local_journal: bool,
     ) -> Result<Mapping> {
         let mut segments = Vec::new();
         if stream.payload_type == "raw" {
             for row in self.raw.get(&stream.id).into_iter().flatten() {
                 row.range.validate()?;
                 ensure!(
-                    (!row.range.source.pending_upload && row.range.source.medium == "shared_s3")
+                    (!row.range.source.pending_upload
+                        && (row.range.source.medium == "shared_s3"
+                            || local_journal && row.range.source.medium == "local"))
                         || (row.range.source.pending_upload && row.node_id == Some(node)),
                     Error::SourceUnavailable
                 );

@@ -42,6 +42,7 @@ fn event(bucket: Uuid, seq: i64, operation: Operation, metadata: serde_json::Val
 
 fn ledger(policy: Policy) -> Ledger {
     Ledger {
+        local: false,
         storage_id: Uuid::new_v4(),
         policy: Json(policy),
         revision: 1,

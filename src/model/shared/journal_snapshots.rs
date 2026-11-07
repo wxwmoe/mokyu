@@ -439,7 +439,7 @@ impl SnapshotStore for Backend {
             )
             .execute(&mut *tx)
             .await?;
-            q::bucket_log(file, file, -1).execute(&mut *tx).await?;
+            q::bucket_log(file, file, -1, 0).execute(&mut *tx).await?;
             q::log_gc(file).execute(&mut *tx).await?;
         }
         q::clear_work(id).execute(&mut *tx).await?;

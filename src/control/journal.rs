@@ -50,10 +50,6 @@ pub(super) async fn configure(
         .ok()
         .filter(|n| *n > 0)
         .ok_or_else(|| s3s::s3_error!(InvalidArgument, "invalid journal policy revision"))?;
-    input
-        .policy
-        .validate()
-        .map_err(|e| s3s::s3_error!(InvalidArgument, "{e}"))?;
     app.journal
         .policy(principal, storage, revision, &input.policy)
         .await?;

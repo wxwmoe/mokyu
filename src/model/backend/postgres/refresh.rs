@@ -378,7 +378,7 @@ async fn load(
                 continue;
             }
             let mapping = sources
-                .mapping(request.node.node_id, stream, 0, stream.size)
+                .mapping(request.node.node_id, stream, 0, stream.size, false)
                 .ok()
                 .filter(|m| m.end == stream.size && m.segments.len() <= read::MAX_ITEMS);
             if let Some(mapping) = &mapping {

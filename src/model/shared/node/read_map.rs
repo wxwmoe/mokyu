@@ -35,7 +35,7 @@ pub(super) async fn node_read_mapping(
     };
     queries::sources::Sources::load(db, raw, extents)
         .await?
-        .mapping(node, stream, start, end)
+        .mapping(node, stream, start, end, false)
 }
 
 pub(super) async fn node_read_materials(

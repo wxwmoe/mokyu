@@ -78,7 +78,7 @@ pub(in super::super) fn sync(storage: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn ready(storage: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT allocated_seq=emitted_seq AND open_file IS NULL AND (lease_token IS NULL OR lease_until<=clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM journal_buckets b JOIN bucket_change_gates g ON g.bucket_id=b.bucket_id WHERE b.storage_id=journal_stores.storage_id AND g.journal_mode=1 AND (b.scanning OR b.prepared_generation<>b.generation)) AND NOT EXISTS(SELECT 1 FROM journal_file_entries m JOIN journal_files f ON f.id=m.file_id JOIN journal_buckets j ON j.bucket_id=m.bucket_id WHERE f.storage_id=journal_stores.storage_id AND f.state='published' AND m.seq>j.published_seq) FROM journal_stores WHERE storage_id=$1").bind(storage)
+    sqlx::query_scalar("SELECT allocated_seq=emitted_seq AND open_file IS NULL AND NOT EXISTS(SELECT 1 FROM journal_files f WHERE f.storage_id=journal_stores.storage_id AND f.state='sealed') AND (lease_token IS NULL OR lease_until<=clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM journal_buckets b JOIN bucket_change_gates g ON g.bucket_id=b.bucket_id WHERE b.storage_id=journal_stores.storage_id AND g.journal_mode=1 AND (b.scanning OR b.prepared_generation<>b.generation)) AND NOT EXISTS(SELECT 1 FROM journal_file_entries m JOIN journal_files f ON f.id=m.file_id JOIN journal_buckets j ON j.bucket_id=m.bucket_id WHERE f.storage_id=journal_stores.storage_id AND f.state='published' AND m.seq>j.published_seq) FROM journal_stores WHERE storage_id=$1").bind(storage)
 }
 
 pub(in super::super) fn point(
@@ -460,8 +460,13 @@ pub(in super::super) fn drop_snap_holds(storage: Uuid) -> Statement<'static> {
 pub(in super::super) fn dequeue<'a>(s: Uuid, id: Uuid, k: &'a str, p: i64) -> Statement<'a> {
     sqlx::query("DELETE FROM journal_snapshot_gc WHERE storage_id=$1 AND object_id=$2 AND kind=$3 AND page_no=$4").bind(s).bind(id).bind(k).bind(p)
 }
-pub(in super::super) fn bucket_log(id: Uuid, again: Uuid, sign: i64) -> Statement<'static> {
-    sqlx::query("UPDATE journal_buckets SET confirmed_log_bytes=confirmed_log_bytes+COALESCE((SELECT SUM(m.encoded_bytes) FROM journal_file_entries m WHERE m.bucket_id=journal_buckets.bucket_id AND m.file_id=$1),0)*$2 WHERE bucket_id IN(SELECT bucket_id FROM journal_file_entries WHERE file_id=$3)").bind(id).bind(sign).bind(again)
+pub(in super::super) fn bucket_log(
+    id: Uuid,
+    again: Uuid,
+    sign: i64,
+    start: i64,
+) -> Statement<'static> {
+    sqlx::query("UPDATE journal_buckets SET confirmed_log_bytes=confirmed_log_bytes+COALESCE((SELECT SUM(m.encoded_bytes) FROM journal_file_entries m WHERE m.bucket_id=journal_buckets.bucket_id AND m.file_id=$1 AND m.byte_offset>=$4),0)*$2 WHERE bucket_id IN(SELECT bucket_id FROM journal_file_entries WHERE file_id=$3)").bind(id).bind(sign).bind(again).bind(start)
 }
 pub(in super::super) fn clear_usage(storage: Uuid) -> Statement<'static> {
     sqlx::query("DELETE FROM journal_snapshot_usage WHERE storage_id=$1").bind(storage)

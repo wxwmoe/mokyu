@@ -43,6 +43,7 @@ pub(crate) struct Entry {
 
 #[derive(Clone, sqlx::FromRow)]
 pub(crate) struct Ledger {
+    pub local: bool,
     pub storage_id: Uuid,
     pub policy: Json<Policy>,
     pub revision: i64,
@@ -124,6 +125,7 @@ pub(crate) trait JournalStore:
         &self,
         storage: Uuid,
         bucket: Uuid,
+        local: bool,
         token: Uuid,
         format: &Format<'_>,
         secrets: &Secrets,

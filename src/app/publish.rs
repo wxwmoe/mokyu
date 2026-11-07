@@ -72,6 +72,7 @@ impl App {
         })
         .await?;
         drop(cache_change);
+        self.wake_local_journal.notify_waiters();
         if self.deployment_mode() == "single_control" {
             self.notifications.committed();
         }
@@ -155,6 +156,7 @@ impl App {
         {
             self.wake_gc.notify_one();
         }
+        self.wake_local_journal.notify_waiters();
         if self.deployment_mode() == "single_control" {
             self.notifications.committed();
         }

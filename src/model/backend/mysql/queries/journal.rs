@@ -18,11 +18,11 @@ pub(in super::super) fn lock_mode(bucket: Uuid) -> Scalar<'static, i64> {
 }
 
 pub(in super::super) fn enabled(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT g.journal_mode=1 FROM bucket_change_gates g JOIN buckets b ON b.id=g.bucket_id JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type='s3'").bind(bucket)
+    sqlx::query_scalar("SELECT g.journal_mode=1 FROM bucket_change_gates g JOIN buckets b ON b.id=g.bucket_id JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3')").bind(bucket)
 }
 
 pub(in super::super) fn supported(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type='s3')").bind(bucket)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3'))").bind(bucket)
 }
 
 pub(in super::super) fn create(bucket: Uuid) -> Statement<'static> {
@@ -71,7 +71,7 @@ pub(in super::super) fn scanned(bucket: Uuid, count: i64) -> Statement<'static> 
 }
 
 pub(in super::super) fn ensure_store(storage: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO journal_stores(policy,storage_id) SELECT ?,id FROM storages WHERE id=? AND type='s3' ON DUPLICATE KEY UPDATE storage_id=journal_stores.storage_id").bind(sqlx::types::Json(Policy::default())).bind(storage)
+    sqlx::query("INSERT INTO journal_stores(policy,storage_id) SELECT ?,id FROM storages WHERE id=? AND type IN ('local','s3') ON DUPLICATE KEY UPDATE storage_id=journal_stores.storage_id").bind(sqlx::types::Json(Policy::default())).bind(storage)
 }
 
 pub(in super::super) fn claim(storage: Uuid, token: Uuid) -> Statement<'static> {
@@ -83,7 +83,7 @@ pub(in super::super) fn fence(storage: Uuid, token: Uuid) -> Scalar<'static, Uui
 }
 
 pub(in super::super) fn ledger(storage: Uuid) -> Rows<'static, Ledger> {
-    sqlx::query_as("SELECT storage_id,policy,revision,descriptor,marker_installed,allocated_seq,allocated_digest,emitted_seq,open_file,flush_requested,last_bucket,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',UTC_TIMESTAMP(6)) AS now_us FROM journal_stores WHERE storage_id=?").bind(storage)
+    sqlx::query_as("SELECT (SELECT s.type='local' FROM storages s WHERE s.id=journal_stores.storage_id) AS local,storage_id,policy,revision,descriptor,marker_installed,allocated_seq,allocated_digest,emitted_seq,open_file,flush_requested,last_bucket,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',UTC_TIMESTAMP(6)) AS now_us FROM journal_stores WHERE storage_id=?").bind(storage)
 }
 
 pub(in super::super) fn event(bucket: Uuid) -> Rows<'static, Entry> {
@@ -98,6 +98,10 @@ pub(in super::super) fn clear_drafts(bucket: Uuid, seq: i64) -> Statement<'stati
     sqlx::query("DELETE FROM journal_drafts WHERE bucket_id=? AND seq=?")
         .bind(bucket)
         .bind(seq)
+}
+
+pub(in super::super) fn unsynced(bucket: Uuid, seq: i64) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM journal_holds h WHERE h.bucket_id=? AND h.seq=? AND ((h.unit='raw' AND EXISTS(SELECT 1 FROM raw_sources r WHERE r.location_id=h.address AND r.durability<>'durable')) OR (h.unit='chunk' AND EXISTS(SELECT 1 FROM chunk_encodings c WHERE c.location_id=h.address AND c.sync_pending))))").bind(bucket).bind(seq)
 }
 
 pub(in super::super) fn clear_holds(bucket: Uuid, seq: i64) -> Statement<'static> {
@@ -208,7 +212,7 @@ pub(in super::super) fn emitted(f: &File) -> Statement<'_> {
 }
 
 pub(in super::super) fn watermarks(file: Uuid) -> Rows<'static, (Uuid, i64, Option<i64>, i64)> {
-    sqlx::query_as("SELECT m.bucket_id,MAX(m.seq),MAX(CASE WHEN e.operation='ready' THEN e.generation END),j.published_seq FROM journal_file_entries m JOIN journal_entries e ON e.bucket_id=m.bucket_id AND e.seq=m.seq JOIN journal_buckets j ON j.bucket_id=m.bucket_id WHERE m.file_id=? AND m.final_page GROUP BY m.bucket_id,j.published_seq").bind(file)
+    sqlx::query_as("SELECT m.bucket_id,MAX(m.seq),MAX(CASE WHEN e.operation='ready' THEN e.generation END),j.published_seq FROM journal_file_entries m JOIN journal_entries e ON e.bucket_id=m.bucket_id AND e.seq=m.seq JOIN journal_buckets j ON j.bucket_id=m.bucket_id WHERE m.file_id=? AND m.final_page AND m.seq>j.published_seq GROUP BY m.bucket_id,j.published_seq").bind(file)
 }
 
 pub(in super::super) fn watermark(
@@ -227,6 +231,11 @@ pub(in super::super) fn release_streams(
     sqlx::query("UPDATE journal_entries SET stream_id=NULL WHERE bucket_id=? AND seq>? AND seq<=? AND stream_id IS NOT NULL").bind(bucket).bind(previous).bind(seq)
 }
 
+pub(in super::super) fn pending_offset(file: Uuid) -> Scalar<'static, Option<i64>> {
+    sqlx::query_scalar("SELECT MIN(byte_offset) FROM journal_file_frames WHERE file_id=?")
+        .bind(file)
+}
+
 pub(in super::super) fn drop_frames(file: Uuid) -> Statement<'static> {
     sqlx::query("DELETE FROM journal_file_frames WHERE file_id=?").bind(file)
 }
@@ -236,7 +245,7 @@ pub(in super::super) fn apply_policy(storage: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn finish_flush(storage: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE journal_stores SET flush_requested=FALSE WHERE storage_id=? AND flush_requested AND NOT EXISTS(SELECT 1 FROM journal_buckets j WHERE j.storage_id=journal_stores.storage_id AND j.flush_seq>j.published_seq)").bind(storage)
+    sqlx::query("UPDATE journal_stores SET flush_requested=FALSE WHERE storage_id=? AND flush_requested AND open_file IS NULL AND NOT EXISTS(SELECT 1 FROM journal_buckets j WHERE j.storage_id=journal_stores.storage_id AND j.flush_seq>j.published_seq)").bind(storage)
 }
 
 #[async_trait]
@@ -281,7 +290,7 @@ impl JournalStore for Backend {
     }
 
     async fn sources(&self) -> Result<Vec<Uuid>> {
-        Ok(sqlx::query_scalar("SELECT storage_id FROM journal_buckets WHERE last_seq>published_seq UNION SELECT storage_id FROM journal_stores WHERE open_file IS NOT NULL OR allocated_seq>emitted_seq OR flush_requested ORDER BY storage_id").fetch_all(&self.pool).await?)
+        Ok(sqlx::query_scalar("SELECT storage_id FROM journal_buckets WHERE last_seq>published_seq UNION SELECT storage_id FROM journal_stores WHERE flush_requested OR allocated_seq>emitted_seq OR EXISTS(SELECT 1 FROM journal_files f WHERE f.storage_id=journal_stores.storage_id AND f.state='sealed') OR open_file IS NOT NULL AND EXISTS(SELECT 1 FROM storages s WHERE s.id=journal_stores.storage_id AND s.type='s3') ORDER BY storage_id").fetch_all(&self.pool).await?)
     }
 
     async fn claim(&self, storage: Uuid, token: Uuid) -> Result<Option<Ledger>> {
@@ -362,13 +371,14 @@ impl JournalStore for Backend {
         &self,
         storage: Uuid,
         bucket: Uuid,
+        local: bool,
         token: Uuid,
         format: &Format<'_>,
         secrets: &Secrets,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         let progress =
-            super::super::journal::prepare(&mut tx, storage, bucket, token, format, secrets)
+            super::super::journal::prepare(&mut tx, storage, bucket, local, token, format, secrets)
                 .await?;
         if progress {
             sqlx::query("UPDATE journal_buckets SET prepare_error=NULL WHERE bucket_id=? AND prepare_error IS NOT NULL").bind(bucket).execute(&mut *tx).await?;
@@ -387,7 +397,7 @@ impl JournalStore for Backend {
     }
 
     async fn next_file(&self, storage: Uuid) -> Result<Option<File>> {
-        Ok(sqlx::query_as("SELECT f.id,f.storage_id,f.epoch,f.first_seq,f.last_seq,f.previous_digest,f.digest,f.byte_count,f.mode,f.state,f.part_cut,f.part_since_us,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',f.opened_at) AS opened_us,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',f.oldest_at) AS oldest_us,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',f.upload_opened_at) AS upload_opened_us,f.upload_id FROM journal_files f JOIN journal_stores j ON j.storage_id=f.storage_id WHERE f.storage_id=? AND f.state='sealed' AND f.first_seq=j.emitted_seq+1 ORDER BY f.first_seq LIMIT 1")
+        Ok(sqlx::query_as("SELECT f.encrypt_frames,f.id,f.storage_id,f.epoch,f.first_seq,f.last_seq,f.previous_digest,f.digest,f.byte_count,f.mode,f.state,f.part_cut,f.part_since_us,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',f.opened_at) AS opened_us,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',f.oldest_at) AS oldest_us,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',f.upload_opened_at) AS upload_opened_us,f.upload_id FROM journal_files f JOIN journal_stores j ON j.storage_id=f.storage_id WHERE f.storage_id=? AND (f.state='sealed' AND f.first_seq=j.emitted_seq+1 OR f.state IN ('open','sealed') AND f.first_seq<=j.emitted_seq+1 AND f.last_seq>=j.emitted_seq AND EXISTS(SELECT 1 FROM storages s WHERE s.id=f.storage_id AND s.type='local') AND EXISTS(SELECT 1 FROM journal_file_frames x WHERE x.file_id=f.id)) ORDER BY f.first_seq LIMIT 1")
             .bind(storage).fetch_optional(&self.pool).await?)
     }
 
@@ -479,17 +489,15 @@ impl JournalStore for Backend {
     }
 
     async fn journal_status(&self, storage: Uuid) -> Result<Status> {
-        let supported: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type='s3')")
-                .bind(storage)
-                .fetch_one(&self.pool)
-                .await?;
+        let supported: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type IN ('local','s3'))",
+        )
+        .bind(storage)
+        .fetch_one(&self.pool)
+        .await?;
         anyhow::ensure!(
             supported,
-            s3s::s3_error!(
-                InvalidArgument,
-                "metadata journal requires a managed S3 storage"
-            )
+            s3s::s3_error!(InvalidArgument, "metadata journal requires managed storage")
         );
         let row: Option<(sqlx::types::Json<Policy>,bool,i64,i64,Option<Uuid>,Option<i64>,Option<String>)> =
             sqlx::query_as("SELECT COALESCE(pending_policy,policy),pending_policy IS NOT NULL,revision,emitted_seq,open_file,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',confirmed_at),last_error FROM journal_stores WHERE storage_id=?")
@@ -524,10 +532,13 @@ impl JournalStore for Backend {
         revision: i64,
         policy: &Policy,
     ) -> Result<()> {
-        policy.validate()?;
         let mut tx = transactions::admin_transaction(&self.pool, principal).await?;
         ensure_store(storage).execute(&mut *tx).await?;
-        let changed = sqlx::query("UPDATE journal_stores SET policy=CASE WHEN open_file IS NULL AND allocated_seq=emitted_seq THEN ? ELSE policy END,pending_policy=CASE WHEN open_file IS NULL AND allocated_seq=emitted_seq THEN NULL ELSE ? END,flush_requested=CASE WHEN open_file IS NOT NULL OR allocated_seq>emitted_seq THEN TRUE ELSE flush_requested END,revision=revision+1 WHERE storage_id=? AND revision=?")
+        let state = ledger(storage).fetch_one(&mut *tx).await?;
+        policy
+            .validate(state.local)
+            .map_err(|e| s3s::s3_error!(InvalidArgument, "{e}"))?;
+        let changed = sqlx::query("UPDATE journal_stores SET policy=CASE WHEN open_file IS NULL AND allocated_seq=emitted_seq AND NOT EXISTS(SELECT 1 FROM journal_files f WHERE f.storage_id=journal_stores.storage_id AND f.state='sealed') THEN ? ELSE policy END,pending_policy=CASE WHEN open_file IS NULL AND allocated_seq=emitted_seq AND NOT EXISTS(SELECT 1 FROM journal_files f WHERE f.storage_id=journal_stores.storage_id AND f.state='sealed') THEN NULL ELSE ? END,flush_requested=CASE WHEN open_file IS NOT NULL OR allocated_seq>emitted_seq THEN TRUE ELSE flush_requested END,revision=revision+1 WHERE storage_id=? AND revision=?")
             .bind(sqlx::types::Json(policy)).bind(sqlx::types::Json(policy)).bind(storage).bind(revision).execute(&mut *tx).await?.rows_affected();
         anyhow::ensure!(
             changed == 1,
@@ -544,7 +555,7 @@ impl JournalStore for Backend {
             .bind(storage)
             .execute(&mut *tx)
             .await?;
-        sqlx::query("UPDATE journal_stores SET flush_requested=TRUE WHERE storage_id=? AND EXISTS(SELECT 1 FROM journal_buckets b WHERE b.storage_id=journal_stores.storage_id AND b.last_seq>b.published_seq)").bind(storage).execute(&mut *tx).await?;
+        sqlx::query("UPDATE journal_stores SET flush_requested=TRUE WHERE storage_id=? AND (open_file IS NOT NULL OR EXISTS(SELECT 1 FROM journal_buckets b WHERE b.storage_id=journal_stores.storage_id AND b.last_seq>b.published_seq))").bind(storage).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(())
     }

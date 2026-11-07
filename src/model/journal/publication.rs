@@ -230,7 +230,7 @@ impl Allocation {
             previous_digest: self.digest.to_vec(),
             digest: self.digest.to_vec(),
             byte_count: 0,
-            mode: if ledger.policy.mode == WriteMode::Put {
+            mode: if ledger.local || ledger.policy.mode == WriteMode::Put {
                 "put"
             } else {
                 "multipart"
@@ -255,7 +255,7 @@ pub(crate) fn allocate(
     format: &Format<'_>,
 ) -> Result<Allocation> {
     let policy = &ledger.policy;
-    policy.validate()?;
+    policy.validate(ledger.local)?;
     let mut plan = Allocation {
         revision: ledger.revision,
         base: ledger.allocated_seq,
@@ -374,32 +374,34 @@ pub(crate) fn allocate(
             ..*format
         };
         let seal_bytes = Format::overhead(file.encrypt_frames);
-        let age = ledger.now_us.saturating_sub(file.oldest_us) / 1_000_000;
         let bytes = usize::try_from(file.byte_count)? + seal_bytes;
-        let part_age = file
-            .part_since_us
-            .map(|since| ledger.now_us.saturating_sub(since) / 1_000_000);
-        let part_due = part_age.is_some_and(|age| {
-            policy
-                .part_max_wait_seconds
-                .is_some_and(|s| age >= i64::from(s))
-        });
-        let tail = file.byte_count - file.part_cut;
-        let full_part = tail >= i64::from(policy.part_target_bytes)
-            || (part_due && tail >= i64::from(super::policy::MIN_PART));
-        let due = ledger.flush_requested
-            || bytes >= max
-            || match policy.mode {
-                WriteMode::Put => policy.put_due(bytes, age, false),
-                WriteMode::Multipart => {
-                    (part_due && tail > 0 && tail < i64::from(super::policy::MIN_PART))
-                        || (full_part && bytes + seal_bytes > max)
-                        || policy.multipart_max_open_seconds.is_some_and(|s| {
-                            ledger.now_us.saturating_sub(file.opened_us) >= i64::from(s) * 1_000_000
-                        })
-                }
-            };
-        if !due && policy.mode == WriteMode::Multipart && full_part {
+        let (rollover, commit) = if ledger.local {
+            (bytes + seal_bytes > max, !plan.pages.is_empty())
+        } else if policy.mode == WriteMode::Put {
+            let age = ledger.now_us.saturating_sub(file.oldest_us) / 1_000_000;
+            (policy.put_due(bytes, age, false), false)
+        } else {
+            let part_due = file
+                .part_since_us
+                .zip(policy.part_max_wait_seconds)
+                .is_some_and(|(since, seconds)| {
+                    ledger.now_us.saturating_sub(since) >= i64::from(seconds) * 1_000_000
+                });
+            let tail = file.byte_count - file.part_cut;
+            let full = tail >= i64::from(policy.part_target_bytes)
+                || part_due && tail >= i64::from(super::policy::MIN_PART);
+            let expired = policy.multipart_max_open_seconds.is_some_and(|s| {
+                ledger.now_us.saturating_sub(file.opened_us) >= i64::from(s) * 1_000_000
+            });
+            (
+                expired
+                    || (part_due && tail > 0 && tail < i64::from(super::policy::MIN_PART))
+                    || (full && bytes + seal_bytes > max),
+                full,
+            )
+        };
+        let due = ledger.flush_requested || bytes >= max || rollover;
+        if !due && commit {
             let data = format.encode(
                 FrameType::PartCommit,
                 &file.path()?,
@@ -413,7 +415,9 @@ pub(crate) fn allocate(
             let hash = *blake3::hash(&data).as_bytes();
             let last = file.last_seq;
             plan.append(&mut file, data, last, hash)?;
-            file.part_cut = file.byte_count;
+            if !ledger.local {
+                file.part_cut = file.byte_count;
+            }
             file.part_since_us = None;
         }
         if due {

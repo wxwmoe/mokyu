@@ -67,7 +67,7 @@ async fn step(
             .storage
             .pack_memory(usize::try_from(file.byte_count)?.saturating_mul(2))
             .await?;
-        return Ok((remote.publish(db, id, token, &file).await?, 0));
+        return Ok((remote.publish(db, &app.storage, id, token, &file).await?, 0));
     }
     let open = match ledger.open_file {
         Some(file) => Some(db.open(id, file).await?),
@@ -90,7 +90,7 @@ async fn step(
                 .storage
                 .pack_memory(usize::try_from(file.byte_count)?.saturating_mul(2))
                 .await?;
-            return Ok((remote.publish(db, id, token, file).await?, 0));
+            return Ok((remote.publish(db, &app.storage, id, token, file).await?, 0));
         }
     }
     let mut prepared = false;
@@ -100,7 +100,14 @@ async fn step(
     let mut drafts = Vec::new();
     for bucket in buckets {
         match db
-            .prepare_page(id, bucket, token, &remote.format(), &app.secrets)
+            .prepare_page(
+                id,
+                bucket,
+                ledger.local,
+                token,
+                &remote.format(),
+                &app.secrets,
+            )
             .await
         {
             Ok(progress) => prepared |= progress,
@@ -144,7 +151,7 @@ async fn step(
 
 fn deadline(ledger: &Ledger, file: Option<&publication::File>) -> u64 {
     let mut us = 5_000_000i64;
-    if let Some(f) = file {
+    if let Some(f) = file.filter(|_| !ledger.local) {
         let limits = if f.mode == "put" {
             [
                 (Some(f.oldest_us), ledger.policy.put_max_wait_seconds),
@@ -187,6 +194,11 @@ async fn store(
         let Some(ledger) = app.journal.claim(id, token).await? else {
             return Ok(());
         };
+        let changed = app.wake_local_journal.notified();
+        tokio::pin!(changed);
+        if ledger.local {
+            changed.as_mut().enable();
+        }
         let mut renew = tokio::time::interval(Duration::from_secs(15));
         renew.tick().await;
         let result = {
@@ -216,7 +228,7 @@ async fn store(
         if ledger.open_file.is_none() && !ledger.flush_requested {
             return Ok(());
         }
-        tokio::select! { _=wake=>(), _=tokio::time::sleep(Duration::from_micros(wait))=>() }
+        tokio::select! { _=wake=>(), _=changed, if ledger.local => (), _=tokio::time::sleep(Duration::from_micros(wait))=>() }
     }
 }
 

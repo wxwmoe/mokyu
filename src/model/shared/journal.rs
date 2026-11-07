@@ -27,10 +27,7 @@ pub(super) async fn configure(db: &mut Connection, bucket: Uuid, enabled: bool) 
     let operation = if enabled {
         ensure!(
             q::supported(bucket).fetch_one(&mut *db).await?,
-            s3s::s3_error!(
-                InvalidArgument,
-                "metadata journal requires a managed S3 storage"
-            )
+            s3s::s3_error!(InvalidArgument, "metadata journal requires managed storage")
         );
         if mode == 0 {
             q::create(bucket).execute(&mut *db).await?;
@@ -198,18 +195,32 @@ pub(super) async fn acknowledge(
     if actual.state == "published" && ledger.emitted_seq >= actual.last_seq {
         return Ok(());
     }
+    let start = q::pending_offset(file.id)
+        .fetch_one(&mut *db)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing journal frames"))?;
+    let next = ledger.emitted_seq.checked_add(1);
     ensure!(
-        actual.state == "sealed" && ledger.emitted_seq.checked_add(1) == Some(actual.first_seq),
+        if ledger.local && start > 0 {
+            matches!(actual.state.as_str(), "open" | "sealed")
+                && actual.first_seq <= ledger.emitted_seq
+                && actual.last_seq >= ledger.emitted_seq
+        } else {
+            (actual.state == "sealed" || ledger.local && actual.state == "open")
+                && next == Some(actual.first_seq)
+        },
         "out-of-order journal receipt"
     );
-    ensure!(
-        q::published(file.id, etag, version)
-            .execute(&mut *db)
-            .await?
-            .rows_affected()
-            == 1,
-        "journal publication changed"
-    );
+    if actual.state == "sealed" {
+        ensure!(
+            q::published(file.id, etag, version)
+                .execute(&mut *db)
+                .await?
+                .rows_affected()
+                == 1,
+            "journal publication changed"
+        );
+    }
     for (bucket, seq, generation, previous) in q::watermarks(file.id).fetch_all(&mut *db).await? {
         q::watermark(bucket, seq, generation)
             .execute(&mut *db)
@@ -219,13 +230,13 @@ pub(super) async fn acknowledge(
             .await?;
     }
     q::emitted(&actual).execute(&mut *db).await?;
-    super::queries::journal_snapshots::bucket_log(actual.id, actual.id, 1)
+    super::queries::journal_snapshots::bucket_log(actual.id, actual.id, 1, start)
         .execute(&mut *db)
         .await?;
     super::queries::journal_snapshots::count_log(
-        actual.byte_count,
+        actual.byte_count - start,
         actual.id,
-        actual.byte_count,
+        actual.byte_count - start,
         i64::try_from(ledger.policy.snapshot_trigger_bytes)?,
         storage,
     )
@@ -241,6 +252,7 @@ pub(super) async fn prepare(
     db: &mut Connection,
     storage: Uuid,
     bucket: Uuid,
+    local: bool,
     token: Uuid,
     format: &crate::storage::journal::Format<'_>,
     secrets: &crate::config::Secrets,
@@ -341,7 +353,7 @@ pub(super) async fn prepare(
             };
             let mapping = queries::sources::Sources::load(&mut *db, raw, extents)
                 .await?
-                .mapping(Uuid::nil(), &stream, start, stream.size)?;
+                .mapping(Uuid::nil(), &stream, start, stream.size, local)?;
             let mut materials = BTreeMap::new();
             let mut ranges = Vec::new();
             for segment in mapping.segments {
@@ -398,6 +410,12 @@ pub(super) async fn prepare(
             });
         }
         state.final_page = state.end_offset == stream.size;
+        if local && state.final_page && stream.size > 0 {
+            ensure!(
+                !q::unsynced(bucket, event.seq).fetch_one(&mut *db).await?,
+                "journal payload is waiting for local disk sync"
+            );
+        }
     }
     if state.final_page {
         batch.push(Record::Change {

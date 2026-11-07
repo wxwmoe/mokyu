@@ -15,11 +15,17 @@ pub(crate) enum WriteMode {
 #[schema(as = MetadataJournalPolicy)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Policy {
+    #[schema(required = false)]
     pub mode: WriteMode,
+    #[schema(required = false)]
     pub put_target_bytes: u32,
+    #[schema(required = false)]
     pub put_max_wait_seconds: Option<u32>,
+    #[schema(required = false)]
     pub part_target_bytes: u32,
+    #[schema(required = false)]
     pub part_max_wait_seconds: Option<u32>,
+    #[schema(required = false)]
     pub multipart_max_open_seconds: Option<u32>,
     pub segment_bytes: u32,
     pub snapshot_page_bytes: u32,
@@ -47,7 +53,7 @@ impl Default for Policy {
 }
 
 impl Policy {
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, local: bool) -> Result<()> {
         ensure!(
             (4096..=MAX_LIMIT).contains(&self.segment_bytes),
             "invalid journal segment limit"
@@ -56,6 +62,13 @@ impl Policy {
             (4096..=MAX_LIMIT).contains(&self.snapshot_page_bytes),
             "invalid snapshot page limit"
         );
+        ensure!(
+            self.snapshot_trigger_bytes > 0 && self.snapshot_trigger_bytes <= 9_007_199_254_740_991,
+            "invalid snapshot trigger"
+        );
+        if local {
+            return Ok(());
+        }
         ensure!(
             (1..=self.segment_bytes).contains(&self.put_target_bytes),
             "invalid journal PUT target"
@@ -70,10 +83,6 @@ impl Policy {
                 "journal part exceeds segment limit"
             );
         }
-        ensure!(
-            self.snapshot_trigger_bytes > 0 && self.snapshot_trigger_bytes <= 9_007_199_254_740_991,
-            "invalid snapshot trigger"
-        );
         for seconds in [
             self.put_max_wait_seconds,
             self.part_max_wait_seconds,
@@ -104,7 +113,7 @@ mod tests {
     #[test]
     fn aggregate_size_and_deadline_are_independent() {
         let mut policy = Policy::default();
-        assert!(policy.validate().is_ok());
+        assert!(policy.validate(false).is_ok());
         assert!(!policy.put_due(131_071, 599, false));
         assert!(policy.put_due(131_072, 599, false));
         assert!(policy.put_due(1, 600, false));
@@ -114,8 +123,8 @@ mod tests {
         policy.put_target_bytes = 4096;
         assert!(policy.put_due(11 * 1024, -1, false));
         policy.segment_bytes = 4096;
-        assert!(policy.validate().is_ok());
+        assert!(policy.validate(false).is_ok());
         policy.mode = WriteMode::Multipart;
-        assert!(policy.validate().is_err());
+        assert!(policy.validate(false).is_err());
     }
 }

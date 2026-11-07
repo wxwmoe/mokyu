@@ -30,7 +30,8 @@ pub(crate) struct Remote {
     pub journal: marker::Journal,
     pub key: crate::content::codec::Key,
     pub backend: Arc<dyn ObjectStore>,
-    pub client: Client,
+    client: Option<Client>,
+    pub local: Option<Arc<super::local::Local>>,
     pub revision: i64,
 }
 
@@ -59,24 +60,34 @@ impl Remote {
             .context("metadata journal storage is disabled")?;
         let mut revision = row.revision;
         let record = model::Record::from(row);
-        ensure!(record.r#type == "s3", "metadata journal requires S3");
         let profile = profiles.load(record.id).await?;
         let opts = Options::from_profile(&profile)?;
         let conn = model::Connection::unprotect(&record, &secrets.credential_key)?;
         let backend = model::Store::connect(&conn, opts)?.backend;
-        let client = Connection {
-            endpoint_url: conn.endpoint_url.context("missing S3 endpoint")?,
-            region: conn.region.context("missing S3 region")?,
-            bucket: conn.remote_bucket_name.context("missing S3 bucket")?,
-            prefix: conn.prefix,
-            virtual_hosted: false,
-            allow_http: true,
-        }
-        .connect(
-            conn.access.as_deref().context("missing S3 access")?,
-            conn.secret.as_deref().context("missing S3 secret")?,
-            opts,
-        )?;
+        let local = super::local::Local::new(&conn)?.map(Arc::new);
+        let _lock = match &local {
+            Some(l) => Some(l.lock(true).await?),
+            None => None,
+        };
+        let client = if local.is_none() {
+            Some(
+                Connection {
+                    endpoint_url: conn.endpoint_url.context("missing S3 endpoint")?,
+                    region: conn.region.context("missing S3 region")?,
+                    bucket: conn.remote_bucket_name.context("missing S3 bucket")?,
+                    prefix: conn.prefix,
+                    virtual_hosted: false,
+                    allow_http: true,
+                }
+                .connect(
+                    conn.access.as_deref().context("missing S3 access")?,
+                    conn.secret.as_deref().context("missing S3 secret")?,
+                    opts,
+                )?,
+            )
+        } else {
+            None
+        };
         let doc = marker::Document::probe(backend.as_ref())
             .await?
             .context("missing storage marker")?;
@@ -104,6 +115,10 @@ impl Remote {
                 ensure!(other == journal, "journal identity or ownership changed");
                 doc.value
             }
+            None if let Some(local) = &local => {
+                doc.set_local_locked(backend.as_ref(), local, &journal)
+                    .await?
+            }
             None => doc.set_journal(backend.as_ref(), &journal).await?,
         };
         if updated != record.identity_marker || !ledger.marker_installed {
@@ -121,6 +136,7 @@ impl Remote {
             key,
             backend,
             client,
+            local,
             revision,
         })
     }
@@ -159,6 +175,7 @@ impl Remote {
     pub async fn publish(
         &self,
         db: &dyn JournalStore,
+        space: &crate::storage::Storage,
         storage: Uuid,
         token: Uuid,
         file: &File,
@@ -170,6 +187,54 @@ impl Remote {
             size <= crate::model::journal::policy::MAX_LIMIT as usize,
             "journal file exceeds limit"
         );
+        if let Some(local) = &self.local {
+            let pending: usize = frames.iter().map(Vec::len).sum();
+            let start = size
+                .checked_sub(pending)
+                .context("invalid pending local frames")?;
+            let guard = local.lock(true).await?;
+            let target = space.store_backend(storage)?;
+            let reservation = space.local_space(&target, pending as u64 + 4096)?;
+            let (local, segment, key, journal) = (
+                local.clone(),
+                file.clone(),
+                self.key.clone(),
+                self.journal.clone(),
+            );
+            let storage_id = self.id;
+            tokio::task::spawn_blocking(move || {
+                let (_guard, _space) = (guard, reservation);
+                local.verify_owner(&journal)?;
+                local.append(
+                    &Format {
+                        storage: storage_id,
+                        encrypted: segment.encrypt_frames,
+                        journal: journal.journal_id,
+                        epoch: journal.writer_epoch,
+                        key: &key,
+                    },
+                    &segment,
+                    start as u64,
+                    &frames.concat(),
+                )
+            })
+            .await??;
+            let etag = if file.state == "sealed" {
+                Some(
+                    self.backend
+                        .head(&Path::from(path))
+                        .await?
+                        .e_tag
+                        .context("missing local segment revision")?,
+                )
+            } else {
+                None
+            };
+            db.acknowledge(storage, token, file, etag.as_deref(), None)
+                .await?;
+            return Ok(true);
+        }
+        let client = self.client.as_ref().context("missing S3 journal client")?;
         let mut body = Vec::with_capacity(size);
         let mut cuts = Vec::new();
         for frame in frames {
@@ -187,8 +252,7 @@ impl Remote {
         let bytes = Bytes::from(body);
         let written = if file.mode == "put" {
             ensure!(file.state == "sealed", "unsealed journal PUT");
-            match self
-                .client
+            match client
                 .put(
                     &path,
                     &Condition::Absent,
@@ -214,7 +278,7 @@ impl Remote {
                     let recovered = if db.start_upload(storage, file.id, token).await? {
                         None
                     } else {
-                        let (previous, truncated) = self.client.uploads(&path).await?;
+                        let (previous, truncated) = client.uploads(&path).await?;
                         ensure!(
                             !truncated && previous.len() <= 1,
                             "ambiguous journal Multipart uploads"
@@ -223,11 +287,7 @@ impl Remote {
                     };
                     let id = match recovered {
                         Some(id) => id,
-                        None => {
-                            self.client
-                                .start_upload(&path, &BTreeMap::new(), None)
-                                .await?
-                        }
+                        None => client.start_upload(&path, &BTreeMap::new(), None).await?,
                     };
                     db.upload_id(storage, file.id, token, &id).await?;
                     id
@@ -264,10 +324,7 @@ impl Remote {
                         etag: None,
                     };
                     db.part(storage, token, &intent).await?;
-                    let result = self
-                        .client
-                        .upload_part(&path, &upload, number, data)
-                        .await?;
+                    let result = client.upload_part(&path, &upload, number, data).await?;
                     intent.etag = Some(result.etag.clone());
                     db.part(storage, token, &intent).await?;
                     parts.push(result);
@@ -277,8 +334,7 @@ impl Remote {
             if file.state != "sealed" {
                 return Ok(parts.len() > receipts.iter().filter(|p| p.etag.is_some()).count());
             }
-            match self
-                .client
+            match client
                 .complete_upload(&path, &upload, &parts, &Condition::Absent)
                 .await
             {
