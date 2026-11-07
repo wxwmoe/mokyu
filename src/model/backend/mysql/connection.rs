@@ -54,6 +54,7 @@ pub(crate) async fn connect(
         upload_cache: backend.clone(),
         multipart: backend.clone(),
         buckets: backend.clone(),
+        journal: backend.clone(),
         credentials: backend.clone(),
         administration: backend.clone(),
         accounts: backend.clone(),

@@ -3,6 +3,8 @@ pub(crate) const USER_LOCK: i64 = 734922709851002;
 mod connection;
 #[path = "../../shared/image.rs"]
 mod image_transactions;
+#[path = "../../shared/journal.rs"]
+mod journal;
 mod migration;
 #[path = "../../shared/node/reads.rs"]
 mod node_reads;
@@ -210,6 +212,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         upload_cache: backend.clone(),
         multipart: backend.clone(),
         buckets: backend.clone(),
+        journal: backend.clone(),
         credentials: backend.clone(),
         administration: backend.clone(),
         accounts: backend.clone(),

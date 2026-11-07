@@ -388,6 +388,9 @@ pub(in super::super) async fn save_bucket_settings(
             }
         }
     }
+    if let Some(enabled) = input.metadata_journal_enabled {
+        super::super::journal::configure(&mut tx, bucket, enabled).await?;
+    }
     queries::save_bucket_settings(bucket, &input)
         .execute(&mut *tx)
         .await?;
@@ -399,7 +402,7 @@ pub(in super::super) async fn save_bucket_settings(
 pub(in super::super) async fn bucket_settings(
     pool: &SqlitePool,
     bucket: Uuid,
-) -> Result<(Bucket, Vec<String>)> {
+) -> Result<(Bucket, Vec<String>, Option<bool>)> {
     let mut tx = pool.begin().await?;
     let row = queries::bucket_by_id(bucket)
         .fetch_optional(&mut *tx)
@@ -408,8 +411,11 @@ pub(in super::super) async fn bucket_settings(
     let domains = queries::bucket_domain_names(bucket)
         .fetch_all(&mut *tx)
         .await?;
+    let journal = queries::journal::enabled(bucket)
+        .fetch_optional(&mut *tx)
+        .await?;
     tx.commit().await?;
-    Ok((row, domains))
+    Ok((row, domains, journal))
 }
 
 pub(in super::super) async fn set_bucket_cors(

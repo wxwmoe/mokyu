@@ -64,6 +64,7 @@ pub(crate) use administration::AdministrationStore;
 pub(crate) use audit::AuditStore;
 pub(crate) use authorization::{AdminGuard, AuthorizationStore};
 
+pub(crate) mod journal;
 pub(crate) use bucket::BucketStore;
 pub(crate) use cache::UploadCacheStore;
 pub(crate) use chunk::Mapping;
@@ -102,6 +103,7 @@ pub(crate) use stream::{
 pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord};
 
 pub(crate) struct Stores {
+    pub(crate) journal: Arc<dyn journal::JournalStore>,
     pub(crate) integrity_rates: Arc<crate::storage::rate::IntegrityRates>,
     pub(crate) runtime: Arc<dyn runtime::RuntimeStore>,
     pub(crate) staging: Arc<dyn cluster::StagingStore>,

@@ -189,6 +189,7 @@ impl Active {
     }
 }
 pub struct App {
+    pub(crate) journal: Arc<dyn crate::model::journal::JournalStore>,
     pub(crate) node_writes: Arc<dyn crate::model::cluster::NodeWrites>,
     pub(crate) node_reads: Arc<dyn crate::model::cluster::NodeReads>,
     pub(crate) node_requests: Arc<dyn crate::model::cluster::NodeRequests>,
@@ -452,6 +453,7 @@ impl App {
             upload_cache: stores.upload_cache,
             multipart: stores.multipart,
             buckets: stores.buckets,
+            journal: stores.journal,
             credentials: stores.credentials,
             administration: stores.administration,
             task_execution: stores.task_execution,

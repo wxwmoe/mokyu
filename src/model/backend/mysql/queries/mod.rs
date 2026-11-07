@@ -146,6 +146,7 @@ pub(super) mod staging;
 pub(super) use raw::*;
 pub(super) mod external;
 pub(super) mod image;
+pub(super) mod journal;
 pub(super) mod redundancy;
 pub(super) mod replica;
 pub(super) mod replication;

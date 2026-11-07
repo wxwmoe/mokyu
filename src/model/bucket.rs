@@ -145,6 +145,7 @@ pub(crate) struct BucketUpdate {
     pub public_base_url: String,
     pub uploads_paused: bool,
     pub domains: Option<Vec<String>>,
+    pub metadata_journal_enabled: Option<bool>,
 }
 
 #[async_trait]
@@ -199,7 +200,7 @@ pub(crate) trait BucketStore: Send + Sync {
         host: &str,
         bucket: Option<Uuid>,
     ) -> Result<()>;
-    async fn settings(&self, bucket: Uuid) -> Result<(Bucket, Vec<String>)>;
+    async fn settings(&self, bucket: Uuid) -> Result<(Bucket, Vec<String>, Option<bool>)>;
     async fn save_settings(
         &self,
         principal: &Principal,

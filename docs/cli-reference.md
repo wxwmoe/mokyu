@@ -25,6 +25,7 @@
 | `bucket create NAME [--project UUID]` | 创建空逻辑桶，默认内置项目，返回桶信息 |
 | `bucket delete NAME` | 删除空桶，返回 deleted UUID；仍有对象、上传或待清理版本时拒绝 |
 | `bucket cors NAME FILE` | 用 JSON 文件替换 CORS，返回实际规则；`[]` 关闭 |
+| `bucket journal NAME [--enabled true\|false --revision N]` | 查看或修改桶的元数据日志开关，修改使用桶设置修订号。首次开启会扫描已存在的对象 |
 | `bucket tiering NAME show` | 返回冷热后端、当前策略、状态和修订号 |
 | `bucket tiering NAME preview FILE` / `set FILE` | 预览或保存含 `revision`、`policy` 的 JSON；文件名 `-` 从 stdin 读取 |
 | `bucket tiering NAME state ACTION --revision N` | 以当前修订号执行 `pause`、`resume`、`drain` 或 `disable` |

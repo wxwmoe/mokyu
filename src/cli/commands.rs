@@ -171,6 +171,13 @@ pub enum Integrity {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Buckets {
     List,
+    Journal {
+        name: String,
+        #[arg(long, requires = "revision")]
+        enabled: Option<bool>,
+        #[arg(long, requires = "enabled")]
+        revision: Option<i64>,
+    },
     Tiering {
         name: String,
         #[command(subcommand)]
@@ -633,7 +640,7 @@ impl Command {
             Self::Init { .. }
             | Self::Status { .. }
             | Self::Audit { .. }
-            | Self::Bucket(Buckets::List)
+            | Self::Bucket(Buckets::List | Buckets::Journal { enabled: None, .. })
             | Self::Bucket(Buckets::Tiering {
                 command:
                     Tiering::Show | Tiering::Preview { .. } | Tiering::Units(_) | Tiering::Usage(_),

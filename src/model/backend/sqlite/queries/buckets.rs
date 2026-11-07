@@ -335,7 +335,7 @@ impl BucketStore for Backend {
     ) -> Result<()> {
         transactions::domain_change(&self.write, principal, host, bucket).await
     }
-    async fn settings(&self, bucket: Uuid) -> Result<(Bucket, Vec<String>)> {
+    async fn settings(&self, bucket: Uuid) -> Result<(Bucket, Vec<String>, Option<bool>)> {
         transactions::bucket_settings(&self.read, bucket).await
     }
     async fn save_settings(

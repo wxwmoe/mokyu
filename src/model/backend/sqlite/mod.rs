@@ -3,6 +3,8 @@ mod connection;
 mod embedded_native;
 #[path = "../../shared/image.rs"]
 mod image_transactions;
+#[path = "../../shared/journal.rs"]
+mod journal;
 mod migration;
 #[path = "../../shared/node/native_parts.rs"]
 mod native_parts;

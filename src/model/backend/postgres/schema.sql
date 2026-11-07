@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261105213227.
+-- Generated from the complete postgres migration chain through 20261107092631.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -183,6 +183,67 @@ BEGIN
     UPDATE api_tokens SET authorization_revision=authorization_revision+1 WHERE id=COALESCE(NEW.token_id,OLD.token_id);
     RETURN NULL;
 END $$;
+
+CREATE FUNCTION public.journal_bucket_drop() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=OLD.id FOR UPDATE)>0 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1,scanning=FALSE,scan_after=NULL,scan_until=NULL WHERE bucket_id=OLD.id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,generation,seq,operation)
+            SELECT (SELECT st.block_key_id IS NOT NULL FROM storages st WHERE st.id=journal_buckets.storage_id),bucket_id,generation,last_seq,'drop' FROM journal_buckets WHERE bucket_id=OLD.id;
+    END IF;
+    RETURN OLD;
+END
+$$;
+
+CREATE FUNCTION public.journal_capture(p_bucket uuid, p_key text, p_stream uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    mode smallint;
+    n bigint;
+    gen bigint;
+BEGIN
+    SELECT journal_mode INTO mode FROM bucket_change_gates WHERE bucket_id=p_bucket FOR SHARE;
+    IF mode=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=p_bucket AND NOT dirty;
+    ELSIF mode=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=p_bucket
+            RETURNING last_seq,generation INTO STRICT n,gen;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes)
+        SELECT (SELECT s.block_key_id IS NOT NULL FROM journal_buckets b JOIN storages s ON s.id=b.storage_id WHERE b.bucket_id=p_bucket),p_bucket,n,gen,CASE WHEN p_stream IS NULL THEN 'delete' ELSE 'put' END,p_key,p_stream,
+            s.payload_revision,CASE WHEN p_stream IS NOT NULL THEN jsonb_build_object('size',s.size,'etag',s.etag,'metadata',s.metadata,'checksums',s.checksums,'payload',s.payload_type,'modified_us',(extract(epoch FROM s.touched_at)*1000000)::bigint) END
+        FROM (SELECT 1) AS one LEFT JOIN streams s ON s.id=p_stream;
+    END IF;
+END
+$$;
+
+CREATE FUNCTION public.journal_object_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        PERFORM journal_capture(OLD.bucket_id,OLD.object_key,NULL);
+    ELSE
+        PERFORM journal_capture(NEW.bucket_id,NEW.object_key,NEW.stream_id);
+    END IF;
+    RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.journal_stream_change() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF (OLD.payload_revision,OLD.metadata,OLD.checksums,OLD.etag,OLD.size)
+        IS DISTINCT FROM (NEW.payload_revision,NEW.metadata,NEW.checksums,NEW.etag,NEW.size)
+        AND EXISTS (SELECT 1 FROM objects WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND stream_id=NEW.id) THEN
+        PERFORM journal_capture(NEW.bucket_id,NEW.object_key,NEW.id);
+    END IF;
+    RETURN NULL;
+END
+$$;
 
 CREATE FUNCTION public.mokyu_capture_change(bucket uuid, object_name text, version uuid) RETURNS void
     LANGUAGE plpgsql
@@ -816,6 +877,8 @@ CREATE TABLE public.bucket_change_gates (
     subscribers integer DEFAULT 0 NOT NULL,
     managed integer DEFAULT 0 NOT NULL,
     required_targets integer DEFAULT 0 NOT NULL,
+    journal_mode smallint DEFAULT 0 NOT NULL,
+    CONSTRAINT bucket_change_gates_journal_mode_check CHECK ((journal_mode = ANY (ARRAY[0, 1, 2]))),
     CONSTRAINT bucket_change_gates_managed_check CHECK ((managed >= 0)),
     CONSTRAINT bucket_change_gates_required_targets_check CHECK ((required_targets >= 0)),
     CONSTRAINT bucket_change_gates_subscribers_check CHECK ((subscribers >= 0))
@@ -1043,6 +1106,38 @@ CREATE TABLE public.integrity_packs (
     task_id uuid NOT NULL,
     pack_id uuid NOT NULL,
     error_code text
+);
+
+CREATE TABLE public.journal_buckets (
+    bucket_id uuid NOT NULL,
+    storage_id uuid NOT NULL,
+    bucket_name text NOT NULL,
+    generation bigint DEFAULT 1 NOT NULL,
+    last_seq bigint DEFAULT 0 NOT NULL,
+    published_seq bigint DEFAULT 0 NOT NULL,
+    scanning boolean DEFAULT true NOT NULL,
+    scan_after text,
+    scan_until text,
+    dirty boolean DEFAULT false NOT NULL,
+    CONSTRAINT journal_buckets_check CHECK (((published_seq >= 0) AND (published_seq <= last_seq))),
+    CONSTRAINT journal_buckets_generation_check CHECK ((generation > 0)),
+    CONSTRAINT journal_buckets_last_seq_check CHECK ((last_seq >= 0))
+);
+
+CREATE TABLE public.journal_entries (
+    encrypt_frames boolean DEFAULT false NOT NULL,
+    bucket_id uuid NOT NULL,
+    seq bigint NOT NULL,
+    generation bigint NOT NULL,
+    operation text NOT NULL,
+    object_key text,
+    stream_id uuid,
+    payload_revision bigint,
+    attributes jsonb,
+    recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    CONSTRAINT journal_entries_generation_check CHECK ((generation > 0)),
+    CONSTRAINT journal_entries_operation_check CHECK ((operation = ANY (ARRAY['start'::text, 'ready'::text, 'put'::text, 'delete'::text, 'pause'::text, 'resume'::text, 'drop'::text]))),
+    CONSTRAINT journal_entries_seq_check CHECK ((seq > 0))
 );
 
 CREATE TABLE public.key_fingerprints (
@@ -2676,6 +2771,12 @@ ALTER TABLE ONLY public.integrity_issues
 ALTER TABLE ONLY public.integrity_packs
     ADD CONSTRAINT integrity_packs_pkey PRIMARY KEY (task_id, pack_id);
 
+ALTER TABLE ONLY public.journal_buckets
+    ADD CONSTRAINT journal_buckets_pkey PRIMARY KEY (bucket_id);
+
+ALTER TABLE ONLY public.journal_entries
+    ADD CONSTRAINT journal_entries_pkey PRIMARY KEY (bucket_id, seq);
+
 ALTER TABLE ONLY public.key_fingerprints
     ADD CONSTRAINT key_fingerprints_pkey PRIMARY KEY (key_id);
 
@@ -3142,6 +3243,12 @@ CREATE INDEX fragments_owner ON public.fragments USING btree (owner_stream) WHER
 
 CREATE INDEX integrity_issues_page ON public.integrity_issues USING btree (task_id, id);
 
+CREATE INDEX journal_buckets_scan ON public.journal_buckets USING btree (scanning, bucket_id);
+
+CREATE INDEX journal_buckets_storage ON public.journal_buckets USING btree (storage_id, bucket_id);
+
+CREATE INDEX journal_entries_stream ON public.journal_entries USING btree (stream_id);
+
 CREATE INDEX key_replacements_expiry ON public.key_replacements USING btree (expires_at);
 
 CREATE INDEX maintenance_previews_expiry ON public.maintenance_previews USING btree (expires_at);
@@ -3440,6 +3547,16 @@ CREATE TRIGGER external_token_authorization AFTER INSERT OR DELETE OR UPDATE ON 
 
 CREATE TRIGGER grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.member_bucket_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
 
+CREATE TRIGGER journal_delete AFTER DELETE ON public.objects FOR EACH ROW WHEN ((old.stream_id IS NOT NULL)) EXECUTE FUNCTION public.journal_object_change();
+
+CREATE TRIGGER journal_drop BEFORE DELETE ON public.buckets FOR EACH ROW EXECUTE FUNCTION public.journal_bucket_drop();
+
+CREATE TRIGGER journal_insert AFTER INSERT ON public.objects FOR EACH ROW WHEN ((new.stream_id IS NOT NULL)) EXECUTE FUNCTION public.journal_object_change();
+
+CREATE TRIGGER journal_stream AFTER UPDATE OF payload_revision, metadata, checksums, etag, size ON public.streams FOR EACH ROW EXECUTE FUNCTION public.journal_stream_change();
+
+CREATE TRIGGER journal_update AFTER UPDATE ON public.objects FOR EACH ROW WHEN ((old.stream_id IS DISTINCT FROM new.stream_id)) EXECUTE FUNCTION public.journal_object_change();
+
 CREATE TRIGGER member_authorization AFTER INSERT OR DELETE OR UPDATE ON public.project_members FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
 
 CREATE TRIGGER objects_capture AFTER INSERT OR DELETE OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.mokyu_capture_object();
@@ -3614,6 +3731,15 @@ ALTER TABLE ONLY public.integrity_packs
 
 ALTER TABLE ONLY public.integrity_packs
     ADD CONSTRAINT integrity_packs_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.journal_buckets
+    ADD CONSTRAINT journal_buckets_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.journal_entries
+    ADD CONSTRAINT journal_entries_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.journal_buckets(bucket_id);
+
+ALTER TABLE ONLY public.journal_entries
+    ADD CONSTRAINT journal_entries_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id);
 
 ALTER TABLE ONLY public.maintenance_previews
     ADD CONSTRAINT maintenance_previews_actor_id_fkey FOREIGN KEY (actor_id) REFERENCES public.web_users(id) ON DELETE CASCADE;

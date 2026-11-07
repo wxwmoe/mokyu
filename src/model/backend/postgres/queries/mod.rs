@@ -167,6 +167,7 @@ pub(super) mod replication_remote;
 #[path = "../../../shared/node/read_sources.rs"]
 pub(super) mod sources;
 pub(super) use sources::{NodeReadChunk, NodeReadFragment, NodeReadRaw};
+pub(super) mod journal;
 pub(super) mod tier;
 pub(super) mod tier_reads;
 pub(super) mod transfer;

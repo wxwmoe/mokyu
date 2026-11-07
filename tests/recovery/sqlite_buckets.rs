@@ -22,6 +22,7 @@ fn create(name: &str) -> CreateBucket {
 }
 fn settings(bucket: &Bucket, paused: bool, domains: Option<Vec<String>>) -> BucketUpdate {
     BucketUpdate {
+        metadata_journal_enabled: None,
         revision: bucket.settings_revision,
         cors: (*bucket.cors).clone(),
         website_enabled: bucket.website_enabled,
@@ -134,7 +135,8 @@ async fn sqlite_bucket_contract() -> Result<()> {
             .await
             .is_err()
     );
-    let (row, domains) = backend.settings(bucket.id).await?;
+    let (row, domains, journal) = backend.settings(bucket.id).await?;
+    assert!(journal.is_none());
     assert_eq!(domains, vec!["a.example", "b.example"]);
     assert_eq!(row.settings_revision, 2);
     assert_eq!(backend.by_host("a.example").await?.unwrap().id, bucket.id);

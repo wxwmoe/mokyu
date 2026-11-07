@@ -123,7 +123,9 @@ connection 包含 `endpoint_url`、`region`、`bucket`、`prefix`（默认空）
 
 域名绑定由管理员统一维护：`GET/POST /api/v1/domains` 列举或创建 `{host,bucket_id}` 绑定，`DELETE /api/v1/domains/{host}` 删除绑定。一个 host 只能指向一个桶；删除桶或转移项目不会静默抢占域名。
 
-桶信息含 id、name、project_id、actions、status、revision、uploads_paused、public_base_url、CORS 和网站设置。统一保存携带读取时的 revision；并发改变返回 412。成员需要 bucket.settings，只能改 CORS 与网站；域名、公共 URL 和暂停新上传限管理员。
+`GET /api/v1/buckets/{bucket}/settings` 同时返回 `metadata_journal_enabled`，托管 S3 后端为 boolean，本地后端为 null。保存时可携带该字段，省略则沿用原值。`metadata_journal` 返回捕获代次、业务序、已发布序、待同步条数和初始扫描状态，序号与计数使用十进制字符串。日志默认关闭，首次开启会分页捕获已有对象，随后在对象发布事务内捕获变更。停用保留已有恢复点，停用期间有对象变化时重新开启会补建基线。
+
+桶信息含 id、name、project_id、actions、status、revision、uploads_paused、public_base_url、CORS 和网站设置。统一保存携带读取时的 revision；并发改变返回 412。成员需要 bucket.settings，可改 CORS、网站与元数据日志。域名、公共 URL 和暂停新上传限管理员。
 
 删除、清桶和转移限管理员，执行时提交预览返回的 confirmation 与精确 confirm_name。空桶删除也要求没有残留流或上传历史。转移先暂停新上传并排空写入、multipart、额度预留，再检查目标额度、转移用量、清除旧桶授权，按目标项目范围重新计算权限；公共域名和桶限额保留，成功后恢复新上传。已开始的 multipart 在暂停期间仍可完成。
 

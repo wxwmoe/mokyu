@@ -1,6 +1,7 @@
 pub(crate) mod cdc;
 pub(crate) mod gc;
 pub(crate) mod integrity;
+pub(crate) mod journal;
 pub(crate) mod lifecycle;
 pub(crate) mod maintenance;
 pub(crate) mod migration;

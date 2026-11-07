@@ -2241,6 +2241,14 @@ export interface components {
             uploads_paused: boolean;
             writing_streams: string;
         };
+        BucketJournal: {
+            captured_sequence: string;
+            dirty: boolean;
+            generation: string;
+            pending_records: string;
+            published_sequence: string;
+            scanning: boolean;
+        };
         BucketPreview: {
             bucket: components["schemas"]["BucketImpact"];
             confirmation: string;
@@ -2253,6 +2261,8 @@ export interface components {
         BucketSettings: {
             bucket: components["schemas"]["BucketView"];
             domains: string[];
+            metadata_journal?: components["schemas"]["BucketJournal"] | null;
+            metadata_journal_enabled?: boolean | null;
         };
         BucketStorage: {
             /** Format: uuid */
@@ -3621,6 +3631,7 @@ export interface components {
             domains?: string[] | null;
             error_document: string;
             index_document: string;
+            metadata_journal_enabled?: boolean | null;
             public_base_url: string;
             revision: string;
             uploads_paused: boolean;

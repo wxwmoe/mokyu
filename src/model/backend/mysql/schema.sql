@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261105213227.
+-- Generated from the complete mysql migration chain through 20261107092631.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -61,11 +61,13 @@ CREATE TABLE `bucket_change_gates` (
   `subscribers` int NOT NULL DEFAULT '0',
   `managed` int NOT NULL DEFAULT '0',
   `required_targets` int NOT NULL DEFAULT '0',
+  `journal_mode` smallint NOT NULL DEFAULT '0',
   PRIMARY KEY (`bucket_id`),
   CONSTRAINT `bucket_change_gates_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
   CONSTRAINT `bucket_change_gates_chk_1` CHECK ((`subscribers` >= 0)),
   CONSTRAINT `bucket_change_gates_chk_2` CHECK ((`managed` >= 0)),
-  CONSTRAINT `bucket_change_gates_chk_3` CHECK ((`required_targets` >= 0))
+  CONSTRAINT `bucket_change_gates_chk_3` CHECK ((`required_targets` >= 0)),
+  CONSTRAINT `bucket_change_gates_chk_4` CHECK ((`journal_mode` in (0,1,2)))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `bucket_domains` (
@@ -384,6 +386,46 @@ CREATE TABLE `integrity_packs` (
   KEY `integrity_packs_pack` (`pack_id`),
   CONSTRAINT `integrity_packs_pack` FOREIGN KEY (`pack_id`) REFERENCES `packs` (`id`) ON DELETE CASCADE,
   CONSTRAINT `integrity_packs_task` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_buckets` (
+  `bucket_id` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `bucket_name` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `generation` bigint NOT NULL DEFAULT '1',
+  `last_seq` bigint NOT NULL DEFAULT '0',
+  `published_seq` bigint NOT NULL DEFAULT '0',
+  `scanning` tinyint(1) NOT NULL DEFAULT '1',
+  `scan_after` varbinary(1024) DEFAULT NULL,
+  `scan_until` varbinary(1024) DEFAULT NULL,
+  `dirty` tinyint(1) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`bucket_id`),
+  KEY `journal_buckets_storage` (`storage_id`,`bucket_id`),
+  KEY `journal_buckets_scan` (`scanning`,`bucket_id`),
+  CONSTRAINT `journal_buckets_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT `journal_buckets_chk_1` CHECK ((`generation` > 0)),
+  CONSTRAINT `journal_buckets_chk_2` CHECK ((`last_seq` >= 0)),
+  CONSTRAINT `journal_buckets_chk_3` CHECK (((`published_seq` >= 0) and (`published_seq` <= `last_seq`)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `journal_entries` (
+  `encrypt_frames` tinyint(1) NOT NULL DEFAULT '0',
+  `bucket_id` binary(16) NOT NULL,
+  `seq` bigint NOT NULL,
+  `generation` bigint NOT NULL,
+  `operation` varchar(8) COLLATE utf8mb4_bin NOT NULL,
+  `object_key` varbinary(1024) DEFAULT NULL,
+  `stream_id` bigint DEFAULT NULL,
+  `payload_revision` bigint DEFAULT NULL,
+  `attributes` json DEFAULT NULL,
+  `recorded_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`bucket_id`,`seq`),
+  KEY `journal_entries_stream` (`stream_id`),
+  CONSTRAINT `journal_entries_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `journal_buckets` (`bucket_id`),
+  CONSTRAINT `journal_entries_ibfk_2` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`),
+  CONSTRAINT `journal_entries_chk_1` CHECK ((`seq` > 0)),
+  CONSTRAINT `journal_entries_chk_2` CHECK ((`generation` > 0)),
+  CONSTRAINT `journal_entries_chk_3` CHECK ((`operation` in (_utf8mb4'start',_utf8mb4'ready',_utf8mb4'put',_utf8mb4'delete',_utf8mb4'pause',_utf8mb4'resume',_utf8mb4'drop')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `key_replacements` (
@@ -2253,6 +2295,84 @@ END;
 CREATE TRIGGER `encodings_owner_update` BEFORE UPDATE ON `chunk_encodings` FOR EACH ROW BEGIN
     IF NEW.owner_task IS NOT NULL AND NEW.owner_stream IS NOT NULL THEN
         SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='encoding owners are exclusive';
+    END IF;
+END;
+
+CREATE TRIGGER `journal_delete` AFTER DELETE ON `objects` FOR EACH ROW BEGIN
+    DECLARE mode_value SMALLINT DEFAULT 0;
+    IF OLD.stream_id IS NOT NULL THEN
+        SELECT journal_mode INTO mode_value FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id LOCK IN SHARE MODE;
+        IF mode_value=2 THEN
+            UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=OLD.bucket_id AND NOT dirty;
+        ELSEIF mode_value=1 THEN
+            UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=OLD.bucket_id;
+            INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes)
+        SELECT (SELECT st.block_key_id IS NOT NULL FROM storages st WHERE st.id=j.storage_id),j.bucket_id,j.last_seq,j.generation,'delete',OLD.object_key,NULL,
+            NULL,NULL
+        FROM journal_buckets j
+        WHERE j.bucket_id=OLD.bucket_id;
+        END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `journal_drop` BEFORE DELETE ON `buckets` FOR EACH ROW BEGIN
+    DECLARE mode_value SMALLINT DEFAULT 0;
+    SELECT journal_mode INTO mode_value FROM bucket_change_gates WHERE bucket_id=OLD.id FOR UPDATE;
+    IF mode_value>0 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1,scanning=FALSE,scan_after=NULL,scan_until=NULL WHERE bucket_id=OLD.id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,generation,seq,operation)
+            SELECT (SELECT st.block_key_id IS NOT NULL FROM storages st WHERE st.id=journal_buckets.storage_id),bucket_id,generation,last_seq,'drop' FROM journal_buckets WHERE bucket_id=OLD.id;
+    END IF;
+END;
+
+CREATE TRIGGER `journal_insert` AFTER INSERT ON `objects` FOR EACH ROW BEGIN
+    DECLARE mode_value SMALLINT DEFAULT 0;
+    IF NEW.stream_id IS NOT NULL THEN
+        SELECT journal_mode INTO mode_value FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF mode_value=2 THEN
+            UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.bucket_id AND NOT dirty;
+        ELSEIF mode_value=1 THEN
+            UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.bucket_id;
+            INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes)
+        SELECT (SELECT st.block_key_id IS NOT NULL FROM storages st WHERE st.id=j.storage_id),j.bucket_id,j.last_seq,j.generation,'put',NEW.object_key,NEW.stream_id,
+            s.payload_revision,CASE WHEN s.id IS NOT NULL THEN JSON_OBJECT('size',s.size,'etag',s.etag,'metadata',JSON_EXTRACT(s.metadata,'$'),'checksums',JSON_EXTRACT(s.checksums,'$'),'payload',s.payload_type,'modified_us',TIMESTAMPDIFF(MICROSECOND,'1970-01-01',s.touched_at)) END
+        FROM journal_buckets j LEFT JOIN streams s ON s.id=NEW.stream_id
+        WHERE j.bucket_id=NEW.bucket_id;
+        END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `journal_stream` AFTER UPDATE ON `streams` FOR EACH ROW BEGIN
+    DECLARE mode_value SMALLINT DEFAULT 0;
+    IF (OLD.payload_revision<>NEW.payload_revision OR NOT (OLD.metadata <=> NEW.metadata) OR NOT (OLD.checksums <=> NEW.checksums) OR OLD.etag<>NEW.etag OR OLD.size<>NEW.size) AND EXISTS (SELECT 1 FROM objects WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND stream_id=NEW.id) THEN
+        SELECT journal_mode INTO mode_value FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF mode_value=2 THEN
+            UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.bucket_id AND NOT dirty;
+        ELSEIF mode_value=1 THEN
+            UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.bucket_id;
+            INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes)
+        SELECT (SELECT st.block_key_id IS NOT NULL FROM storages st WHERE st.id=j.storage_id),j.bucket_id,j.last_seq,j.generation,'put',NEW.object_key,NEW.id,
+            NEW.payload_revision,JSON_OBJECT('size',NEW.size,'etag',NEW.etag,'metadata',JSON_EXTRACT(NEW.metadata,'$'),'checksums',JSON_EXTRACT(NEW.checksums,'$'),'payload',NEW.payload_type,'modified_us',TIMESTAMPDIFF(MICROSECOND,'1970-01-01',NEW.touched_at))
+        FROM journal_buckets j
+        WHERE j.bucket_id=NEW.bucket_id;
+        END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `journal_update` AFTER UPDATE ON `objects` FOR EACH ROW BEGIN
+    DECLARE mode_value SMALLINT DEFAULT 0;
+    IF NOT (OLD.stream_id <=> NEW.stream_id) THEN
+        SELECT journal_mode INTO mode_value FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF mode_value=2 THEN
+            UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.bucket_id AND NOT dirty;
+        ELSEIF mode_value=1 THEN
+            UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.bucket_id;
+            INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes)
+        SELECT (SELECT st.block_key_id IS NOT NULL FROM storages st WHERE st.id=j.storage_id),j.bucket_id,j.last_seq,j.generation,CASE WHEN NEW.stream_id IS NULL THEN 'delete' ELSE 'put' END,NEW.object_key,NEW.stream_id,
+            s.payload_revision,CASE WHEN s.id IS NOT NULL THEN JSON_OBJECT('size',s.size,'etag',s.etag,'metadata',JSON_EXTRACT(s.metadata,'$'),'checksums',JSON_EXTRACT(s.checksums,'$'),'payload',s.payload_type,'modified_us',TIMESTAMPDIFF(MICROSECOND,'1970-01-01',s.touched_at)) END
+        FROM journal_buckets j LEFT JOIN streams s ON s.id=NEW.stream_id
+        WHERE j.bucket_id=NEW.bucket_id;
+        END IF;
     END IF;
 END;
 

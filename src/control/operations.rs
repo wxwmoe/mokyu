@@ -791,6 +791,14 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let buckets: Vec<Bucket> = app.buckets.all().await?;
             Ok(serde_json::to_value(buckets)?)
         }
+        Command::Bucket(Buckets::Journal {
+            name,
+            enabled,
+            revision,
+        }) => {
+            let bucket = app.bucket(&name, true).await?.id;
+            super::buckets::journal_option(app, principal, bucket, enabled, revision).await
+        }
         Command::Bucket(Buckets::Tiering { name, command }) => {
             let bucket = app.bucket(&name, true).await?.id;
             use crate::model::tiering::{Change, Update};

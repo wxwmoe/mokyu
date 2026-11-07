@@ -134,6 +134,8 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 | `transfer_runs` | 关联已有 `storage_migration` 任务，保存 `operation=replication` 的范围、权限来源、存储配置修订、扫描游标、验证代次及阶段/进度 |
 | `transfer_items` | 每个源/目标 key 的预期版本、来源保护、写入候选、映射进度和最终结果；来源与候选使用 stream 外键，活动保护同时参与 GC 选择和领取判断 |
 | `bucket_change_gates`、`transfer_subscriptions` | 桶发布的共享提交边界及活动复制范围；激活和封口使用独占边界，不在事务外缓存订阅是否存在 |
+| `journal_buckets` | 元数据日志捕获代次、业务提交序、已发布序和初始扫描游标。保留关闭桶的恢复边界 |
+| `journal_entries` | 对象发布事务内的待导出记录，保存桶内顺序、对象键、读取属性和载荷版本引用。来源流参与 GC 保护 |
 | `transfer_changes` | 按任务和对象 key 合并的持久变更，保存版本、元数据、权限与消费修订；来源外键参与 GC 保护，封口后保留至确认、冲突或取消 |
 | `transfer_sources` | 按任务、来源类型及原生来源 ID 去重的 raw/chunk/pack 依赖；raw 保存完整验证对应的来源快照和代次，活动任务保护其物理来源 |
 | `transfer_connections` | 活动外部任务使用的连接修订与加密凭据，密文绑定任务和资源；阻止删除引用中的外部资源，结束后释放 |

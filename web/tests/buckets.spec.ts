@@ -33,6 +33,15 @@ test('bucket creation, settings conflicts, CORS, website, paused transfer and de
     await expect(page.getByRole('heading', { name, exact: true })).toBeVisible()
     id = page.url().split('/').pop()!
     const path = `/api/v1/buckets/${id}/settings`
+    const journal = page.getByRole('checkbox', { name: en.metadataJournal, exact: true })
+    if ((await (await request.get(path)).json()).metadata_journal_enabled == null) {
+      await expect(journal).toHaveCount(0)
+    } else {
+      await expect(journal).not.toBeChecked()
+      await journal.check()
+      await page.getByRole('button', { name: en.save, exact: true }).click()
+      await expect.poll(async () => (await (await request.get(path)).json()).metadata_journal_enabled).toBe(true)
+    }
     await page.getByRole('textbox', { name: en.publicBaseUrl, exact: true }).fill('https://media.example.test/')
     await page.getByRole('textbox', { name: en.bucketDomains, exact: true }).fill(name + '.test\n' + name + '-two.test')
     await page.getByRole('button', { name: en.save, exact: true }).click()

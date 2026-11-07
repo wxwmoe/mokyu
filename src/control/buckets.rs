@@ -24,6 +24,8 @@ use uuid::Uuid;
 pub(super) struct BucketSettings {
     bucket: BucketView,
     domains: Vec<String>,
+    metadata_journal_enabled: Option<bool>,
+    metadata_journal: Option<crate::model::journal::BucketJournal>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -55,6 +57,7 @@ pub(super) struct SettingsInput {
     public_base_url: String,
     uploads_paused: bool,
     domains: Option<Vec<String>>,
+    metadata_journal_enabled: Option<bool>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -235,11 +238,56 @@ pub(super) async fn remove_domain(
     domain_change(&app, &actor.principal, &host, None).await?;
     Ok(StatusCode::NO_CONTENT)
 }
+pub(super) async fn journal_option(
+    app: &App,
+    principal: &Principal,
+    bucket: Uuid,
+    enabled: Option<bool>,
+    revision: Option<i64>,
+) -> Result<serde_json::Value> {
+    principal
+        .require(app.authorization.as_ref(), bucket, Action::Settings)
+        .await?;
+    let (row, _, previous) = app.buckets.settings(bucket).await?;
+    let (revision, enabled) = if let Some(enabled) = enabled {
+        app.writable()?;
+        app.buckets
+            .save_settings(
+                principal,
+                bucket,
+                BucketUpdate {
+                    revision: revision.ok_or_else(|| {
+                        s3s::s3_error!(InvalidArgument, "missing bucket revision")
+                    })?,
+                    cors: serde_json::to_value(&row.cors)?,
+                    website_enabled: row.website_enabled,
+                    index_document: row.index_document,
+                    error_document: row.error_document,
+                    public_base_url: row.public_base_url,
+                    uploads_paused: row.uploads_paused,
+                    domains: None,
+                    metadata_journal_enabled: Some(enabled),
+                },
+            )
+            .await?;
+        app.wake_maintenance.notify_waiters();
+        let (row, _, enabled) = app.buckets.settings(bucket).await?;
+        (row.settings_revision, enabled)
+    } else {
+        (row.settings_revision, previous)
+    };
+    Ok(serde_json::json!({
+        "metadata_journal_enabled": enabled,
+        "revision": revision.to_string(),
+        "metadata_journal": app.journal.bucket(bucket).await?,
+    }))
+}
+
 async fn settings(app: &App, principal: &Principal, bucket: Uuid) -> Result<BucketSettings> {
     principal
         .require(app.authorization.as_ref(), bucket, Action::Settings)
         .await?;
-    let (row, domains) = app.buckets.settings(bucket).await?;
+    let (row, domains, metadata_journal_enabled) = app.buckets.settings(bucket).await?;
     let mut view = BucketView::from(row);
     view.actions = principal
         .actions(app.authorization.as_ref(), bucket)
@@ -250,6 +298,8 @@ async fn settings(app: &App, principal: &Principal, bucket: Uuid) -> Result<Buck
     Ok(BucketSettings {
         bucket: view,
         domains,
+        metadata_journal_enabled,
+        metadata_journal: app.journal.bucket(bucket).await?,
     })
 }
 #[utoipa::path(post,operation_id="bucket_create",path="/api/v1/buckets",request_body=CreateBucket,responses((status=201,body=BucketView)))]
@@ -340,9 +390,11 @@ pub(super) async fn save(
                 public_base_url: url,
                 uploads_paused: input.uploads_paused,
                 domains,
+                metadata_journal_enabled: input.metadata_journal_enabled,
             },
         )
         .await?;
+    app.wake_maintenance.notify_waiters();
     Ok(Json(settings(&app, &actor.principal, bucket).await?))
 }
 #[utoipa::path(delete,operation_id="bucket_delete",path="/api/v1/buckets/{bucket}",params(("bucket"=Uuid,Path)),request_body=ConfirmBucket,responses((status=204)))]
