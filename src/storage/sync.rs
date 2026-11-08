@@ -1,5 +1,5 @@
 use super::{CachePin, Storage, chunk_name, raw::sync_directory, read_bounded};
-use crate::content::codec::{Chunk, IntegrityError, MAX};
+use crate::content::codec::{Chunk, IntegrityError};
 use anyhow::{Context, Result, ensure};
 use std::sync::atomic::Ordering;
 
@@ -74,12 +74,12 @@ impl Storage {
                 == if cached {
                     chunk.raw_size as u64
                 } else {
-                    chunk.stored_size.context("encoded size missing")? as u64
+                    chunk.file_size()? as u64
                 },
             IntegrityError::Length
         );
         if verify {
-            let bytes = read_bounded(&path, MAX + 16).await?;
+            let bytes = read_bounded(&path, crate::content::codec::MAX_FILE).await?;
             if cached {
                 ensure!(
                     blake3::hash(&bytes).as_bytes() == chunk.hash.as_slice(),

@@ -53,7 +53,7 @@ impl PhysicalSource {
     pub(crate) fn bytes(&self) -> Result<i64> {
         use anyhow::Context;
         match self {
-            Self::Chunk(c) => c.stored_size.map(i64::from),
+            Self::Chunk(c) => Some(c.file_size()? as i64),
             Self::Pack(p) => p.stored_size,
             Self::Raw(r) => Some(r.size),
         }

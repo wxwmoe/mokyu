@@ -359,7 +359,7 @@ pub(crate) async fn execute(
     let limit = match original {
         PhysicalSource::Chunk(c) => {
             codec::validate_metadata(c, keys.as_ref())?;
-            codec::MAX + 16
+            codec::MAX_FILE
         }
         PhysicalSource::Pack(p) => {
             p.validate(keys.as_ref())?;

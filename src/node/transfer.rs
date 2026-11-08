@@ -24,7 +24,7 @@ impl Reader {
         );
         let payload = match &plan.input {
             Input::Pack { pack, .. } => pack.payload_size()? as u64 + 16,
-            Input::Chunk { chunk } => chunk.raw_size as u64 + 16,
+            Input::Chunk { chunk } => chunk.file_size()? as u64,
             Input::Raw { .. } => crate::model::transfer::PROOF_BYTES as u64,
         };
         let units = (payload.saturating_mul(4) + self.workspace).div_ceil(1024 * 1024);

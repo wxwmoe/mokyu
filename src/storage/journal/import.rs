@@ -152,7 +152,7 @@ impl Import<'_> {
                 .as_ref()
                 .context("missing local raw namespace")?;
             let dest = root.join(
-                to.strip_prefix("raw/")
+                to.strip_prefix("objects/")
                     .context("invalid recovered raw path")?,
             );
             let parent = dest.parent().context("missing raw directory")?;
@@ -321,7 +321,7 @@ impl Import<'_> {
             Material::Raw { source } => self.raw(mat, source, &from, &to).await?,
             Material::Chunk { chunk } => {
                 codec::validate_metadata(chunk, &self.keys)?;
-                let size = u64::try_from(chunk.stored_size.context("missing chunk size")?)?;
+                let size = chunk.file_size()? as u64;
                 let data = source::bytes(self.origin.as_ref(), &from, size)
                     .await?
                     .context("missing recovered chunk")?;

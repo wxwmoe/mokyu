@@ -1740,10 +1740,7 @@ impl Storage {
         let storage_id = c.storage_id.context("chunk has no store")?;
         self.ensure_storage_verified(storage_id).await?;
         let target = self.store_backend(storage_id)?;
-        ensure!(
-            Some(encoded.len() as i32) == c.stored_size,
-            "encoded length mismatch"
-        );
+        c.file_body(&encoded)?;
         let permit = target.writes.acquire().await?;
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
@@ -2804,7 +2801,7 @@ impl Storage {
                     crate::worker::integrity::Mode::Head => {
                         let size = self.head(&physical).await?;
                         ensure!(
-                            Some(size as i32) == physical.stored_size,
+                            size == physical.file_size()? as u64,
                             codec::IntegrityError::Length
                         );
                         Ok(0)
@@ -2953,7 +2950,7 @@ impl Storage {
         self.read_path_for(
             storage_id,
             &self.path_for(storage_id, c.address())?,
-            MAX + 16,
+            codec::MAX_FILE,
         )
         .await
     }

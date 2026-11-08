@@ -94,7 +94,7 @@ impl Reader {
                 PhysicalSource::Chunk(chunk) => {
                     codec::validate_metadata(chunk, keys.as_ref())?;
                     (
-                        codec::MAX + 16,
+                        codec::MAX_FILE,
                         crate::storage::location::Layout::S3.chunk(chunk.address()),
                     )
                 }
@@ -116,7 +116,7 @@ impl Reader {
                 self.gets.fetch_add(1, Ordering::Relaxed);
                 let meta = backend.store.backend.head(&path).await?;
                 let expected = match &snapshot.physical {
-                    PhysicalSource::Chunk(chunk) => chunk.stored_size.map(i64::from),
+                    PhysicalSource::Chunk(chunk) => Some(chunk.file_size()? as i64),
                     PhysicalSource::Pack(pack) => pack.stored_size,
                     PhysicalSource::Raw(_) => unreachable!(),
                 };

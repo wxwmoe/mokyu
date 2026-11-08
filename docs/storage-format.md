@@ -8,7 +8,7 @@ Mokyu 的格式标记共 8 字节。前 5 字节是 ASCII `MOKYU`，后 3 字节
 
 | 编号 | 用途 |
 | --- | --- |
-| `0x000003` | [独立区块的AAD 标记](#物理编码和完整性) |
+| `0x000003` | [独立区块的明文文件头及 AAD 标记](#物理编码和完整性) |
 | `0x000004` | [整包编码前的区块包头及 AAD 标记](#区块包) |
 | `0x000006` | [元数据恢复帧的标记](#存储布局) |
 | `0x000007` | [raw 部分读缓存的 `.map` 文件头](#本地目录和缓存) |
@@ -83,7 +83,7 @@ S3 raw 开启 `upload_cache` 后，在 `<data_path>/pending/objects/<末三位�
 
 每个 ready 独立来源保存物理 UUID、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、nonce 和 `encoding_fingerprint`；区块包保存对应的 `pack_fingerprint`。fingerprint 绑定 key、算法、压缩和 storage profile，`storage rewrite` 用它判断是否需要处理。
 
-区块格式为 2，AAD 标记为 `MOKYU\x00\x00\x03`，绑定持久逻辑 UUID、物理 UUID、明文哈希、原始长度、编码长度、压缩标志、算法和 block key UUID。数据库整数主键不进入密文格式。读取顺序固定为认证、解密、有界解压、长度检查和 BLAKE3 检查；任何元数据或载荷不匹配都报告完整性错误。
+独立区块文件以 8 字节明文文件头 `MOKYU\x00\x00\x03` 开始。文件头后保存该区块的编码，数据库中的 `stored_size` 为编码字节数，包含适用的认证标签。文件长度为 `8 + stored_size`。加密只覆盖编码正文。区块格式为 2，AAD 标记为 `MOKYU\x00\x00\x03`，绑定持久逻辑 UUID、物理 UUID、明文哈希、原始长度、编码长度、压缩标志、算法和 block key UUID。数据库整数主键不进入密文格式。读取顺序固定为认证、解密、有界解压、长度检查和 BLAKE3 检查；任何元数据或载荷不匹配都报告完整性错误。
 
 nonce 为 12 字节：前 4 字节编码来源类型和 UTC 日期，后 8 字节为独立的正整数 `nonce_id`。加密的物理区块编码和区块包分别使用类型标记 0 和 1；未加密来源的 `nonce_id`、nonce 和 `block_key_id` 均为空。逻辑区块、pack 成员和 raw 不单独分配 nonce。
 

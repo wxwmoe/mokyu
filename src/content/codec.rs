@@ -10,6 +10,8 @@ use uuid::Uuid;
 pub const MIN: usize = 256 * 1024;
 pub const AVG: usize = 1024 * 1024;
 pub const MAX: usize = 4 * 1024 * 1024;
+pub(crate) const FILE_HEADER: &[u8; 8] = b"MOKYU\0\0\x03";
+pub(crate) const MAX_FILE: usize = FILE_HEADER.len() + MAX + 16;
 
 #[derive(Debug, Clone, Copy)]
 pub enum IntegrityError {
@@ -116,6 +118,20 @@ pub struct Chunk {
 }
 
 impl Chunk {
+    pub(crate) fn file_size(&self) -> Result<usize> {
+        let body = self
+            .stored_size
+            .filter(|n| (1..=(MAX as i32 + 16)).contains(n))
+            .context(IntegrityError::Length)?;
+        Ok(FILE_HEADER.len() + body as usize)
+    }
+
+    pub(crate) fn file_body<'a>(&self, file: &'a [u8]) -> Result<&'a [u8]> {
+        ensure!(file.len() == self.file_size()?, IntegrityError::Length);
+        file.strip_prefix(FILE_HEADER.as_slice())
+            .context(IntegrityError::Metadata)
+    }
+
     pub fn home_storage(&self) -> Option<Uuid> {
         self.home_storage_id.or(self.storage_id)
     }
@@ -216,7 +232,7 @@ fn aad(c: &Chunk) -> Result<Vec<u8>> {
         "invalid chunk metadata"
     );
     let mut aad = Vec::with_capacity(128 + c.block_key_id.map_or(0, |id| id.to_string().len()));
-    aad.extend_from_slice(b"MOKYU\x00\x00\x03");
+    aad.extend_from_slice(FILE_HEADER);
     aad.extend_from_slice(c.uuid.as_bytes());
     aad.extend_from_slice(c.location_id.as_bytes());
     aad.extend_from_slice(&c.hash);
@@ -280,7 +296,15 @@ pub fn encode(
     Ok((c, encoded, cache))
 }
 
-pub(crate) fn seal(c: &Chunk, mut encoded: Vec<u8>, keys: &dyn KeySource) -> Result<Vec<u8>> {
+pub(crate) fn seal(c: &Chunk, encoded: Vec<u8>, keys: &dyn KeySource) -> Result<Vec<u8>> {
+    let body = seal_body(c, encoded, keys)?;
+    let mut file = Vec::with_capacity(FILE_HEADER.len() + body.len());
+    file.extend_from_slice(FILE_HEADER);
+    file.extend_from_slice(&body);
+    Ok(file)
+}
+
+pub(crate) fn seal_body(c: &Chunk, mut encoded: Vec<u8>, keys: &dyn KeySource) -> Result<Vec<u8>> {
     let tag_len = if c.algorithm == "none" { 0 } else { 16 };
     ensure!(
         encoded.len() <= MAX && c.stored_size == Some(i32::try_from(encoded.len() + tag_len)?),
@@ -349,7 +373,13 @@ pub fn decode_read(
     };
     Ok((raw, cache))
 }
-pub(crate) fn open(c: &Chunk, mut encoded: Vec<u8>, keys: &dyn KeySource) -> Result<Vec<u8>> {
+pub(crate) fn open(c: &Chunk, mut file: Vec<u8>, keys: &dyn KeySource) -> Result<Vec<u8>> {
+    c.file_body(&file)?;
+    file.drain(..FILE_HEADER.len());
+    open_body(c, file, keys)
+}
+
+pub(crate) fn open_body(c: &Chunk, mut encoded: Vec<u8>, keys: &dyn KeySource) -> Result<Vec<u8>> {
     ensure!(
         encoded.len() <= MAX + 16 && Some(encoded.len() as i32) == c.stored_size,
         IntegrityError::Length
@@ -584,7 +614,12 @@ mod tests {
                 _ => "c692b7da947c6766f31f607589ba734f9784cf667944313c",
             };
             assert_eq!(&aad(&c).unwrap()[..8], b"MOKYU\x00\x00\x03");
-            assert_eq!(hex::encode(&encoded), expected);
+            assert_eq!(&encoded[..8], FILE_HEADER);
+            assert_eq!(hex::encode(c.file_body(&encoded).unwrap()), expected);
+            assert_eq!(encoded.len(), 8 + c.stored_size.unwrap() as usize);
+            let mut wrong_header = encoded.clone();
+            wrong_header[7] = 5;
+            assert!(c.file_body(&wrong_header).is_err());
             let keys = c
                 .block_key_id
                 .into_iter()

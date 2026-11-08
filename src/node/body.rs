@@ -448,7 +448,7 @@ impl Reader {
                 &prepared,
                 chunk.storage_id.context("chunk storage missing")?,
                 crate::storage::location::Layout::S3.chunk(chunk.address()),
-                usize::try_from(chunk.stored_size.context("chunk size missing")?)?,
+                chunk.file_size()?,
             )
             .await?
         };

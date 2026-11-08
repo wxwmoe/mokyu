@@ -26,7 +26,7 @@ impl Reader {
                 );
                 codec::validate_metadata(source, keys.as_ref())?;
                 (
-                    codec::MAX + 16,
+                    codec::MAX_FILE,
                     crate::storage::location::Layout::S3.chunk(source.address()),
                     crate::storage::location::Layout::S3.chunk(target.location_id),
                 )
@@ -96,7 +96,9 @@ impl Reader {
                     let encoded = codec::seal(&target, encoded, keys.as_ref())?;
                     (
                         Outcome::Encoded {
-                            size: encoded.len() as i64,
+                            size: i64::from(
+                                target.stored_size.context("missing encoded chunk size")?,
+                            ),
                             compressed: target.compressed,
                             digest: None,
                         },

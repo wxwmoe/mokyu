@@ -15,7 +15,7 @@ impl Reader {
         let (path, bound) = match input {
             Input::Chunk { chunk } => (
                 crate::storage::location::Layout::S3.chunk(chunk.address()),
-                codec::MAX + 16,
+                codec::MAX_FILE,
             ),
             Input::Pack { pack, .. } => (
                 crate::storage::location::Layout::S3.pack(pack.address()),
@@ -62,7 +62,7 @@ impl Reader {
                 let (start, end) = crate::model::transfer::chunk_span_bounds(source, &work.spans)?;
                 end - start
             }
-            Input::Chunk { chunk } => chunk.raw_size as u64 + 16,
+            Input::Chunk { chunk } => chunk.file_size()? as u64,
         };
         let config = target.profile.compression_config("0s");
         let units = (payload.saturating_mul(4) + self.workspace.max(config.workspace_bytes()?))
@@ -127,7 +127,7 @@ impl Reader {
                 .checked_add(match source {
                     wire::Source::Chunk { chunk } => {
                         codec::validate_metadata(chunk, keys.as_ref())?;
-                        chunk.raw_size as u64 + 16
+                        chunk.file_size()? as u64
                     }
                     wire::Source::Pack { pack, members } => {
                         pack.validate(keys.as_ref())?;
@@ -152,7 +152,7 @@ impl Reader {
             let (path, bound) = match source {
                 wire::Source::Chunk { chunk } => (
                     crate::storage::location::Layout::S3.chunk(chunk.address()),
-                    codec::MAX + 16,
+                    codec::MAX_FILE,
                 ),
                 wire::Source::Pack { pack, .. } => (
                     crate::storage::location::Layout::S3.pack(pack.address()),
@@ -343,7 +343,10 @@ impl Reader {
                             encoded.len() + if chunk.algorithm == "none" { 0 } else { 16 },
                         )?);
                         let encoded = codec::seal(&chunk, encoded, keys.as_ref())?;
-                        let value = wire::encoded(encoded.len() as i64, chunk.compressed)?;
+                        let value = wire::encoded(
+                            i64::from(chunk.stored_size.context("missing encoded chunk size")?),
+                            chunk.compressed,
+                        )?;
                         Ok::<_, anyhow::Error>((encoded, value, hold))
                     })
                     .await??;
