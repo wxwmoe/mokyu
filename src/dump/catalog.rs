@@ -12,12 +12,32 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-pub(super) struct Catalog(pub Connection);
+pub(super) struct Catalog {
+    pub db: Connection,
+    records: u64,
+    last_report: std::time::Instant,
+}
 
 impl Catalog {
+    pub fn new(db: Connection) -> Self {
+        Self {
+            db,
+            records: 0,
+            last_report: std::time::Instant::now(),
+        }
+    }
+    fn record(&mut self) {
+        self.records += 1;
+        if self.records.is_multiple_of(256)
+            && self.last_report.elapsed() >= std::time::Duration::from_secs(3)
+        {
+            eprintln!("Read {} metadata records", self.records);
+            self.last_report = std::time::Instant::now();
+        }
+    }
     fn ranges(&self, b: Uuid, g: i64, s: i64, offset: i64, spans: Vec<Span>) -> Result<()> {
         let (n, mut end, digest) = self
-            .0
+            .db
             .query_row(
                 "SELECT n,end,digest FROM pages WHERE (bucket,generation,seq)=(?1,?2,?3)",
                 params![b, g, s],
@@ -40,7 +60,7 @@ impl Catalog {
             .checked_add(spans.len() as i64)
             .context("too many ranges")?;
         let mut put = self
-            .0
+            .db
             .prepare_cached("INSERT INTO ranges VALUES(?1,?2,?3,?4,?5,?6,?7)")?;
         for span in spans {
             ensure!(
@@ -64,7 +84,7 @@ impl Catalog {
                 serde_json::to_vec(&span.material)?
             ])?;
         }
-        self.0.execute(
+        self.db.execute(
             "INSERT OR REPLACE INTO pages VALUES(?1,?2,?3,?4,?5,?6)",
             params![b, g, s, count, end, digest],
         )?;
@@ -74,7 +94,7 @@ impl Catalog {
     fn complete(&self, c: &Change, g: i64, count: u64, digest: [u8; 32]) -> Result<()> {
         let p = params![c.bucket, g, c.seq];
         let (n, end, hash) = self
-            .0
+            .db
             .query_row(
                 "SELECT n,end,digest FROM pages WHERE (bucket,generation,seq)=(?1,?2,?3)",
                 p,
@@ -93,7 +113,7 @@ impl Catalog {
             "incomplete journal range map"
         );
         c.validate_metadata(end)?;
-        self.0.execute(
+        self.db.execute(
             "DELETE FROM pages WHERE (bucket,generation,seq)=(?1,?2,?3)",
             p,
         )?;
@@ -101,7 +121,7 @@ impl Catalog {
     }
 
     fn object(&self, c: &Change, g: i64) -> Result<()> {
-        let db = &self.0;
+        let db = &self.db;
         let p = params![c.bucket, c.generation, c.key];
         let old: Option<i64> = db
             .query_row(
@@ -136,11 +156,11 @@ impl Catalog {
     }
 
     fn store_spans(&self, c: &Change, g: i64) -> Result<()> {
-        self.0.execute("INSERT INTO spans SELECT bucket,seq,offset,source_offset,length,material FROM ranges WHERE (bucket,generation,seq)=(?1,?2,?3)",params![c.bucket,g,c.seq])?;
+        self.db.execute("INSERT INTO spans SELECT bucket,seq,offset,source_offset,length,material FROM ranges WHERE (bucket,generation,seq)=(?1,?2,?3)",params![c.bucket,g,c.seq])?;
         Ok(())
     }
     fn apply_change(&self, c: &Change) -> Result<()> {
-        let db = &self.0;
+        let db = &self.db;
         let (id, g, s) = (c.bucket, c.generation, c.seq);
         let (prev, excluded) = db
             .query_row("SELECT seq,excluded FROM marks WHERE bucket=?", [id], |r| {
@@ -213,7 +233,7 @@ impl Catalog {
     }
 
     fn clear_ranges(&self, b: Uuid, g: i64, s: i64) -> Result<()> {
-        self.0.execute(
+        self.db.execute(
             "DELETE FROM ranges WHERE (bucket,generation,seq)=(?1,?2,?3)",
             params![b, g, s],
         )?;
@@ -229,10 +249,11 @@ impl Sink for Catalog {
     fn scope(&mut self, cuts: &[BucketCut], excluded: &[BucketCut]) -> Result<()> {
         for cut in cuts.iter().chain(excluded) {
             for table in ["objects", "ranges", "pages", "marks", "events", "spans"] {
-                self.0
+                self.db
                     .execute(&format!("DELETE FROM {table} WHERE bucket=?"), [cut.id])?;
             }
-            self.0.execute("DELETE FROM buckets WHERE id=?", [cut.id])?;
+            self.db
+                .execute("DELETE FROM buckets WHERE id=?", [cut.id])?;
         }
         for (active, group) in [(true, cuts), (false, excluded)] {
             for c in group {
@@ -240,7 +261,7 @@ impl Sink for Catalog {
                     !c.id.is_nil() && c.generation > 0 && c.sequence > 0,
                     "invalid snapshot cut"
                 );
-                self.0.execute(
+                self.db.execute(
                     "INSERT INTO marks VALUES(?,?,?)",
                     params![c.id, c.sequence, (!active).then_some(c.generation)],
                 )?;
@@ -249,7 +270,7 @@ impl Sink for Catalog {
                         s3s::path::check_bucket_name(&c.name),
                         "invalid snapshot bucket name"
                     );
-                    self.0.execute(
+                    self.db.execute(
                         "INSERT INTO buckets VALUES(?,?,?,?,?,1)",
                         params![c.id, c.generation, c.name, c.sequence, c.stopped],
                     )?;
@@ -259,6 +280,7 @@ impl Sink for Catalog {
         Ok(())
     }
     fn row(&mut self, row: Row, f: &Format<'_>) -> Result<()> {
+        self.record();
         let (b, g, s, k, attr, count, digest) = match row {
             Row::Key(k) => return self.stage(Record::Key(k), f),
             Row::Material(m) => return self.stage(Record::Material(m), f),
@@ -295,7 +317,7 @@ impl Sink for Catalog {
             _ => return Ok(()),
         };
         let state = self
-            .0
+            .db
             .query_row(
                 "SELECT name,seq FROM buckets WHERE id=? AND generation=?",
                 params![b, g],
@@ -324,7 +346,8 @@ impl Sink for Catalog {
         self.clear_ranges(b, 0, s)
     }
     fn stage(&mut self, record: Record, f: &Format<'_>) -> Result<()> {
-        let db = &self.0;
+        self.record();
+        let db = &self.db;
         match record {
             Record::Key(k) => {
                 let opened = k.open(f)?;
@@ -421,7 +444,7 @@ impl Sink for Catalog {
     fn apply(&mut self) -> Result<()> {
         loop {
             let value: Option<Vec<u8>> = self
-                .0
+                .db
                 .query_row(
                     "SELECT value FROM events WHERE applied=0 ORDER BY bucket,seq LIMIT 1",
                     [],
@@ -431,7 +454,7 @@ impl Sink for Catalog {
             let Some(value) = value else { break };
             let c: Change = serde_json::from_slice(&value)?;
             self.apply_change(&c)?;
-            self.0.execute(
+            self.db.execute(
                 "UPDATE events SET applied=1 WHERE bucket=? AND seq=?",
                 params![c.bucket, c.seq],
             )?;
@@ -439,7 +462,7 @@ impl Sink for Catalog {
         Ok(())
     }
     fn finish(&mut self) -> Result<()> {
-        let db = &self.0;
+        let db = &self.db;
         db.execute_batch("DELETE FROM buckets WHERE visible=0;
           DELETE FROM objects WHERE attributes IS NULL OR NOT EXISTS(SELECT 1 FROM buckets b WHERE b.id=objects.bucket AND b.generation=objects.generation);
           CREATE UNIQUE INDEX object_sequence ON objects(bucket,seq);
@@ -486,7 +509,7 @@ impl Sink for Catalog {
         Ok(())
     }
     fn list(&mut self, first: u64, path: String) -> Result<()> {
-        self.0.execute(
+        self.db.execute(
             "INSERT INTO paths VALUES(?,?)",
             params![first.to_be_bytes(), path],
         )?;
@@ -494,7 +517,7 @@ impl Sink for Catalog {
     }
     fn pop(&mut self) -> Result<Option<(u64, String)>> {
         Ok(self
-            .0
+            .db
             .query_row(
                 "DELETE FROM paths WHERE first=(SELECT MIN(first) FROM paths) RETURNING first,path",
                 [],

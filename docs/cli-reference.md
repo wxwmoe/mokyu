@@ -4,9 +4,11 @@
 
 默认读取 `/config/config.toml`，可用 `mokyu -c PATH cli ...` 或 `mokyu --config PATH cli ...` 指定配置。
 
-除样式文本导出外，成功向 stdout 输出 JSON、退出 0；执行或连接失败向 stderr 输出错误并非零退出，参数错误退出 2。管理帧最多 1 MiB，RPC 等待 60 秒。任务创建成功表示已排队，后续结果通过 `task show` 查看。
+在线命令成功时退出码为 0，除样式文本导出外，结果以 JSON 写入 stdout。执行或连接失败时，错误写入 stderr，退出码为非零值。参数错误的退出码为 2。管理帧最多 1 MiB，RPC 等待 60 秒。任务创建成功表示已排队，后续结果通过 `task show` 查看。
 
 离线命令 `mokyu tool openapi` 输出管理 API 的 OpenAPI JSON，不访问配置、数据库或服务；`mokyu tool keygen` 生成部署 key。
+
+`mokyu dump` 可独立于常驻服务运行。`mokyu dump ls` 列出可恢复的桶，`mokyu dump ls mokyu://BUCKET/PREFIX/` 列出前缀下一级的对象和子前缀。`mokyu dump mokyu://BUCKET/PREFIX/ TARGET --preview` 预览路径映射和总量，去掉 `--preview` 即可导出。[Docker 示例、环境变量与续传](dump.md)
 
 ## 首次初始化
 

@@ -125,17 +125,20 @@ impl Transfer<'_, '_> {
             (file, part, 0, h)
         };
         let reused = at;
+        self.progress.advance(at, false);
         while at < self.size() {
             let data = self.read(at, self.size()).await?;
             file.write_all(&data)?;
             h.update(&data);
             at += data.len() as u64;
             file.sync_data()?;
+            self.progress.advance(data.len() as u64, true);
             db.execute(
                 "UPDATE dump_files SET offset=?2,digest=?3 WHERE task=?1",
                 params![task, i64::try_from(at)?, h.finalize().as_bytes()],
             )?;
         }
+        self.finish_digest().await?;
         file.sync_all()?;
         if self.policy == Policy::Overwrite {
             fs::rename(&part, &final_path)?;

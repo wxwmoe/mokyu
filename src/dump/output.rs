@@ -13,7 +13,6 @@ use bytes::{Bytes, BytesMut};
 use rusqlite::params;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::Read,
     path::{Path, PathBuf},
@@ -49,10 +48,13 @@ pub(super) struct Transfer<'a, 'r> {
     pub bucket: Uuid,
     pub item: &'a Item,
     pub attrs: Attributes,
+    pub integrity: std::cell::RefCell<Option<verify::LogicalDigest>>,
     pub policy: Policy,
     pub window: u64,
     pub generation: i64,
     pub recovery: [u8; 32],
+    pub schedule: &'a super::export::Schedule,
+    pub progress: &'a super::progress::ObjectProgress<'a>,
 }
 pub(super) fn directory(path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -109,9 +111,37 @@ impl Transfer<'_, '_> {
         self.item.size as u64
     }
     pub async fn read(&self, start: u64, end: u64) -> Result<Bytes> {
-        self.reader
+        let data = self
+            .reader
             .read(self.bucket, self.item, start, end, self.window)
-            .await
+            .await?;
+        if let Some(check) = self.integrity.borrow_mut().as_mut()
+            && let Some(offset) = check.next.checked_sub(start)
+            && offset < data.len() as u64
+        {
+            check.digest.update(&data[offset as usize..]);
+            check.next = start + data.len() as u64;
+        }
+        Ok(data)
+    }
+    pub(super) async fn finish_digest(&self) -> Result<()> {
+        let Some(mut check) = self.integrity.take() else {
+            return Ok(());
+        };
+        // Resumed or out-of-order parts may leave a suffix outside the running digest.
+        while check.next < self.size() {
+            let data = self
+                .reader
+                .read(self.bucket, self.item, check.next, self.size(), self.window)
+                .await?;
+            check.digest.update(&data);
+            check.next += data.len() as u64;
+        }
+        check
+            .digest
+            .finish(None)
+            .context("restored object checksum mismatch")?;
+        Ok(())
     }
     async fn verify_local(&self, mut f: File) -> Result<()> {
         ensure!(f.metadata()?.len() == self.size(), "local length differs");
@@ -207,59 +237,100 @@ impl Transfer<'_, '_> {
         }
         Ok(out.freeze())
     }
-    async fn put(
+    pub(super) async fn send_range(
         &self,
         c: &Client,
         key: &str,
-        condition: &Condition,
-        metadata: &BTreeMap<String, String>,
-        budget: u64,
-    ) -> Result<Written> {
-        let mut headers = crate::storage::external::objects::write_headers(metadata, None)?;
-        condition.apply(&mut headers)?;
-        let size = self.size();
-        if size <= budget {
-            let body = self.buffer(0, size).await?;
-            headers.insert(
-                "x-amz-checksum-sha256",
-                STANDARD.encode(Sha256::digest(&body)).parse()?,
+        query: &[(&str, &str)],
+        mut headers: axum::http::HeaderMap,
+        from: u64,
+        end: u64,
+        checksum: bool,
+    ) -> Result<(Written, String)> {
+        let length = end - from;
+        if length <= self.schedule.buffer {
+            let body = self.buffer(from, end).await?;
+            let hash = STANDARD.encode(Sha256::digest(&body));
+            if query.is_empty() {
+                self.finish_digest().await?;
+            }
+            if checksum {
+                headers.insert("x-amz-checksum-sha256", hash.parse()?);
+            }
+            let reply = c
+                .bytes(Method::PUT, Some(key), query, headers, body)
+                .await?;
+            let headers = c.empty(reply).await?;
+            ensure!(
+                headers
+                    .get("x-amz-checksum-sha256")
+                    .is_none_or(|v| v.as_bytes() == hash.as_bytes()),
+                "S3 upload checksum mismatch"
             );
-            let reply = c.bytes(Method::PUT, Some(key), &[], headers, body).await?;
-            return Written::headers(&c.empty(reply).await?, None);
+            self.progress.advance(length, true);
+            return Ok((Written::headers(&headers, None)?, hash));
         }
-        let digest = verify::full(
-            self.reader,
-            self.bucket,
-            self.item,
-            &self.attrs,
-            "sha256",
-            self.window,
-        )
-        .await?;
-        headers.insert("x-amz-checksum-sha256", digest.parse()?);
-        headers.insert("content-length", size.to_string().parse()?);
+        let hash = if from == 0 && end == self.size() {
+            verify::full(
+                self.reader,
+                self.bucket,
+                self.item,
+                &self.attrs,
+                "sha256",
+                self.window,
+            )
+            .await?
+        } else {
+            verify::calculate(
+                self.reader,
+                self.bucket,
+                self.item,
+                from,
+                end,
+                "sha256",
+                self.window,
+            )
+            .await?
+        };
+        if checksum {
+            headers.insert("x-amz-checksum-sha256", hash.parse()?);
+        }
+        headers.insert("content-length", length.to_string().parse()?);
         let (tx, mut rx) = tokio::sync::mpsc::channel::<std::io::Result<Bytes>>(1);
         let body = axum::body::Body::from_stream(
             async_stream::stream! {while let Some(chunk)=rx.recv().await{yield chunk;}},
         );
         let producer = async {
-            let mut pos = 0;
-            while pos < size {
-                let data = self.read(pos, size).await?;
-                pos += data.len() as u64;
+            let mut pos = from;
+            let mut sha = Sha256::new();
+            while pos < end {
+                let data = self.read(pos, end).await?;
+                let n = data.len() as u64;
+                sha.update(&data);
+                pos += n;
+                if pos == end {
+                    if query.is_empty() {
+                        self.finish_digest().await?;
+                    }
+                    ensure!(
+                        STANDARD.encode(sha.clone().finalize()) == hash,
+                        "source changed before upload"
+                    );
+                }
                 tx.send(Ok(data)).await.context("S3 closed the upload")?;
+                self.progress.advance(n, true);
             }
             drop(tx);
             Ok::<_, anyhow::Error>(())
         };
-        let digest = hex::encode(STANDARD.decode(digest)?);
+        let digest = hex::encode(STANDARD.decode(&hash)?);
         let send = async {
             let reply = c
-                .request(Method::PUT, Some(key), &[], headers, body, &digest)
+                .request(Method::PUT, Some(key), query, headers, body, &digest)
                 .await?;
             Written::headers(&c.empty(reply).await?, None)
         };
-        Ok(tokio::try_join!(producer, send)?.1)
+        Ok((tokio::try_join!(producer, send)?.1, hash))
     }
     pub async fn remote(
         &self,
@@ -268,8 +339,8 @@ impl Transfer<'_, '_> {
         dest: &str,
         threshold: u64,
         part: u64,
-        buffer: u64,
     ) -> Result<Outcome> {
+        let slot = self.schedule.slots.acquire().await?;
         let task = self.task(dest)?;
         let completing = self.reader.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM dump_uploads WHERE task=? AND completing=1)",
@@ -309,12 +380,14 @@ impl Transfer<'_, '_> {
                 self.size() <= crate::storage::external::objects::MAX_PART,
                 "MOKYU_DUMP_MULTIPART_THRESHOLD exceeds the S3 single PUT limit"
             );
-            self.put(c, key, &condition, &metadata, buffer)
+            let mut headers = crate::storage::external::objects::write_headers(&metadata, None)?;
+            condition.apply(&mut headers)?;
+            self.send_range(c, key, &[], headers, 0, self.size(), true)
                 .await
-                .map(|w| (w, 0))
+                .map(|(w, _)| (w, 0))
         } else {
-            self.upload(c, key, task, &condition, &metadata, part, buffer)
-                .await
+            drop(slot);
+            self.upload(c, key, task, &condition, &metadata, part).await
         };
         let (written, reused) = match written {
             Ok(w) => w,

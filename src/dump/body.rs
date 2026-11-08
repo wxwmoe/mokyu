@@ -27,6 +27,7 @@ pub(super) struct Reader<'a> {
     pool: compression::Pool,
     key: codec::Key,
     layout: Layout,
+    raw_checks: [tokio::sync::Mutex<()>; 16],
 }
 struct Extent {
     offset: u64,
@@ -43,6 +44,7 @@ impl Reader<'_> {
             backend,
             pool: compression::Pool::new(Default::default(), 1)?,
             key: codec::Key::new("aes-256-gcm", backend.source.material)?,
+            raw_checks: Default::default(),
             layout: Layout::for_local(backend.source.connection.r#type == "local"),
         })
     }
@@ -113,6 +115,9 @@ impl Reader<'_> {
             );
             return Ok(bytes.slice(from as usize..(from + length) as usize));
         }
+        let validation = self.raw_checks[usize::from(id.as_bytes()[15] & 15)]
+            .lock()
+            .await;
         let ready = self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM raw_ready WHERE id=?)",
             [id],
@@ -154,6 +159,7 @@ impl Reader<'_> {
             self.db
                 .execute("INSERT OR IGNORE INTO raw_ready VALUES(?)", [id])?;
         }
+        drop(validation);
         let end = from + length;
         let start = from / RAW_WINDOW * RAW_WINDOW;
         let stop = end

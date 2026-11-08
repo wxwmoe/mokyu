@@ -14,6 +14,43 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+pub(super) struct LogicalDigest {
+    pub next: u64,
+    pub digest: Integrity,
+}
+impl LogicalDigest {
+    pub fn new(attrs: &Attributes) -> Result<Option<Self>> {
+        let mut expected = HeaderMap::new();
+        if attrs.etag.len() == 32 {
+            expected.insert(
+                "content-md5",
+                STANDARD.encode(hex::decode(&attrs.etag)?).parse()?,
+            );
+        }
+        if attrs.checksums["type"] != "COMPOSITE"
+            && let Some(sums) = attrs.checksums.as_object()
+        {
+            for (algo, value) in sums {
+                if algo != "type"
+                    && let Some(v) = value.as_str().filter(|s| !s.contains('-'))
+                {
+                    let name = axum::http::HeaderName::from_bytes(
+                        format!("x-amz-checksum-{algo}").as_bytes(),
+                    )?;
+                    expected.insert(name, v.parse()?);
+                }
+            }
+        }
+        if expected.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            next: 0,
+            digest: Integrity::new(&expected, None)?,
+        }))
+    }
+}
+
 pub(super) fn headers(attrs: &Attributes) -> Result<BTreeMap<String, String>> {
     let m: Metadata = serde_json::from_value(attrs.metadata.clone())?;
     let mut values = BTreeMap::from([(

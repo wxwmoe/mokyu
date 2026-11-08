@@ -234,6 +234,17 @@ impl Target {
                     "target overlaps the read-only source"
                 );
             }
+            if let Some(token) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|s| s.strip_prefix(".mokyu-dump-"))
+                .and_then(|s| s.strip_suffix(".part"))
+            {
+                ensure!(
+                    token.len() != 32 || Uuid::parse_str(token).is_err(),
+                    "target uses a reserved dump temporary filename"
+                );
+            }
             let db = absolute(db_path)?;
             for suffix in ["", "-wal", "-shm", "-journal"] {
                 let mut reserved = db.as_os_str().to_owned();

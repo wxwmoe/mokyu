@@ -72,7 +72,12 @@ pub(super) struct S3 {
     pub token: Option<String>,
 }
 impl S3 {
-    pub fn load(side: &str, bucket: &str, prefix: &str) -> Result<Self> {
+    pub fn load(
+        side: &str,
+        bucket: &str,
+        prefix: &str,
+        catalog: Option<&Location>,
+    ) -> Result<Self> {
         let base = format!("MOKYU_DUMP_{side}");
         let get = |name: &str| setting(&format!("{base}_{name}"));
         let named = get("PROFILE")?;
@@ -130,11 +135,13 @@ impl S3 {
             }
         };
         let region = get("REGION")?
+            .or_else(|| catalog.and_then(|l| l.region.clone()))
             .or_else(|| cfg.remove("region"))
             .or(setting("AWS_REGION")?)
             .or(setting("AWS_DEFAULT_REGION")?)
             .unwrap_or_else(|| "us-east-1".into());
         let endpoint_url = get("ENDPOINT")?
+            .or_else(|| catalog.and_then(|l| l.endpoint.clone()))
             .or_else(|| cfg.remove("endpoint_url"))
             .or(setting("AWS_ENDPOINT_URL_S3")?)
             .or(setting("AWS_ENDPOINT_URL")?)
@@ -221,7 +228,7 @@ pub(super) struct Backend {
     pub deployment: Uuid,
 }
 impl Backend {
-    pub async fn open(uri: &str) -> Result<Self> {
+    pub async fn open(uri: &str, catalog: Option<&Location>) -> Result<Self> {
         let uri = Location::normalize(uri)?;
         let mut c = model::Connection {
             id: Uuid::nil(),
@@ -237,7 +244,7 @@ impl Backend {
         };
         let store: Arc<dyn ObjectStore> = if uri.starts_with("s3://") {
             let (bucket, prefix) = physical(&uri)?;
-            let s3 = S3::load("SOURCE", bucket, prefix)?;
+            let s3 = S3::load("SOURCE", bucket, prefix, catalog)?;
             c.r#type = "s3".into();
             c.prefix = prefix.into();
             c.region = Some(s3.connection.region.clone());

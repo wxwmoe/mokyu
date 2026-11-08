@@ -61,3 +61,26 @@ async fn raw_ranges_are_bound_to_the_verified_source() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn object_checksums_cover_only_their_declared_scope() -> Result<()> {
+    use crate::dump::verify::LogicalDigest;
+    let mut attrs = Attributes {
+        size: 3,
+        etag: "900150983cd24fb0d6963f7d28e17f72".into(),
+        metadata: serde_json::json!({}),
+        checksums: serde_json::json!({}),
+        payload: "cdc".into(),
+        modified_us: 0,
+    };
+    let mut check = LogicalDigest::new(&attrs)?.unwrap();
+    check.digest.update(b"abc");
+    check.digest.finish(None)?;
+    let mut check = LogicalDigest::new(&attrs)?.unwrap();
+    check.digest.update(b"abd");
+    assert!(check.digest.finish(None).is_err());
+    attrs.etag = "900150983cd24fb0d6963f7d28e17f72-2".into();
+    attrs.checksums = serde_json::json!({"type":"COMPOSITE","sha256":"part-checksum-2"});
+    assert!(LogicalDigest::new(&attrs)?.is_none());
+    Ok(())
+}

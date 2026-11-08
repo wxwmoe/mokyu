@@ -32,7 +32,7 @@ fn destination(target: &Target) -> Result<Option<Destination>> {
     let Target::S3 { bucket, .. } = target else {
         return Ok(None);
     };
-    let s3 = S3::load("DEST", bucket, "")?;
+    let s3 = S3::load("DEST", bucket, "", None)?;
     let threshold = size("MOKYU_DUMP_MULTIPART_THRESHOLD", "100MiB")?;
     let part = size("MOKYU_DUMP_PART_SIZE", "16MiB")?;
     ensure!(
@@ -50,6 +50,11 @@ fn destination(target: &Target) -> Result<Option<Destination>> {
         part,
     }))
 }
+pub(super) struct Schedule {
+    pub slots: tokio::sync::Semaphore,
+    pub count: usize,
+    pub buffer: u64,
+}
 pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Target) -> Result<()> {
     let policy = match setting("MOKYU_DUMP_IF_EXISTS")?
         .as_deref()
@@ -65,6 +70,11 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
         memory >= 32 * 1024 * 1024,
         "MOKYU_DUMP_MEMORY_LIMIT must allow at least 32MiB for an export"
     );
+    let requested = setting("MOKYU_DUMP_CONCURRENCY")?
+        .unwrap_or_else(|| "4".into())
+        .parse::<usize>()
+        .context("invalid MOKYU_DUMP_CONCURRENCY")?;
+    ensure!(requested > 0, "MOKYU_DUMP_CONCURRENCY must be positive");
     let dest = destination(&target)?;
     let lock = OpenOptions::new().read(true).write(true).open(path)?;
     lock.try_lock()
@@ -80,7 +90,7 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
         serde_json::from_slice::<Identity>(&v)? == *id,
         "MOKYU_DUMP_DB changed"
     );
-    let backend = Backend::open(&id.location.uri).await?;
+    let backend = Backend::open(&id.location.uri, Some(&id.location)).await?;
     ensure!(
         backend.location == id.location
             && backend.deployment == id.deployment
@@ -88,9 +98,41 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
             && backend.source.journal.journal_id == id.journal,
         "source identity differs from MOKYU_DUMP_DB"
     );
+    let db_path = path.canonicalize()?;
+    let local_root = backend
+        .source
+        .connection
+        .path
+        .as_deref()
+        .map(std::fs::canonicalize)
+        .transpose()?;
+    if let Some(root) = &local_root {
+        ensure!(
+            !db_path.starts_with(root),
+            "MOKYU_DUMP_DB must be outside the read-only source"
+        );
+    }
     let (total, bytes) = sel.visit(&db, |item| {
+        if let Some(d) = &dest {
+            super::multipart::part_width(item.size.try_into()?, d.part)?;
+            if item.size as u64 <= d.threshold {
+                ensure!(
+                    item.size as u64 <= crate::storage::external::objects::MAX_PART,
+                    "MOKYU_DUMP_MULTIPART_THRESHOLD exceeds the S3 single PUT limit for {}",
+                    item.key
+                );
+            }
+        }
         let mapped = target.mapped(&sel, &item.key)?;
-        target.protect_local(&mapped, id, path)?;
+        target.protect_local(&mapped, id, &db_path)?;
+        if matches!(target, Target::Local(_))
+            && let Some(root) = &local_root
+        {
+            ensure!(
+                !super::selection::absolute(Path::new(&mapped))?.starts_with(root),
+                "target overlaps the read-only source"
+            );
+        }
         if matches!(target, Target::Local(_)) {
             sel.check_collision(&db, &item.key)?;
         }
@@ -117,7 +159,24 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
     let mut resumed = 0;
     let mut reused = 0u64;
     let reader = Reader::new(&db, &backend)?;
-    let window = (memory / 5).min(32 * 1024 * 1024);
+    use futures_util::{StreamExt, stream};
+    const M: u64 = 1024 * 1024;
+    let available = memory - 8 * M;
+    let count = if total <= 1 && dest.as_ref().is_none_or(|d| bytes <= d.threshold) {
+        1
+    } else {
+        requested.min((available / (48 * M)).clamp(1, 10000) as usize)
+    };
+    let slot = available / count as u64;
+    let buffer = slot / 3;
+    let window = ((slot - buffer).saturating_sub(12 * M) / 3).clamp(M, 32 * M);
+    let schedule = Schedule {
+        slots: tokio::sync::Semaphore::new(count),
+        count,
+        buffer,
+    };
+    let progress = super::progress::Progress::new(total, bytes);
+    progress.print(true);
     let mut cursor = None;
     let (mut published, mut verified, mut skipped, mut conflicts, mut failed, mut written) =
         (0, 0, 0, 0, 0, 0u64);
@@ -125,34 +184,58 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
         let items = sel.page(&db, cursor.as_deref(), 64)?;
         let Some(last) = items.last() else { break };
         cursor = Some(last.key.clone());
-        for item in items {
-            let transfer = Transfer {
-                reader: &reader,
-                bucket: sel.bucket,
-                attrs: reader.attributes(sel.bucket, &item)?,
-                item: &item,
-                policy,
-                generation: sel.generation,
-                recovery,
-                window,
-            };
-            let mapped = target.mapped(&sel, &item.key)?;
-            let outcome = match &dest {
-                Some(d) => {
-                    let (_, key) = physical(&mapped)?;
-                    transfer
-                        .remote(
-                            &d.client,
-                            key,
-                            &format!("{} {mapped}", d.endpoint),
-                            d.threshold,
-                            d.part,
-                            memory / 2,
-                        )
-                        .await
+        let jobs = stream::iter(&items)
+            .map(|item| {
+                let (reader, sel, target, dest, progress, schedule) =
+                    (&reader, &sel, &target, &dest, &progress, &schedule);
+                async move {
+                    let object_progress = progress.object();
+                    let result = async {
+                        let attrs = reader.attributes(sel.bucket, item)?;
+                        let integrity = super::verify::LogicalDigest::new(&attrs)?.into();
+                        let transfer = Transfer {
+                            reader,
+                            bucket: sel.bucket,
+                            attrs,
+                            integrity,
+                            item,
+                            policy,
+                            generation: sel.generation,
+                            recovery,
+                            window,
+                            schedule,
+                            progress: &object_progress,
+                        };
+                        let mapped = target.mapped(sel, &item.key)?;
+                        match dest {
+                            Some(d) => {
+                                let (_, key) = physical(&mapped)?;
+                                transfer
+                                    .remote(
+                                        &d.client,
+                                        key,
+                                        &format!("{} {mapped}", d.endpoint),
+                                        d.threshold,
+                                        d.part,
+                                    )
+                                    .await
+                            }
+                            None => {
+                                let _slot = schedule.slots.acquire().await?;
+                                transfer.local(Path::new(&mapped)).await
+                            }
+                        }
+                    }
+                    .await;
+                    if matches!(result, Ok(Outcome::Verified | Outcome::Skipped)) {
+                        object_progress.finish(item.size as u64);
+                    }
+                    (item, result)
                 }
-                None => transfer.local(Path::new(&mapped)).await,
-            };
+            })
+            .buffer_unordered(count);
+        futures_util::pin_mut!(jobs);
+        while let Some((item, outcome)) = jobs.next().await {
             match outcome {
                 Ok(Outcome::Published) => {
                     published += 1;
@@ -163,8 +246,12 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
                     written += item.size as u64;
                     reused += n;
                 }
-                Ok(Outcome::Verified) => verified += 1,
-                Ok(Outcome::Skipped) => skipped += 1,
+                Ok(Outcome::Verified) => {
+                    verified += 1;
+                }
+                Ok(Outcome::Skipped) => {
+                    skipped += 1;
+                }
                 Err(e) => {
                     if e.is::<Conflict>() {
                         conflicts += 1;
@@ -174,10 +261,13 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
                     eprintln!("mokyu://{}/{}: {e:#}", sel.name, item.key.escape_debug());
                 }
             }
+            progress.done();
         }
     }
+    progress.print(true);
+    let transferred = progress.transferred();
     eprintln!(
-        "{total} objects, {bytes} B total: {published} published, {resumed} resumed ({written} B published, {reused} B reused), {verified} verified, {skipped} skipped, {conflicts} conflicts, {failed} failed"
+        "{total} objects, {bytes} B total: {published} published, {resumed} resumed ({written} B published, {reused} B reused, {transferred} B transferred), {verified} verified, {skipped} skipped, {conflicts} conflicts, {failed} failed"
     );
     ensure!(
         conflicts + failed == 0,

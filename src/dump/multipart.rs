@@ -10,9 +10,22 @@ use anyhow::{Result, ensure};
 use axum::http::Method;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
+use futures_util::{StreamExt, stream};
 use rusqlite::{OptionalExtension, params};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+
+pub(super) fn part_width(size: u64, configured: u64) -> Result<u64> {
+    ensure!(
+        size <= objects::MAX_SIZE,
+        "object exceeds the external S3 client's 5TiB limit"
+    );
+    let width = configured.max(size.div_ceil(10000));
+    ensure!(
+        width <= objects::MAX_PART,
+        "object exceeds the S3 Multipart part limit"
+    );
+    Ok(width)
+}
 
 impl Transfer<'_, '_> {
     fn owner(&self, task: &[u8; 32], id: &str) -> [u8; 32] {
@@ -73,17 +86,18 @@ impl Transfer<'_, '_> {
         c: &Client,
         key: &str,
         upload: &str,
-    ) -> Result<Option<BTreeMap<u16, UploadedPart>>> {
+    ) -> Result<Option<BTreeMap<u16, (UploadedPart, Option<String>)>>> {
         let mut parts = BTreeMap::new();
         let mut pos = 0;
         loop {
-            let Some(page) = c.parts(key, upload, pos).await? else {
+            let Some(mut page) = c.parts(key, upload, pos).await? else {
                 return Ok(None);
             };
             for p in page.items {
                 ensure!(p.number > pos && p.number <= 10000, "invalid part sequence");
                 pos = p.number;
-                parts.insert(p.number, p);
+                let checksum = page.sha256.remove(&p.number);
+                parts.insert(p.number, (p, checksum));
             }
             match page.next {
                 None => break,
@@ -100,7 +114,6 @@ impl Transfer<'_, '_> {
         condition: &Condition,
         meta: &BTreeMap<String, String>,
         configured: u64,
-        buffer: u64,
     ) -> Result<(Written, u64)> {
         let db = self.reader.db;
         let previous = db
@@ -144,18 +157,10 @@ impl Transfer<'_, '_> {
                 self.forget_upload(&task)?;
             }
         }
-        let (id, width, algo, mut remote) = if let Some(v) = saved {
+        let (id, width, algo, remote) = if let Some(v) = saved {
             v
         } else {
-            let width = configured.max(self.size().div_ceil(10000));
-            ensure!(
-                width <= objects::MAX_PART,
-                "object exceeds S3 Multipart size limit"
-            );
-            ensure!(
-                width <= buffer,
-                "MOKYU_DUMP_MEMORY_LIMIT is too small for the required S3 part"
-            );
+            let width = part_width(self.size(), configured)?;
             let (id, algo) = self.start(c, key, meta).await?;
             db.execute(
                 "INSERT INTO dump_uploads(task,upload,part_size,size,checksums,owner) VALUES(?,?,?,?,?,?)",
@@ -163,83 +168,53 @@ impl Transfer<'_, '_> {
             )?;
             (id, width, algo, BTreeMap::new())
         };
-        let mut parts = Vec::new();
-        let mut checksums = Vec::new();
-        let mut reused = 0;
-        for number in 1..=self.size().div_ceil(width) {
-            let number = u16::try_from(number)?;
-            let start = u64::from(number - 1) * width;
-            let end = self.size().min(start + width);
-            let length = end - start;
-            let mut receipt = None;
-            if let Some(remote) = remote.remove(&number)
-                && remote.size == length
-                && let Some((size, etag, hash)) = db
-                    .query_row(
+        let count = u16::try_from(self.size().div_ceil(width))?;
+        let work = stream::iter(1..=count).map(|number| {
+            let old = remote.get(&number);
+            let id = &id;
+            async move {
+                let start = u64::from(number - 1) * width;
+                let end = self.size().min(start + width);
+                let length = end - start;
+                if let Some((p, remote_hash)) = old
+                    && p.size == length
+                    && let Some((size, etag, hash)) = db.query_row(
                         "SELECT size,etag,checksum FROM dump_parts WHERE task=? AND number=?",
                         params![task, number],
-                        |r| {
-                            Ok((
-                                r.get::<_, i64>(0)?,
-                                r.get::<_, String>(1)?,
-                                r.get::<_, String>(2)?,
-                            ))
-                        },
-                    )
-                    .optional()?
-                && u64::try_from(size).ok() == Some(length)
-                && etag == remote.etag
-                && STANDARD.decode(&hash).is_ok_and(|v| v.len() == 32)
-            {
-                receipt = Some((remote, hash));
-                reused += length;
+                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+                    ).optional()?
+                    && u64::try_from(size).ok() == Some(length)
+                    && etag == p.etag
+                    && remote_hash.as_ref().is_none_or(|v| v == &hash)
+                    && STANDARD.decode(&hash).is_ok_and(|v| v.len() == 32)
+                {
+                    self.progress.advance(length, false);
+                    return Ok::<_, anyhow::Error>((p.clone(), hash, length));
+                }
+                let _slot = self.schedule.slots.acquire().await?;
+                let n = number.to_string();
+                let (receipt, hash) = self.send_range(
+                    c, key, &[("partNumber", &n), ("uploadId", id)],
+                    axum::http::HeaderMap::new(), start, end, algo
+                ).await?;
+                let part = UploadedPart { number, size: length, etag: receipt.etag };
+                db.execute("INSERT OR REPLACE INTO dump_parts VALUES(?,?,?,?,?)",
+                    params![task, number, i64::try_from(length)?, part.etag, hash])?;
+                Ok((part, hash, 0))
             }
-            let (part, hash) = if let Some(v) = receipt {
-                v
-            } else {
-                ensure!(
-                    length <= buffer,
-                    "MOKYU_DUMP_MEMORY_LIMIT is too small for the saved part size"
-                );
-                let body = self.buffer(start, end).await?;
-                let hash = STANDARD.encode(Sha256::digest(&body));
-                let part = if algo {
-                    let mut h = axum::http::HeaderMap::new();
-                    h.insert("x-amz-checksum-sha256", hash.parse()?);
-                    let n = number.to_string();
-                    let reply = c
-                        .bytes(
-                            Method::PUT,
-                            Some(key),
-                            &[("partNumber", &n), ("uploadId", &id)],
-                            h,
-                            body,
-                        )
-                        .await?;
-                    let headers = c.empty(reply).await?;
-                    ensure!(
-                        headers
-                            .get("x-amz-checksum-sha256")
-                            .is_none_or(|v| v.as_bytes() == hash.as_bytes()),
-                        "S3 part checksum mismatch"
-                    );
-                    UploadedPart {
-                        number,
-                        size: length,
-                        etag: Written::headers(&headers, None)?.etag,
-                    }
-                } else {
-                    c.upload_part(key, &id, number, body).await?
-                };
-                db.execute(
-                    "INSERT OR REPLACE INTO dump_parts VALUES(?,?,?,?,?)",
-                    params![task, number, i64::try_from(length)?, part.etag, hash],
-                )?;
-                (part, hash)
-            };
+        }).buffered(self.schedule.count);
+        futures_util::pin_mut!(work);
+        let mut parts = Vec::with_capacity(count.into());
+        let mut checksums = Vec::with_capacity(count.into());
+        let mut reused = 0;
+        while let Some(result) = work.next().await {
+            let (part, hash, n) = result?;
             parts.push(part);
             checksums.push(hash);
+            reused += n;
         }
+        let _slot = self.schedule.slots.acquire().await?;
+        self.finish_digest().await?;
         db.execute("UPDATE dump_uploads SET completing=1 WHERE task=?", [task])?;
         let written = c
             .complete_with_checksums(
@@ -251,5 +226,19 @@ impl Transfer<'_, '_> {
             )
             .await?;
         Ok((written, reused))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn raises_part_size_at_ten_thousand_parts() {
+        let width = 16 * 1024 * 1024;
+        for size in [10000 * width - 1, 10000 * width] {
+            assert_eq!(part_width(size, width).unwrap(), width);
+        }
+        assert_eq!(part_width(10000 * width + 1, width).unwrap(), width + 1);
+        assert!(part_width(5 * 1024u64.pow(4) + 1, width).is_err());
     }
 }

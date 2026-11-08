@@ -1,5 +1,5 @@
-use super::super::s3::{self, Parts};
 pub(crate) use super::super::s3::UploadedPart;
+use super::super::s3::{self, Parts};
 use super::*;
 use axum::http::StatusCode;
 use std::collections::{BTreeMap, BTreeSet};
@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) const WINDOW: usize = 8 * 1024 * 1024;
 pub(crate) const LIST_LIMIT: usize = 128;
 const RESPONSE_LIMIT: usize = 1024 * 1024;
-const MAX_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
+pub(crate) const MAX_SIZE: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 pub(crate) const MAX_PART: u64 = 5 * 1024 * 1024 * 1024;
 
 #[async_trait::async_trait]

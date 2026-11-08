@@ -257,6 +257,7 @@ impl UploadedPart {
 }
 
 pub(crate) struct Parts {
+    pub sha256: std::collections::BTreeMap<u16, String>,
     pub items: Vec<UploadedPart>,
     pub next: Option<u16>,
 }
@@ -557,6 +558,7 @@ impl Streaming {
 pub(super) fn parts_listing(bytes: &[u8], key: &str, upload: &str, after: u16) -> Result<Parts> {
     let mut xml = s3s::xml::Deserializer::new(bytes);
     let mut items = Vec::new();
+    let mut sha256 = std::collections::BTreeMap::new();
     let (mut remote_key, mut remote_upload, mut truncated, mut next) = (None, None, None, None);
     xml.named_element_any(&["ListPartsResult", "ListPartsResponse"], |xml| {
         xml.for_each_element(|xml, name| {
@@ -565,7 +567,7 @@ pub(super) fn parts_listing(bytes: &[u8], key: &str, upload: &str, after: u16) -
                     if items.len() >= 1000 {
                         return Err(s3s::xml::DeError::UnexpectedTagName);
                     }
-                    let (mut number, mut size, mut etag) = (None, None, None);
+                    let (mut number, mut size, mut etag, mut hash) = (None, None, None, None);
                     xml.for_each_element(|xml, name| {
                         match name {
                             b"PartNumber" if number.is_none() => {
@@ -583,7 +585,10 @@ pub(super) fn parts_listing(bytes: &[u8], key: &str, upload: &str, after: u16) -
                                 )
                             }
                             b"ETag" if etag.is_none() => etag = Some(xml.content::<String>()?),
-                            b"PartNumber" | b"Size" | b"ETag" => {
+                            b"ChecksumSHA256" if hash.is_none() => {
+                                hash = Some(xml.content::<String>()?)
+                            }
+                            b"PartNumber" | b"Size" | b"ETag" | b"ChecksumSHA256" => {
                                 return Err(s3s::xml::DeError::UnexpectedTagName);
                             }
                             _ => {
@@ -593,8 +598,12 @@ pub(super) fn parts_listing(bytes: &[u8], key: &str, upload: &str, after: u16) -
                         Ok(())
                     })?;
                     let missing = || s3s::xml::DeError::UnexpectedTagName;
+                    let number = number.ok_or_else(missing)?;
+                    if let Some(hash) = hash {
+                        sha256.insert(number, hash);
+                    }
                     items.push(UploadedPart {
-                        number: number.ok_or_else(missing)?,
+                        number,
                         size: size.ok_or_else(missing)?,
                         etag: etag.ok_or_else(missing)?,
                     });
@@ -657,7 +666,11 @@ pub(super) fn parts_listing(bytes: &[u8], key: &str, upload: &str, after: u16) -
     } else {
         None
     };
-    Ok(Parts { items, next })
+    Ok(Parts {
+        items,
+        next,
+        sha256,
+    })
 }
 
 pub(super) fn multipart_listing(bytes: &[u8]) -> Result<(Vec<(String, String)>, bool)> {
@@ -803,6 +816,15 @@ mod completion_tests {
         let body = b"<ListPartsResult><Key>scope/file</Key><UploadId>id</UploadId><IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker><Part><PartNumber>2</PartNumber><ETag>&quot;abc&quot;</ETag><Size>13</Size></Part></ListPartsResult>";
         let page = parts_listing(body, "scope/file", "id", 1).unwrap();
         assert_eq!(page.next, Some(2));
+        let with_hash = String::from_utf8(body.to_vec())
+            .unwrap()
+            .replace("</Part>", "<ChecksumSHA256>abc=</ChecksumSHA256></Part>");
+        assert_eq!(
+            parts_listing(with_hash.as_bytes(), "scope/file", "id", 1)
+                .unwrap()
+                .sha256[&2],
+            "abc="
+        );
         let alternate = std::str::from_utf8(body)
             .unwrap()
             .replace("ListPartsResult", "ListPartsResponse");

@@ -48,6 +48,7 @@ docker exec -it mokyu mokyu cli user create admin
 | [群集部署](docs/cluster-deployment.md) | 单主控与多控制节点拓扑、节点角色、API 通信和多 IP DNS |
 | [配置](docs/configuration.md) | 全部 TOML 字段、默认值、资源预算和秘密文件 |
 | [CLI](docs/cli-reference.md) | 完整命令、参数、输出、危险确认和任务语义 |
+| [只读对象导出](docs/dump.md) | 从元数据日志重建对象索引，将对象导出到本地或 S3 |
 | [管理指南](docs/management.md) | 媒体、项目授权、密钥、配额、空间洞察与维护流程 |
 | [桶图片处理](docs/image-processing.md) | 样式表单、导入导出、自动格式、原图保护和 CDN |
 | [管理 API](docs/control-api-reference.md) | 方法、路径、认证、分页、并发条件和生成契约 |

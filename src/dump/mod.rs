@@ -4,6 +4,7 @@ mod export;
 mod multipart;
 mod origin;
 mod output;
+mod progress;
 mod resume;
 mod selection;
 mod verify;
@@ -24,8 +25,11 @@ use std::{
 use uuid::Uuid;
 
 #[derive(clap::Args)]
+#[command(
+    after_help = "Examples:\n  mokyu dump ls mokyu://media/photos/\n  mokyu dump mokyu://media/photos/ s3://backup/mokyu/ --preview\n\nSet MOKYU_DUMP_SOURCE and MOKYU_DUMP_DEPLOYMENT_KEY (or its _FILE variant) to build the catalog. MOKYU_DUMP_DB defaults to ./metadata.db."
+)]
 pub(crate) struct Args {
-    /// Preview up to ten mappings and the total logical size.
+    /// Show ten sample mappings and the full totals. May appear before or after the paths.
     #[arg(long)]
     preview: bool,
     /// ls [mokyu://BUCKET/PREFIX/] or mokyu://BUCKET/KEY TARGET.
@@ -109,7 +113,8 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
         budget >= 64 * 1024 * 1024,
         "MOKYU_DUMP_MEMORY_LIMIT must allow at least 64MiB for journal replay"
     );
-    let backend = Backend::open(&uri).await?;
+    eprintln!("Building metadata catalog from the published journal...");
+    let backend = Backend::open(&uri, None).await?;
     let dir = parent(path)
         .canonicalize()
         .context("missing MOKYU_DUMP_DB parent directory")?;
@@ -128,9 +133,9 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
     let file = tempfile::Builder::new()
         .prefix(".mokyu-catalog-")
         .tempfile_in(&dir)?;
-    let mut catalog = Catalog(Connection::open(file.path())?);
-    catalog.0.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE; PRAGMA cache_size=-2048; PRAGMA temp.cache_size=-2048; BEGIN IMMEDIATE;")?;
-    catalog.0.execute_batch(include_str!("schema.sql"))?;
+    let mut catalog = Catalog::new(Connection::open(file.path())?);
+    catalog.db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE; PRAGMA cache_size=-2048; PRAGMA temp.cache_size=-2048; BEGIN IMMEDIATE;")?;
+    catalog.db.execute_batch(include_str!("schema.sql"))?;
     let cut = backend
         .source
         .walk(&*backend.store, None, None, local.as_ref(), &mut catalog)
@@ -147,12 +152,12 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
         journal: backend.source.journal.journal_id,
         cut,
     };
-    catalog.0.execute(
+    catalog.db.execute(
         "INSERT INTO identity VALUES(?)",
         [serde_json::to_vec(&identity)?],
     )?;
-    catalog.0.execute_batch("COMMIT")?;
-    catalog.0.close().map_err(|(_, e)| e)?;
+    catalog.db.execute_batch("COMMIT")?;
+    catalog.db.close().map_err(|(_, e)| e)?;
     file.as_file().sync_all()?;
     match file.persist_noclobber(path) {
         Ok(_) => fs::File::open(&dir)?.sync_all()?,
@@ -166,6 +171,10 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
             && actual.storage == identity.storage
             && actual.journal == identity.journal,
         "concurrent catalog build used a different source"
+    );
+    eprintln!(
+        "Metadata catalog ready at sequence {}",
+        actual.cut.point.sequence
     );
     Ok((db, actual))
 }

@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::BTreeMap;
 use crate::{
     model::journal::record::{Change, Operation},
     storage::journal::{
@@ -9,6 +8,7 @@ use crate::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bytes::Bytes;
+use std::collections::BTreeMap;
 
 fn event(bucket: Uuid, seq: i64, operation: Operation, key: Option<String>) -> Record {
     Record::Change {

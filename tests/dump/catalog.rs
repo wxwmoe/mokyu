@@ -4,9 +4,9 @@ use crate::{content::codec::Key, model::journal::record::BlockKey};
 
 #[test]
 fn recovery_keeps_only_wrapped_keys_and_published_generations() -> Result<()> {
-    let mut catalog = Catalog(Connection::open_in_memory()?);
+    let mut catalog = Catalog::new(Connection::open_in_memory()?);
     catalog
-        .0
+        .db
         .execute_batch(include_str!("../../src/dump/schema.sql"))?;
     let id = Uuid::new_v4();
     let crypto = Key::new("aes-256-gcm", [29; 32])?;
@@ -25,7 +25,7 @@ fn recovery_keeps_only_wrapped_keys_and_published_generations() -> Result<()> {
     };
     catalog.stage(Record::Key(WrappedKey::seal(&key, &format)?), &format)?;
     let bytes: Vec<u8> = catalog
-        .0
+        .db
         .query_row("SELECT value FROM keys", [], |r| r.get(0))?;
     assert!(!bytes.windows(32).any(|b| b == key.material));
     assert_eq!(
@@ -75,7 +75,7 @@ fn recovery_keeps_only_wrapped_keys_and_published_generations() -> Result<()> {
     catalog.finish()?;
     assert_eq!(
         catalog
-            .0
+            .db
             .query_row("SELECT generation,paused FROM buckets", [], |r| Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, bool>(1)?
