@@ -2,15 +2,45 @@
 import ErrorNotice from './ErrorNotice.vue'
 import { computed, ref } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
-import { Layers3, Package, ChevronRight, CloudUpload } from 'lucide-vue-next'
+import { Package } from 'lucide-vue-next'
 import { api, params, bytes } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
-import { errorText } from '../app/feedback'
+import ObjectExtent from './ObjectExtent.vue'
+import { completePack, extentGroups } from '../app/object-storage'
 import UiListFooter from './ui/UiListFooter.vue'
 const props = defineProps<{ bucket: string; item: components['schemas']['MediaItem'] }>()
 const after = ref('')
 const query = computed(() => params({ bucket: props.bucket, key: props.item.object_key, version: props.item.id, after: after.value || undefined }))
 const chunks = useQuery({ queryKey: ['object-chunks', query], queryFn: ({ signal }) => api<components['schemas']['ChunkPage']>(`/api/v1/buckets/${props.bucket}/object/chunks?` + query.value, { signal }) })
+const groups = computed(() => extentGroups(chunks.data.value?.items ?? []))
 </script>
-<template><div class="object-storage"><p class="field-help">{{ t(chunks.data.value?.payload_type === 'raw' ? 'objectRawStorageHint' : 'objectStorageHint') }}</p><ErrorNotice v-if="chunks.error.value" :error="chunks.error.value" /><div v-for="chunk in chunks.data.value?.items" :key="chunk.offset_bytes" class="object-chunk"><Package v-if="chunk.source === 'pack'" :size="17" /><CloudUpload v-else-if="chunk.source === 'pending'" :size="17" /><Layers3 v-else :size="17" /><div><strong>{{ bytes(Number(chunk.offset_bytes)) }} + {{ bytes(chunk.length) }}</strong><span>{{ t('source_' + chunk.source) }} · {{ chunk.compression === 'zstd' ? 'Zstd' : t('uncompressed') }}</span></div><RouterLink v-if="chunk.source === 'pack' && chunk.pack_id" :to="{ path: '/storage', query: { bucket, pack: chunk.pack_id } }" :aria-label="t('packNumber', { id: chunk.pack_id })"><ChevronRight :size="17" /></RouterLink><details><summary>{{ t('details') }}</summary><dl class="facts"><dt>{{ t('chunkId') }}</dt><dd>{{ chunk.id }}</dd><dt>{{ t('sourceOffset') }}</dt><dd>{{ bytes(chunk.source_offset) }}</dd><dt>{{ t('rawContent') }}</dt><dd>{{ bytes(chunk.raw_size) }}</dd><dt>{{ t('encryption') }}</dt><dd>{{ chunk.algorithm }}</dd><template v-if="chunk.reads != null"><dt>{{ t('readCount') }}</dt><dd>{{ chunk.reads }}</dd><dt>{{ t('rangeReadCount') }}</dt><dd>{{ chunk.range_reads }}</dd></template></dl></details></div><UiListFooter :first="!!after" :next="!!chunks.data.value?.next_cursor" @first="after = ''" @next="after = chunks.data.value!.next_cursor || ''" /></div></template>
+
+<template>
+  <div class="object-storage">
+    <ErrorNotice v-if="chunks.error.value" :error="chunks.error.value" />
+    <div v-if="chunks.isPending.value" class="skeleton-row" />
+    <template v-for="group in groups" :key="group.start">
+      <details v-if="group.pack" class="object-pack">
+        <summary>
+          <Package :size="17" />
+          <span>{{ t('source_pack') }}<small>{{ t(completePack(group.members) ? 'packContains' : group.members.length === 1 ? 'packRefersOne' : 'packRefers', { count: group.members.length }) }} · {{ bytes(group.end - group.start) }}</small></span>
+        </summary>
+        <ObjectExtent v-for="row in group.members" :key="row.offset_bytes" :row="row" />
+      </details>
+      <ObjectExtent v-else :row="group.members[0]" />
+    </template>
+    <UiListFooter :first="!!after" :next="!!chunks.data.value?.next_cursor" @first="after = ''" @next="after = chunks.data.value!.next_cursor || ''" />
+  </div>
+</template>
+
+<style scoped>
+.object-pack { border-bottom: 1px solid var(--line-soft); }
+.object-pack > summary { display: flex; align-items: baseline; gap: 8px; padding: 13px 0; cursor: pointer; }
+.object-pack > summary > svg { align-self: flex-start; color: var(--accent); }
+.object-pack > summary::after { content: '▸'; margin-inline-start: auto; }
+.object-pack[open] > summary::after { content: '▾'; }
+.object-pack small { display: block; color: var(--muted); }
+.object-pack > .object-chunk { margin-inline-start: 24px; }
+.object-pack > .object-chunk:last-child { border: 0; }
+</style>

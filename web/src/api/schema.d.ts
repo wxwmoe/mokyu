@@ -3332,18 +3332,26 @@ export interface components {
             id: string;
             /** Format: int32 */
             independent_size_hint?: number | null;
-            /** Format: int32 */
+            /** Format: int64 */
             length: number;
             offset_bytes: string;
+            /** Format: int32 */
+            pack_count?: number | null;
             pack_id?: string | null;
+            /** Format: int64 */
+            pack_offset?: number | null;
+            /** Format: int32 */
+            pack_ordinal?: number | null;
+            /** Format: int64 */
+            pack_size?: number | null;
             /** Format: int32 */
             payload_size?: number | null;
             range_reads?: string | null;
-            /** Format: int32 */
+            /** Format: int64 */
             raw_size: number;
             reads?: string | null;
             source: string;
-            /** Format: int32 */
+            /** Format: int64 */
             source_offset: number;
             /** Format: int32 */
             stored_size?: number | null;

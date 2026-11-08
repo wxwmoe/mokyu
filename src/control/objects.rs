@@ -137,17 +137,37 @@ pub(super) async fn object_chunks(
     if object.id != q.version {
         return Err(s3s::s3_error!(PreconditionFailed).into());
     }
-    if object.payload_type == "raw" {
-        return Ok(Json(insights::ChunkPage {
-            payload_type: object.payload_type,
-            chunks: Vec::new(),
-            next_offset: None,
-        }));
-    }
-    let mut rows = app
-        .objects
-        .chunks(object.id, q.after.unwrap_or(-1), limit + 1)
-        .await?;
+    let mut rows = if object.payload_type == "raw" {
+        let after = q.after.unwrap_or(-1);
+        let mut cursor = after.max(0);
+        let mut rows = Vec::new();
+        while cursor < object.size || (cursor == 0 && object.size == 0 && after < 0) {
+            let page = app.raw.page(object.id, cursor, object.size).await?;
+            let before = cursor;
+            for row in page {
+                row.validate()?;
+                cursor = row.offset_bytes + row.length;
+                if row.offset_bytes > after {
+                    rows.push(serde_json::json!({
+                        "id": row.source.id.to_string(), "offset_bytes": row.offset_bytes.to_string(),
+                        "length": row.length, "source_offset": row.source_offset, "raw_size": row.source.size,
+                        "compression":"none", "algorithm":"none", "source": if row.source.pending_upload { "pending" } else { "raw" }
+                    }));
+                    if rows.len() > limit as usize {
+                        break;
+                    }
+                }
+            }
+            if rows.len() > limit as usize || cursor <= before {
+                break;
+            }
+        }
+        rows
+    } else {
+        app.objects
+            .chunks(object.id, q.after.unwrap_or(-1), limit + 1)
+            .await?
+    };
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
     if !actor.admin {
