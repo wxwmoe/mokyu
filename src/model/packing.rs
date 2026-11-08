@@ -10,6 +10,7 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use uuid::Uuid;
 pub(crate) struct PackOutput {
+    pub(crate) entries: Vec<(Id, crate::content::pack::frame::Entry)>,
     pub(crate) chunks: Vec<Id>,
     pub(crate) pack: Option<Pack>,
     pub(crate) independent: Option<Chunk>,
@@ -20,9 +21,11 @@ impl PackOutput {
             .as_ref()
             .and_then(|p| p.stored_size)
             .or_else(|| {
-                self.independent
-                    .as_ref()
-                    .and_then(|c| c.stored_size.map(i64::from))
+                self.independent.as_ref().and_then(|c| {
+                    c.stored_size.map(|size| {
+                        i64::from(size) + crate::content::codec::FILE_HEADER.len() as i64
+                    })
+                })
             })
             .unwrap_or(0)
     }
@@ -91,7 +94,7 @@ pub(crate) trait PackingStore: Send + Sync {
         old: &Pack,
         new: &Pack,
         current: &[Id],
-        members: &[Chunk],
+        members: &[(Id, crate::content::pack::frame::Entry)],
         first: Id,
     ) -> Result<()>;
     async fn complete_rewrite(&self, task: Uuid, token: Uuid, after: Id) -> Result<()>;
@@ -102,6 +105,7 @@ pub(crate) trait PackingStore: Send + Sync {
     async fn preparing_packs(&self) -> Result<bool>;
     async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, Uuid, i32)>>;
     async fn prepare_encoding(&self, physical: &Chunk, task: Execution) -> Result<Id>;
+    async fn restore_encoding(&self, physical: &Chunk, task: Execution) -> Result<Id>;
     async fn encoding_metadata(&self, physical: &Chunk) -> Result<()>;
     async fn prepare_pack(
         &self,
@@ -184,7 +188,12 @@ pub(crate) trait PackingStore: Send + Sync {
 
     async fn start_pack(&self, policy: &str, automatic: bool, node: Option<Uuid>) -> Result<Value>;
     async fn start_unpack(&self, pack: Option<Id>, all: bool, node: Option<Uuid>) -> Result<Value>;
-    async fn insert_pack_members(&self, pack: Id, rows: &[Mapping]) -> Result<()>;
+    async fn insert_pack_members(
+        &self,
+        pack: Id,
+        rows: &[Mapping],
+        entries: &[(Id, crate::content::pack::frame::Entry)],
+    ) -> Result<()>;
     async fn commit_pack_outputs(
         &self,
         task: Execution,

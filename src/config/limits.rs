@@ -415,7 +415,7 @@ impl Budget {
         let pack_required = {
             let payload = maximum
                 + 12
-                + crate::content::pack::MEMBER_SIZE as u64
+                + crate::content::pack::MAX_MEMBER_TAG as u64
                     * (maximum / crate::content::codec::MIN as u64 + 1);
             (payload * 4 + workspace).div_ceil(1024 * 1024) * 1024 * 1024
         };
@@ -467,7 +467,7 @@ impl Budget {
         {
             let payload = maximum
                 + 12
-                + crate::content::pack::MEMBER_SIZE as u64
+                + crate::content::pack::MAX_MEMBER_TAG as u64
                     * (maximum / crate::content::codec::MIN as u64 + 1);
             ensure!(
                 (payload * 4 + workspace).div_ceil(1024 * 1024) <= u64::from(pack_memory_units),

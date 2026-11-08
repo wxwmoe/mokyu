@@ -350,10 +350,11 @@ async fn mysql_content_contract() -> Result<()> {
         .await?;
     assert!(backend.pending_only(physical.id).await?);
     let pack_location = Uuid::new_v4();
-    let pack=sqlx::query("INSERT INTO packs(location_id,storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,pack_fingerprint) VALUES(?,?,'none',64,64,2,'ready',?)").bind(pack_location).bind(storage).bind(vec![1u8;32]).execute(db).await?.last_insert_id() as i64;
-    sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES(?,0,?,0)")
+    let pack=sqlx::query("INSERT INTO packs(location_id,storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,pack_fingerprint) VALUES(?,?,'none',64,72,2,'ready',?)").bind(pack_location).bind(storage).bind(vec![1u8;32]).execute(db).await?.last_insert_id() as i64;
+    sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) VALUES(?,0,?,8,?,32,FALSE,'none')")
         .bind(pack)
         .bind(physical.id)
+        .bind(physical.location_id)
         .execute(db)
         .await?;
     sqlx::query("UPDATE chunks SET pack_id=? WHERE id=?")

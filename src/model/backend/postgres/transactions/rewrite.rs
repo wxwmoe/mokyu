@@ -135,20 +135,11 @@ pub(in super::super) async fn commit_rewrite_pack(
     old: &Pack,
     new: &Pack,
     current: &[Id],
-    members: &[Chunk],
+    members: &[(Id, crate::content::pack::frame::Entry)],
     first: Id,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let mut offset = 0;
-    let members = members
-        .iter()
-        .map(|member| {
-            let row = (member.id, offset);
-            offset += i64::from(member.raw_size);
-            row
-        })
-        .collect::<Vec<_>>();
-    commit_rewrite_pack_in(&mut tx, task, token, old, new, current, &members, first).await?;
+    commit_rewrite_pack_in(&mut tx, task, token, old, new, current, members, first).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -160,7 +151,7 @@ pub(super) async fn commit_rewrite_pack_in(
     old: &Pack,
     new: &Pack,
     current: &[Id],
-    members: &[(Id, i64)],
+    members: &[(Id, crate::content::pack::frame::Entry)],
     first: Id,
 ) -> Result<()> {
     rewrite_lease(tx, task, token).await?;
@@ -186,11 +177,7 @@ pub(super) async fn commit_rewrite_pack_in(
         .await?
         .rows_affected();
     ensure!(updated == 1, "new pack was changed during rewrite");
-    for (ordinal, (member, offset)) in members.iter().enumerate() {
-        queries::insert_pack_member(new.id, ordinal as i32, *member, *offset)
-            .execute(&mut **tx)
-            .await?;
-    }
+    queries::write_pack_index(tx, new.id, members).await?;
     let changed = queries::replace_rewrite_pack(old.id, new.id)
         .execute(&mut **tx)
         .await?

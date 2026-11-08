@@ -99,6 +99,21 @@ fn stamp(s: &SourceSnapshot, target: &Destination) -> Result<Vec<u8>> {
     )
 }
 
+async fn pack_index(
+    db: &mut q::Tx<'_>,
+    pack: &crate::content::pack::Pack,
+) -> Result<crate::content::pack::TierIndex> {
+    if let Some(index) = &pack.tier_index {
+        return Ok(*index.clone());
+    }
+    let entries = queries::pack_work::physical_members(db, pack).await?;
+    crate::model::source::manifest_digest(pack, &entries)?;
+    Ok(crate::content::pack::TierIndex {
+        home_digest: pack.digest.clone().context("missing pack digest")?,
+        entries,
+    })
+}
+
 async fn template(
     db: &mut q::Tx<'_>,
     s: &PhysicalSource,
@@ -113,26 +128,61 @@ async fn template(
     if matches!(s, PhysicalSource::Raw(_)) {
         return Ok(cfg.1.is_none().then_some(out));
     }
-    let (key, algorithm, nonce, compressed, date, tag) = match &mut out {
-        PhysicalSource::Chunk(c) => (
-            &mut c.block_key_id,
-            &mut c.algorithm,
-            &mut c.nonce,
-            &mut c.compressed,
-            c.created_at,
-            crate::content::nonce::CHUNK,
-        ),
-        PhysicalSource::Pack(p) => (
-            &mut p.block_key_id,
-            &mut p.algorithm,
-            &mut p.nonce,
-            &mut p.compressed,
-            p.created_at,
-            crate::content::nonce::PACK,
-        ),
-        PhysicalSource::Raw(_) => unreachable!(),
-    };
     let allow_compression = cfg.3 && cfg.4 != "never";
+    if let PhysicalSource::Pack(p) = &mut out {
+        let mut index = pack_index(db, p).await?;
+        if index.entries.iter().any(|e| {
+            let c = &e.position.encoding;
+            c.block_key_id != cfg.1 || c.algorithm != alg || c.compressed && !allow_compression
+        }) {
+            let first = if let Some(key) = cfg.1 {
+                let tag = crate::content::nonce::CHUNK;
+                let previous = queries::nonce_counter(key, tag)
+                    .fetch_one(&mut **db)
+                    .await?;
+                let units = u32::try_from(
+                    index
+                        .entries
+                        .len()
+                        .div_ceil(crate::content::nonce::UNIT as usize),
+                )?;
+                let (first, last) = crate::model::key::nonce_reservation(previous, units)?;
+                ensure!(
+                    queries::advance_nonce(key, tag, previous, last)
+                        .execute(&mut **db)
+                        .await?
+                        .rows_affected()
+                        == 1,
+                    Error::OperationAborted
+                );
+                Some(first)
+            } else {
+                None
+            };
+            index.entries = crate::content::pack::frame::rewrite_entries(
+                &index.entries,
+                alg,
+                cfg.1,
+                p.created_at,
+                first,
+                allow_compression,
+            )?;
+        }
+        p.tier_index = Some(Box::new(index));
+        return Ok(Some(out));
+    }
+    let PhysicalSource::Chunk(c) = &mut out else {
+        unreachable!()
+    };
+    let (key, algorithm, nonce, compressed, date, tag) = (
+        &mut c.block_key_id,
+        &mut c.algorithm,
+        &mut c.nonce,
+        &mut c.compressed,
+        c.created_at,
+        crate::content::nonce::CHUNK,
+    );
+
     if *key != cfg.1 || algorithm != alg || *compressed && !allow_compression {
         *key = cfg.1;
         *algorithm = alg.into();
@@ -167,10 +217,7 @@ fn recode(a: &PhysicalSource, b: &PhysicalSource) -> bool {
                 || a.compressed != b.compressed
         }
         (PhysicalSource::Pack(a), PhysicalSource::Pack(b)) => {
-            a.algorithm != b.algorithm
-                || a.block_key_id != b.block_key_id
-                || a.nonce != b.nonce
-                || a.compressed != b.compressed
+            a.tier_index.as_ref().map(|i| &i.entries) != b.tier_index.as_ref().map(|i| &i.entries)
         }
         _ => false,
     }
@@ -488,12 +535,16 @@ pub(super) async fn step(
         return Ok(idle);
     }
     if movement.phase == "copying" {
+        let mut source = (*source).clone();
+        if let PhysicalSource::Pack(pack) = &mut source {
+            pack.tier_index = Some(Box::new(pack_index(db, pack).await?));
+        }
         return Ok(Step {
             work: Some(Work::Copy {
                 source: source.clone(),
                 target: target.0.clone(),
                 rate: (policy.bytes_per_second / u64::from(policy.parallelism)).max(1),
-                recode: recode(source, target),
+                recode: recode(&source, target),
                 progress: movement.checkpoint.map(|p| p.0).unwrap_or_default(),
             }),
             switched: false,
@@ -613,9 +664,9 @@ pub(super) async fn finish(db: &mut q::Tx<'_>, task: Execution, outcome: &Outcom
                                 && a.nonce == b.nonce
                                 && (!b.compressed || a.compressed),
                         (PhysicalSource::Pack(a), PhysicalSource::Pack(b)) =>
-                            a.algorithm == b.algorithm
-                                && a.nonce == b.nonce
-                                && (!b.compressed || a.compressed),
+                            a.tier_index.as_ref().map(|i| &i.entries)
+                                == b.tier_index.as_ref().map(|i| &i.entries)
+                                && b.digest.as_deref() == Some(digest.as_slice()),
                         (PhysicalSource::Raw(_), PhysicalSource::Raw(_)) => true,
                         _ => false,
                     }

@@ -30,11 +30,17 @@ pub(crate) struct Target {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding: Option<Id>,
     pub size: i32,
+    #[serde(with = "crate::content::codec::digest")]
     pub hash: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_size: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<crate::content::pack::frame::Encoding>,
     pub compress: bool,
     pub location: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ready: Option<u32>,
 }
 
@@ -45,6 +51,7 @@ pub(crate) struct Attempt {
     pub start: usize,
     pub end: usize,
     pub location: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nonce: Option<Vec<u8>>,
 }
 
@@ -69,10 +76,25 @@ impl Target {
     }
 }
 impl Batch {
+    pub(crate) fn packed_chunks(&self) -> Result<Vec<bool>> {
+        let mut packed = vec![false; self.chunks.len()];
+        for attempt in &self.packs {
+            let range = packed
+                .get_mut(attempt.start..attempt.end)
+                .ok_or_else(|| anyhow::anyhow!("invalid pack range"))?;
+            ensure!(
+                range.len() >= 2 && !range.iter().any(|c| *c),
+                "overlapping pack groups"
+            );
+            range.fill(true);
+        }
+        Ok(packed)
+    }
+
     pub(crate) fn chunk(&self, storage: Uuid, index: usize) -> Result<Chunk> {
         let item = &self.chunks[index];
         let uuid = item.physical_id()?;
-        Ok(Chunk {
+        let mut chunk = Chunk {
             id: item.id,
             uuid,
             encoding_id: item.encoding.unwrap_or(Id::Uuid(item.location)),
@@ -90,7 +112,11 @@ impl Batch {
             format: 2,
             state: "ready".into(),
             created_at: self.created,
-        })
+        };
+        if let Some(encoding) = &item.original {
+            encoding.apply(&mut chunk)?;
+        }
+        Ok(chunk)
     }
 
     pub(crate) fn pack(&self, storage: Uuid, index: usize) -> Result<Pack> {
@@ -105,16 +131,17 @@ impl Batch {
             address: None,
             location_id: item.location,
             storage_id: Some(storage),
-            algorithm: self.algorithm.clone(),
-            block_key_id: self.key,
+            algorithm: "none".into(),
+            block_key_id: None,
             raw_size: self.chunks[item.start..item.end]
                 .iter()
                 .map(|c| i64::from(c.size))
                 .sum(),
             stored_size: None,
             compressed: false,
-            nonce: item.nonce.clone(),
+            nonce: None,
             digest: None,
+            tier_index: None,
             member_count: i32::try_from(item.end - item.start)?,
             state: "preparing".into(),
             created_at: self.created,

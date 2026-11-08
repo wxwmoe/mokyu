@@ -1,12 +1,6 @@
 use crate::model::task::Execution;
 use crate::model::{Id, cache::EncodingPolicy};
-use crate::{
-    app::App,
-    config,
-    content::codec::Chunk,
-    content::pack::{CompressionStrategy, Pack},
-    storage::ReadContext,
-};
+use crate::{app::App, config, content::codec::Chunk, content::pack::Pack, storage::ReadContext};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use serde_json::{Value, json};
@@ -153,6 +147,7 @@ impl App {
         &self,
         task: Execution,
         c: &Chunk,
+        packed: bool,
         raw: Bytes,
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         accepted: Option<&EncodingPolicy>,
@@ -168,6 +163,27 @@ impl App {
                 cache.push((physical.clone(), raw));
             }
             return Ok(Output {
+                entries: Vec::new(),
+                chunks: vec![c.id],
+                pack: None,
+                independent: Some(physical),
+            });
+        }
+        if packed {
+            let (mut physical, file) = self.storage.member_file(c).await?;
+            physical.storage_id = c.storage_id;
+            physical.encoding_id = self.packing.restore_encoding(&physical, task).await?;
+            let storage = physical.storage_id.context("chunk has no store")?;
+            self.storage
+                .put_path_for(
+                    storage,
+                    &self.storage.path_for(storage, physical.location_id)?,
+                    file.to_vec(),
+                )
+                .await?;
+            cache.push((physical.clone(), raw));
+            return Ok(Output {
+                entries: Vec::new(),
                 chunks: vec![c.id],
                 pack: None,
                 independent: Some(physical),
@@ -211,6 +227,7 @@ impl App {
             cache.push((physical.clone(), raw));
         }
         Ok(Output {
+            entries: Vec::new(),
             chunks: vec![c.id],
             pack: None,
             independent: Some(physical),
@@ -230,7 +247,7 @@ impl App {
         let raw_size: usize = rows.iter().map(|r| r.chunk.raw_size as usize).sum();
         let memory = self
             .storage
-            .pack_work(raw_size + 12 + rows.len() * crate::content::pack::MEMBER_SIZE)
+            .pack_work(raw_size + 8 + rows.len() * crate::content::pack::MAX_MEMBER_TAG)
             .await?;
         let mut data = Vec::with_capacity(rows.len());
         for row in rows {
@@ -266,10 +283,18 @@ impl App {
         let mut cache = Vec::new();
         if rows.len() == 1 || !allow_pack || !self.pack_creation_allowed() {
             let mut outputs = Vec::new();
-            for (c, raw) in data {
+            for (row, (c, raw)) in rows.iter().zip(data) {
                 outputs.push(
-                    self.independent_output(task, c, raw.clone(), memory, accepted, &mut cache)
-                        .await?,
+                    self.independent_output(
+                        task,
+                        c,
+                        row.pack_id.is_some(),
+                        raw.clone(),
+                        memory,
+                        accepted,
+                        &mut cache,
+                    )
+                    .await?,
                 );
             }
             fills.extend(self.storage.prepare_batch(cache, memory.clone()));
@@ -317,39 +342,19 @@ impl App {
                 outputs.push(output);
                 continue;
             }
-            // At most one bisection per bounded group, on a complete CDC boundary.
-            let mid = rows.len() / 2;
-            for (rows, data) in [(&rows[..mid], &data[..mid]), (&rows[mid..], &data[mid..])] {
-                if rows.len() > 1
-                    && let Some(output) = self
-                        .try_pack_output(
-                            task,
-                            rows,
-                            data,
-                            content_type,
-                            key,
-                            &memory,
-                            accepted,
-                            &mut cache,
-                        )
-                        .await?
-                {
-                    outputs.push(output);
-                    continue;
-                }
-                for (c, raw) in data {
-                    outputs.push(
-                        self.independent_output(
-                            task,
-                            c,
-                            raw.clone(),
-                            &memory,
-                            accepted,
-                            &mut cache,
-                        )
-                        .await?,
-                    );
-                }
+            for (row, (c, raw)) in rows.iter().zip(data) {
+                outputs.push(
+                    self.independent_output(
+                        task,
+                        c,
+                        row.pack_id.is_some(),
+                        raw.clone(),
+                        memory,
+                        accepted,
+                        &mut cache,
+                    )
+                    .await?,
+                );
             }
         }
         fills.extend(self.storage.prepare_batch(cache, memory.clone()));
@@ -393,48 +398,38 @@ impl App {
         }
         let p: Pack = self
             .packing
-            .prepare_pack(
-                storage_id,
-                &algorithm,
-                block_key_id,
-                raw_size,
-                rows.len() as i32,
-                task,
-            )
+            .prepare_pack(storage_id, "none", None, raw_size, rows.len() as i32, task)
             .await?;
         drop(coord);
-        let strategy = match settings.compression_strategy {
-            None => anyhow::bail!("storage pack compression policy is missing"),
-            Some(CompressionStrategy::Never) => crate::content::compression::Strategy::Never,
-            Some(CompressionStrategy::Always) => crate::content::compression::Strategy::Always,
-            Some(CompressionStrategy::Sample) => crate::content::compression::Strategy::Sample,
-        };
-        let should_try = match settings.compression_strategy {
-            Some(CompressionStrategy::Never) => false,
-            Some(_) => true,
-            None => anyhow::bail!("storage pack compression policy is missing"),
-        };
-        let (p, encoded) = self
-            .storage
-            .encode_pack(
-                p,
-                data.to_vec(),
-                strategy,
-                should_try,
-                memory,
-                accepted.map(|p| &p.compression),
-            )
-            .await?;
-        let old: i64 = rows
-            .iter()
-            .map(|r| r.chunk.stored_size.unwrap_or(r.chunk.raw_size) as i64)
-            .sum();
-        if p.stored_size.unwrap_or(i64::MAX)
-            > old + 12 + rows.len() as i64 * crate::content::pack::MEMBER_SIZE as i64
-        {
-            self.packing.discard_pack(p.id).await?;
-            return Ok(None);
+        let mut files = Vec::with_capacity(rows.len());
+        for (row, (source, raw)) in rows.iter().zip(data) {
+            let file = if row.pack_id.is_some()
+                || source.stored_size.is_some()
+                    && self.packing.ready_encoding(source.id).await?.is_some()
+            {
+                self.storage.member_file(source).await?
+            } else {
+                let mut member = source.clone();
+                member.location_id = Uuid::now_v7();
+                member.address = None;
+                member.algorithm = algorithm.clone();
+                member.block_key_id = block_key_id;
+                member.created_at = chrono::Utc::now();
+                let (physical, file, _) = self
+                    .storage
+                    .encode(
+                        member,
+                        raw.to_vec(),
+                        source.stored_size.is_none() || source.compressed,
+                        Some(memory),
+                        accepted.map(|policy| &policy.compression),
+                    )
+                    .await?;
+                (physical, Bytes::from(file))
+            };
+            files.push(file);
         }
+        let (p, encoded, entries) = self.storage.assemble_pack(p, files, memory).await?;
         self.packing.pack_metadata(&p).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pack-prepared").await;
@@ -448,7 +443,9 @@ impl App {
             .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pack-stored").await;
-        self.packing.insert_pack_members(p.id, rows).await?;
+        self.packing
+            .insert_pack_members(p.id, rows, &entries)
+            .await?;
         for (source, bytes) in data {
             if !self.storage.has_pending(source) {
                 let mut member = source.clone();
@@ -458,6 +455,7 @@ impl App {
             }
         }
         Ok(Some(Output {
+            entries,
             chunks: rows.iter().map(|r| r.chunk.id).collect(),
             pack: Some(p),
             independent: None,
@@ -768,7 +766,7 @@ impl App {
             .sum();
         if outputs.len() < physical.len()
             && new_size
-                <= old_size + 12 + crate::content::pack::MEMBER_SIZE as i64 * group.len() as i64
+                <= old_size + 8 + crate::content::pack::MAX_MEMBER_TAG as i64 * group.len() as i64
         {
             self.commit_outputs(task, &group, &outputs, false).await?;
             crate::storage::cache::publish_fills(fills);

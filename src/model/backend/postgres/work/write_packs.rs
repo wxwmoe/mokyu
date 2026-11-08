@@ -60,7 +60,7 @@ pub(super) async fn finish(
             .eq(batch.chunks.iter().map(|chunk| chunk.id)),
         Error::NodeOperationConflict
     );
-    queries::pack_work::record_outputs(db, task.id, &rows, &outputs).await?;
+    queries::pack_work::record_outputs(db, task.id, &outputs).await?;
     let stream: Id = row.stream_id.ok_or(Error::NodeExpired)?.into();
     commit_conversion_batch_in(db, task, stream, &rows, &outputs).await?;
     let mut completed = BTreeSet::new();

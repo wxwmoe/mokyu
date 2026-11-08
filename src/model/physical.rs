@@ -113,9 +113,26 @@ impl PhysicalSource {
     pub(crate) fn block_key(&self) -> Option<Uuid> {
         match self {
             Self::Chunk(c) => c.block_key_id,
-            Self::Pack(p) => p.block_key_id,
+            Self::Pack(p) => p
+                .tier_index
+                .as_ref()
+                .and_then(|i| i.entries.first())
+                .and_then(|e| e.position.encoding.block_key_id),
             Self::Raw(_) => None,
         }
+    }
+
+    pub(crate) fn block_keys(&self) -> std::collections::BTreeSet<Uuid> {
+        if let Self::Pack(pack) = self
+            && let Some(tier) = &pack.tier_index
+        {
+            return tier
+                .entries
+                .iter()
+                .filter_map(|e| e.position.encoding.block_key_id)
+                .collect();
+        }
+        self.block_key().into_iter().collect()
     }
 
     pub(crate) fn relocate(&mut self, storage: Uuid, address: Uuid, local: bool) {
@@ -154,7 +171,7 @@ impl PhysicalSource {
                 (Self::Pack(a), Self::Pack(b)) => {
                     a.id == b.id
                         && a.raw_size == b.raw_size
-                        && a.digest == b.digest
+                        && a.home_digest() == b.home_digest()
                         && a.member_count == b.member_count
                 }
                 (Self::Raw(a), Self::Raw(b)) => {

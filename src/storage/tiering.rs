@@ -139,19 +139,23 @@ fn encoded(
             Ok((PhysicalSource::Chunk(b), data))
         }
         (PhysicalSource::Pack(a), PhysicalSource::Pack(mut b)) => {
-            let raw = pack::decode(a, bytes.clone(), keys, pool)?;
-            if !recode {
-                return Ok((PhysicalSource::Pack(b), bytes));
-            }
-            let plain = if b.compressed {
-                pack::open(a, bytes, keys)?
+            let old = &a
+                .tier_index
+                .as_ref()
+                .context("missing tier source members")?
+                .entries;
+            let new = b
+                .tier_index
+                .as_ref()
+                .context("missing tier destination members")?
+                .entries
+                .clone();
+            let data = if recode {
+                pack::frame::recode(a, &mut b, &bytes, old, &new, keys, pool)?
             } else {
-                raw.bytes.to_vec()
+                pack::decode_index(a, bytes.clone(), old, keys, pool, true)?;
+                bytes
             };
-            b.stored_size = Some(i64::try_from(
-                plain.len() + if b.algorithm == "none" { 0 } else { 16 },
-            )?);
-            let data = pack::seal(&b, plain, keys)?;
             Ok((PhysicalSource::Pack(b), data))
         }
         _ => anyhow::bail!("invalid encoded tier source"),
@@ -411,7 +415,9 @@ pub(crate) async fn execute(
 impl super::Storage {
     pub(crate) async fn tier_work(&self, work: &Work) -> Result<Outcome> {
         for material in std::iter::once(work.source()).chain(work.target()) {
-            self.ensure_key_loaded(material.block_key()).await?;
+            for id in material.block_keys() {
+                self.ensure_key_loaded(Some(id)).await?;
+            }
         }
         let source = self.store_backend(work.source().storage()?)?;
         self.verify_raw_target(&source).await?;

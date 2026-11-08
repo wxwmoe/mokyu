@@ -7,6 +7,28 @@ struct InspectionMember {
     offset_bytes: i64,
 }
 
+pub(in super::super) async fn pack_index_rows(
+    db: &mut sqlx::PgConnection,
+    pack: Id,
+    chunk: Option<Id>,
+) -> Result<Vec<(Id, crate::content::pack::frame::Entry)>> {
+    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT m.chunk_id,c.id AS uuid,c.hash,c.raw_size,m.ordinal,m.offset_bytes,m.encoding_uuid,m.encoded_size,m.compressed,m.encryption_algorithm,m.block_key_id,m.nonce FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=",
+    );
+    query.push_bind(pack);
+    if let Some(chunk) = chunk {
+        query.push(" AND m.chunk_id=").push_bind(chunk);
+    }
+    query
+        .push(" ORDER BY m.ordinal LIMIT 4097")
+        .build_query_as::<crate::model::physical::PackMemberRow>()
+        .fetch_all(db)
+        .await?
+        .into_iter()
+        .map(crate::model::physical::PackMemberRow::entry)
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl PhysicalStore for Backend {
     async fn recover_memory(&self, boot: Uuid) -> Result<()> {
@@ -144,21 +166,7 @@ impl PhysicalStore for Backend {
         pack: Id,
         chunk: Option<Id>,
     ) -> Result<Vec<(Id, crate::content::pack::frame::Entry)>> {
-        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-            "SELECT m.chunk_id,c.id AS uuid,c.hash,c.raw_size,m.ordinal,m.offset_bytes,m.encoding_uuid,m.encoded_size,m.compressed,m.encryption_algorithm,m.block_key_id,m.nonce FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=",
-        );
-        query.push_bind(pack);
-        if let Some(chunk) = chunk {
-            query.push(" AND m.chunk_id=").push_bind(chunk);
-        }
-        query
-            .push(" ORDER BY m.ordinal LIMIT 4097")
-            .build_query_as::<crate::model::physical::PackMemberRow>()
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .map(crate::model::physical::PackMemberRow::entry)
-            .collect()
+        pack_index_rows(&mut *self.pool.acquire().await?, pack, chunk).await
     }
     async fn inspection_members(&self, pack: Id) -> Result<Vec<(Chunk, i64)>> {
         Ok(sqlx::query_as::<_, InspectionMember>("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,m.offset_bytes FROM pack_members m JOIN chunks c ON c.id=m.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE m.pack_id=$1 ORDER BY m.ordinal LIMIT 4097").bind(pack).fetch_all(&self.pool).await?.into_iter().map(|m| (m.chunk,m.offset_bytes)).collect())

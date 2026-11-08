@@ -30,9 +30,33 @@ pub(crate) enum Input {
 pub(crate) struct Member {
     pub id: Id,
     pub uuid: Uuid,
-    pub offset: u64,
+    pub position: crate::content::pack::frame::Position,
     pub size: u32,
+    #[serde(with = "crate::content::codec::digest")]
     pub hash: Vec<u8>,
+}
+
+impl From<(Id, crate::content::pack::frame::Entry)> for Member {
+    fn from((id, entry): (Id, crate::content::pack::frame::Entry)) -> Self {
+        Self {
+            id,
+            uuid: entry.uuid,
+            position: entry.position,
+            size: entry.raw_size as u32,
+            hash: entry.hash.to_vec(),
+        }
+    }
+}
+
+impl Member {
+    pub(crate) fn entry(&self) -> Result<crate::content::pack::frame::Entry> {
+        Ok(crate::content::pack::frame::Entry {
+            uuid: self.uuid,
+            raw_size: self.size.try_into()?,
+            position: self.position.clone(),
+            hash: self.hash.as_slice().try_into()?,
+        })
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -540,27 +564,21 @@ impl Input {
                     "invalid transfer pack"
                 );
                 let mut ids = std::collections::BTreeSet::new();
-                let mut uuids = std::collections::BTreeSet::new();
-                let mut end = 0;
-                for member in members {
-                    ensure!(
-                        ids.insert(member.id)
-                            && uuids.insert(member.uuid)
-                            && !member.uuid.is_nil()
-                            && member.hash.len() == 32
-                            && (1..=crate::content::codec::MAX as u32).contains(&member.size)
-                            && member.offset >= end,
-                        "invalid transfer member"
-                    );
-                    end = member
-                        .offset
-                        .checked_add(u64::from(member.size))
-                        .context("transfer offset overflow")?;
-                    ensure!(
-                        end <= u64::try_from(pack.raw_size)?,
-                        "transfer member exceeds pack"
-                    );
-                }
+                ensure!(
+                    members.iter().all(|m| ids.insert(m.id)),
+                    "duplicate transfer member"
+                );
+                let entries = members
+                    .iter()
+                    .map(Member::entry)
+                    .collect::<Result<Vec<_>>>()?;
+                crate::content::pack::frame::validate_entries(
+                    &entries,
+                    pack.stored_size.context("missing pack size")?.try_into()?,
+                    pack.raw_size,
+                    pack.member_count,
+                    false,
+                )?;
             }
             Self::Raw { source } => source.validate()?,
         }
@@ -869,7 +887,18 @@ mod tests {
                 Member {
                     id: Id::Uuid(uuid),
                     uuid,
-                    offset: index as u64 * 4096,
+                    position: crate::content::pack::frame::Position {
+                        ordinal: index as u32,
+                        offset: 8 + index as u64 * 4096,
+                        encoding: crate::content::pack::frame::Encoding {
+                            location_id: uuid,
+                            stored_size: 4096,
+                            compressed: false,
+                            algorithm: "none".into(),
+                            block_key_id: None,
+                            nonce: None,
+                        },
+                    },
                     size: 4096,
                     hash: vec![255; 32],
                 }
@@ -884,6 +913,7 @@ mod tests {
                 size: member.size as i32,
                 hash: member.hash.clone(),
                 previous_size: None,
+                original: None,
                 compress: true,
                 location: Uuid::now_v7(),
                 nonce: Some(vec![255; 12]),
@@ -908,10 +938,11 @@ mod tests {
                     algorithm: "aes-256-gcm".into(),
                     block_key_id: Some(Uuid::new_v4()),
                     raw_size: count as i64 * 4096,
-                    stored_size: Some(count as i64 * 4096),
+                    stored_size: Some(8 + count as i64 * 4096),
                     compressed: false,
-                    nonce: Some(vec![255; 12]),
+                    nonce: None,
                     digest: Some(vec![255; 32]),
+                    tier_index: None,
                     member_count: count as i32,
                     state: "ready".into(),
                     created_at: chrono::Utc::now(),

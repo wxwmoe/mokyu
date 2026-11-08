@@ -59,6 +59,13 @@ pub(in super::super) fn node_read_chunks(ids: &[Id]) -> Rows<'_, NodeReadChunk> 
         .bind(ids)
 }
 
+pub(in super::super) fn node_pack_members(
+    ids: &[Id],
+) -> Rows<'_, crate::model::physical::PackMemberRow> {
+    sqlx::query_as("SELECT m.chunk_id,c.id AS uuid,c.hash,c.raw_size,m.ordinal,m.offset_bytes,m.encoding_uuid,m.encoded_size,m.compressed,m.encryption_algorithm,m.block_key_id,m.nonce FROM pack_members m JOIN chunks c ON c.id=m.chunk_id AND c.pack_id=m.pack_id WHERE c.id = ANY($1) ORDER BY c.id")
+        .bind(ids)
+}
+
 pub(in super::super) fn node_read_encodings(ids: &[Id]) -> Rows<'_, Chunk> {
     sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=l.encoding_id) AS tier_material,c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,l.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunks c JOIN LATERAL (SELECT * FROM chunk_encodings e WHERE e.chunk_id=c.id AND e.state='ready' AND e.quarantined_at IS NULL ORDER BY e.encoding_id LIMIT 1 FOR SHARE) l ON true WHERE c.id=ANY($1) ORDER BY c.id")
         .bind(ids)

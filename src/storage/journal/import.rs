@@ -22,6 +22,33 @@ use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, path::Path}
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
 
+enum CarrierDigest {
+    Raw(Md5),
+    Pack(Box<blake3::Hasher>),
+}
+impl CarrierDigest {
+    fn new(packed: bool) -> Self {
+        if packed {
+            Self::Pack(Box::new(blake3::Hasher::new()))
+        } else {
+            Self::Raw(Md5::new())
+        }
+    }
+    fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Self::Raw(h) => h.update(bytes),
+            Self::Pack(h) => {
+                h.update(bytes);
+            }
+        }
+    }
+    fn matches(self, expected: &[u8]) -> bool {
+        match self {
+            Self::Raw(h) => h.finalize().as_slice() == expected,
+            Self::Pack(h) => h.finalize().as_bytes() == expected,
+        }
+    }
+}
 fn role(m: &Material) -> &'static str {
     match m {
         Material::Raw { .. } => "raw",
@@ -111,25 +138,29 @@ impl Import<'_> {
         Ok(())
     }
 
-    async fn raw(
-        &mut self,
-        mat: &Material,
-        source: &crate::model::raw::RawSource,
+    async fn copy_carrier(
+        &self,
         from: &str,
         to: &str,
-    ) -> Result<()> {
-        let size = u64::try_from(source.size)?;
-        let expected = source.digest.as_deref().context("missing raw digest")?;
-        let mut pages =
-            crate::storage::raw_manifest::Spool::new(&self.app.config.instance.data_path);
-        let mut hasher = Md5::new();
+        size: u64,
+        expected: &[u8],
+        mut pages: Option<&mut crate::storage::raw_manifest::Spool<'_>>,
+        member: Option<std::ops::Range<u64>>,
+    ) -> Result<Vec<u8>> {
+        let packed = pages.is_none();
+        let mut hasher = CarrierDigest::new(packed);
+        let mut header = Vec::new();
+        let mut selected = Vec::new();
         let object = self.origin.get(&Path::from(from)).await?;
-        ensure!(object.meta.size == size, "recovered raw length mismatch");
+        ensure!(
+            object.meta.size == size,
+            "recovered carrier length mismatch"
+        );
         let copy = !(self.same && from == to);
         let existed = if copy {
             match self.destination.head(&Path::from(to)).await {
                 Ok(m) => {
-                    ensure!(m.size == size, "conflicting destination raw");
+                    ensure!(m.size == size, "conflicting recovery destination");
                     true
                 }
                 Err(object_store::Error::NotFound { .. }) => false,
@@ -150,13 +181,17 @@ impl Import<'_> {
             let root = backend
                 .raw_root
                 .as_ref()
-                .context("missing local raw namespace")?;
-            let dest = root.join(
-                to.strip_prefix("objects/")
-                    .context("invalid recovered raw path")?,
+                .and_then(|p| p.parent())
+                .context("missing local backend root")?;
+            let directory = if packed { "packs" } else { "objects" };
+            ensure!(
+                to.starts_with(&format!("{directory}/")),
+                "invalid recovery path"
             );
+            let root = root.join(directory);
+            let dest = root.parent().unwrap().join(to);
             let parent = dest.parent().context("missing raw directory")?;
-            crate::storage::raw::directory(root).await?;
+            crate::storage::raw::directory(&root).await?;
             crate::storage::raw::directory(parent).await?;
             Some((
                 dest.with_extension(format!("{}.recover", self.job.simple())),
@@ -203,7 +238,22 @@ impl Import<'_> {
                     .checked_add(bytes.len() as u64)
                     .context("raw size overflow")?;
                 ensure!(read <= size, "raw file grew");
-                pages.feed(&bytes).await?;
+                if let Some(pages) = pages.as_deref_mut() {
+                    pages.feed(&bytes).await?;
+                }
+                if packed && header.len() < 8 {
+                    let n = bytes.len().min(8 - header.len());
+                    header.extend_from_slice(&bytes[..n]);
+                }
+                if let Some(span) = &member {
+                    let start = read - bytes.len() as u64;
+                    let a = start.max(span.start);
+                    let b = read.min(span.end);
+                    if a < b {
+                        selected
+                            .extend_from_slice(&bytes[(a - start) as usize..(b - start) as usize]);
+                    }
+                }
                 hasher.update(&bytes);
                 if let Some(out) = &mut local {
                     tokio::io::AsyncWriteExt::write_all(out, &bytes).await?;
@@ -223,8 +273,10 @@ impl Import<'_> {
                 }
             }
             ensure!(
-                read == size && hasher.finalize().as_slice() == expected,
-                "recovered raw digest mismatch"
+                read == size
+                    && hasher.matches(expected)
+                    && (!packed || header.as_slice() == pack::frame::HEADER),
+                "recovered carrier digest mismatch"
             );
             if let Some(upload) = &upload {
                 if !buffer.is_empty() {
@@ -253,14 +305,14 @@ impl Import<'_> {
                 self.put(to, buffer.to_vec()).await?;
             }
             if existed {
-                let mut hash = Md5::new();
+                let mut hash = CarrierDigest::new(packed);
                 let mut chunks = self.destination.get(&Path::from(to)).await?.into_stream();
                 while let Some(part) = chunks.try_next().await? {
                     hash.update(&part);
                 }
                 ensure!(
-                    hash.finalize().as_slice() == expected,
-                    "destination raw digest mismatch"
+                    hash.matches(expected),
+                    "destination carrier digest mismatch"
                 );
             }
             if let Some((temp, dest)) = &local_paths {
@@ -283,6 +335,33 @@ impl Import<'_> {
                 .await;
         }
         result?;
+        ensure!(
+            member
+                .as_ref()
+                .is_none_or(|s| s.end - s.start == selected.len() as u64),
+            "incomplete recovered member"
+        );
+        Ok(selected)
+    }
+    async fn raw(
+        &mut self,
+        mat: &Material,
+        source: &crate::model::raw::RawSource,
+        from: &str,
+        to: &str,
+    ) -> Result<()> {
+        let expected = source.digest.as_deref().context("missing raw digest")?;
+        let mut pages =
+            crate::storage::raw_manifest::Spool::new(&self.app.config.instance.data_path);
+        self.copy_carrier(
+            from,
+            to,
+            u64::try_from(source.size)?,
+            expected,
+            Some(&mut pages),
+            None,
+        )
+        .await?;
         let id = self.save(mat, None).await?;
         let mut verified = pages.finish().await?;
         while let Some(group) = verified.next().await? {
@@ -340,66 +419,53 @@ impl Import<'_> {
             Material::Pack { pack } => {
                 pack.validate(&self.keys)?;
                 let size = u64::try_from(pack.stored_size.context("missing pack size")?)?;
-                let _memory = self
-                    .app
-                    .storage
-                    .pack_memory(usize::try_from(size)?.saturating_add(pack.payload_size()?))
+                let member = mat.pack_member()?.map(|(_, entry)| entry);
+                let pack_ref = physical.reference();
+                let (id, body) = if let Some(id) = self.locations.get(&pack_ref).copied() {
+                    let member = member.as_ref().context("missing recovery member")?;
+                    let span = member
+                        .position
+                        .range(member.raw_size, size, pack.member_count)?;
+                    let body = crate::storage::read_retry::bounded(
+                        self.origin.as_ref(),
+                        &Path::from(from.as_str()),
+                        member.position.encoding.stored_size as usize,
+                        Some((span, size)),
+                        None,
+                    )
                     .await?;
-                let data = source::bytes(self.origin.as_ref(), &from, size)
-                    .await?
-                    .context("missing recovered pack")?;
-                let decoded = pack::decode(
-                    pack,
-                    data.clone(),
-                    &self.keys,
-                    &self.app.storage.compression,
-                )?;
-                if !self.same || from != to {
-                    self.put(&to, data).await?;
-                }
-                let id = self.save(physical, None).await?;
-                let mut offset = 0i64;
-                for (i, member) in decoded.members.iter().enumerate() {
-                    let r = Reference {
-                        kind: Kind::Member,
-                        id: pack.address(),
-                        member: Some(member.id),
-                    };
-                    let from_header;
-                    let material = if let Some(material) = catalog.materials.get(&r) {
-                        material
-                    } else {
-                        from_header = Material::Member {
-                            pack: pack.address(),
-                            chunk: codec::Chunk {
-                                id: member.id.into(),
-                                uuid: member.id,
-                                encoding_id: member.id.into(),
-                                location_id: member.id,
-                                address: None,
-                                home_storage_id: None,
-                                storage_id: pack.storage_id,
-                                hash: member.hash.to_vec(),
-                                raw_size: i32::try_from(member.len)?,
-                                stored_size: None,
-                                algorithm: "none".into(),
-                                block_key_id: None,
-                                compressed: false,
-                                nonce: None,
-                                format: 2,
-                                state: "ready".into(),
-                                created_at: pack.created_at,
-                            },
-                        };
-                        &from_header
-                    };
-                    let Material::Member { chunk, .. } = material else {
-                        anyhow::bail!("invalid pack member reference")
-                    };
-                    decoded.chunk(chunk)?;
-                    self.save(material, Some((id, i32::try_from(i)?, offset)))
+                    (id, Some(body))
+                } else {
+                    let _memory = self.app.storage.pack_memory(crate::content::codec::MAX).await?;
+                    let span = member
+                        .as_ref()
+                        .map(|m| m.position.range(m.raw_size, size, pack.member_count))
+                        .transpose()?;
+                    let expected = pack.digest.as_deref().context("missing pack digest")?;
+                    let body = self
+                        .copy_carrier(&from, &to, size, expected, None, span)
                         .await?;
-                    offset += i64::try_from(member.len)?;
+                    let body = member.as_ref().map(|_| body);
+                    (self.save(physical, None).await?, body)
+                };
+                if let Some(member) = member {
+                    pack::frame::decode_entry(
+                        pack,
+                        &member,
+                        body.context("missing recovery bytes")?,
+                        &self.keys,
+                        &self.app.storage.compression,
+                        true,
+                    )?;
+                    self.save(
+                        mat,
+                        Some((
+                            id,
+                            i32::try_from(member.position.ordinal)?,
+                            i64::try_from(member.position.offset)?,
+                        )),
+                    )
+                    .await?;
                 }
             }
             Material::Fragment { size, hash, .. } => {

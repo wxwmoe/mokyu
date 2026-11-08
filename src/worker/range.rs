@@ -198,7 +198,7 @@ impl App {
                             })
                             .sum::<i64>()
                             + if g.len() > 1 {
-                                12 + crate::content::pack::MEMBER_SIZE as i64 * g.len() as i64
+                                8 + crate::content::pack::MAX_MEMBER_TAG as i64 * g.len() as i64
                             } else {
                                 0
                             },

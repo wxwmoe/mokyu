@@ -855,12 +855,14 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         .await?;
     sqlx::query("UPDATE streams SET payload_type='chunks',payload_revision=payload_revision+1,size=4 WHERE id=$1")
         .bind(stream).execute(&pool).await?;
-    let pack: Uuid = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,digest,member_count,state,pack_fingerprint,created_at) VALUES($1,'none',8,124,$2,2,'ready',$3,clock_timestamp()-interval '1 day') RETURNING id")
+    let pack: Uuid = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,digest,member_count,state,pack_fingerprint,created_at) VALUES($1,'none',8,16,$2,2,'ready',$3,clock_timestamp()-interval '1 day') RETURNING id")
         .bind(storage).bind(vec![91u8; 32]).bind(vec![92u8; 32]).fetch_one(&pool).await?;
     let member: Uuid = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state,pack_id) VALUES($1,$2,4,'none','ready',$3) RETURNING id")
         .bind(storage).bind(vec![93u8; 32]).bind(pack).fetch_one(&pool).await?;
     sqlx::query("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state,pack_id) VALUES($1,$2,4,'none','ready',$3)")
         .bind(storage).bind(vec![94u8; 32]).bind(pack).execute(&pool).await?;
+    sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) SELECT $1, CASE WHEN id=$2 THEN 0 ELSE 1 END,id,CASE WHEN id=$2 THEN 8 ELSE 12 END,id,4,FALSE,'none' FROM chunks WHERE pack_id=$1")
+        .bind(pack).bind(member).execute(&pool).await?;
     sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,chunk_id) VALUES($1,0,4,$2)")
         .bind(stream)
         .bind(member)
@@ -869,7 +871,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     let packed = backend.open_read(&node, &key, request(session.run)).await?;
     let mapping: read::Mapping = material(&packed, read::MaterialType::Mapping)?;
     assert!(
-        matches!(&mapping.segments[0].source, read::Source::Pack { pack: selected, chunk } if selected.id == Id::Uuid(pack) && selected.location_id == pack && chunk.id == Id::Uuid(member))
+        matches!(&mapping.segments[0].source, read::Source::Pack { pack: selected, chunk, .. } if selected.id == Id::Uuid(pack) && selected.location_id == pack && chunk.id == Id::Uuid(member))
     );
     let scopes = mapping.report_scopes(&[0])?;
     assert_eq!(scopes.len(), 1);

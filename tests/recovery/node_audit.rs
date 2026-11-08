@@ -252,7 +252,7 @@ pub(super) async fn check(
     assert_eq!(status, "completed");
     assert_eq!(detail["bytes_checked"], 1_400_000);
 
-    let pack: Uuid = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,pack_fingerprint) VALUES($1,'none',4,120,2,'ready',$2) RETURNING id")
+    let pack: Uuid = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,pack_fingerprint) VALUES($1,'none',4,12,2,'ready',$2) RETURNING id")
         .bind(storage).bind(vec![3u8;32]).fetch_one(pool).await?;
     let stream: Uuid = sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size) VALUES($1,'z','object','ready',4) RETURNING id").bind(bucket).fetch_one(pool).await?;
     sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,'z',$2,uuidv7())").bind(bucket).bind(stream).execute(pool).await?;
@@ -260,19 +260,19 @@ pub(super) async fn check(
         let chunk: Uuid = sqlx::query_scalar("INSERT INTO chunks(storage_id,hash,raw_size,encryption_algorithm,state,pack_id) VALUES($1,$2,2,'none','ready',$3) RETURNING id")
             .bind(storage).bind(vec![ordinal as u8;32]).bind(pack).fetch_one(pool).await?;
         sqlx::query(
-            "INSERT INTO pack_members(pack_id,chunk_id,ordinal,offset_bytes) VALUES($1,$2,$3,$4)",
+            "INSERT INTO pack_members(pack_id,chunk_id,ordinal,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) VALUES($1,$2,$3,$4,$2,2,FALSE,'none')",
         )
         .bind(pack)
         .bind(chunk)
         .bind(ordinal)
-        .bind(i64::from(ordinal) * 2)
+        .bind(8 + i64::from(ordinal) * 2)
         .execute(pool)
         .await?;
         sqlx::query(
             "INSERT INTO extents(stream_id,offset_bytes,length,chunk_id) VALUES($1,$2,2,$3)",
         )
         .bind(stream)
-        .bind(i64::from(ordinal) * 2)
+        .bind(8 + i64::from(ordinal) * 2)
         .bind(chunk)
         .execute(pool)
         .await?;

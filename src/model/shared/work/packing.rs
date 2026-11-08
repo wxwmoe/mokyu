@@ -413,7 +413,7 @@ async fn range(
                                 })
                                 .sum::<i64>()
                                 + if g.len() > 1 {
-                                    12 + pack::MEMBER_SIZE as i64 * g.len() as i64
+                                    8 + pack::MAX_MEMBER_TAG as i64 * g.len() as i64
                                 } else {
                                     0
                                 },
@@ -447,29 +447,23 @@ pub(in super::super) async fn reserve_outputs(
     batch: &mut wire::Batch,
 ) -> Result<()> {
     if let Some(key) = batch.key {
-        for tag in [crate::content::nonce::CHUNK, crate::content::nonce::PACK] {
-            let slots: Vec<_> = if tag == crate::content::nonce::CHUNK {
-                batch
-                    .chunks
-                    .iter_mut()
-                    .filter(|c| c.ready.is_none())
-                    .map(|c| &mut c.nonce)
-                    .collect()
-            } else {
-                batch.packs.iter_mut().map(|p| &mut p.nonce).collect()
-            };
-            if !slots.is_empty() {
-                let units = slots.len().div_ceil(crate::content::nonce::UNIT as usize) as u32;
-                let (first, last) = reserve_nonce_in(db, key, tag, units).await?;
-                ensure!(
-                    last - first + 1 >= slots.len() as i64,
-                    "encryption key cannot reserve enough nonce IDs"
-                );
-                for (offset, nonce) in slots.into_iter().enumerate() {
-                    *nonce = Some(
-                        codec::typed_nonce(batch.created, first + offset as i64, tag)?.to_vec(),
-                    );
-                }
+        let tag = crate::content::nonce::CHUNK;
+        let slots: Vec<_> = batch
+            .chunks
+            .iter_mut()
+            .filter(|c| c.ready.is_none() && c.original.is_none())
+            .map(|c| &mut c.nonce)
+            .collect();
+        if !slots.is_empty() {
+            let units = slots.len().div_ceil(crate::content::nonce::UNIT as usize) as u32;
+            let (first, last) = reserve_nonce_in(db, key, tag, units).await?;
+            ensure!(
+                last - first + 1 >= slots.len() as i64,
+                "encryption key cannot reserve enough nonce IDs"
+            );
+            for (offset, nonce) in slots.into_iter().enumerate() {
+                *nonce =
+                    Some(codec::typed_nonce(batch.created, first + offset as i64, tag)?.to_vec());
             }
         }
     }
@@ -521,6 +515,7 @@ pub(in super::super) async fn prepare_write(
             size: item.chunk.raw_size,
             hash: item.chunk.hash.clone(),
             previous_size: None,
+            original: None,
             compress: true,
             location: Uuid::now_v7(),
             nonce: None,
@@ -534,17 +529,14 @@ pub(in super::super) async fn prepare_write(
     let allowed = p::creation_allowed(&mut *db).await?;
     if allowed {
         for &(start, end) in &batch.groups {
-            let middle = start + (end - start) / 2;
-            for (start, end) in [(start, end), (start, middle), (middle, end)] {
-                if end - start > 1 {
-                    batch.packs.push(wire::Attempt {
-                        id: None,
-                        start,
-                        end,
-                        location: Uuid::now_v7(),
-                        nonce: None,
-                    });
-                }
+            if end - start > 1 {
+                batch.packs.push(wire::Attempt {
+                    id: None,
+                    start,
+                    end,
+                    location: Uuid::now_v7(),
+                    nonce: None,
+                });
             }
         }
     }
@@ -757,15 +749,25 @@ pub(super) async fn prepare(
             .map(|c| (c.id, c))
             .collect();
         let mut ready = Vec::new();
+        let mut packed_encodings = BTreeMap::new();
         for group in &selected.groups {
             let start = batch.chunks.len();
             for row in group {
                 if let Some(id) = row.pack_id {
                     if sources.insert((true, id)) {
                         let pack = p::source_pack(id).fetch_one(&mut **db).await?;
-                        let members = p::physical_members(&mut **db, id).await?;
+                        let members = p::physical_members(&mut **db, &pack).await?;
                         crate::model::source::manifest_digest(&pack, &members)?;
-                        blocks.extend(pack.block_key_id);
+                        blocks.extend(
+                            members
+                                .iter()
+                                .filter_map(|m| m.position.encoding.block_key_id),
+                        );
+                        packed_encodings.extend(
+                            members
+                                .iter()
+                                .map(|m| (m.uuid, m.position.encoding.clone())),
+                        );
                         batch.sources.push(wire::Source::Pack { pack, members });
                     }
                 } else if sources.insert((false, row.chunk.encoding_id)) {
@@ -805,6 +807,11 @@ pub(super) async fn prepare(
                     size: row.chunk.raw_size,
                     hash: row.chunk.hash.clone(),
                     previous_size: row.chunk.stored_size,
+                    original: existing
+                        .as_ref()
+                        .map(pack::frame::Encoding::capture)
+                        .transpose()?
+                        .or_else(|| packed_encodings.get(&row.chunk.uuid).cloned()),
                     compress: row.chunk.stored_size.is_none() || row.chunk.compressed,
                     location,
                     nonce,
@@ -815,20 +822,14 @@ pub(super) async fn prepare(
             let end = batch.chunks.len();
             batch.groups.push((start, end));
             if allow && !unpack && settings.enabled && end - start > 1 {
-                let middle = start + (end - start) / 2;
-                for (start, end) in [(start, end), (start, middle), (middle, end)] {
-                    if end - start < 2 {
-                        continue;
-                    }
-                    let location = Uuid::now_v7();
-                    batch.packs.push(wire::Attempt {
-                        id: None,
-                        start,
-                        end,
-                        location,
-                        nonce: None,
-                    });
-                }
+                let location = Uuid::now_v7();
+                batch.packs.push(wire::Attempt {
+                    id: None,
+                    start,
+                    end,
+                    location,
+                    nonce: None,
+                });
             }
         }
         reserve_outputs(db, task.id, storage, &mut batch).await?;
@@ -872,6 +873,12 @@ pub(in super::super) async fn outputs(
     );
     let mut key_ids = BTreeSet::new();
     key_ids.extend(batch.key);
+    key_ids.extend(
+        batch
+            .chunks
+            .iter()
+            .filter_map(|c| c.original.as_ref()?.block_key_id),
+    );
     key_ids.extend(ready.iter().flatten().filter_map(|c| c.block_key_id));
     let keys: BTreeMap<_, _> = rewrite::keys(db, &key_ids.into_iter().collect::<Vec<_>>(), key)
         .await?
@@ -894,11 +901,44 @@ pub(in super::super) async fn outputs(
         );
         pack.validate(&keys)
             .map_err(|_| Error::NodeOperationConflict)?;
+        let mut entries = Vec::with_capacity(attempt.end - attempt.start);
+        let mut offset = pack::frame::HEADER.len() as u64;
+        for index in attempt.start..attempt.end {
+            ensure!(
+                covered.insert(index) && result.chunks[index] != 0,
+                Error::NodeOperationConflict
+            );
+            let (size, compressed) = wire::size(result.chunks[index]);
+            let mut chunk = batch.chunk(storage, index)?;
+            if let Some(original) = &batch.chunks[index].original {
+                ensure!(
+                    i64::from(original.stored_size) == size && original.compressed == compressed,
+                    Error::NodeOperationConflict
+                );
+            }
+            chunk.stored_size = Some(i32::try_from(size)?);
+            chunk.compressed = compressed;
+            codec::validate_metadata(&chunk, &keys)?;
+            let position = pack::frame::Position {
+                ordinal: u32::try_from(entries.len())?,
+                offset,
+                encoding: pack::frame::Encoding::capture(&chunk)?,
+            };
+            offset = position
+                .range(
+                    chunk.raw_size,
+                    pack.stored_size.unwrap_or_default() as u64,
+                    pack.member_count,
+                )?
+                .end;
+            entries.push((chunk.id, pack::frame::Entry::new(&chunk, position)?));
+        }
         ensure!(
-            (attempt.start..attempt.end).all(|i| covered.insert(i) && result.chunks[i] == 0),
+            Some(i64::try_from(offset)?) == pack.stored_size,
             Error::NodeOperationConflict
         );
         outputs.push(PackOutput {
+            entries,
             chunks: batch.chunks[attempt.start..attempt.end]
                 .iter()
                 .map(|c| c.id)
@@ -908,10 +948,13 @@ pub(in super::super) async fn outputs(
         });
     }
     for (index, value) in result.chunks.iter().enumerate() {
-        if *value == 0 {
+        if covered.contains(&index) {
             continue;
         }
-        ensure!(covered.insert(index), Error::NodeOperationConflict);
+        ensure!(
+            *value != 0 && covered.insert(index),
+            Error::NodeOperationConflict
+        );
         let chunk = if let Some(chunk) = &ready[index] {
             ensure!(
                 batch.chunks[index].ready == Some(*value),
@@ -925,6 +968,12 @@ pub(in super::super) async fn outputs(
             );
             let mut chunk = batch.chunk(storage, index)?;
             let (size, compressed) = wire::size(*value);
+            if let Some(original) = &batch.chunks[index].original {
+                ensure!(
+                    i64::from(original.stored_size) == size && original.compressed == compressed,
+                    Error::NodeOperationConflict
+                );
+            }
             chunk.stored_size =
                 Some(i32::try_from(size).map_err(|_| Error::NodeOperationConflict)?);
             chunk.compressed = compressed;
@@ -932,6 +981,7 @@ pub(in super::super) async fn outputs(
             chunk
         };
         outputs.push(PackOutput {
+            entries: Vec::new(),
             chunks: vec![chunk.id],
             pack: None,
             independent: Some(chunk),
@@ -1001,7 +1051,7 @@ pub(super) async fn finish(
     let publish = match &snapshot.rule {
         Rule::Combine { before, physical } => {
             outputs.len() < *physical
-                && after <= before + 12 + pack::MEMBER_SIZE as i64 * batch.chunks.len() as i64
+                && after <= before + 8 + pack::MAX_MEMBER_TAG as i64 * batch.chunks.len() as i64
         }
         Rule::Split { before, minimum } => {
             minimum.is_none_or(|n| before.saturating_sub(after) >= n as i64)
@@ -1028,7 +1078,7 @@ pub(super) async fn finish(
     if publish {
         let flush = flush(db).await?;
         let mut publication = sqlx::Acquire::begin(&mut **db).await?;
-        p::record_outputs(&mut publication, task.id, &snapshot.rows, &outputs).await?;
+        p::record_outputs(&mut publication, task.id, &outputs).await?;
         if let Err(error) = commit_pack_outputs_in(
             &mut publication,
             task,

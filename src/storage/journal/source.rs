@@ -495,6 +495,7 @@ impl Source {
                 "fixed recovery checkpoint changed"
             );
         }
+        catalog.validate_pack_members()?;
         Ok((
             catalog,
             Cut {

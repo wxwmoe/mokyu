@@ -57,6 +57,43 @@ pub(in super::super) fn unpack_storage(pack: Id) -> Rows<'static, (Uuid, String,
     sqlx::query_as("SELECT s.id,s.type,sp.revision FROM storages s JOIN storage_profiles sp ON sp.storage_id=s.id JOIN packs p ON p.storage_id=s.id WHERE p.id=$1").bind(pack)
 }
 
+pub(in super::super) async fn reserve_member_encoding(
+    db: &mut sqlx::PgConnection,
+    c: &Chunk,
+    task: Uuid,
+) -> Result<Id> {
+    crate::content::pack::frame::Encoding::capture(c)?;
+    let previous: Option<(Id, String, Option<Uuid>, Option<i32>, bool, String, Option<Uuid>, Option<Vec<u8>>)> = sqlx::query_as("SELECT encoding_id,state,owner_task,standalone_size,standalone_compressed,encryption_algorithm,block_key_id,nonce FROM chunk_encodings WHERE encoding_id=$1 AND chunk_id=$2 AND storage_id=$3 AND quarantined_at IS NULL FOR UPDATE")
+        .bind(c.location_id).bind(c.id).bind(c.storage_id).fetch_optional(&mut *db).await?;
+    let counter = crate::content::nonce::id(c.nonce.as_deref());
+    let id = if let Some((id, state, owner, size, compressed, algorithm, key, nonce)) = previous {
+        ensure!(
+            algorithm == c.algorithm
+                && key == c.block_key_id
+                && nonce.as_ref().is_none_or(|n| Some(n) == c.nonce.as_ref())
+                && size.is_none_or(|n| Some(n) == c.stored_size && compressed == c.compressed),
+            "member encoding identity changed"
+        );
+        ensure!(
+            matches!(state.as_str(), "retired" | "deleted")
+                || state == "uploading" && owner == Some(task),
+            "member encoding is in use"
+        );
+        sqlx::query("UPDATE chunk_encodings SET state='uploading',owner_task=$1,standalone_size=$2,standalone_compressed=$3,encryption_algorithm=$4,block_key_id=$5,nonce=$6,nonce_id=$7,deleted_at=NULL,stored_at=NULL,unreferenced_at=clock_timestamp() WHERE encoding_id=$8").bind(task).bind(c.stored_size).bind(c.compressed).bind(&c.algorithm)
+            .bind(c.block_key_id).bind(&c.nonce).bind(counter).bind(id).execute(&mut *db).await?;
+        id
+    } else {
+        let _inserted = sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,owner_task,standalone_size,standalone_compressed,encryption_algorithm,block_key_id,nonce,nonce_id,state,unreferenced_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'uploading',clock_timestamp())")
+            .bind(c.location_id).bind(c.id).bind(c.storage_id).bind(task).bind(c.stored_size)
+            .bind(c.compressed).bind(&c.algorithm).bind(c.block_key_id).bind(&c.nonce).bind(counter)
+            .execute(&mut *db).await?;
+        let id = c.location_id.into();
+        id
+    };
+
+    Ok(id)
+}
+
 pub(in super::super) async fn write_pack_index(
     db: &mut sqlx::PgConnection,
     pack: Id,
@@ -85,21 +122,6 @@ pub(in super::super) async fn write_pack_index(
     Ok(())
 }
 
-pub(in super::super) fn insert_pack_member(
-    pack: Id,
-    ordinal: i32,
-    chunk: Id,
-    offset: i64,
-) -> Statement<'static> {
-    sqlx::query(
-        "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES($1,$2,$3,$4)",
-    )
-    .bind(pack)
-    .bind(ordinal)
-    .bind(chunk)
-    .bind(offset)
-}
-
 pub(in super::super) fn lock_pack_layout<'q>(ids: &'q [Id]) -> Rows<'q, (Id, Option<Id>)> {
     sqlx::query_as(
         "SELECT id,pack_id FROM chunks WHERE id=ANY($1) AND state='ready' ORDER BY id FOR UPDATE",
@@ -108,11 +130,11 @@ pub(in super::super) fn lock_pack_layout<'q>(ids: &'q [Id]) -> Rows<'q, (Id, Opt
 }
 
 pub(in super::super) fn pack_layout_bytes<'q>(ids: &'q [Id]) -> Scalar<'q, i64> {
-    sqlx::query_scalar("SELECT COALESCE(sum(bytes),0)::bigint FROM (SELECT standalone_size bytes FROM chunk_encodings WHERE chunk_id=ANY($1) AND state='ready' UNION ALL SELECT stored_size FROM packs WHERE id IN (SELECT pack_id FROM chunks WHERE id=ANY($1))) sources").bind(ids)
+    sqlx::query_scalar("SELECT COALESCE(sum(bytes),0)::bigint FROM (SELECT standalone_size+8 bytes FROM chunk_encodings WHERE chunk_id=ANY($1) AND state='ready' UNION ALL SELECT stored_size FROM packs WHERE id IN (SELECT pack_id FROM chunks WHERE id=ANY($1))) sources").bind(ids)
 }
 
 pub(in super::super) fn pack_added_bytes(task: Uuid) -> Scalar<'static, i64> {
-    sqlx::query_scalar("SELECT COALESCE(sum(bytes),0)::bigint FROM (SELECT stored_size bytes FROM packs WHERE owner_task=$1 AND state='preparing' UNION ALL SELECT standalone_size FROM chunk_encodings WHERE owner_task=$1 AND state='uploading') sources").bind(task)
+    sqlx::query_scalar("SELECT COALESCE(sum(bytes),0)::bigint FROM (SELECT stored_size bytes FROM packs WHERE owner_task=$1 AND state='preparing' UNION ALL SELECT standalone_size+8 FROM chunk_encodings WHERE owner_task=$1 AND state='uploading') sources").bind(task)
 }
 
 pub(in super::super) fn pack_is_upload(task: Uuid) -> Scalar<'static, bool> {
@@ -295,7 +317,7 @@ impl PackingStore for Backend {
         old: &Pack,
         new: &Pack,
         current: &[Id],
-        members: &[Chunk],
+        members: &[(Id, crate::content::pack::frame::Entry)],
         first: Id,
     ) -> Result<()> {
         transactions::commit_rewrite_pack(
@@ -328,6 +350,10 @@ impl PackingStore for Backend {
     }
     async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, Uuid, i32)>> {
         pack_work::ready_encoding(&self.pool, chunk).await
+    }
+
+    async fn restore_encoding(&self, physical: &Chunk, task: Execution) -> Result<Id> {
+        transactions::restore_member_encoding(&self.pool, physical, task).await
     }
 
     async fn prepare_encoding(&self, physical: &Chunk, task: Execution) -> Result<Id> {
@@ -523,8 +549,13 @@ impl PackingStore for Backend {
     async fn start_unpack(&self, pack: Option<Id>, all: bool, node: Option<Uuid>) -> Result<Value> {
         transactions::start_unpack(&self.pool, self.single, pack, all, node).await
     }
-    async fn insert_pack_members(&self, pack: Id, rows: &[Mapping]) -> Result<()> {
-        transactions::insert_pack_members(&self.pool, pack, rows).await
+    async fn insert_pack_members(
+        &self,
+        pack: Id,
+        rows: &[Mapping],
+        entries: &[(Id, crate::content::pack::frame::Entry)],
+    ) -> Result<()> {
+        transactions::insert_pack_members(&self.pool, pack, rows, entries).await
     }
     async fn commit_pack_outputs(
         &self,
@@ -624,7 +655,7 @@ pub(in super::super) fn rewrite_counts<'q>(
     algorithm: &'q str,
     key: Option<Uuid>,
 ) -> Rows<'q, (i64, i64)> {
-    sqlx::query_as("SELECT count(*) FILTER (WHERE c.pack_id IS NULL AND (l.encoding_id IS NULL OR l.encoding_fingerprint IS DISTINCT FROM digest(concat_ws(':',$3::uuid::text,$2::text,l.standalone_compressed::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),'standalone'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND l.standalone_compressed))), count(*) FILTER (WHERE c.pack_id IS NOT NULL AND (p.pack_fingerprint IS DISTINCT FROM digest(concat_ws(':',$3::uuid::text,$2::text,p.pack_compressed::text,p.member_count::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),coalesce(sp.pack_max_size,''),coalesce(sp.pack_range_enabled::text,''),coalesce(sp.pack_range_min_downloads::text,''),coalesce(sp.pack_range_min_savings_percent::text,''),coalesce(sp.pack_range_min_savings_bytes,''),'pack'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND p.pack_compressed))) FROM chunks c JOIN storage_profiles sp ON sp.storage_id=c.storage_id LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE c.storage_id=$1 AND c.state='ready'").bind(storage).bind(algorithm).bind(key)
+    sqlx::query_as("SELECT count(*) FILTER (WHERE c.pack_id IS NULL AND (l.encoding_id IS NULL OR l.encoding_fingerprint IS DISTINCT FROM digest(concat_ws(':',$3::uuid::text,$2::text,l.standalone_compressed::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),'standalone'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND l.standalone_compressed))), count(*) FILTER (WHERE c.pack_id IS NOT NULL AND (p.pack_fingerprint IS DISTINCT FROM digest(concat_ws(':',NULL::text,'none',p.pack_compressed::text,p.member_count::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),coalesce(sp.pack_max_size,''),coalesce(sp.pack_range_enabled::text,''),coalesce(sp.pack_range_min_downloads::text,''),coalesce(sp.pack_range_min_savings_percent::text,''),coalesce(sp.pack_range_min_savings_bytes,''),'pack'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND p.pack_compressed) OR EXISTS (SELECT 1 FROM pack_members m WHERE m.pack_id=p.id AND (m.encryption_algorithm<>$2 OR m.block_key_id IS DISTINCT FROM $3 OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND m.compressed))))) FROM chunks c JOIN storage_profiles sp ON sp.storage_id=c.storage_id LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE c.storage_id=$1 AND c.state='ready'").bind(storage).bind(algorithm).bind(key)
 }
 
 pub(in super::super) fn lock_rewrite_storage(storage: Uuid) -> Statement<'static> {
@@ -712,8 +743,9 @@ pub(in super::super) async fn rewrite_pack_candidate(
     query.push_bind(job.storage_id).push(
         " AND c.state='ready' AND (p.pack_fingerprint IS DISTINCT FROM digest(concat_ws(':',",
     );
-    query.push_bind(job.target_key_id).push("::uuid::text,");
-    query.push_bind(&job.target_algorithm).push("::text,p.pack_compressed::text,p.member_count::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),coalesce(sp.pack_max_size,''),coalesce(sp.pack_range_enabled::text,''),coalesce(sp.pack_range_min_downloads::text,''),coalesce(sp.pack_range_min_savings_percent::text,''),coalesce(sp.pack_range_min_savings_bytes,''),'pack'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND p.pack_compressed)) AND c.id>");
+    query.push("NULL::text,");
+    query.push("'none',p.pack_compressed::text,p.member_count::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),coalesce(sp.pack_max_size,''),coalesce(sp.pack_range_enabled::text,''),coalesce(sp.pack_range_min_downloads::text,''),coalesce(sp.pack_range_min_savings_percent::text,''),coalesce(sp.pack_range_min_savings_bytes,''),'pack'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND p.pack_compressed) OR EXISTS (SELECT 1 FROM pack_members m WHERE m.pack_id=p.id AND (m.encryption_algorithm<>");
+    query.push_bind(&job.target_algorithm).push(" OR m.block_key_id IS DISTINCT FROM ").push_bind(job.target_key_id).push(" OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND m.compressed)))) AND c.id>");
     query.push_bind(after).push(" AND c.id<=");
     query.push_bind(job.upper_chunk_id).push("");
     if job.shards > 1 {

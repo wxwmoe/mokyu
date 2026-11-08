@@ -69,17 +69,56 @@ impl Catalog {
     pub fn select(&mut self, buckets: Option<&std::collections::BTreeSet<Uuid>>) {
         self.selected = buckets.cloned();
     }
+    pub fn validate_pack_members(&self) -> Result<()> {
+        use crate::content::pack::frame;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut packs = BTreeMap::<Uuid, Vec<frame::Entry>>::new();
+        for bucket in self.buckets.values() {
+            for change in bucket.objects.values() {
+                for span in &change.ranges {
+                    if span.material.kind == Kind::Member && seen.insert(&span.material) {
+                        let material = self
+                            .materials
+                            .get(&span.material)
+                            .context("missing recovery member")?;
+                        let (pack, entry) =
+                            material.pack_member()?.context("invalid recovery member")?;
+                        packs.entry(pack).or_default().push(entry);
+                    }
+                }
+            }
+        }
+        for (id, mut entries) in packs {
+            let reference = Reference {
+                kind: Kind::Pack,
+                id,
+                member: None,
+            };
+            let Some(Material::Pack { pack }) = self.materials.get(&reference) else {
+                anyhow::bail!("missing recovery pack")
+            };
+            entries.sort_unstable_by_key(|e| e.position.ordinal);
+            frame::validate_entries(
+                &entries,
+                pack.stored_size.context("missing pack size")?.try_into()?,
+                pack.raw_size,
+                pack.member_count,
+                false,
+            )?;
+        }
+        Ok(())
+    }
+
     pub fn required_keys(&self, bucket: &Bucket) -> Result<std::collections::BTreeSet<Uuid>> {
         let mut ids = std::collections::BTreeSet::new();
         for change in bucket.objects.values() {
             for span in &change.ranges {
-                let mut m = self
+                let m = self
                     .materials
                     .get(&span.material)
                     .context("missing recovery material")?;
                 if let Material::Member { pack, .. } = m {
-                    m = self
-                        .materials
+                    self.materials
                         .get(&Reference {
                             kind: Kind::Pack,
                             id: *pack,
@@ -389,18 +428,16 @@ impl Catalog {
                                 .is_some_and(|end| end <= material.size()),
                             "journal range exceeds source"
                         );
-                        let holder = if let Material::Member { pack, .. } = material {
+                        if let Material::Member { pack, .. } = material {
                             self.materials
                                 .get(&Reference {
                                     kind: Kind::Pack,
                                     id: *pack,
                                     member: None,
                                 })
-                                .context("journal pack missing")?
-                        } else {
-                            material
-                        };
-                        if let Some(hold) = holder.hold()?
+                                .context("journal pack is missing")?;
+                        }
+                        if let Some(hold) = material.hold()?
                             && let Some(key) = hold.key
                         {
                             ensure!(self.keys.contains_key(&key), "journal block key missing");

@@ -109,7 +109,7 @@ impl Reader {
             );
         }
         target.store.verify().await?;
-        self.pack_data(target, keys, batch, raw, memory, attempts)
+        self.pack_data(target, keys, batch, raw, BTreeMap::new(), memory, attempts)
             .await
     }
 
@@ -148,6 +148,7 @@ impl Reader {
         let _io = self.acquire(&self.io, 1).await?;
         backend.store.verify().await?;
         let mut raw = BTreeMap::<Id, (Vec<u8>, Bytes)>::new();
+        let mut originals = BTreeMap::new();
         for source in &batch.sources {
             let (path, bound) = match source {
                 wire::Source::Chunk { chunk } => (
@@ -178,38 +179,49 @@ impl Reader {
                 let mut data = Vec::new();
                 match source {
                     wire::Source::Chunk { chunk } => {
-                        let (bytes, _) =
-                            codec::decode_read(&chunk, bytes, keys.as_ref(), 0, &pool, true)?;
-                        data.push((
-                            chunk.uuid.into(),
-                            (chunk.hash, Bytes::copy_from_slice(&bytes)),
-                        ));
+                        let (raw, _) = codec::decode_read(
+                            &chunk,
+                            bytes.clone(),
+                            keys.as_ref(),
+                            0,
+                            &pool,
+                            true,
+                        )?;
+                        data.push((chunk.uuid.into(), raw, chunk, Bytes::from(bytes)));
                     }
                     wire::Source::Pack { pack, members } => {
-                        let decoded = pack::decode(&pack, bytes, keys.as_ref(), &pool)?;
-                        ensure!(
-                            decoded.members.len() == members.len(),
-                            "pack members changed"
-                        );
-                        for ((id, offset, size, hash), member) in
-                            members.into_iter().zip(&decoded.members)
-                        {
-                            ensure!(
-                                id == Id::Uuid(member.id)
-                                    && size as usize == member.len
-                                    && hash.as_slice() == member.hash
-                                    && member.start
-                                        == 12
-                                            + pack::MEMBER_SIZE * decoded.members.len()
-                                            + offset as usize,
-                                "pack member metadata changed"
-                            );
+                        pack::frame::validate_file(&pack, &bytes)?;
+                        let size = bytes.len() as u64;
+                        pack::frame::validate_entries(
+                            &members,
+                            size,
+                            pack.raw_size,
+                            pack.member_count,
+                            true,
+                        )?;
+                        for member in members {
+                            let span =
+                                member
+                                    .position
+                                    .range(member.raw_size, size, pack.member_count)?;
+                            let body = &bytes[span.start as usize..span.end as usize];
+                            let raw = pack::frame::decode_entry(
+                                &pack,
+                                &member,
+                                body.to_vec(),
+                                keys.as_ref(),
+                                &pool,
+                                true,
+                            )?;
+                            let mut file =
+                                Vec::with_capacity(codec::FILE_HEADER.len() + body.len());
+                            file.extend_from_slice(codec::FILE_HEADER);
+                            file.extend_from_slice(body);
                             data.push((
-                                id,
-                                (
-                                    hash,
-                                    decoded.bytes.slice(member.start..member.start + member.len),
-                                ),
+                                member.uuid.into(),
+                                raw,
+                                member.chunk(&pack)?,
+                                Bytes::from(file),
                             ));
                         }
                     }
@@ -217,11 +229,12 @@ impl Reader {
                 Ok::<_, anyhow::Error>((data, hold))
             })
             .await??;
-            for (id, value) in decoded {
-                raw.entry(id).or_insert(value);
+            for (id, plain, chunk, file) in decoded {
+                raw.entry(id).or_insert_with(|| (chunk.hash.clone(), plain));
+                originals.insert(chunk.location_id, (chunk, file));
             }
         }
-        self.pack_data(backend, keys, batch, raw, memory, attempts)
+        self.pack_data(backend, keys, batch, raw, originals, memory, attempts)
             .await
     }
 
@@ -250,7 +263,7 @@ impl Reader {
         );
         let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
         backend.store.verify().await?;
-        self.pack_data(backend, keys, batch, raw, memory, attempts)
+        self.pack_data(backend, keys, batch, raw, BTreeMap::new(), memory, attempts)
             .await
     }
 
@@ -260,6 +273,7 @@ impl Reader {
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         batch: wire::Batch,
         raw: BTreeMap<Id, (Vec<u8>, Bytes)>,
+        mut originals: BTreeMap<Uuid, (codec::Chunk, Bytes)>,
         memory: Arc<OwnedSemaphorePermit>,
         attempts: BTreeMap<(usize, usize), usize>,
     ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
@@ -282,94 +296,115 @@ impl Reader {
         drop(raw);
         let data = Arc::new(data);
         let batch = Arc::new(batch);
-        let mut result = wire::Encoded {
-            chunks: vec![0; batch.chunks.len()],
-            packs: vec![],
-        };
-        for &(start, end) in &batch.groups {
-            if self
-                .pack_attempt(
-                    &backend,
-                    &keys,
-                    &batch,
-                    &data,
-                    &memory,
-                    &attempts,
-                    start,
-                    end,
-                    &mut result,
-                )
-                .await?
-            {
+        let mut files = Vec::with_capacity(data.len());
+        for (index, (chunk, raw)) in data.iter().enumerate() {
+            if let Some((mut physical, file)) = originals.remove(&chunk.location_id) {
+                ensure!(
+                    physical.uuid == chunk.uuid && physical.hash == chunk.hash,
+                    codec::IntegrityError::Metadata
+                );
+                physical.id = chunk.id;
+                files.push((physical, file));
                 continue;
             }
-            let mid = start + (end - start) / 2;
-            for (start, end) in [(start, mid), (mid, end)] {
-                if self
-                    .pack_attempt(
-                        &backend,
-                        &keys,
-                        &batch,
-                        &data,
-                        &memory,
-                        &attempts,
-                        start,
-                        end,
-                        &mut result,
+            ensure!(
+                batch.chunks[index].ready.is_none() && batch.chunks[index].original.is_none(),
+                "missing immutable source encoding"
+            );
+            let cpu = self.cpu.clone().acquire_owned().await?;
+            let hold = memory.clone();
+            let keys = keys.clone();
+            let pool = self.pool.clone();
+            let config = config.clone();
+            let (mut chunk, raw) = (chunk.clone(), raw.clone());
+            let compress = batch.chunks[index].compress;
+            let file = tokio::task::spawn_blocking(move || {
+                let (_cpu, _hold) = (cpu, hold);
+                ensure!(
+                    raw.len() == chunk.raw_size as usize
+                        && blake3::hash(&raw).as_bytes().as_slice() == chunk.hash,
+                    codec::IntegrityError::Hash
+                );
+                let compressed = pool.compress_for(&raw, compress, &config)?;
+                chunk.compressed = compressed.is_some();
+                let body = compressed.unwrap_or_else(|| raw.to_vec());
+                chunk.stored_size = Some(i32::try_from(
+                    body.len() + if chunk.block_key_id.is_some() { 16 } else { 0 },
+                )?);
+                let encoded = codec::seal(&chunk, body, keys.as_ref())?;
+                Ok::<_, anyhow::Error>((chunk, Bytes::from(encoded)))
+            })
+            .await??;
+            files.push(file);
+        }
+        let mut result = wire::Encoded {
+            chunks: files
+                .iter()
+                .map(|(chunk, _)| {
+                    wire::encoded(
+                        i64::from(chunk.stored_size.context("missing encoded chunk size")?),
+                        chunk.compressed,
                     )
-                    .await?
-                {
-                    continue;
-                }
+                })
+                .collect::<Result<Vec<_>>>()?,
+            packs: Vec::new(),
+        };
+        for &(start, end) in &batch.groups {
+            if let Some(&index) = attempts.get(&(start, end)) {
+                let mut pack = batch.pack(backend.profile.storage_id, index)?;
+                ensure!(
+                    pack.raw_size as u64 <= crate::config::bytes(&backend.profile.pack_max_size)?,
+                    "pack exceeds profile size"
+                );
+                let members = files[start..end].to_vec();
+                let cpu = self.cpu.clone().acquire_owned().await?;
+                let hold = memory.clone();
+                let (pack, bytes) = tokio::task::spawn_blocking(move || {
+                    let (_cpu, _hold) = (cpu, hold);
+                    let (file, _) = pack::frame::assemble(&mut pack, &members)?;
+                    Ok::<_, anyhow::Error>((pack, file))
+                })
+                .await??;
+                backend
+                    .store
+                    .backend
+                    .put(
+                        &crate::storage::location::Layout::S3.pack(pack.address()),
+                        Bytes::from(bytes).into(),
+                    )
+                    .await?;
+                result.packs.push((
+                    index,
+                    wire::encoded(pack.stored_size.context("missing pack size")?, false)?,
+                    STANDARD.encode(pack.digest.context("missing pack digest")?),
+                ));
+            } else {
                 for index in start..end {
                     let target = &batch.chunks[index];
                     if let Some(ready) = target.ready {
                         result.chunks[index] = ready;
-                        continue;
+                    } else {
+                        backend
+                            .store
+                            .backend
+                            .put(
+                                &crate::storage::location::Layout::S3.chunk(target.location),
+                                files[index].1.clone().into(),
+                            )
+                            .await?;
                     }
-                    let cpu = self.cpu.clone().acquire_owned().await?;
-                    let hold = memory.clone();
-                    let keys = keys.clone();
-                    let pool = self.pool.clone();
-                    let config = config.clone();
-                    let (mut chunk, raw) = data[index].clone();
-                    let should_try = target.compress;
-                    let (encoded, value, _memory) = tokio::task::spawn_blocking(move || {
-                        let _cpu = cpu;
-                        let compressed = pool.compress_for(&raw, should_try, &config)?;
-                        chunk.compressed = compressed.is_some();
-                        let encoded = compressed.unwrap_or_else(|| raw.to_vec());
-                        chunk.stored_size = Some(i32::try_from(
-                            encoded.len() + if chunk.algorithm == "none" { 0 } else { 16 },
-                        )?);
-                        let encoded = codec::seal(&chunk, encoded, keys.as_ref())?;
-                        let value = wire::encoded(
-                            i64::from(chunk.stored_size.context("missing encoded chunk size")?),
-                            chunk.compressed,
-                        )?;
-                        Ok::<_, anyhow::Error>((encoded, value, hold))
-                    })
-                    .await??;
-                    backend
-                        .store
-                        .backend
-                        .put(
-                            &crate::storage::location::Layout::S3.chunk(target.location),
-                            Bytes::from(encoded).into(),
-                        )
-                        .await?;
-                    result.chunks[index] = value;
                 }
             }
         }
+        let packed = batch.packed_chunks()?;
         let cached = data
             .iter()
             .enumerate()
             .map(|(index, (chunk, raw))| {
-                let id = if result.chunks[index] != 0 {
-                    chunk.location_id
-                } else {
+                let id = if packed[index] {
                     chunk.uuid
+                } else {
+                    chunk.location_id
                 };
                 (id, raw.clone())
             })
@@ -380,86 +415,6 @@ impl Reader {
             .into_iter()
             .collect();
         Ok((result, fills))
-    }
-
-    async fn pack_attempt(
-        &self,
-        backend: &Arc<Backend>,
-        keys: &Arc<BTreeMap<Uuid, codec::Key>>,
-        batch: &Arc<wire::Batch>,
-        data: &Arc<Vec<(codec::Chunk, Bytes)>>,
-        memory: &Arc<OwnedSemaphorePermit>,
-        attempts: &BTreeMap<(usize, usize), usize>,
-        start: usize,
-        end: usize,
-        result: &mut wire::Encoded,
-    ) -> Result<bool> {
-        let Some(&index) = attempts.get(&(start, end)) else {
-            return Ok(false);
-        };
-        let target = batch.pack(backend.profile.storage_id, index)?;
-        let config = backend.profile.compression_config("0s");
-        let settings = backend.profile.pack_config();
-        ensure!(
-            target.raw_size as u64 <= crate::config::bytes(&settings.max_size)?,
-            "pack exceeds profile size"
-        );
-        let strategy = match settings
-            .compression_strategy
-            .context("missing pack compression policy")?
-        {
-            pack::CompressionStrategy::Never => compression::Strategy::Never,
-            pack::CompressionStrategy::Always => compression::Strategy::Always,
-            pack::CompressionStrategy::Sample => compression::Strategy::Sample,
-        };
-        let tag_bytes = if batch.key.is_some() { 16 } else { 0 };
-        let old: i64 = batch.chunks[start..end]
-            .iter()
-            .map(|c| {
-                c.previous_size
-                    .map(i64::from)
-                    .unwrap_or(i64::from(c.size) + tag_bytes)
-            })
-            .sum();
-        let cpu = self.cpu.clone().acquire_owned().await?;
-        let hold = memory.clone();
-        let keys = keys.clone();
-        let pool = self.pool.clone();
-        let values = data[start..end].to_vec();
-        let (target, bytes, _memory) = tokio::task::spawn_blocking(move || {
-            let _cpu = cpu;
-            let (target, bytes) = pack::encode(
-                target,
-                &values,
-                keys.as_ref(),
-                &pool,
-                strategy,
-                !matches!(strategy, compression::Strategy::Never),
-                Some(&config),
-            )?;
-            Ok::<_, anyhow::Error>((target, bytes, hold))
-        })
-        .await??;
-        if bytes.len() as i64 > old + 12 + (end - start) as i64 * pack::MEMBER_SIZE as i64 {
-            return Ok(false);
-        }
-        backend
-            .store
-            .backend
-            .put(
-                &crate::storage::location::Layout::S3.pack(target.location_id),
-                Bytes::from(bytes).into(),
-            )
-            .await?;
-        result.packs.push((
-            index,
-            wire::encoded(
-                target.stored_size.context("pack size is missing")?,
-                target.compressed,
-            )?,
-            STANDARD.encode(target.digest.context("pack digest is missing")?),
-        ));
-        Ok(true)
     }
 }
 
@@ -479,11 +434,8 @@ fn layout(batch: &wire::Batch) -> Result<BTreeMap<(usize, usize), usize>> {
             start == covered && start < end && end <= batch.chunks.len(),
             "invalid pack groups"
         );
-        let mid = start + (end - start) / 2;
-        for range in [(start, end), (start, mid), (mid, end)] {
-            if range.1 - range.0 > 1 {
-                allowed.insert(range);
-            }
+        if end - start > 1 {
+            allowed.insert((start, end));
         }
         covered = end;
     }

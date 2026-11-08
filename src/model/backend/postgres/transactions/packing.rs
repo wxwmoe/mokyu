@@ -226,19 +226,37 @@ pub(in super::super) async fn advance_pack_storage(
     Ok(())
 }
 
+pub(in super::super) async fn restore_member_encoding(
+    pool: &PgPool,
+    c: &Chunk,
+    task: Execution,
+) -> Result<Id> {
+    let mut tx = pool.begin().await?;
+    lock_execution(&mut tx, task).await?;
+    let id = queries::reserve_member_encoding(&mut tx, c, task.id).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
 pub(in super::super) async fn insert_pack_members(
     pool: &PgPool,
     pack: Id,
     rows: &[Mapping],
+    entries: &[(Id, crate::content::pack::frame::Entry)],
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    let mut offset = 0i64;
-    for (ordinal, row) in rows.iter().enumerate() {
-        queries::insert_pack_member(pack, ordinal as i32, row.chunk.id, offset)
-            .execute(&mut *tx)
-            .await?;
-        offset += i64::from(row.chunk.raw_size);
-    }
+    ensure!(
+        rows.len() == entries.len()
+            && rows
+                .iter()
+                .zip(entries)
+                .all(|(row, (id, entry))| row.chunk.id == *id
+                    && row.chunk.uuid == entry.uuid
+                    && row.chunk.raw_size == entry.raw_size
+                    && row.chunk.hash == entry.hash),
+        "pack members changed"
+    );
+    queries::write_pack_index(&mut tx, pack, entries).await?;
     tx.commit().await?;
     Ok(())
 }

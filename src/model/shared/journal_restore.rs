@@ -225,7 +225,7 @@ impl RecoveryStore for Backend {
                             .execute(&mut *tx)
                             .await?;
 
-                        q::member(pack, ordinal, id, offset)
+                        q::member(pack, ordinal, id, offset, chunk)
                             .execute(&mut *tx)
                             .await?;
                     } else {

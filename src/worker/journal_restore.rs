@@ -130,7 +130,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                                 .or_default()
                                 .insert(chunk.location_id);
                         }
-                        Material::Member { pack, chunk } => {
+                        Material::Member { pack, chunk, .. } => {
                             ids.entry(Kind::Member).or_default().insert(chunk.uuid);
                             let reference = crate::model::journal::record::Reference {
                                 kind: Kind::Pack,

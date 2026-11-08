@@ -44,11 +44,16 @@ pub(super) async fn prepared(
 ) -> Result<Pack> {
     let mut pack =
         transactions::prepare_pack(&backend.pool, storage, "none", None, 64, 2, task).await?;
-    pack.stored_size = Some(40);
-    pack.compressed = true;
+    let entries = crate::content::pack::frame::index(rows.iter().map(|row| &row.chunk))?;
+    pack.stored_size = Some(
+        8 + entries
+            .iter()
+            .map(|(_, e)| i64::from(e.position.encoding.stored_size))
+            .sum::<i64>(),
+    );
     pack.digest = Some(vec![7; 32]);
     transactions::pack_metadata(&backend.pool, &pack).await?;
-    transactions::insert_pack_members(&backend.pool, pack.id, rows).await?;
+    transactions::insert_pack_members(&backend.pool, pack.id, rows, &entries).await?;
     Ok(pack)
 }
 
@@ -129,11 +134,12 @@ async fn mysql_pack_publication_contract() -> Result<()> {
     );
     let pack = prepared(&backend, task, storage, &rows[..2]).await?;
     assert!(
-        transactions::insert_pack_members(db, pack.id, &rows[..2])
+        transactions::insert_pack_members(db, pack.id, &rows[..2], &[])
             .await
             .is_err()
     );
     let outputs = [PackOutput {
+        entries: Vec::new(),
         chunks: rows[..2].iter().map(|r| r.chunk.id).collect(),
         pack: Some(pack.clone()),
         independent: None,
@@ -179,11 +185,11 @@ async fn mysql_pack_publication_contract() -> Result<()> {
             .build_query_scalar::<i64>()
             .fetch_one(db)
             .await?,
-        40
+        72
     );
     assert_eq!(
         backend.raw(task.id).await?.unwrap()["detail"]["last_rewrite"],
-        json!({"before_bytes":64,"output_bytes":40,"temporary_added_bytes":40,"transition_bytes":104})
+        json!({"before_bytes":80,"output_bytes":72,"temporary_added_bytes":72,"transition_bytes":152})
     );
     assert!(transactions::pack_metadata(db, &pack).await.is_err());
     finish(&backend, task).await?;
@@ -258,11 +264,13 @@ async fn mysql_pack_publication_contract() -> Result<()> {
     backend.register_encoding(&physical).await?;
     let unpacked = [
         PackOutput {
+            entries: Vec::new(),
             chunks: vec![existing.id],
             pack: None,
             independent: Some(existing),
         },
         PackOutput {
+            entries: Vec::new(),
             chunks: vec![physical.id],
             pack: None,
             independent: Some(physical.clone()),

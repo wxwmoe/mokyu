@@ -107,80 +107,24 @@ impl Reader {
                 }
                 Rewrite::Pack {
                     source,
-                    target,
+                    mut target,
                     members,
-                    current,
+                    replacements,
                     ..
                 } => {
-                    let decoded = pack::decode(&source, bytes, keys.as_ref(), &pool)?;
-                    ensure!(
-                        decoded.members.len() == members.len(),
-                        "pack members changed"
-                    );
-                    let mut data = Vec::with_capacity(members.len());
-                    for ((id, offset, size, hash), member) in
-                        members.into_iter().zip(&decoded.members)
-                    {
-                        ensure!(
-                            id == crate::model::Id::Uuid(member.id)
-                                && size as usize == member.len
-                                && hash.as_slice() == member.hash
-                                && member.start
-                                    == 12
-                                        + pack::MEMBER_SIZE * decoded.members.len()
-                                        + offset as usize,
-                            "pack member metadata changed"
-                        );
-                        let chunk = codec::Chunk {
-                            id,
-                            uuid: member.id,
-                            encoding_id: crate::model::Id::default(),
-                            home_storage_id: None,
-                            address: None,
-                            location_id: Uuid::nil(),
-                            storage_id: target.storage_id,
-                            hash,
-                            raw_size: size,
-                            stored_size: None,
-                            algorithm: target.algorithm.clone(),
-                            block_key_id: target.block_key_id,
-                            compressed: false,
-                            nonce: None,
-                            format: 2,
-                            state: "ready".into(),
-                            created_at: target.created_at,
-                        };
-                        if current.contains(&id) {
-                            fills.extend(crate::storage::resource_gate::PRIORITY.sync_scope(
-                                crate::storage::resource_gate::MAINTENANCE,
-                                || {
-                                    files.prepare_fill(
-                                        member.id,
-                                        &decoded.bytes[member.start..member.start + member.len],
-                                        false,
-                                        &profile,
-                                    )
-                                },
-                            ));
-                        }
-                        data.push((
-                            chunk,
-                            decoded.bytes.slice(member.start..member.start + member.len),
-                        ));
-                    }
-                    let (target, encoded) = pack::encode(
-                        target,
-                        &data,
+                    let encoded = pack::frame::recode(
+                        &source,
+                        &mut target,
+                        &bytes,
+                        &members,
+                        &replacements,
                         keys.as_ref(),
                         &pool,
-                        config.strategy,
-                        config.enabled,
-                        Some(&config),
                     )?;
                     (
                         Outcome::Encoded {
                             size: encoded.len() as i64,
-                            compressed: target.compressed,
+                            compressed: false,
                             digest: target.digest,
                         },
                         encoded,

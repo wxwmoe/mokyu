@@ -94,6 +94,31 @@ pub fn validate_metadata(c: &Chunk, keys: &dyn KeySource) -> Result<()> {
     Ok(())
 }
 
+pub(crate) mod digest {
+    use base64::{Engine, engine::general_purpose::STANDARD_NO_PAD};
+    use serde::{Deserialize, Deserializer, Serializer, de::Error};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        if bytes.len() != 32 {
+            return Err(serde::ser::Error::custom("invalid BLAKE3 length"));
+        }
+        serializer.serialize_str(&STANDARD_NO_PAD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: TryFrom<Vec<u8>>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.len() != 43 {
+            return Err(D::Error::custom("invalid BLAKE3 length"));
+        }
+        let bytes = STANDARD_NO_PAD.decode(value).map_err(D::Error::custom)?;
+        T::try_from(bytes).map_err(|_| D::Error::custom("invalid BLAKE3 digest"))
+    }
+}
+
 #[derive(Clone, serde::Deserialize, Serialize)]
 pub struct Chunk {
     pub id: Id,

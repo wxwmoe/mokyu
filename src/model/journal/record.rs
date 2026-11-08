@@ -38,6 +38,8 @@ pub(crate) enum Material {
     Member {
         pack: Uuid,
         chunk: Chunk,
+        ordinal: u32,
+        offset: u64,
     },
     Pack {
         pack: Pack,
@@ -62,10 +64,29 @@ pub(crate) struct Hold {
 }
 
 impl Material {
+    pub fn pack_member(&self) -> Result<Option<(Uuid, crate::content::pack::frame::Entry)>> {
+        use crate::content::pack::frame::{Encoding, Entry, Position};
+        let Self::Member {
+            pack,
+            chunk,
+            ordinal,
+            offset,
+        } = self
+        else {
+            return Ok(None);
+        };
+        let position = Position {
+            ordinal: *ordinal,
+            offset: *offset,
+            encoding: Encoding::capture(chunk)?,
+        };
+        Ok(Some((*pack, Entry::new(chunk, position)?)))
+    }
+
     pub fn reference(&self) -> Reference {
         let (kind, id, member) = match self {
             Self::Chunk { chunk } => (Kind::Chunk, chunk.address(), None),
-            Self::Member { pack, chunk } => (Kind::Member, *pack, Some(chunk.uuid)),
+            Self::Member { pack, chunk, .. } => (Kind::Member, *pack, Some(chunk.uuid)),
             Self::Pack { pack } => (Kind::Pack, pack.address(), None),
             Self::Raw { source } => (Kind::Raw, source.address(), None),
             Self::Fragment { id, .. } => (Kind::Fragment, *id, None),
@@ -109,7 +130,12 @@ impl Material {
                 );
                 ("fragment", *storage, *id, None)
             }
-            Self::Member { .. } => return Ok(None),
+            Self::Member { pack, chunk, .. } => (
+                "pack",
+                chunk.storage_id.context("member storage missing")?,
+                *pack,
+                chunk.block_key_id,
+            ),
         };
         ensure!(
             !storage.is_nil() && !address.is_nil(),
@@ -320,10 +346,12 @@ pub(crate) fn add_segment(
         Source::Pack {
             mut pack,
             mut chunk,
+            ordinal,
+            offset,
         } => {
             pack.id = pack.location_id.into();
             chunk.id = chunk.uuid.into();
-            chunk.encoding_id = chunk.uuid.into();
+            chunk.encoding_id = chunk.location_id.into();
             let id = pack.address();
             ensure!(
                 pack.storage_id == Some(storage),
@@ -331,7 +359,12 @@ pub(crate) fn add_segment(
             );
             let material = Material::Pack { pack };
             materials.entry(material.reference()).or_insert(material);
-            Material::Member { pack: id, chunk }
+            Material::Member {
+                pack: id,
+                chunk,
+                ordinal,
+                offset,
+            }
         }
         Source::Raw { mut source } => {
             source.id = source.location_id.into();

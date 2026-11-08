@@ -45,7 +45,6 @@ pub(in super::super) async fn prepare(
         return Ok(None);
     }
     rows.sort_by_key(|row| row.offset_bytes);
-    let references = p::reference_boundaries(&mut **db, &rows.iter().collect::<Vec<_>>()).await?;
     let policy = &copy.prepared.policy;
     let maximum = config::bytes(&policy.pack_max_size)?;
     let mut batch = wire::Batch {
@@ -65,6 +64,7 @@ pub(in super::super) async fn prepare(
             size: row.chunk.raw_size,
             hash: row.chunk.hash.clone(),
             previous_size: None,
+            original: None,
             compress: true,
             location: Uuid::now_v7(),
             nonce: None,
@@ -76,7 +76,7 @@ pub(in super::super) async fn prepare(
         let mut end = start + 1;
         let mut size = rows[start].chunk.raw_size as u64;
         while end < rows.len()
-            && references[end - 1]
+            && end - start < crate::content::pack::MAX_MEMBERS
             && size + rows[end].chunk.raw_size as u64 <= maximum
         {
             size += rows[end].chunk.raw_size as u64;
@@ -84,18 +84,13 @@ pub(in super::super) async fn prepare(
         }
         batch.groups.push((start, end));
         if policy.pack_enabled && end - start > 1 {
-            let middle = start + (end - start) / 2;
-            for (start, end) in [(start, end), (start, middle), (middle, end)] {
-                if end - start > 1 {
-                    batch.packs.push(wire::Attempt {
-                        id: None,
-                        start,
-                        end,
-                        location: Uuid::now_v7(),
-                        nonce: None,
-                    });
-                }
-            }
+            batch.packs.push(wire::Attempt {
+                id: None,
+                start,
+                end,
+                location: Uuid::now_v7(),
+                nonce: None,
+            });
         }
         start = end;
     }
@@ -105,7 +100,11 @@ pub(in super::super) async fn prepare(
     blocks.extend(policy.block_key_id);
     match &copy.input {
         Input::Chunk { chunk } => blocks.extend(chunk.block_key_id),
-        Input::Pack { pack, .. } => blocks.extend(pack.block_key_id),
+        Input::Pack { members, .. } => blocks.extend(
+            members
+                .iter()
+                .filter_map(|m| m.position.encoding.block_key_id),
+        ),
         Input::Raw { .. } => {}
     }
     let keys = rewrite::keys(db, &blocks.into_iter().collect::<Vec<_>>(), key).await?;
@@ -153,7 +152,7 @@ pub(in super::super) async fn finish(
         key,
     )
     .await?;
-    let rows = copy.outputs(&outputs)?;
-    p::record_outputs(db, task.id, &rows, &outputs).await?;
+    copy.outputs(&outputs)?;
+    p::record_outputs(db, task.id, &outputs).await?;
     transactions::transfer::copied(db, task, &run, &copy, &outputs).await
 }

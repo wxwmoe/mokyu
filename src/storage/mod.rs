@@ -761,7 +761,7 @@ impl Storage {
             let maximum = config::bytes(&profile.pack_max_size)?;
             let payload = maximum
                 + 12
-                + crate::content::pack::MEMBER_SIZE as u64 * (maximum / codec::MIN as u64 + 1);
+                + crate::content::pack::MAX_MEMBER_TAG as u64 * (maximum / codec::MIN as u64 + 1);
             if workspace > self.compression_workspace
                 || (profile.pack_enabled
                     && (payload * 4 + workspace).div_ceil(1024 * 1024)
@@ -2256,38 +2256,31 @@ impl Storage {
                 ))
             }
             Source::Pack(pack, _pin) => {
-                if let Some(context) = context {
-                    let mut current = context.pack.lock().await;
-                    if let Some(loaded) = current
-                        .as_ref()
-                        .filter(|p| p.pack.id == pack.id && (!verify || p.verified))
-                    {
-                        loaded.touch(c, context.observe, context.range);
-                        return Ok((
-                            loaded.data.chunk(c)?,
-                            Some(loaded.clone()),
-                            c.raw_size as usize,
-                            cache::ReadTrace::pack(loaded, c, false),
-                        ));
-                    }
-                    *current = None;
-                    let loaded = self.load_pack_read(pack, verify).await?;
-                    loaded.touch(c, context.observe, context.range);
-                    let raw = loaded.data.chunk(c)?;
-                    *current = Some(loaded.clone());
-                    let trace = cache::ReadTrace::pack(&loaded, c, true);
-                    Ok((raw, Some(loaded), c.raw_size as usize, trace))
-                } else {
-                    let loaded = self.load_pack_read(pack, verify).await?;
-                    loaded.touch(c, false, false);
-                    let trace = cache::ReadTrace::pack(&loaded, c, true);
-                    Ok((
-                        loaded.data.chunk(c)?,
-                        Some(loaded),
-                        c.raw_size as usize,
-                        trace,
-                    ))
+                let entry = self.pack_entry(&pack, c).await?;
+                self.ensure_key_loaded(entry.position.encoding.block_key_id)
+                    .await?;
+                let body = self.read_pack_body(&pack, &entry).await?;
+                let pool = self.compression_for(pack.storage_id)?.0;
+                let keys = self.secrets.clone();
+                let permit = self.cpu.clone().acquire_owned().await?;
+                let trace = cache::ReadTrace {
+                    source: Some(crate::model::tiering::Source::Pack {
+                        pack: pack.location_id,
+                        member: c.uuid,
+                    }),
+                    origin: true,
+                };
+                let raw = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    crate::content::pack::frame::decode_entry(
+                        &pack, &entry, body, &keys, &pool, verify,
+                    )
+                })
+                .await??;
+                if verify {
+                    self.fill_read(c, raw.clone(), None);
                 }
+                Ok((raw, None, c.raw_size as usize, trace))
             }
         }
     }
@@ -2357,41 +2350,89 @@ impl Storage {
     pub(crate) fn http_work(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.pack_work.clone().try_acquire_many_owned(32).ok()
     }
-    pub async fn encode_pack(
+    async fn pack_entry(
         &self,
-        mut p: crate::content::pack::Pack,
-        members: Vec<(Chunk, Bytes)>,
-        strategy: crate::content::compression::Strategy,
-        should_try: bool,
+        pack: &crate::content::pack::Pack,
+        chunk: &Chunk,
+    ) -> Result<crate::content::pack::frame::Entry> {
+        let entries = self.physical.pack_index(pack.id, Some(chunk.id)).await?;
+        let [(_, entry)] = entries.as_slice() else {
+            anyhow::bail!(codec::IntegrityError::Metadata)
+        };
+        ensure!(
+            entry.uuid == chunk.uuid
+                && entry.raw_size == chunk.raw_size
+                && entry.hash.as_slice() == chunk.hash,
+            codec::IntegrityError::Metadata
+        );
+        let mut entry = entry.clone();
+        pack.resolve_entry(&mut entry)?;
+        Ok(entry)
+    }
+
+    async fn read_pack_body(
+        &self,
+        pack: &crate::content::pack::Pack,
+        entry: &crate::content::pack::frame::Entry,
+    ) -> Result<Vec<u8>> {
+        let storage = pack.storage_id.context("pack has no store")?;
+        let size = u64::try_from(pack.stored_size.context(codec::IntegrityError::Metadata)?)?;
+        let span = entry
+            .position
+            .range(entry.raw_size, size, pack.member_count)?;
+        self.ensure_storage_verified(storage).await?;
+        let target = self.store_backend(storage)?;
+        let _permit = target.reads.acquire().await?;
+        self.read_path_permitted(
+            storage,
+            &self.pack_path_for(storage, pack.address())?,
+            entry.position.encoding.stored_size as usize,
+            Some((span, size)),
+        )
+        .await
+    }
+
+    pub(crate) async fn member_file(&self, chunk: &Chunk) -> Result<(Chunk, Bytes)> {
+        match self.source(chunk.id, false).await? {
+            Source::Chunk(physical, _pin) => {
+                let file = self.read_backend(&physical).await?;
+                self.ensure_key_loaded(physical.block_key_id).await?;
+                self.decode(&physical, file.clone()).await?;
+                Ok((physical, file.into()))
+            }
+            Source::Pack(pack, _pin) => {
+                let entry = self.pack_entry(&pack, chunk).await?;
+                let body = self.read_pack_body(&pack, &entry).await?;
+                let mut physical = chunk.clone();
+                entry.position.encoding.apply(&mut physical)?;
+                self.ensure_key_loaded(physical.block_key_id).await?;
+                let mut file = Vec::with_capacity(codec::FILE_HEADER.len() + body.len());
+                file.extend_from_slice(codec::FILE_HEADER);
+                file.extend_from_slice(&body);
+                self.decode(&physical, file.clone()).await?;
+                Ok((physical, file.into()))
+            }
+        }
+    }
+
+    pub(crate) async fn assemble_pack(
+        &self,
+        mut pack: crate::content::pack::Pack,
+        files: Vec<(Chunk, Bytes)>,
         memory: &Arc<tokio::sync::OwnedSemaphorePermit>,
-        accepted: Option<&crate::content::compression::Config>,
-    ) -> Result<(crate::content::pack::Pack, Vec<u8>)> {
-        let (pool, compression_enabled, _) = self.encoding_compression(p.storage_id, accepted)?;
-        p.nonce = self
-            .encoding_nonce(
-                &p.algorithm,
-                p.block_key_id,
-                p.created_at,
-                crate::content::nonce::PACK,
-            )
-            .await?;
-        let memory = memory.clone();
+    ) -> Result<(
+        crate::content::pack::Pack,
+        Vec<u8>,
+        Vec<(crate::model::Id, crate::content::pack::frame::Entry)>,
+    )> {
         let permit = self.cpu.clone().acquire_owned().await?;
-        let secrets = self.secrets.clone();
+        let memory = memory.clone();
         tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let _memory = memory;
+            let (_permit, _memory) = (permit, memory);
             #[cfg(feature = "fault-injection")]
             crate::faults::blocking("pack-encode");
-            crate::content::pack::encode(
-                p,
-                &members,
-                &secrets,
-                &pool,
-                strategy,
-                should_try && compression_enabled,
-                None,
-            )
+            let (file, entries) = crate::content::pack::frame::assemble(&mut pack, &files)?;
+            Ok((pack, file, entries))
         })
         .await?
     }
@@ -2546,7 +2587,23 @@ impl Storage {
                     let target = self.store_backend(storage_id)?;
                     target.reads.local.refresh();
                     self.ensure_storage_verified(storage_id).await?;
-                    self.ensure_key_loaded(p.block_key_id).await?;
+                    let entries: Vec<_> = self
+                        .physical
+                        .pack_index(p.id, None)
+                        .await?
+                        .into_iter()
+                        .map(|(_, mut entry)| {
+                            p.resolve_entry(&mut entry)?;
+                            Ok(entry)
+                        })
+                        .collect::<Result<_>>()?;
+                    for key in entries
+                        .iter()
+                        .filter_map(|entry| entry.position.encoding.block_key_id)
+                        .collect::<std::collections::HashSet<_>>()
+                    {
+                        self.ensure_key_loaded(Some(key)).await?;
+                    }
                     let memory = self.pack_memory(p.payload_size()?).await?;
                     let read_permit = target
                         .reads
@@ -2559,6 +2616,7 @@ impl Storage {
                             storage_id,
                             &self.pack_path_for(storage_id, p.address())?,
                             p.payload_size()? + 16,
+                            None,
                         )
                         .await?;
                     drop(read_permit);
@@ -2571,8 +2629,8 @@ impl Storage {
                         let _permit = permit;
                         #[cfg(feature = "fault-injection")]
                         crate::faults::blocking("pack-decode");
-                        let data = crate::content::pack::decode_read(
-                            &pack, encoded, &secrets, &pool, verify,
+                        let data = crate::content::pack::decode_index(
+                            &pack, encoded, &entries, &secrets, &pool, verify,
                         )
                         .inspect_err(|e| diagnostics.content(e))?;
                         Ok::<_, anyhow::Error>((data, memory))
@@ -2591,17 +2649,6 @@ impl Storage {
                         live.retain(|_, v| v.strong_count() > 0);
                         live.insert((p.id, verify), Arc::downgrade(&loaded));
                     }
-                    if verify && let Ok(permit) = self.fills.clone().try_acquire_owned() {
-                        let storage = self.clone();
-                        let loaded = loaded.clone();
-                        let priority = lock.priority.load(Ordering::Relaxed);
-                        tokio::spawn(resource_gate::PRIORITY.scope(priority, async move {
-                            let _permit = permit;
-                            if let Err(e) = storage.fill_pack(&loaded).await {
-                                tracing::warn!(error=%e,"pack cache fill failed");
-                            }
-                        }));
-                    }
                     Ok(loaded)
                 }
                 .await;
@@ -2612,13 +2659,6 @@ impl Storage {
             .as_ref()
             .map(Arc::clone)
             .map_err(|e| anyhow::anyhow!("pack read failed: {e:#}"))
-    }
-    async fn fill_pack(self: &Arc<Self>, loaded: &LoadedPack) -> Result<()> {
-        let chunks: Vec<Chunk> = self.physical.pack_chunks(loaded.pack.id).await?;
-        for c in chunks {
-            self.fill_raw(&c, loaded.data.chunk(&c)?).await?;
-        }
-        Ok(())
     }
     pub async fn fill_raw(&self, c: &Chunk, raw: Bytes) -> Result<()> {
         if self.has_pending(c) || !self.local_cache(c.storage_id)?.enabled {
@@ -2840,20 +2880,30 @@ impl Storage {
                     return Ok(0);
                 }
                 let result: Result<u64> = async {
-                    let members: Vec<(Chunk, i64)> = self.physical.inspection_members(p.id).await?;
-                    let mut offset = 0i64;
-                    ensure!(
-                        members.len() == p.member_count as usize,
-                        codec::IntegrityError::Metadata
-                    );
-                    for (c, start) in &members {
-                        ensure!(
-                            *start == offset && c.raw_size > 0,
-                            codec::IntegrityError::Metadata
-                        );
-                        offset += i64::from(c.raw_size);
+                    let entries: Vec<_> = self
+                        .physical
+                        .pack_index(p.id, None)
+                        .await?
+                        .into_iter()
+                        .map(|(_, mut entry)| {
+                            p.resolve_entry(&mut entry)?;
+                            Ok(entry)
+                        })
+                        .collect::<Result<_>>()?;
+                    crate::content::pack::frame::validate_entries(
+                        &entries,
+                        u64::try_from(p.stored_size.context(codec::IntegrityError::Metadata)?)?,
+                        p.raw_size,
+                        p.member_count,
+                        true,
+                    )?;
+                    for key in entries
+                        .iter()
+                        .filter_map(|entry| entry.position.encoding.block_key_id)
+                        .collect::<std::collections::HashSet<_>>()
+                    {
+                        self.ensure_key_loaded(Some(key)).await?;
                     }
-                    ensure!(offset == p.raw_size, codec::IntegrityError::Metadata);
                     if matches!(mode, crate::worker::integrity::Mode::Metadata) {
                         return Ok(0);
                     }
@@ -2886,39 +2936,15 @@ impl Storage {
                     let secrets = self.secrets.clone();
                     let pack = p.clone();
                     let diagnostics = self.diagnostics.clone();
-                    let storage = self.clone();
                     tokio::task::spawn_blocking(move || {
-                        let _permit = permit;
-                        let _memory = memory;
+                        let (_permit, _memory) = (permit, memory);
                         #[cfg(feature = "fault-injection")]
                         crate::faults::blocking("pack-inspect");
-                        let result = (|| {
-                            let decoded =
-                                crate::content::pack::decode(&pack, data, &secrets, &pool)?;
-                            for ((c, offset), member) in members.iter().zip(&decoded.members) {
-                                ensure!(
-                                    member.id == c.uuid
-                                        && member.hash.as_slice() == c.hash
-                                        && member.len == c.raw_size as usize
-                                        && member.start
-                                            == 12
-                                                + crate::content::pack::MEMBER_SIZE * members.len()
-                                                + *offset as usize,
-                                    codec::IntegrityError::Metadata
-                                );
-                            }
-                            for (mut c, _) in members {
-                                c.address = None;
-                                c.location_id = Uuid::nil();
-                                let data = decoded.chunk(&c)?;
-                                resource_gate::PRIORITY
-                                    .sync_scope(resource_gate::MAINTENANCE, || {
-                                        storage.fill_read(&c, data, None)
-                                    });
-                            }
-                            Ok::<_, anyhow::Error>(())
-                        })();
-                        result.inspect_err(|e| diagnostics.content(e))
+                        crate::content::pack::decode_index(
+                            &pack, data, &entries, &secrets, &pool, true,
+                        )
+                        .map(drop)
+                        .inspect_err(|e| diagnostics.content(e))
                     })
                     .await??;
                     Ok(size)
@@ -2963,13 +2989,15 @@ impl Storage {
         self.ensure_storage_verified(storage_id).await?;
         let target = self.store_backend(storage_id)?;
         let _permit = target.reads.acquire().await?;
-        self.read_path_permitted(storage_id, path, bound).await
+        self.read_path_permitted(storage_id, path, bound, None)
+            .await
     }
     async fn read_path_permitted(
         &self,
         storage_id: Uuid,
         path: &Path,
         bound: usize,
+        span: Option<(std::ops::Range<u64>, u64)>,
     ) -> Result<Vec<u8>> {
         let target = self.store_backend(storage_id)?;
         let mut operation = self.operations[0].begin();
@@ -2982,6 +3010,7 @@ impl Storage {
                 target.backend.as_ref(),
                 path,
                 bound,
+                span,
                 read_retry::REQUEST
                     .try_with(|recovery| recovery.configured(target.profile.max_retries))
                     .ok(),

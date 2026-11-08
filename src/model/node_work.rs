@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 pub(crate) const MAX_ITEMS: usize = 64;
 pub(crate) const SCAN_ITEMS: usize = 32;
-pub(crate) type Member = (super::Id, i64, i32, Vec<u8>);
+pub(crate) type Member = crate::content::pack::frame::Entry;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Materials {
@@ -95,6 +95,7 @@ pub(crate) enum Rewrite {
         source: crate::content::pack::Pack,
         target: crate::content::pack::Pack,
         members: Vec<Member>,
+        replacements: Vec<Member>,
         current: Vec<super::Id>,
         cursor: super::Id,
     },

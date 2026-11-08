@@ -153,36 +153,7 @@ impl Reader {
                         );
                     }
                     PhysicalSource::Pack(pack) => {
-                        let decoded = pack::decode(&pack, bytes, keys.as_ref(), &pool)?;
-                        ensure!(
-                            decoded.members.len() == members.len(),
-                            codec::IntegrityError::Metadata
-                        );
-                        for ((id, offset, size, hash), member) in
-                            members.iter().zip(&decoded.members)
-                        {
-                            ensure!(
-                                *id == crate::model::Id::Uuid(member.id)
-                                    && hash.as_slice() == member.hash
-                                    && *size as usize == member.len
-                                    && member.start
-                                        == 12
-                                            + pack::MEMBER_SIZE * members.len()
-                                            + *offset as usize,
-                                codec::IntegrityError::Metadata
-                            );
-                            fills.extend(crate::storage::resource_gate::PRIORITY.sync_scope(
-                                crate::storage::resource_gate::MAINTENANCE,
-                                || {
-                                    files.prepare_fill(
-                                        member.id,
-                                        &decoded.bytes[member.start..member.start + member.len],
-                                        false,
-                                        &profile,
-                                    )
-                                },
-                            ));
-                        }
+                        pack::decode_index(&pack, bytes, &members, keys.as_ref(), &pool, true)?;
                     }
                     PhysicalSource::Raw(_) => unreachable!(),
                 }

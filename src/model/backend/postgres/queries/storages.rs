@@ -371,7 +371,7 @@ pub(in super::super) fn insert_storage_profile(
     control: Option<i32>,
     remote: bool,
 ) -> Statement<'static> {
-    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled,pack_range_enabled,min_free_space) VALUES($1,$2,$3,$4,$5,$5,$5,$5,$5,$6)").bind(id).bind(read).bind(upload).bind(control).bind(remote).bind((!remote).then_some("1GiB"))
+    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled,pack_range_enabled,min_free_space) VALUES($1,$2,$3,$4,$5,$5,$5,true,$5,$6)").bind(id).bind(read).bind(upload).bind(control).bind(remote).bind((!remote).then_some("1GiB"))
 }
 
 pub(in super::super) fn storage_profile_lock(id: Uuid) -> Rows<'static, StorageProfile> {

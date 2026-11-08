@@ -142,7 +142,7 @@ impl PackingStore for Backend {
         old: &Pack,
         new: &Pack,
         current: &[Id],
-        members: &[Chunk],
+        members: &[(Id, crate::content::pack::frame::Entry)],
         first: Id,
     ) -> Result<()> {
         transactions::commit_rewrite_pack(
@@ -179,6 +179,10 @@ impl PackingStore for Backend {
     async fn ready_encoding(&self, chunk: Id) -> Result<Option<(Id, Uuid, i32)>> {
         super::pack_work::ready_encoding(&self.pool, chunk).await
     }
+    async fn restore_encoding(&self, physical: &Chunk, task: Execution) -> Result<Id> {
+        transactions::restore_member_encoding(&self.pool, physical, task).await
+    }
+
     async fn prepare_encoding(&self, physical: &Chunk, task: Execution) -> Result<Id> {
         transactions::prepare_encoding(&self.pool, physical, task).await
     }
@@ -336,8 +340,13 @@ impl PackingStore for Backend {
         ensure!(node.is_none(), "MySQL does not support cluster nodes");
         transactions::start_unpack(&self.pool, pack, all).await
     }
-    async fn insert_pack_members(&self, pack: Id, rows: &[Mapping]) -> Result<()> {
-        transactions::insert_pack_members(&self.pool, pack, rows).await
+    async fn insert_pack_members(
+        &self,
+        pack: Id,
+        rows: &[Mapping],
+        entries: &[(Id, crate::content::pack::frame::Entry)],
+    ) -> Result<()> {
+        transactions::insert_pack_members(&self.pool, pack, rows, entries).await
     }
     async fn commit_pack_outputs(
         &self,
@@ -681,6 +690,43 @@ pub(in super::super) fn pack_metadata(pack: &Pack) -> Statement<'_> {
         .bind(pack.stored_size).bind(pack.compressed).bind(&pack.nonce).bind(crate::content::nonce::id(pack.nonce.as_deref())).bind(&pack.digest).bind(pack.id).bind(pack.location_id).bind(pack.storage_id).bind(&pack.algorithm).bind(pack.block_key_id)
 }
 
+pub(in super::super) async fn reserve_member_encoding(
+    db: &mut sqlx::MySqlConnection,
+    c: &Chunk,
+    task: Uuid,
+) -> Result<Id> {
+    crate::content::pack::frame::Encoding::capture(c)?;
+    let previous: Option<(Id, String, Option<Uuid>, Option<i32>, bool, String, Option<Uuid>, Option<Vec<u8>>)> = sqlx::query_as("SELECT encoding_id,state,owner_task,standalone_size,standalone_compressed,encryption_algorithm,block_key_id,nonce FROM chunk_encodings WHERE location_id=? AND chunk_id=? AND storage_id=? AND quarantined_at IS NULL FOR UPDATE")
+        .bind(c.location_id).bind(c.id).bind(c.storage_id).fetch_optional(&mut *db).await?;
+    let counter = crate::content::nonce::id(c.nonce.as_deref());
+    let id = if let Some((id, state, owner, size, compressed, algorithm, key, nonce)) = previous {
+        ensure!(
+            algorithm == c.algorithm
+                && key == c.block_key_id
+                && nonce.as_ref().is_none_or(|n| Some(n) == c.nonce.as_ref())
+                && size.is_none_or(|n| Some(n) == c.stored_size && compressed == c.compressed),
+            "member encoding identity changed"
+        );
+        ensure!(
+            matches!(state.as_str(), "retired" | "deleted")
+                || state == "uploading" && owner == Some(task),
+            "member encoding is in use"
+        );
+        sqlx::query("UPDATE chunk_encodings SET state='uploading',owner_task=?,standalone_size=?,standalone_compressed=?,encryption_algorithm=?,block_key_id=?,nonce=?,nonce_id=?,deleted_at=NULL,stored_at=NULL,unreferenced_at=UTC_TIMESTAMP(6) WHERE encoding_id=?").bind(task).bind(c.stored_size).bind(c.compressed).bind(&c.algorithm)
+            .bind(c.block_key_id).bind(&c.nonce).bind(counter).bind(id).execute(&mut *db).await?;
+        id
+    } else {
+        let inserted = sqlx::query("INSERT INTO chunk_encodings(location_id,chunk_id,storage_id,owner_task,standalone_size,standalone_compressed,encryption_algorithm,block_key_id,nonce,nonce_id,state,unreferenced_at,encoding_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,'uploading',UTC_TIMESTAMP(6),UNHEX(REPEAT('00',32)))")
+            .bind(c.location_id).bind(c.id).bind(c.storage_id).bind(task).bind(c.stored_size)
+            .bind(c.compressed).bind(&c.algorithm).bind(c.block_key_id).bind(&c.nonce).bind(counter)
+            .execute(&mut *db).await?;
+        let id = i64::try_from(inserted.last_insert_id())?.into();
+        id
+    };
+    refresh_encoding_fingerprint(db, id).await?;
+    Ok(id)
+}
+
 pub(in super::super) async fn write_pack_index(
     db: &mut sqlx::MySqlConnection,
     pack: Id,
@@ -709,23 +755,6 @@ pub(in super::super) async fn write_pack_index(
     Ok(())
 }
 
-pub(in super::super) fn insert_pack_members<'a>(
-    pack: Id,
-    chunks: impl Iterator<Item = &'a Chunk>,
-) -> sqlx::QueryBuilder<MySql> {
-    let mut query =
-        sqlx::QueryBuilder::new("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) ");
-    let mut offset = 0i64;
-    query.push_values(chunks.enumerate(), |mut row, (ordinal, chunk)| {
-        row.push_bind(pack)
-            .push_bind(ordinal as i32)
-            .push_bind(chunk.id)
-            .push_bind(offset);
-        offset += i64::from(chunk.raw_size);
-    });
-    query
-}
-
 pub(in super::super) fn pack_member_ids(pack: Id) -> Scalar<'static, Id> {
     sqlx::query_scalar("SELECT chunk_id FROM pack_members WHERE pack_id=? ORDER BY ordinal")
         .bind(pack)
@@ -733,7 +762,7 @@ pub(in super::super) fn pack_member_ids(pack: Id) -> Scalar<'static, Id> {
 
 pub(in super::super) fn pack_layout_bytes(ids: &[Id]) -> sqlx::QueryBuilder<MySql> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT CAST(COALESCE(SUM(bytes),0) AS SIGNED) FROM (SELECT standalone_size bytes FROM chunk_encodings WHERE state='ready' AND chunk_id IN ",
+        "SELECT CAST(COALESCE(SUM(bytes),0) AS SIGNED) FROM (SELECT standalone_size+8 bytes FROM chunk_encodings WHERE state='ready' AND chunk_id IN ",
     );
     chunk_ids(&mut query, ids);
     query.push(" UNION ALL SELECT stored_size FROM packs WHERE id IN (SELECT pack_id FROM chunks WHERE id IN ");
@@ -743,7 +772,7 @@ pub(in super::super) fn pack_layout_bytes(ids: &[Id]) -> sqlx::QueryBuilder<MySq
 }
 
 pub(in super::super) fn pack_added_bytes(task: Uuid) -> Scalar<'static, i64> {
-    sqlx::query_scalar("SELECT CAST(COALESCE(SUM(bytes),0) AS SIGNED) FROM (SELECT stored_size bytes FROM packs WHERE owner_task=? AND state='preparing' UNION ALL SELECT standalone_size FROM chunk_encodings WHERE owner_task=? AND state='uploading') physical").bind(task).bind(task)
+    sqlx::query_scalar("SELECT CAST(COALESCE(SUM(bytes),0) AS SIGNED) FROM (SELECT stored_size bytes FROM packs WHERE owner_task=? AND state='preparing' UNION ALL SELECT standalone_size+8 FROM chunk_encodings WHERE owner_task=? AND state='uploading') physical").bind(task).bind(task)
 }
 
 pub(in super::super) fn pack_task_policy(task: Uuid) -> Rows<'static, (bool, bool)> {
@@ -972,9 +1001,9 @@ fn rewrite_needed(
     });
     query
         .push("UNHEX(SHA2(CONCAT_WS(':',HEX(")
-        .push_bind(key)
+        .push_bind(if pack { None } else { key })
         .push("),CAST(")
-        .push_bind(algorithm.to_owned())
+        .push_bind(if pack { "none" } else { algorithm }.to_owned())
         .push(" AS BINARY)");
     query.push(if pack {
         ",k.pack_compressed,k.member_count"
@@ -990,10 +1019,14 @@ fn rewrite_needed(
     query
         .push("),256))) OR ((NOT p.compression_enabled OR p.compression_strategy='never') AND ")
         .push(if pack {
-            "k.pack_compressed))"
+            "k.pack_compressed) OR EXISTS (SELECT 1 FROM pack_members m WHERE m.pack_id=k.id AND (m.encryption_algorithm<>"
         } else {
             "l.standalone_compressed))"
         });
+    if pack {
+        query.push_bind(algorithm.to_owned()).push(" OR NOT(m.block_key_id<=>").push_bind(key)
+            .push(") OR ((NOT p.compression_enabled OR p.compression_strategy='never') AND m.compressed))))");
+    }
 }
 
 pub(in super::super) fn rewrite_counts(

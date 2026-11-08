@@ -338,10 +338,10 @@ pub(super) async fn check(
     let mut old_packs = Vec::new();
     for group in [[ids[4], ids[0]], [ids[3], ids[1]]] {
         let id: Id = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,'none',4,$2,2,'ready',$3) RETURNING id")
-            .bind(storage).bind((4+12+2*crate::content::pack::MEMBER_SIZE) as i64).bind(vec![7u8;32]).fetch_one(pool).await?;
+            .bind(storage).bind(12i64).bind(vec![7u8;32]).fetch_one(pool).await?;
         for (ordinal, chunk) in group.into_iter().enumerate() {
-            sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES($1,$2,$3,$4)")
-                .bind(id).bind(ordinal as i32).bind(chunk).bind(ordinal as i64*2).execute(pool).await?;
+            sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) VALUES($1,$2,$3,$4,$3,2,FALSE,'none')")
+                .bind(id).bind(ordinal as i32).bind(chunk).bind(8 + ordinal as i64*2).execute(pool).await?;
             sqlx::query("UPDATE chunks SET pack_id=$2 WHERE id=$1")
                 .bind(chunk)
                 .bind(id)

@@ -196,8 +196,11 @@ pub(in super::super) fn capture_member(
         .bind(task).bind(unit).bind(chunk).bind(pack)
 }
 
-pub(in super::super) fn members(unit: Id) -> Rows<'static, (Id, Uuid, i64, i32, Vec<u8>)> {
-    sqlx::query_as("SELECT m.source_chunk,c.uuid,m.source_offset,m.length,c.hash FROM transfer_members m JOIN chunks c ON c.id=m.source_chunk WHERE m.unit_id=? ORDER BY m.source_offset LIMIT 4097").bind(unit)
+pub(in super::super) fn members(
+    unit: Id,
+    pack: Id,
+) -> Rows<'static, crate::model::physical::PackMemberRow> {
+    sqlx::query_as("SELECT m.chunk_id,c.uuid,c.hash,c.raw_size,m.ordinal,m.offset_bytes,m.encoding_uuid,m.encoded_size,m.compressed,m.encryption_algorithm,m.block_key_id,m.nonce FROM transfer_members t JOIN chunks c ON c.id=t.source_chunk JOIN pack_members m ON m.chunk_id=c.id AND m.offset_bytes=t.source_offset WHERE t.unit_id=? AND m.pack_id=? ORDER BY m.ordinal LIMIT 4097").bind(unit).bind(pack)
 }
 
 pub(in super::super) fn begin_scan(id: Id) -> Statement<'static> {

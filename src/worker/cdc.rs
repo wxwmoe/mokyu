@@ -78,7 +78,7 @@ impl App {
                     .pack_work(
                         maximum
                             + 12
-                            + (maximum / codec::MIN + 1) * crate::content::pack::MEMBER_SIZE,
+                            + (maximum / codec::MIN + 1) * crate::content::pack::MAX_MEMBER_TAG,
                     )
                     .await?;
                 let read = self.reads.acquire().await?;

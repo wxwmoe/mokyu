@@ -324,8 +324,8 @@ pub(super) async fn check(
     );
     let large = object(backend, storage, bucket, 4096, 1).await?;
     let old:Id=sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,'none',4096,$2,4096,'ready',$3) RETURNING id")
-        .bind(storage).bind((4096+12+4096*crate::content::pack::MEMBER_SIZE) as i64).bind(vec![8u8;32]).fetch_one(pool).await?;
-    sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) SELECT $1,(ordinality-1)::int,id,ordinality-1 FROM unnest($2::uuid[]) WITH ORDINALITY t(id,ordinality)").bind(old).bind(&large).execute(pool).await?;
+        .bind(storage).bind(4104i64).bind(vec![8u8;32]).fetch_one(pool).await?;
+    sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) SELECT $1,(ordinality-1)::int,id,8+ordinality-1,id,1,FALSE,'none' FROM unnest($2::uuid[]) WITH ORDINALITY t(id,ordinality)").bind(old).bind(&large).execute(pool).await?;
     sqlx::query("UPDATE chunks SET pack_id=$2 WHERE id=ANY($1)")
         .bind(&large)
         .bind(old)

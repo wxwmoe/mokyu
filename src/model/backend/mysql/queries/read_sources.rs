@@ -12,8 +12,15 @@ pub(in super::super) fn node_read_extents(
     sqlx::query_as("SELECT * FROM extents WHERE stream_id=? AND offset_bytes>=?-4194304 AND offset_bytes+length>? AND offset_bytes<? ORDER BY offset_bytes LIMIT ?").bind(stream).bind(start).bind(start).bind(end).bind(limit)
 }
 pub(in super::super) fn node_read_chunks(ids: &[Id]) -> Rows<'_, NodeReadChunk> {
-    sqlx::query_as("SELECT c.*,l.location_id FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE c.id IN (SELECT j.id FROM JSON_TABLE(?, '$[*]' COLUMNS(id BIGINT PATH '$')) j) AND c.state='ready' ORDER BY c.id LOCK IN SHARE MODE").bind(Json(ids))
+    sqlx::query_as("SELECT c.*,COALESCE(l.location_id,0x00000000000000000000000000000000) AS location_id FROM chunks c LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE c.id IN (SELECT j.id FROM JSON_TABLE(?, '$[*]' COLUMNS(id BIGINT PATH '$')) j) AND c.state='ready' ORDER BY c.id LOCK IN SHARE MODE").bind(Json(ids))
 }
+pub(in super::super) fn node_pack_members(
+    ids: &[Id],
+) -> Rows<'_, crate::model::physical::PackMemberRow> {
+    sqlx::query_as("SELECT m.chunk_id,c.uuid,c.hash,c.raw_size,m.ordinal,m.offset_bytes,m.encoding_uuid,m.encoded_size,m.compressed,m.encryption_algorithm,m.block_key_id,m.nonce FROM pack_members m JOIN chunks c ON c.id=m.chunk_id AND c.pack_id=m.pack_id WHERE c.id IN (SELECT j.id FROM JSON_TABLE(?, '$[*]' COLUMNS(id BIGINT PATH '$')) j) ORDER BY c.id")
+        .bind(Json(ids))
+}
+
 pub(in super::super) fn node_read_encodings(ids: &[Id]) -> Rows<'_, Chunk> {
     sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=l.location_id) AS tier_material,c.id,c.uuid,l.encoding_id AS current_encoding_id,l.location_id,l.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunks c JOIN chunk_encodings l ON l.encoding_id=(SELECT e.encoding_id FROM chunk_encodings e WHERE e.chunk_id=c.id AND e.state='ready' AND e.quarantined_at IS NULL ORDER BY e.encoding_id LIMIT 1) WHERE c.id IN (SELECT j.id FROM JSON_TABLE(?, '$[*]' COLUMNS(id BIGINT PATH '$')) j) ORDER BY c.id LOCK IN SHARE MODE").bind(Json(ids))
 }

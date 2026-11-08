@@ -103,6 +103,7 @@ impl Position {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) struct Entry {
     pub uuid: Uuid,
+    #[serde(with = "crate::content::codec::digest")]
     pub hash: [u8; 32],
     pub raw_size: i32,
     pub position: Position,
@@ -255,6 +256,24 @@ impl Builder {
     }
 }
 
+pub(crate) fn index<'a>(
+    chunks: impl IntoIterator<Item = &'a Chunk>,
+) -> Result<Vec<(crate::model::Id, Entry)>> {
+    let mut offset = HEADER.len() as u64;
+    let mut entries = Vec::new();
+    for chunk in chunks {
+        ensure!(entries.len() < MAX_MEMBERS, codec::IntegrityError::Metadata);
+        let position = Position {
+            ordinal: entries.len() as u32,
+            offset,
+            encoding: Encoding::capture(chunk)?,
+        };
+        offset += position.encoding.stored_size as u64;
+        entries.push((chunk.id, Entry::new(chunk, position)?));
+    }
+    Ok(entries)
+}
+
 pub(crate) fn assemble(
     pack: &mut Pack,
     files: &[(Chunk, bytes::Bytes)],
@@ -280,6 +299,129 @@ pub(crate) fn assemble(
     pack.stored_size = Some(i64::try_from(size)?);
     pack.digest = Some(digest.as_bytes().to_vec());
     Ok((bytes, entries))
+}
+
+pub(crate) fn rewrite_entries(
+    members: &[Entry],
+    algorithm: &str,
+    key: Option<Uuid>,
+    created: chrono::DateTime<chrono::Utc>,
+    first: Option<i64>,
+    allow_compression: bool,
+) -> Result<Vec<Entry>> {
+    ensure!(
+        key.is_some() == first.is_some() && (algorithm != "none") == key.is_some(),
+        codec::IntegrityError::Metadata
+    );
+    let mut offset = HEADER.len() as u64;
+    let mut output = Vec::with_capacity(members.len());
+    for (index, source) in members.iter().enumerate() {
+        let old = &source.position.encoding;
+        let payload = if allow_compression {
+            old.stored_size - if old.block_key_id.is_some() { 16 } else { 0 }
+        } else {
+            source.raw_size
+        };
+        let encoding = Encoding {
+            location_id: Uuid::now_v7(),
+            stored_size: payload + if key.is_some() { 16 } else { 0 },
+            compressed: allow_compression && old.compressed,
+            algorithm: algorithm.to_owned(),
+            block_key_id: key,
+            nonce: first
+                .map(|n| -> Result<_> {
+                    Ok(codec::typed_nonce(
+                        created,
+                        n.checked_add(index as i64).context("nonce overflow")?,
+                        crate::content::nonce::CHUNK,
+                    )?
+                    .to_vec())
+                })
+                .transpose()?,
+        };
+        encoding.validate(source.raw_size)?;
+        let end = offset + encoding.stored_size as u64;
+        output.push(Entry {
+            position: Position {
+                ordinal: index as u32,
+                offset,
+                encoding,
+            },
+            ..source.clone()
+        });
+        offset = end;
+    }
+    Ok(output)
+}
+
+pub(crate) fn recode(
+    source: &Pack,
+    target: &mut Pack,
+    file: &[u8],
+    old: &[Entry],
+    new: &[Entry],
+    keys: &dyn codec::KeySource,
+    pool: &crate::content::compression::Pool,
+) -> Result<Vec<u8>> {
+    validate_file(source, file)?;
+    validate_entries(
+        old,
+        file.len() as u64,
+        source.raw_size,
+        source.member_count,
+        true,
+    )?;
+    ensure!(
+        old.len() == new.len()
+            && source.raw_size == target.raw_size
+            && source.member_count == target.member_count,
+        codec::IntegrityError::Metadata
+    );
+    let last = new.last().context(codec::IntegrityError::Metadata)?;
+    let size = last
+        .position
+        .offset
+        .checked_add(u64::try_from(last.position.encoding.stored_size)?)
+        .context(codec::IntegrityError::Length)?;
+    validate_entries(new, size, target.raw_size, target.member_count, true)?;
+    let mut output = Vec::with_capacity(usize::try_from(size)?);
+    output.extend_from_slice(HEADER);
+    for (before, after) in old.iter().zip(new) {
+        ensure!(
+            before.uuid == after.uuid
+                && before.hash == after.hash
+                && before.raw_size == after.raw_size
+                && (!after.position.encoding.compressed || before.position.encoding.compressed)
+                && before.position.encoding.location_id != after.position.encoding.location_id,
+            codec::IntegrityError::Metadata
+        );
+        let range =
+            before
+                .position
+                .range(before.raw_size, file.len() as u64, source.member_count)?;
+        let chunk = before.chunk(source)?;
+        let body = codec::open_body(
+            &chunk,
+            file[range.start as usize..range.end as usize].to_vec(),
+            keys,
+        )?;
+        let body = bytes::Bytes::from(body);
+        let raw = codec::decode_cache_read(&chunk, body.clone(), chunk.compressed, pool, true)?;
+        let payload = if after.position.encoding.compressed {
+            body
+        } else {
+            raw
+        };
+        output.extend_from_slice(&codec::seal_body(
+            &after.chunk(target)?,
+            payload.to_vec(),
+            keys,
+        )?);
+    }
+    ensure!(output.len() as u64 == size, codec::IntegrityError::Length);
+    target.stored_size = Some(i64::try_from(size)?);
+    target.digest = Some(blake3::hash(&output).as_bytes().to_vec());
+    Ok(output)
 }
 
 pub(crate) fn validate_file(pack: &Pack, file: &[u8]) -> Result<()> {
@@ -378,6 +520,7 @@ mod tests {
             compressed: false,
             nonce: None,
             digest: None,
+            tier_index: None,
             member_count: 3,
             state: "ready".into(),
             created_at: now,

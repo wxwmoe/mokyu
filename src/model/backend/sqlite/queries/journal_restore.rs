@@ -207,12 +207,19 @@ pub(in super::super) fn member(
     ordinal: i32,
     chunk: Id,
     offset: i64,
-) -> Statement<'static> {
-    sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES(?,?,?,?)")
+    encoding: &crate::content::codec::Chunk,
+) -> Statement<'_> {
+    sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm,block_key_id,nonce) VALUES(?,?,?,?,?,?,?,?,?,?)")
         .bind(pack)
         .bind(ordinal)
         .bind(chunk)
         .bind(offset)
+        .bind(encoding.location_id)
+        .bind(encoding.stored_size)
+        .bind(encoding.compressed)
+        .bind(&encoding.algorithm)
+        .bind(encoding.block_key_id)
+        .bind(&encoding.nonce)
 }
 
 pub(in super::super) fn insert_encoding<'a>(

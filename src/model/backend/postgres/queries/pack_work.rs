@@ -70,7 +70,7 @@ pub(crate) async fn pack_member_count(db: impl sqlx::PgExecutor<'_>, pack: Id) -
 }
 
 pub(crate) async fn physical_bytes(db: impl sqlx::PgExecutor<'_>, ids: &[Id]) -> Result<i64> {
-    Ok(sqlx::query_scalar("SELECT COALESCE(sum(bytes),0)::bigint FROM (SELECT standalone_size bytes FROM chunk_encodings WHERE chunk_id=ANY($1) AND state='ready' UNION ALL SELECT stored_size FROM packs WHERE id IN (SELECT pack_id FROM chunks WHERE id=ANY($1))) physical").bind(ids).fetch_one(db).await?)
+    Ok(sqlx::query_scalar("SELECT COALESCE(sum(bytes),0)::bigint FROM (SELECT standalone_size+8 bytes FROM chunk_encodings WHERE chunk_id=ANY($1) AND state='ready' UNION ALL SELECT stored_size FROM packs WHERE id IN (SELECT pack_id FROM chunks WHERE id=ANY($1))) physical").bind(ids).fetch_one(db).await?)
 }
 
 pub(crate) async fn next_pack(
@@ -239,9 +239,26 @@ pub(crate) async fn prepare_outputs(
     db: &mut sqlx::PgConnection,
     task: Uuid,
     storage: Uuid,
-    batch: &crate::model::node_pack::Batch,
+    batch: &mut crate::model::node_pack::Batch,
 ) -> Result<()> {
-    let chunks: Vec<_> = batch.chunks.iter().filter(|c| c.ready.is_none()).collect();
+    let packed = batch.packed_chunks()?;
+    for (index, grouped) in packed.iter().enumerate() {
+        if !grouped && batch.chunks[index].ready.is_none() && batch.chunks[index].original.is_some()
+        {
+            let c = batch.chunk(storage, index)?;
+            batch.chunks[index].encoding =
+                Some(super::reserve_member_encoding(db, &c, task).await?);
+            batch.chunks[index].location = c.location_id;
+        }
+    }
+    let chunks: Vec<_> = batch
+        .chunks
+        .iter()
+        .zip(packed)
+        .filter_map(|(c, grouped)| {
+            (!grouped && c.ready.is_none() && c.original.is_none()).then_some(c)
+        })
+        .collect();
     if !chunks.is_empty() {
         let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
             "INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_compressed,state,created_at,unreferenced_at,owner_task,encryption_algorithm,block_key_id,nonce,nonce_id) ",
@@ -273,8 +290,8 @@ pub(crate) async fn prepare_outputs(
                 .sum();
             row.push_bind(p.location)
                 .push_bind(storage)
-                .push_bind(&batch.algorithm)
-                .push_bind(batch.key)
+                .push_bind("none")
+                .push_bind(Option::<Uuid>::None)
                 .push_bind(raw)
                 .push_bind((p.end - p.start) as i32)
                 .push("'preparing'")
@@ -292,7 +309,6 @@ pub(crate) async fn prepare_outputs(
 pub(crate) async fn record_outputs(
     db: &mut sqlx::PgConnection,
     task: Uuid,
-    rows: &[Mapping],
     outputs: &[PackOutput],
 ) -> Result<()> {
     let packs: Vec<_> = outputs.iter().filter_map(|o| o.pack.as_ref()).collect();
@@ -311,30 +327,11 @@ pub(crate) async fn record_outputs(
             .push_bind(task)
             .push(" AND p.state='preparing'");
         query.build().execute(&mut *db).await?;
-        let sizes: std::collections::BTreeMap<_, _> = rows
-            .iter()
-            .map(|r| (r.chunk.id, i64::from(r.chunk.raw_size)))
-            .collect();
-        let mut members = Vec::new();
         for output in outputs {
             if let Some(pack) = &output.pack {
-                let mut offset = 0;
-                for (ordinal, id) in output.chunks.iter().enumerate() {
-                    members.push((pack.id, ordinal as i32, *id, offset));
-                    offset += sizes.get(id).context("missing pack source")?;
-                }
+                super::write_pack_index(&mut *db, pack.id, &output.entries).await?;
             }
         }
-        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-            "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) ",
-        );
-        query.push_values(members, |mut row, (pack, ordinal, id, offset)| {
-            row.push_bind(pack)
-                .push_bind(ordinal)
-                .push_bind(id)
-                .push_bind(offset);
-        });
-        query.build().execute(&mut *db).await?;
     }
     let chunks: Vec<_> = outputs
         .iter()
@@ -466,9 +463,16 @@ pub(in super::super) use super::{
 };
 pub(in super::super) async fn physical_members(
     db: &mut Connection,
-    pack: Id,
+    pack: &crate::content::pack::Pack,
 ) -> Result<Vec<crate::model::node_work::Member>> {
-    Ok(super::work::members(pack).fetch_all(db).await?)
+    super::physical::pack_index_rows(db, pack.id, None)
+        .await?
+        .into_iter()
+        .map(|(_, mut entry)| {
+            pack.resolve_entry(&mut entry)?;
+            Ok(entry)
+        })
+        .collect()
 }
 pub(in super::super) async fn clock(db: &mut Connection) -> Result<DateTime<Utc>> {
     Ok(super::node_clock().fetch_one(db).await?)

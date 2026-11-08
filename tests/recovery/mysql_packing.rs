@@ -80,6 +80,7 @@ async fn mysql_packing_contract() -> Result<()> {
             task,
             &rows[..2],
             &[PackOutput {
+                entries: Vec::new(),
                 chunks: rows[..2].iter().map(|r| r.chunk.id).collect(),
                 pack: Some(pack.clone()),
                 independent: None,
@@ -95,9 +96,9 @@ async fn mysql_packing_contract() -> Result<()> {
     assert!(!backend.in_storage(pack.id, Uuid::new_v4()).await?);
     assert_eq!(backend.pack_layout(pack.id).await?.len(), 2);
     assert_eq!(backend.range_pack_layout(pack.id).await?.len(), 2);
-    assert_eq!(backend.pack_dimensions(pack.id).await?, (40, 64, 2));
+    assert_eq!(backend.pack_dimensions(pack.id).await?, (72, 64, 2));
     assert_eq!(backend.pack_raw_size(pack.id).await?, 64);
-    assert_eq!(backend.pack_stored_size(pack.id).await?, 40);
+    assert_eq!(backend.pack_stored_size(pack.id).await?, 72);
     assert_eq!(backend.pack_member_count(pack.id).await?, 2);
     assert!(backend.chunk_has_references(rows[0].chunk.id).await?);
     assert_eq!(backend.physical_bytes(&[]).await?, 0);
@@ -105,7 +106,7 @@ async fn mysql_packing_contract() -> Result<()> {
         backend
             .physical_bytes(&rows.iter().map(|r| r.chunk.id).collect::<Vec<_>>())
             .await?,
-        72
+        112
     );
     assert_eq!(backend.ready_encoding(rows[0].chunk.id).await?, None);
     assert_eq!(
@@ -118,7 +119,7 @@ async fn mysql_packing_contract() -> Result<()> {
         backend.unpack_identity(None).await?,
         (pack.id.to_string(), pack.id.to_string())
     );
-    assert_eq!(backend.pack_totals().await?[0]["stored_bytes"], 40);
+    assert_eq!(backend.pack_totals().await?[0]["stored_bytes"], 72);
     assert_eq!(
         PackingStore::page(&backend, 0.into(), 2).await?[0]["id"],
         pack.id.to_string()

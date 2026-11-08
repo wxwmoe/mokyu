@@ -104,11 +104,6 @@ impl App {
             .storage
             .profile_permit(job.storage_id, "maintenance")
             .await?;
-        let strategy = match profile.compression_strategy.as_str() {
-            "never" => crate::content::compression::Strategy::Never,
-            "sample" => crate::content::compression::Strategy::Sample,
-            _ => crate::content::compression::Strategy::Always,
-        };
         ensure!(
             job.profile_revision == 0 || job.profile_revision == profile.revision,
             "storage profile changed during rewrite; preview again"
@@ -197,37 +192,90 @@ impl App {
                 .collect();
             self.pin_pack_inputs(execution, &mappings).await?;
             let work = self.storage.pack_work(old.payload_size()?).await?;
-            let loaded = self.storage.load_pack(old.clone()).await?;
-            let mut encoded_members = Vec::with_capacity(members.len());
-            for mut member in members {
-                let raw = loaded.data.chunk(&member)?;
-                member.algorithm = job.target_algorithm.clone();
-                member.block_key_id = job.target_key_id;
-                encoded_members.push((member, raw));
+            let (ids, mut source_index): (Vec<_>, Vec<_>) = self
+                .physical
+                .pack_index(old.id, None)
+                .await?
+                .into_iter()
+                .unzip();
+            for entry in &mut source_index {
+                old.resolve_entry(entry)?;
             }
-            let new_pack = self
+            for key in source_index
+                .iter()
+                .filter_map(|entry| entry.position.encoding.block_key_id)
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                self.storage.ensure_key_loaded(Some(key)).await?;
+            }
+            let mut new_pack = self
                 .packing
                 .prepare_pack(
                     job.storage_id,
-                    &job.target_algorithm,
-                    job.target_key_id,
+                    "none",
+                    None,
                     old.raw_size,
                     old.member_count,
                     execution,
                 )
                 .await?;
-            let (new_pack, encoded) = self
+            let first = if let Some(key) = job.target_key_id {
+                Some(
+                    self.managed_keys
+                        .reserve_nonce(
+                            key,
+                            crate::content::nonce::CHUNK,
+                            u32::try_from(
+                                source_index
+                                    .len()
+                                    .div_ceil(crate::content::nonce::UNIT as usize),
+                            )?,
+                        )
+                        .await?
+                        .0,
+                )
+            } else {
+                None
+            };
+            let target_index = crate::content::pack::frame::rewrite_entries(
+                &source_index,
+                &job.target_algorithm,
+                job.target_key_id,
+                new_pack.created_at,
+                first,
+                profile.compression_enabled && profile.compression_strategy != "never",
+            )?;
+            let storage = old.storage_id.context("pack storage missing")?;
+            let file = self
                 .storage
-                .encode_pack(
-                    new_pack,
-                    encoded_members.clone(),
-                    strategy,
-                    profile.compression_enabled
-                        && strategy != crate::content::compression::Strategy::Never,
-                    &work,
-                    None,
+                .read_path_for(
+                    storage,
+                    &self.storage.pack_path_for(storage, old.address())?,
+                    usize::try_from(old.stored_size.context("missing pack size")?)?,
                 )
                 .await?;
+            let cpu = self.storage.cpu.clone().acquire_owned().await?;
+            let keys = self.secrets.clone();
+            let pool = self.storage.compression.clone();
+            let source = old.clone();
+            let (new_pack, encoded, members) = tokio::task::spawn_blocking(move || {
+                let (_cpu, _memory) = (cpu, work);
+                let encoded = crate::content::pack::frame::recode(
+                    &source,
+                    &mut new_pack,
+                    &file,
+                    &source_index,
+                    &target_index,
+                    &keys,
+                    &pool,
+                )?;
+                Ok::<_, anyhow::Error>((
+                    new_pack,
+                    encoded,
+                    ids.into_iter().zip(target_index).collect::<Vec<_>>(),
+                ))
+            })
+            .await??;
             self.storage
                 .put_path_for(
                     job.storage_id,
@@ -239,19 +287,8 @@ impl App {
                 .await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("rewrite-pack-stored").await;
-            let mut fills = Vec::new();
-            for (source, bytes) in &encoded_members {
-                let mut member = source.clone();
-                member.address = None;
-                member.location_id = Uuid::nil();
-                fills.extend(self.storage.prepare_fill(&member, bytes, None));
-            }
             self.storage_writable()?;
             let _gate = self.storage.source_gate.write().await;
-            let members = encoded_members
-                .into_iter()
-                .map(|(chunk, _)| chunk)
-                .collect::<Vec<_>>();
             self.packing
                 .commit_rewrite_pack(
                     id,
@@ -263,7 +300,6 @@ impl App {
                     first_id,
                 )
                 .await?;
-            crate::storage::cache::publish_fills(fills);
             return Ok(false);
         }
 

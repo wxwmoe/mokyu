@@ -198,7 +198,7 @@ async fn mysql_inventory_contract() -> Result<()> {
             .await?["unreferenced"]["eligible_chunks"],
         0
     );
-    sqlx::query("INSERT INTO pack_members(pack_id,chunk_id,ordinal,offset_bytes) VALUES(?,?,0,0)")
+    sqlx::query("INSERT INTO pack_members(pack_id,chunk_id,ordinal,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) SELECT ?,chunk_id,0,8,location_id,standalone_size,TRUE,'none' FROM chunk_encodings WHERE chunk_id=?")
         .bind(packs[2])
         .bind(c5)
         .execute(db)

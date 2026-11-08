@@ -583,6 +583,8 @@ pub(crate) enum Source {
     Pack {
         pack: Pack,
         chunk: Chunk,
+        ordinal: u32,
+        offset: u64,
     },
     Raw {
         source: RawSource,
@@ -619,7 +621,7 @@ impl Source {
         use super::tiering::Source as Demand;
         match self {
             Self::Chunk { chunk } => Some(Demand::Chunk(chunk.location_id)),
-            Self::Pack { pack, chunk } => Some(Demand::Pack {
+            Self::Pack { pack, chunk, .. } => Some(Demand::Pack {
                 pack: pack.location_id,
                 member: chunk.uuid,
             }),
@@ -656,7 +658,7 @@ impl Source {
     pub(crate) fn key(&self) -> Option<Uuid> {
         match self {
             Self::Chunk { chunk } => chunk.block_key_id,
-            Self::Pack { pack, .. } => pack.block_key_id,
+            Self::Pack { chunk, .. } => chunk.block_key_id,
             _ => None,
         }
     }

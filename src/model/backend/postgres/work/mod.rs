@@ -1332,7 +1332,7 @@ pub(crate) async fn exchange(
                     if let Some(work) = step.work {
                         let ids: std::collections::BTreeSet<_> = std::iter::once(work.source())
                             .chain(work.target())
-                            .filter_map(|s| s.block_key())
+                            .flat_map(|s| s.block_keys())
                             .collect();
                         let keys =
                             rewrite::keys(&mut tx, &ids.into_iter().collect::<Vec<_>>(), key)

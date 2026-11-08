@@ -141,7 +141,7 @@ pub(super) async fn finish_write(
             .eq(batch.chunks.iter().map(|c| c.id)),
         Error::NodeOperationConflict
     );
-    db::record_outputs(tx, id, &rows, &outputs).await?;
+    db::record_outputs(tx, id, &outputs).await?;
     transactions::commit_conversion_batch_in(tx, task, stream, &rows, &outputs).await?;
     used.clear();
     for item in items.iter().filter(|item| !item.reused) {

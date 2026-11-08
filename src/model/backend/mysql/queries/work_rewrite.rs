@@ -9,16 +9,3 @@ pub(in super::super) fn chunk_nonce<'a>(
 ) -> Statement<'a> {
     sqlx::query("UPDATE chunk_encodings SET nonce=?,nonce_id=? WHERE encoding_id=? AND owner_task=? AND state='uploading'").bind(nonce).bind(crate::content::nonce::id(nonce)).bind(id).bind(task)
 }
-pub(in super::super) fn pack_nonce<'a>(
-    id: Id,
-    task: Uuid,
-    nonce: Option<&'a [u8]>,
-) -> Statement<'a> {
-    sqlx::query(
-        "UPDATE packs SET nonce=?,nonce_id=? WHERE id=? AND owner_task=? AND state='preparing'",
-    )
-    .bind(nonce)
-    .bind(crate::content::nonce::id(nonce))
-    .bind(id)
-    .bind(task)
-}

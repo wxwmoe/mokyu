@@ -273,6 +273,7 @@ impl Reader {
             backend.store.backend.as_ref(),
             &path,
             bound,
+            None,
             Some(prepared.recovery.configured(backend.profile.max_retries)),
         )
         .await
@@ -358,58 +359,45 @@ impl Reader {
             }
         }
         let memory = memory.unwrap();
-        if let read::Source::Pack { pack, .. } = source {
-            let current = loaded.as_ref().is_some_and(|value| {
-                value.pack.location_id == pack.location_id
-                    && value.pack.digest == pack.digest
-                    && (!verify || value.verified)
-            });
-            if !current {
-                *loaded = None;
-                let units =
-                    (pack.payload_size()? as u64 * 4 + self.workspace).div_ceil(1024 * 1024);
-                ensure!(
-                    units <= u64::from(self.pack_units),
-                    "pack exceeds node memory budget"
-                );
-                let pack_memory = self.acquire(&self.packs, units as u32).await?;
-                let bytes = self
-                    .get(
-                        &prepared,
-                        pack.storage_id.context("pack storage missing")?,
-                        crate::storage::location::Layout::S3.pack(pack.address()),
-                        pack.payload_size()? + 16,
-                    )
-                    .await?;
-                let cpu = self.cpu.clone().acquire_owned().await?;
-                let pool = self.pool.clone();
-                let pack = pack.clone();
-                let lease = prepared.clone();
-                let keys = keys.clone();
-                let access = node.access.clone();
-                *loaded = Some(
-                    tokio::task::spawn_blocking(move || {
-                        let (_cpu, _lease) = (cpu, lease);
-                        let data = pack::decode_read(&pack, bytes, keys.as_ref(), &pool, verify)?;
-                        Ok::<_, anyhow::Error>(Loaded {
-                            data,
-                            pack,
-                            verified: verify,
-                            _memory: pack_memory,
-                            used: Default::default(),
-                            access,
-                        })
-                    })
-                    .await??,
-                );
-            }
-            let loaded = loaded.as_ref().unwrap();
-            loaded.touch(
-                chunk,
-                !self.background && !prepared.verify,
-                prepared.reply.http_status == 206,
-            );
-            return Ok((memory.hold(loaded.data.chunk(chunk)?), !current));
+        if let read::Source::Pack {
+            pack,
+            ordinal,
+            offset,
+            ..
+        } = source
+        {
+            *loaded = None;
+            let size = u64::try_from(pack.stored_size.context(codec::IntegrityError::Metadata)?)?;
+            let position = pack::frame::Position {
+                ordinal: *ordinal,
+                offset: *offset,
+                encoding: pack::frame::Encoding::capture(chunk)?,
+            };
+            let span = position.range(chunk.raw_size, size, pack.member_count)?;
+            let storage = pack.storage_id.context("pack storage missing")?;
+            let encoded = {
+                let _io = self.io(&prepared, Some(storage)).await?;
+                let backend = prepared.backend(storage)?;
+                backend.store.ensure_verified().await?;
+                self.gets.fetch_add(1, Ordering::Relaxed);
+                crate::storage::read_retry::bounded(
+                    backend.store.backend.as_ref(),
+                    &crate::storage::location::Layout::S3.pack(pack.address()),
+                    chunk.stored_size.context(codec::IntegrityError::Metadata)? as usize,
+                    Some((span, size)),
+                    Some(prepared.recovery.configured(backend.profile.max_retries)),
+                )
+                .await?
+            };
+            let cpu = self.cpu.clone().acquire_owned().await?;
+            let chunk = chunk.clone();
+            let pool = self.pool.clone();
+            return tokio::task::spawn_blocking(move || {
+                let (_cpu, _lease) = (cpu, prepared);
+                let raw = codec::decode_member(&chunk, encoded, keys.as_ref(), 0, &pool, verify)?.0;
+                Ok((memory.hold(raw), true))
+            })
+            .await?;
         }
         *loaded = None;
         let mut compressed = false;

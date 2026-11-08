@@ -41,6 +41,7 @@ pub(in super::super) struct Sources {
     chunks: HashMap<Id, super::NodeReadChunk>,
     encodings: HashMap<Id, crate::content::codec::Chunk>,
     packs: HashMap<Id, crate::content::pack::Pack>,
+    members: HashMap<Id, crate::content::pack::frame::Entry>,
     pending: HashMap<Id, Option<Uuid>>,
     fragments: HashMap<Id, super::NodeReadFragment>,
 }
@@ -89,6 +90,16 @@ impl Sources {
                 .map(|pack| (pack.id, pack))
                 .collect()
         };
+        let members = if packs.is_empty() {
+            HashMap::new()
+        } else {
+            super::node_pack_members(&ids)
+                .fetch_all(&mut *db)
+                .await?
+                .into_iter()
+                .map(crate::model::physical::PackMemberRow::entry)
+                .collect::<Result<HashMap<_, _>>>()?
+        };
         let local_ids: Vec<_> = chunks
             .values()
             .filter(|row| {
@@ -127,6 +138,7 @@ impl Sources {
             extents: by_stream,
             chunks,
             encodings,
+            members,
             packs,
             pending,
             fragments,
@@ -177,9 +189,33 @@ impl Sources {
                             chunk: chunk.clone(),
                         }
                     } else if let Some(pack) = chunk.pack_id.and_then(|id| self.packs.get(&id)) {
+                        let mut member = self
+                            .members
+                            .get(&id)
+                            .ok_or(Error::SourceUnavailable)?
+                            .clone();
+                        pack.resolve_entry(&mut member)?;
+                        let mut physical = chunk.chunk.clone();
+                        ensure!(
+                            member.uuid == physical.uuid
+                                && member.hash.as_slice() == physical.hash
+                                && member.raw_size == physical.raw_size,
+                            Error::SourceUnavailable
+                        );
+                        member.position.encoding.apply(&mut physical)?;
+                        physical.encoding_id = member.position.encoding.location_id.into();
+                        member.position.range(
+                            physical.raw_size,
+                            u64::try_from(pack.stored_size.ok_or(Error::SourceUnavailable)?)?,
+                            pack.member_count,
+                        )?;
+                        let mut location = pack.clone();
+                        location.tier_index = None;
                         Source::Pack {
-                            pack: pack.clone(),
-                            chunk: chunk.chunk.clone(),
+                            pack: location,
+                            chunk: physical,
+                            ordinal: member.position.ordinal,
+                            offset: member.position.offset,
                         }
                     } else if self.pending.get(&id) == Some(&Some(node)) {
                         Source::Local {

@@ -16,7 +16,7 @@ pub(super) async fn members(
     pack: &crate::content::pack::Pack,
     snapshot: &crate::model::source::SourceSnapshot,
 ) -> Result<Vec<work::Member>> {
-    let members = super::queries::pack_work::physical_members(tx, pack.id).await?;
+    let members = super::queries::pack_work::physical_members(tx, pack).await?;
     ensure!(
         Some(crate::model::source::manifest_digest(pack, &members)?) == snapshot.manifest_digest,
         Error::OperationAborted
@@ -116,9 +116,19 @@ pub(super) async fn prepare(
         vec![]
     };
     let mut keys = vec![];
-    if inspect && let Some(id) = block {
-        let record = q::block(tx, id).await?;
-        keys.push(read::BlockKey::unprotect(record, key)?);
+    if inspect {
+        let ids: std::collections::BTreeSet<_> = block
+            .into_iter()
+            .chain(
+                members
+                    .iter()
+                    .filter_map(|m| m.position.encoding.block_key_id),
+            )
+            .collect();
+        for id in ids {
+            let record = q::block(tx, id).await?;
+            keys.push(read::BlockKey::unprotect(record, key)?);
+        }
     }
     Ok(Some((
         work::Plan::Inspect {

@@ -97,32 +97,16 @@ pub(crate) fn decode(
         }
         Input::Pack { pack, members } => {
             pack.validate(keys)?;
-            let decoded = crate::content::pack::decode(pack, data, keys, pool)?;
-            let index: std::collections::BTreeMap<_, _> = decoded
-                .members
+            let entries = members
                 .iter()
-                .map(|member| (member.id, member))
-                .collect();
-            let start = 12 + crate::content::pack::MEMBER_SIZE * decoded.members.len();
+                .map(|m| m.entry())
+                .collect::<Result<Vec<_>>>()?;
+            let decoded =
+                crate::content::pack::decode_index(pack, data, &entries, keys, pool, true)?;
             members
                 .iter()
-                .map(|member| {
-                    let stored = index
-                        .get(&member.uuid)
-                        .context("transfer member missing from pack")?;
-                    ensure!(
-                        stored.start as u64 == start as u64 + member.offset
-                            && stored.len == member.size as usize
-                            && stored.hash.as_slice() == member.hash,
-                        "transfer member differs from pack"
-                    );
-                    Ok((
-                        member.id,
-                        bytes::Bytes::copy_from_slice(
-                            &decoded.bytes[stored.start..stored.start + stored.len],
-                        ),
-                    ))
-                })
+                .zip(&entries)
+                .map(|(m, e)| Ok((m.id, decoded.chunk(&e.chunk(pack)?)?)))
                 .collect()
         }
         Input::Raw { .. } => anyhow::bail!("raw transfers require bounded proof reads"),
@@ -337,56 +321,52 @@ mod tests {
                     )
                 })
                 .collect();
-            let original = pack::Pack {
+            let mut packed = pack::Pack {
                 id: 19.into(),
                 home_storage_id: None,
                 address: None,
                 location_id: Uuid::now_v7(),
                 storage_id: Some(storage),
-                algorithm: algorithm.into(),
-                block_key_id: (algorithm != "none").then_some(key_id),
+                algorithm: "none".into(),
+                block_key_id: None,
                 raw_size: chunks
                     .iter()
                     .map(|(chunk, _)| i64::from(chunk.raw_size))
                     .sum(),
                 stored_size: None,
                 compressed: false,
-                nonce: (algorithm != "none").then(|| {
-                    codec::typed_nonce(date, 19, crate::content::nonce::PACK)
-                        .unwrap()
-                        .to_vec()
-                }),
+                nonce: None,
                 digest: None,
+                tier_index: None,
                 member_count: 3,
                 state: "preparing".into(),
                 created_at: date,
             };
-            let (mut packed, data) = pack::encode(
-                original,
-                &chunks,
-                &keys,
-                &pool,
-                compression::Strategy::Always,
-                true,
-                None,
-            )?;
-            packed.state = "ready".into();
-            let mut offset = 0;
-            let members: Vec<_> = chunks
+            let files = chunks
                 .iter()
                 .enumerate()
-                .filter_map(|(index, (chunk, _))| {
-                    let member = Member {
-                        id: chunk.id,
-                        uuid: chunk.uuid,
-                        offset,
-                        size: chunk.raw_size as u32,
-                        hash: chunk.hash.clone(),
+                .map(|(i, (chunk, raw))| -> Result<_> {
+                    let mut chunk = chunk.clone();
+                    chunk.nonce = if algorithm == "none" {
+                        None
+                    } else {
+                        Some(
+                            codec::typed_nonce(date, (i + 1) as i64, crate::content::nonce::CHUNK)?
+                                .to_vec(),
+                        )
                     };
-                    offset += chunk.raw_size as u64;
-                    (index != 1).then_some(member)
+                    let (chunk, file, _) =
+                        codec::encode(chunk, raw.to_vec(), &keys, 0, &pool, true)?;
+                    Ok((chunk, bytes::Bytes::from(file)))
                 })
-                .collect();
+                .collect::<Result<Vec<_>>>()?;
+            let (data, entries) = pack::frame::assemble(&mut packed, &files)?;
+            packed.state = "ready".into();
+            let members = entries
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, entry)| (index != 1).then(|| Member::from(entry)))
+                .collect::<Vec<_>>();
             let input = Input::Pack {
                 pack: packed.clone(),
                 members: members.clone(),
@@ -407,7 +387,11 @@ mod tests {
             *corrupted.last_mut().unwrap() ^= 1;
             assert!(decode(&input, corrupted, &keys, &pool).is_err());
             let mut wrong = members.clone();
-            wrong[0].uuid = chunks[1].0.uuid;
+            if algorithm == "none" {
+                wrong[0].hash = chunks[1].0.hash.clone();
+            } else {
+                wrong[0].uuid = chunks[1].0.uuid;
+            }
             assert!(
                 decode(
                     &Input::Pack {
@@ -421,7 +405,7 @@ mod tests {
                 .is_err()
             );
             let mut wrong = members;
-            wrong[1].offset = 0;
+            wrong[1].position.offset = 0;
             assert!(
                 decode(
                     &Input::Pack {

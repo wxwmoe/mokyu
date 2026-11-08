@@ -204,7 +204,7 @@ pub(in super::super) async fn source_snapshot(
         PhysicalSource::Chunk(sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=0 AND tl.physical_id=l.encoding_id) AS tier_material,c.id,l.encoding_id AS current_encoding_id,l.encoding_id AS location_id,c.storage_id,c.hash,c.raw_size,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.standalone_compressed,l.nonce,c.format,c.state,c.created_at FROM chunk_encodings l JOIN chunks c ON c.id=l.chunk_id WHERE l.encoding_id=$1 AND l.storage_id=$2").bind(id).bind(scope.storage_id).fetch_one(&mut *db).await?)
     };
     let manifest_digest = if let PhysicalSource::Pack(pack) = &physical {
-        let members = super::pack_work::physical_members(db, id).await?;
+        let members = super::pack_work::physical_members(db, pack).await?;
         Some(manifest_digest(pack, &members)?)
     } else {
         None

@@ -68,10 +68,11 @@ async fn sqlite_rewrite_contract() -> Result<()> {
     let mut pack_b = packing::prepared(&backend, task, storage, &members_b).await?;
     for pack in [&mut pack_a, &mut pack_b] {
         pack.compressed = false;
-        pack.stored_size = Some(64);
+        pack.stored_size = Some(72);
         transactions::pack_metadata(db, pack).await?;
     }
     let output = |pack: crate::content::pack::Pack, members: &[Mapping]| PackOutput {
+        entries: Vec::new(),
         chunks: members.iter().map(|r| r.chunk.id).collect(),
         pack: Some(pack),
         independent: None,
@@ -178,6 +179,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
         vec![rows[0].chunk.id]
     );
     let current = vec![rows[0].chunk.id];
+    let index = backend.pack_index(pack_a.id, None).await?;
     let members = queries::rewrite_members(pack_a.id)
         .build_query_as::<Chunk>()
         .fetch_all(db)
@@ -190,8 +192,8 @@ async fn sqlite_rewrite_contract() -> Result<()> {
     transactions::pin_pack_inputs(db, task, &inputs).await?;
     let mut replacement =
         transactions::prepare_pack(db, storage, "none", None, 64, 2, task).await?;
-    replacement.compressed = true;
-    replacement.stored_size = Some(36);
+    replacement.compressed = false;
+    replacement.stored_size = Some(72);
     replacement.digest = Some(vec![8; 32]);
     assert!(
         transactions::commit_rewrite_pack(
@@ -200,7 +202,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
             &pack_a,
             &replacement,
             &current,
-            &members,
+            &index,
             current[0]
         )
         .await
@@ -213,7 +215,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
             &pack_a,
             &replacement,
             &[rows[0].chunk.id, rows[2].chunk.id],
-            &members,
+            &index,
             current[0]
         )
         .await
@@ -235,7 +237,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
         &pack_a,
         &replacement,
         &current,
-        &members,
+        &index,
         current[0],
     )
     .await?;
@@ -262,6 +264,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
             .await?,
         Some((rows[1].chunk.id, pack_b.id))
     );
+    let index = backend.pack_index(pack_b.id, None).await?;
     let members = queries::rewrite_members(pack_b.id)
         .build_query_as::<Chunk>()
         .fetch_all(db)
@@ -280,8 +283,8 @@ async fn sqlite_rewrite_contract() -> Result<()> {
     transactions::pin_pack_inputs(db, task, &inputs).await?;
     let mut replacement =
         transactions::prepare_pack(db, storage, "none", None, 64, 2, task).await?;
-    replacement.compressed = true;
-    replacement.stored_size = Some(36);
+    replacement.compressed = false;
+    replacement.stored_size = Some(72);
     replacement.digest = Some(vec![8; 32]);
     transactions::commit_rewrite_pack(
         db,
@@ -289,7 +292,7 @@ async fn sqlite_rewrite_contract() -> Result<()> {
         &pack_b,
         &replacement,
         &current,
-        &members,
+        &index,
         current[0],
     )
     .await?;

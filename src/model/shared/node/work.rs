@@ -186,7 +186,7 @@ async fn tier_plan(
     let mut keys = std::collections::BTreeSet::new();
     for source in std::iter::once(work.source()).chain(work.target()) {
         ids.insert(source.storage()?);
-        keys.extend(source.block_key());
+        keys.extend(source.block_keys());
     }
     let mut additional = Vec::new();
     for id in ids.into_iter().filter(|id| *id != storage) {

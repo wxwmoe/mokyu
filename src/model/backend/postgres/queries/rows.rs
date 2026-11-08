@@ -108,6 +108,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::content::pack::Pack
                 compressed: row.try_get("pack_compressed")?,
                 nonce: row.try_get("nonce")?,
                 digest: row.try_get("digest")?,
+                tier_index: None,
                 member_count: row.try_get("member_count")?,
                 state: row.try_get("state")?,
                 created_at: row.try_get("created_at")?,

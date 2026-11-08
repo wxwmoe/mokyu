@@ -1,6 +1,6 @@
 use anyhow::{Result, ensure};
 use futures_util::StreamExt;
-use object_store::{ObjectStore, ObjectStoreExt, path::Path};
+use object_store::{GetOptions, GetRange, ObjectStore, path::Path};
 use std::{
     future::Future,
     io,
@@ -153,21 +153,40 @@ pub(crate) async fn bounded(
     store: &dyn ObjectStore,
     key: &Path,
     bound: usize,
+    span: Option<(std::ops::Range<u64>, u64)>,
     budget: Option<Arc<Recovery>>,
 ) -> Result<Vec<u8>> {
     async fn read(
         store: &dyn ObjectStore,
         key: &Path,
         bound: usize,
+        span: Option<&(std::ops::Range<u64>, u64)>,
         op: Option<&Attempt>,
     ) -> Result<Vec<u8>> {
-        let open = async { Ok(store.get(key).await?) };
+        let options = GetOptions {
+            range: span.map(|(range, _)| GetRange::Bounded(range.clone())),
+            ..Default::default()
+        };
+        let open = async { Ok(store.get_opts(key, options).await?) };
         let result = if let Some(op) = op {
             op.progress(open).await?
         } else {
             open.await?
         };
-        let size = usize::try_from(result.meta.size)?;
+        let size = if let Some((range, total)) = span {
+            ensure!(
+                result.meta.size == *total && result.range == *range,
+                crate::content::codec::IntegrityError::Length
+            );
+            usize::try_from(
+                range
+                    .end
+                    .checked_sub(range.start)
+                    .ok_or(crate::content::codec::IntegrityError::Length)?,
+            )?
+        } else {
+            usize::try_from(result.meta.size)?
+        };
         ensure!(size <= bound, crate::content::codec::IntegrityError::Length);
         let mut bytes = Vec::with_capacity(size);
         let mut stream = result.into_stream();
@@ -193,12 +212,12 @@ pub(crate) async fn bounded(
         Ok(bytes)
     }
     let Some(budget) = budget else {
-        return read(store, key, bound, None).await;
+        return read(store, key, bound, span.as_ref(), None).await;
     };
     let op = Attempt::new(budget);
     OP.scope(op.clone(), async {
-        match read(store, key, bound, Some(&op)).await {
-            Err(e) if op.may_retry(&e) => read(store, key, bound, Some(&op)).await,
+        match read(store, key, bound, span.as_ref(), Some(&op)).await {
+            Err(e) if op.may_retry(&e) => read(store, key, bound, span.as_ref(), Some(&op)).await,
             other => other,
         }
     })

@@ -66,14 +66,13 @@ async fn pack_members(
             && rows.len() <= crate::content::pack::MAX_MEMBERS,
         Error::NodeWorkLimit
     );
-    let members = p::physical_members(tx, source.id).await?;
+    let members = p::physical_members(tx, source).await?;
     crate::model::source::manifest_digest(source, &members)?;
     ensure!(
         rows.len() == members.len()
-            && rows
-                .iter()
-                .zip(&members)
-                .all(|(c, v)| Id::Uuid(c.uuid) == v.0 && c.raw_size == v.2 && c.hash == v.3),
+            && rows.iter().zip(&members).all(|(c, v)| c.uuid == v.uuid
+                && c.raw_size == v.raw_size
+                && c.hash.as_slice() == v.hash),
         Error::SourceUnavailable
     );
     let current = queries::rewrite_current_members(source.id)
@@ -189,39 +188,46 @@ pub(super) async fn offer(
         let source = queries::pack_record(id).fetch_one(&mut **tx).await?;
         let (_, current, members, physical) = pack_members(tx, &source).await?;
         transactions::pin_inputs(tx, task.id, &current).await?;
-        keys.extend(source.block_key_id);
-        let mut output = transactions::prepare_pack_in(
+        keys.extend(
+            members
+                .iter()
+                .filter_map(|m| m.position.encoding.block_key_id),
+        );
+        let output = transactions::prepare_pack_in(
             tx,
             job.storage_id,
-            &job.target_algorithm,
-            job.target_key_id,
+            "none",
+            None,
             source.raw_size,
             source.member_count,
             task,
         )
         .await?;
-        output.nonce = nonce(
-            tx,
-            output.block_key_id,
-            output.created_at,
-            crate::content::nonce::PACK,
-        )
-        .await?;
-        if output.nonce.is_some() {
-            ensure!(
-                q::pack_nonce(output.id, task.id, output.nonce.as_deref())
-                    .execute(&mut **tx)
+        let first = if let Some(key) = job.target_key_id {
+            let units =
+                u32::try_from(members.len().div_ceil(crate::content::nonce::UNIT as usize))?;
+            Some(
+                transactions::reserve_nonce_in(tx, key, crate::content::nonce::CHUNK, units)
                     .await?
-                    .rows_affected()
-                    == 1,
-                Error::OperationAborted
-            );
-        }
+                    .0,
+            )
+        } else {
+            None
+        };
+        let replacements = crate::content::pack::frame::rewrite_entries(
+            &members,
+            &job.target_algorithm,
+            job.target_key_id,
+            output.created_at,
+            first,
+            target.profile.compression_enabled && target.profile.compression_strategy != "never",
+        )?;
         items.push(Rewrite::Pack {
             location: source.location_id,
             source,
             target: output,
             members,
+            replacements,
             current: physical,
             cursor,
         });
@@ -316,6 +322,7 @@ pub(super) async fn finish(
                 source,
                 mut target,
                 members,
+                replacements,
                 current,
                 cursor,
                 ..
@@ -330,6 +337,15 @@ pub(super) async fn finish(
                 if members != manifest || current != physical {
                     return Ok(Some("source_changed"));
                 }
+                ensure!(
+                    rows.len() == replacements.len(),
+                    Error::NodeOperationConflict
+                );
+                let rows = rows
+                    .into_iter()
+                    .zip(replacements)
+                    .map(|(c, e)| (c.id, e))
+                    .collect::<Vec<_>>();
                 transactions::commit_rewrite_pack_in(
                     tx, task, &source, &target, &logical, &rows, cursor,
                 )

@@ -209,7 +209,7 @@ pub(in super::super) async fn commit_rewrite_pack(
     old: &Pack,
     new: &Pack,
     current: &[Id],
-    members: &[Chunk],
+    members: &[(Id, crate::content::pack::frame::Entry)],
     first: Id,
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
@@ -224,7 +224,7 @@ pub(in super::super) async fn commit_rewrite_pack_in(
     old: &Pack,
     new: &Pack,
     current: &[Id],
-    members: &[Chunk],
+    members: &[(Id, crate::content::pack::frame::Entry)],
     first: Id,
 ) -> Result<()> {
     ensure!(
@@ -260,7 +260,7 @@ pub(in super::super) async fn commit_rewrite_pack_in(
         owners.len() == current.len() && owners.iter().all(|id| *id == task.id),
         "rewrite inputs are not owned by this task"
     );
-    let member_ids: Vec<_> = members.iter().map(|c| c.id).collect();
+    let member_ids: Vec<_> = members.iter().map(|(id, _)| *id).collect();
     ensure!(
         queries::pack_member_ids(old.id)
             .fetch_all(&mut **tx)
@@ -277,10 +277,7 @@ pub(in super::super) async fn commit_rewrite_pack_in(
         "new pack changed during rewrite"
     );
     queries::refresh_pack_fingerprint(tx, new.id).await?;
-    queries::insert_pack_members(new.id, members.iter())
-        .build()
-        .execute(&mut **tx)
-        .await?;
+    queries::write_pack_index(tx, new.id, members).await?;
     ensure!(
         queries::publish_prepared_pack(new.id, task.id)
             .execute(&mut **tx)
@@ -679,10 +676,23 @@ pub(in super::super) async fn pack_metadata(pool: &SqlitePool, pack: &Pack) -> R
     Ok(())
 }
 
+pub(in super::super) async fn restore_member_encoding(
+    pool: &SqlitePool,
+    c: &Chunk,
+    task: Execution,
+) -> Result<Id> {
+    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
+    lock_execution(&mut tx, task).await?;
+    let id = queries::reserve_member_encoding(&mut tx, c, task.id).await?;
+    tx.commit().await?;
+    Ok(id)
+}
+
 pub(in super::super) async fn insert_pack_members(
     pool: &SqlitePool,
     pack: Id,
     rows: &[Mapping],
+    entries: &[(Id, crate::content::pack::frame::Entry)],
 ) -> Result<()> {
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     let record = queries::lock_prepared_pack(pack)
@@ -698,10 +708,18 @@ pub(in super::super) async fn insert_pack_members(
                 == record.raw_size,
         "pack members changed"
     );
-    queries::insert_pack_members(pack, rows.iter().map(|row| &row.chunk))
-        .build()
-        .execute(&mut *tx)
-        .await?;
+    ensure!(
+        rows.len() == entries.len()
+            && rows
+                .iter()
+                .zip(entries)
+                .all(|(row, (id, entry))| row.chunk.id == *id
+                    && row.chunk.uuid == entry.uuid
+                    && row.chunk.raw_size == entry.raw_size
+                    && row.chunk.hash == entry.hash),
+        "pack members changed"
+    );
+    queries::write_pack_index(&mut tx, pack, entries).await?;
     tx.commit().await?;
     Ok(())
 }

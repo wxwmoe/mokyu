@@ -350,6 +350,7 @@ async fn source_quarantine_contract() -> Result<()> {
         "only a successful full recheck is audited as recovered"
     );
     let outputs = [crate::model::packing::PackOutput {
+        entries: Vec::new(),
         chunks: vec![chunk.id],
         pack: None,
         independent: Some(candidate),

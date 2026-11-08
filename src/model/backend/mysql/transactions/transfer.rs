@@ -92,18 +92,14 @@ pub(in super::super) async fn scan(
     }
     if let Some(Json(Input::Pack { pack, members })) = unit.input.as_ref() {
         if unit.state == "selected" && members.is_empty() {
-            let members = q::members(unit.id)
+            let members = q::members(unit.id, pack.id)
                 .fetch_all(&mut **db)
                 .await?
                 .into_iter()
-                .map(|(id, uuid, offset, size, hash)| {
-                    Ok(crate::model::transfer::Member {
-                        id,
-                        uuid,
-                        offset: u64::try_from(offset)?,
-                        size: u32::try_from(size)?,
-                        hash,
-                    })
+                .map(|row| {
+                    let (id, mut entry) = row.entry()?;
+                    pack.resolve_entry(&mut entry)?;
+                    Ok(crate::model::transfer::Member::from((id, entry)))
                 })
                 .collect::<Result<Vec<_>>>()?;
             let input = Input::Pack {

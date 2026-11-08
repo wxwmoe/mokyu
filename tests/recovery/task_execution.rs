@@ -86,7 +86,13 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
     prepared.stored_size = Some(2);
     prepared.digest = Some(vec![9; 32]);
     backend.pack_metadata(&prepared).await?;
-    backend.insert_pack_members(prepared.id, &rows).await?;
+    backend
+        .insert_pack_members(
+            prepared.id,
+            &rows,
+            &crate::content::pack::frame::index(rows.iter().map(|r| &r.chunk))?,
+        )
+        .await?;
     let mut physical = source.clone();
     physical.location_id = Uuid::new_v4();
     physical.encoding_id = backend.prepare_encoding(&physical, current).await?;
@@ -109,6 +115,7 @@ async fn postgres_task_execution_fences_stale_work() -> Result<()> {
     );
     assert!(backend.prepare_encoding(&physical, old).await.is_err());
     let output = [PackOutput {
+        entries: Vec::new(),
         chunks: chunks.clone(),
         pack: Some(prepared.clone()),
         independent: None,

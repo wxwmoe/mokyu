@@ -290,13 +290,16 @@ pub(in super::super) async fn keys(
 }
 pub(in super::super) async fn physical_members(
     db: &mut Connection,
-    pack: Id,
+    pack: &crate::content::pack::Pack,
 ) -> Result<Vec<crate::model::node_work::Member>> {
-    let rows:Vec<(Uuid,i64,i32,Vec<u8>)>=sqlx::query_as("SELECT c.uuid,m.offset_bytes,c.raw_size,c.hash FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=? ORDER BY m.ordinal LIMIT 4097").bind(pack).fetch_all(db).await?;
-    Ok(rows
+    super::physical::pack_index_rows(db, pack.id, None)
+        .await?
         .into_iter()
-        .map(|(uuid, offset, size, hash)| (uuid.into(), offset, size, hash))
-        .collect())
+        .map(|(_, mut entry)| {
+            pack.resolve_entry(&mut entry)?;
+            Ok(entry)
+        })
+        .collect()
 }
 pub(in super::super) async fn creation_allowed(db: &mut Connection) -> Result<bool> {
     Ok(
@@ -383,10 +386,19 @@ pub(in super::super) async fn prepare_outputs(
     storage: Uuid,
     batch: &mut crate::model::node_pack::Batch,
 ) -> Result<()> {
-    for c in &mut batch.chunks {
-        if c.ready.is_some() {
+    let packed = batch.packed_chunks()?;
+    for (index, grouped) in packed.into_iter().enumerate() {
+        if grouped || batch.chunks[index].ready.is_some() {
             continue;
         }
+        if batch.chunks[index].original.is_some() {
+            let c = batch.chunk(storage, index)?;
+            batch.chunks[index].encoding =
+                Some(super::reserve_member_encoding(db, &c, task).await?);
+            batch.chunks[index].location = c.location_id;
+            continue;
+        }
+        let c = &mut batch.chunks[index];
         let result=sqlx::query("INSERT INTO chunk_encodings(chunk_id,location_id,storage_id,state,created_at,unreferenced_at,owner_task,encryption_algorithm,block_key_id,nonce,nonce_id,encoding_fingerprint) VALUES(?,?,?,'uploading',?,UTC_TIMESTAMP(6),?,?,?,?,?,UNHEX(REPEAT('00',32)))").bind(c.id).bind(c.location).bind(storage).bind(batch.created).bind(task).bind(&batch.algorithm).bind(batch.key).bind(&c.nonce).bind(crate::content::nonce::id(c.nonce.as_deref())).execute(&mut *db).await?;
         let id = (i64::try_from(result.last_insert_id())?).into();
         super::refresh_encoding_fingerprint(&mut *db, id).await?;
@@ -397,7 +409,7 @@ pub(in super::super) async fn prepare_outputs(
             .iter()
             .map(|c| i64::from(c.size))
             .sum();
-        let result=sqlx::query("INSERT INTO packs(location_id,storage_id,encryption_algorithm,block_key_id,raw_size,member_count,state,created_at,unreferenced_at,owner_task,nonce,nonce_id,pack_fingerprint) VALUES(?,?,?,?,?,?,'preparing',?,UTC_TIMESTAMP(6),?,?,?,UNHEX(REPEAT('00',32)))").bind(a.location).bind(storage).bind(&batch.algorithm).bind(batch.key).bind(size).bind(i32::try_from(a.end-a.start)?).bind(batch.created).bind(task).bind(&a.nonce).bind(crate::content::nonce::id(a.nonce.as_deref())).execute(&mut *db).await?;
+        let result=sqlx::query("INSERT INTO packs(location_id,storage_id,encryption_algorithm,block_key_id,raw_size,member_count,state,created_at,unreferenced_at,owner_task,nonce,nonce_id,pack_fingerprint) VALUES(?,?,?,?,?,?,'preparing',?,UTC_TIMESTAMP(6),?,?,?,UNHEX(REPEAT('00',32)))").bind(a.location).bind(storage).bind("none").bind(Option::<Uuid>::None).bind(size).bind(i32::try_from(a.end-a.start)?).bind(batch.created).bind(task).bind(&a.nonce).bind(crate::content::nonce::id(a.nonce.as_deref())).execute(&mut *db).await?;
         let id = (i64::try_from(result.last_insert_id())?).into();
         super::refresh_pack_fingerprint(&mut *db, id).await?;
         a.id = Some(id);
@@ -407,13 +419,8 @@ pub(in super::super) async fn prepare_outputs(
 pub(in super::super) async fn record_outputs(
     db: &mut Connection,
     task: Uuid,
-    rows: &[Mapping],
     outputs: &[PackOutput],
 ) -> Result<()> {
-    let mut chunks = std::collections::BTreeMap::new();
-    for row in rows {
-        chunks.insert(row.chunk.id, &row.chunk);
-    }
     for out in outputs {
         if let Some(pack) = &out.pack {
             ensure!(
@@ -425,15 +432,7 @@ pub(in super::super) async fn record_outputs(
                 crate::model::Error::OperationAborted
             );
             super::refresh_pack_fingerprint(&mut *db, pack.id).await?;
-            let members = out
-                .chunks
-                .iter()
-                .map(|id| chunks.get(id).copied().context("pack member is missing"))
-                .collect::<Result<Vec<_>>>()?;
-            super::insert_pack_members(pack.id, members.into_iter())
-                .build()
-                .execute(&mut *db)
-                .await?;
+            super::write_pack_index(&mut *db, pack.id, &out.entries).await?;
         } else if let Some(chunk) = &out.independent {
             sqlx::query("UPDATE chunk_encodings SET standalone_size=?,standalone_compressed=? WHERE encoding_id=? AND chunk_id=? AND location_id=? AND owner_task=? AND state='uploading'").bind(chunk.stored_size).bind(chunk.compressed).bind(chunk.encoding_id).bind(chunk.id).bind(chunk.location_id).bind(task).execute(&mut *db).await?;
             super::refresh_encoding_fingerprint(&mut *db, chunk.encoding_id).await?;

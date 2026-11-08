@@ -161,12 +161,13 @@ async fn sqlite_maintenance_contract() -> Result<()> {
     let pack = cache_tests::pack(&backend, storage, task).await?;
     for (ordinal, chunk) in chunks.iter().enumerate() {
         sqlx::query(
-            "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES(?,?,?,?)",
+            "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) VALUES(?,?,?,?,?,32,FALSE,'none')",
         )
         .bind(pack)
         .bind(ordinal as i32)
         .bind(chunk.id)
-        .bind(ordinal as i64 * 32)
+        .bind(8 + ordinal as i64 * 32)
+        .bind(chunk.location_id)
         .execute(db)
         .await?;
         sqlx::query("UPDATE chunks SET pack_id=? WHERE id=?")

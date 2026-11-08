@@ -1,5 +1,27 @@
 use super::*;
 
+pub(in super::super) async fn pack_index_rows(
+    db: &mut sqlx::MySqlConnection,
+    pack: Id,
+    chunk: Option<Id>,
+) -> Result<Vec<(Id, crate::content::pack::frame::Entry)>> {
+    let mut query = sqlx::QueryBuilder::<sqlx::MySql>::new(
+        "SELECT m.chunk_id,c.uuid,c.hash,c.raw_size,m.ordinal,m.offset_bytes,m.encoding_uuid,m.encoded_size,m.compressed,m.encryption_algorithm,m.block_key_id,m.nonce FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=",
+    );
+    query.push_bind(pack);
+    if let Some(chunk) = chunk {
+        query.push(" AND m.chunk_id=").push_bind(chunk);
+    }
+    query
+        .push(" ORDER BY m.ordinal LIMIT 4097")
+        .build_query_as::<crate::model::physical::PackMemberRow>()
+        .fetch_all(db)
+        .await?
+        .into_iter()
+        .map(crate::model::physical::PackMemberRow::entry)
+        .collect()
+}
+
 #[async_trait::async_trait]
 impl PhysicalStore for Backend {
     async fn recover_memory(&self, boot: Uuid) -> Result<()> {
@@ -151,21 +173,7 @@ impl PhysicalStore for Backend {
         pack: Id,
         chunk: Option<Id>,
     ) -> Result<Vec<(Id, crate::content::pack::frame::Entry)>> {
-        let mut query = sqlx::QueryBuilder::<sqlx::MySql>::new(
-            "SELECT m.chunk_id,c.uuid,c.hash,c.raw_size,m.ordinal,m.offset_bytes,m.encoding_uuid,m.encoded_size,m.compressed,m.encryption_algorithm,m.block_key_id,m.nonce FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=",
-        );
-        query.push_bind(pack);
-        if let Some(chunk) = chunk {
-            query.push(" AND m.chunk_id=").push_bind(chunk);
-        }
-        query
-            .push(" ORDER BY m.ordinal LIMIT 4097")
-            .build_query_as::<crate::model::physical::PackMemberRow>()
-            .fetch_all(&self.pool)
-            .await?
-            .into_iter()
-            .map(crate::model::physical::PackMemberRow::entry)
-            .collect()
+        pack_index_rows(&mut *self.pool.acquire().await?, pack, chunk).await
     }
     async fn inspection_members(&self, pack: Id) -> Result<Vec<(Chunk, i64)>> {
         let mut query = sqlx::QueryBuilder::new("SELECT ");
@@ -293,6 +301,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for Pack {
                 compressed: row.try_get("pack_compressed")?,
                 nonce: row.try_get("nonce")?,
                 digest: row.try_get("digest")?,
+                tier_index: None,
                 member_count: row.try_get("member_count")?,
                 state: row.try_get("state")?,
                 created_at: row.try_get("created_at")?,

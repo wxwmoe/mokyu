@@ -3,7 +3,7 @@ use crate::{
     authorization::Principal,
     model::{PhysicalSource, task::Execution},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
@@ -153,25 +153,15 @@ pub(crate) struct SourceUpdate<'a> {
 
 pub(crate) fn manifest_digest(
     pack: &crate::content::pack::Pack,
-    members: &[(Id, i64, i32, Vec<u8>)],
+    members: &[crate::content::pack::frame::Entry],
 ) -> Result<String> {
-    use crate::content::codec::IntegrityError;
-    ensure!(
-        members.len() <= crate::content::pack::MAX_MEMBERS
-            && members.len() == pack.member_count as usize,
-        IntegrityError::Metadata
-    );
-    let mut offset = 0i64;
-    for (_, start, size, hash) in members {
-        ensure!(
-            *start == offset
-                && (1..=crate::content::codec::MAX as i32).contains(size)
-                && hash.len() == 32,
-            IntegrityError::Metadata
-        );
-        offset += i64::from(*size);
-    }
-    ensure!(offset == pack.raw_size, IntegrityError::Metadata);
+    crate::content::pack::frame::validate_entries(
+        members,
+        u64::try_from(pack.stored_size.context("missing pack size")?)?,
+        pack.raw_size,
+        pack.member_count,
+        false,
+    )?;
     Ok(blake3::hash(&serde_json::to_vec(members)?)
         .to_hex()
         .to_string())

@@ -142,17 +142,7 @@ pub(super) async fn prepare(
         }
     } else if let Some((cursor, id)) = packed {
         let source = queries::rewrite_pack(id).fetch_one(&mut **tx).await?;
-        let mut offset = 0;
-        let members: Vec<work::Member> = queries::rewrite_members(id)
-            .fetch_all(&mut **tx)
-            .await?
-            .into_iter()
-            .map(|chunk| {
-                let member = (chunk.id, offset, chunk.raw_size, chunk.hash);
-                offset += i64::from(chunk.raw_size);
-                member
-            })
-            .collect();
+        let members = queries::pack_work::physical_members(tx, &source).await?;
         ensure!(
             members.len() == source.member_count as usize
                 && members.len() <= crate::content::pack::MAX_MEMBERS,
@@ -163,27 +153,38 @@ pub(super) async fn prepare(
             .fetch_all(&mut **tx)
             .await?;
         pin_inputs(tx, task.id, &current).await?;
-        blocks.extend(source.block_key_id);
-        let mut target: crate::content::pack::Pack = sqlx::query_as("INSERT INTO packs(storage_id,encryption_algorithm,block_key_id,raw_size,member_count,state,unreferenced_at,owner_task) VALUES($1,$2,$3,$4,$5,'preparing',clock_timestamp(),$6) RETURNING *")
-            .bind(job.storage_id).bind(&job.target_algorithm).bind(job.target_key_id).bind(source.raw_size).bind(source.member_count).bind(task.id).fetch_one(&mut **tx).await?;
-        target.nonce = nonce(
-            tx,
-            target.block_key_id,
+        blocks.extend(
+            members
+                .iter()
+                .filter_map(|m| m.position.encoding.block_key_id),
+        );
+        let target: crate::content::pack::Pack = sqlx::query_as("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,member_count,state,unreferenced_at,owner_task) VALUES($1,'none',$2,$3,'preparing',clock_timestamp(),$4) RETURNING *")
+            .bind(job.storage_id).bind(source.raw_size).bind(source.member_count).bind(task.id).fetch_one(&mut **tx).await?;
+        let first = if let Some(key) = job.target_key_id {
+            let units =
+                u32::try_from(members.len().div_ceil(crate::content::nonce::UNIT as usize))?;
+            Some(
+                reserve_nonce_in(tx, key, crate::content::nonce::CHUNK, units)
+                    .await?
+                    .0,
+            )
+        } else {
+            None
+        };
+        let replacements = crate::content::pack::frame::rewrite_entries(
+            &members,
+            &job.target_algorithm,
+            job.target_key_id,
             target.created_at,
-            crate::content::nonce::PACK,
-        )
-        .await?;
-        sqlx::query("UPDATE packs SET nonce=$2,nonce_id=$3 WHERE id=$1")
-            .bind(target.id)
-            .bind(&target.nonce)
-            .bind(crate::content::nonce::id(target.nonce.as_deref()))
-            .execute(&mut **tx)
-            .await?;
+            first,
+            profile.compression_enabled && profile.compression_strategy != "never",
+        )?;
         items.push(work::Rewrite::Pack {
             location: source.location_id,
             source,
             target,
             members,
+            replacements,
             current,
             cursor,
         });
@@ -283,6 +284,7 @@ pub(super) async fn finish(
                 source,
                 mut target,
                 members,
+                replacements,
                 current,
                 cursor,
                 ..
@@ -293,10 +295,15 @@ pub(super) async fn finish(
                 target
                     .validate(&blocks)
                     .map_err(|_| Error::NodeOperationConflict)?;
-                let members: Vec<_> = members
-                    .iter()
-                    .map(|(id, offset, _, _)| (*id, *offset))
-                    .collect();
+                let source_entries = queries::pack_work::physical_members(tx, &source).await?;
+                ensure!(
+                    source_entries == members && replacements.len() == members.len(),
+                    Error::OperationAborted
+                );
+                let members = replacements
+                    .into_iter()
+                    .map(|e| (Id::Uuid(e.uuid), e))
+                    .collect::<Vec<_>>();
                 commit_rewrite_pack_in(
                     tx, task.id, task.token, &source, &target, &current, &members, cursor,
                 )

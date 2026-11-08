@@ -110,7 +110,7 @@ function profileDefaults(type: string): Record<ProfileKey, string | number | boo
     min_storage_duration: '0s', unreferenced_grace: '48h', deleted_chunk_retention: '7d', upload_retention: '24h', multipart_idle_timeout: '24h', min_free_space: s3 ? null : '1GiB', cache_enabled: s3,
     cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, upload_cache_overflow: 'fallback', compression_enabled: s3,
     compression_strategy: 'always', compression_level: 6, compression_sample_level: 3, compression_min_savings_percent: 2,
-    compression_min_savings_bytes: 256, pack_enabled: s3, pack_max_size: '32MiB', pack_upload_flush_timeout: '60s', pack_interval: '1h',
+    compression_min_savings_bytes: 256, pack_enabled: true, pack_max_size: '32MiB', pack_upload_flush_timeout: '60s', pack_interval: '1h',
     pack_reuse_interval: '5m', pack_reclaim_interval: '30m', pack_repack_interval: '24h', pack_repack_cooldown: '1h',
     pack_reclaim_min_savings_bytes: '4MiB', pack_range_enabled: s3, pack_range_interval: '15m', pack_range_window: '24h',
     pack_range_min_downloads: 8, pack_range_min_savings_percent: 50, pack_range_min_savings_bytes: '64MiB', pack_range_repack_after: '30d',
@@ -151,7 +151,7 @@ watch(() => draft.type, value => {
   else {
     profileDraft.value.min_free_space = value === 'local' ? profileDraft.value.min_free_space || '1GiB' : null
     if (value !== 'local' && profileDraft.value.file_delivery === 'x_sendfile') setDelivery('application')
-    if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false, pack_enabled: false, pack_range_enabled: false })
+    if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false, pack_range_enabled: false })
     if (!canBufferInMemory.value && profileDraft.value.write_durability === 'volatile') profileDraft.value.write_durability = 'durable'
   }
 })
@@ -190,7 +190,7 @@ function setProfileBoolean(key: ProfileKey, value: boolean) {
 }
 function profileDisabled(key: string) {
   return (key === 'http_compression_enabled' && profileDraft.value?.file_delivery !== 'application')
-    || (draft.type === 'local' && (key.startsWith('cache_') || key.startsWith('pack_') || key.startsWith('upload_cache')))
+    || (draft.type === 'local' && (key.startsWith('cache_') || key.startsWith('pack_range_') || key.startsWith('upload_cache')))
     || (key === 'upload_cache_overflow' && !profileDraft.value?.upload_cache)
     || (profileDraft.value?.cdc_enabled === false && (key.startsWith('compression_') || key.startsWith('pack_')))
 }

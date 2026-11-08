@@ -1,6 +1,8 @@
 use super::{Backend, migration};
 use crate::model::Id;
-use crate::model::{ChunkStore, PackingStore, packing::RewriteTask, task::Execution};
+use crate::model::{
+    ChunkStore, PackingStore, PhysicalStore, packing::RewriteTask, task::Execution,
+};
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -43,11 +45,11 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
     }
     let mut packs = Vec::new();
     for group in [[chunks[4], chunks[0]], [chunks[3], chunks[1]]] {
-        let id: Id = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,'none',2,2,2,'ready',$2) RETURNING id")
+        let id: Id = sqlx::query_scalar("INSERT INTO packs(storage_id,encryption_algorithm,raw_size,stored_size,member_count,state,digest) VALUES($1,'none',2,10,2,'ready',$2) RETURNING id")
             .bind(storage).bind(vec![7u8;32]).fetch_one(&pool).await?;
         for (ordinal, chunk) in group.into_iter().enumerate() {
-            sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES($1,$2,$3,$4)")
-                .bind(id).bind(ordinal as i32).bind(chunk).bind(ordinal as i64).execute(&pool).await?;
+            sqlx::query("INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) VALUES($1,$2,$3,$4,$3,1,FALSE,'none')")
+                .bind(id).bind(ordinal as i32).bind(chunk).bind(8 + ordinal as i64).execute(&pool).await?;
             sqlx::query("UPDATE chunks SET pack_id=$2 WHERE id=$1")
                 .bind(chunk)
                 .bind(id)
@@ -131,10 +133,18 @@ async fn postgres_rewrite_interleaved_members() -> Result<()> {
     let mut new = backend
         .prepare_pack(storage, "none", None, 2, 2, Execution { id: task, token })
         .await?;
-    new.stored_size = Some(2);
+    new.stored_size = Some(10);
     new.digest = Some(vec![8; 32]);
     backend
-        .commit_rewrite_pack(task, token, &old, &new, &current, &members, chunks[0])
+        .commit_rewrite_pack(
+            task,
+            token,
+            &old,
+            &new,
+            &current,
+            &backend.pack_index(old.id, None).await?,
+            chunks[0],
+        )
         .await?;
     let cursor: String = sqlx::query_scalar("SELECT cursor FROM tasks WHERE id=$1")
         .bind(task)

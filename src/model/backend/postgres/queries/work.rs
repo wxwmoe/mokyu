@@ -164,7 +164,3 @@ pub(crate) fn staging(storage: Uuid, maximum: i64) -> Rows<'static, (String,)> {
 pub(crate) fn remove_staging(storage: Uuid, key: &str) -> Statement<'_> {
     sqlx::query("DELETE FROM staging_objects s WHERE s.storage_id=$1 AND s.object_key=$2 AND NOT EXISTS(SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS(SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS(SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key)").bind(storage).bind(key)
 }
-
-pub(crate) fn members(pack: Id) -> Rows<'static, work::Member> {
-    sqlx::query_as("SELECT m.chunk_id,m.offset_bytes,c.raw_size,c.hash FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=$1 ORDER BY m.ordinal LIMIT 4097").bind(pack)
-}

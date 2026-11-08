@@ -4,7 +4,7 @@ use crate::model::Id;
 use crate::{
     config,
     content::codec::{self, Chunk},
-    content::compression::{Pool, Strategy},
+    content::compression::Pool,
 };
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
@@ -14,9 +14,8 @@ use uuid::Uuid;
 
 pub const MAX_RAW: usize = 256 * 1024 * 1024;
 pub const MAX_MEMBERS: usize = 4096;
-pub const MEMBER_SIZE: usize = 52;
-pub const MAX_PAYLOAD: usize = MAX_RAW + 12 + MAX_MEMBERS * MEMBER_SIZE;
-const MAGIC: &[u8; 8] = b"MOKYU\x00\x00\x04";
+pub const MAX_MEMBER_TAG: usize = 16;
+pub const MAX_PAYLOAD: usize = MAX_RAW + frame::HEADER.len() + MAX_MEMBERS * MAX_MEMBER_TAG;
 
 #[derive(Clone, Copy, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +112,12 @@ impl Config {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct TierIndex {
+    pub home_digest: Vec<u8>,
+    pub entries: Vec<frame::Entry>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
 pub struct Pack {
     pub id: Id,
     pub location_id: Uuid,
@@ -129,6 +134,8 @@ pub struct Pack {
     pub nonce: Option<Vec<u8>>,
     pub digest: Option<Vec<u8>>,
     pub member_count: i32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) tier_index: Option<Box<TierIndex>>,
     pub state: String,
     pub created_at: DateTime<Utc>,
 }
@@ -141,75 +148,57 @@ impl Pack {
         self.address.unwrap_or(self.location_id)
     }
 
-    pub fn validate(&self, keys: &dyn codec::KeySource) -> Result<()> {
-        self.aad().context(codec::IntegrityError::Metadata)?;
-        let tag = if self.algorithm == "none" { 0 } else { 16 };
-        ensure!(
-            self.stored_size
-                .is_some_and(|n| n > tag && n <= self.payload_size().unwrap_or(0) as i64 + tag),
-            codec::IntegrityError::Metadata
-        );
-        ensure!(
-            self.compressed || self.stored_size == Some(self.payload_size()? as i64 + tag),
-            codec::IntegrityError::Metadata
-        );
-        if self.algorithm == "none" {
+    pub(crate) fn home_digest(&self) -> Option<&[u8]> {
+        self.tier_index
+            .as_ref()
+            .map(|idx| idx.home_digest.as_slice())
+            .or(self.digest.as_deref())
+    }
+
+    pub(crate) fn resolve_entry(&self, entry: &mut frame::Entry) -> Result<()> {
+        if let Some(tier) = &self.tier_index {
+            let index = tier
+                .entries
+                .binary_search_by_key(&entry.position.ordinal, |e| e.position.ordinal)
+                .map_err(|_| codec::IntegrityError::Metadata)?;
+            let current = &tier.entries[index];
             ensure!(
-                self.block_key_id.is_none() && self.nonce.is_none(),
+                current.uuid == entry.uuid
+                    && current.hash == entry.hash
+                    && current.raw_size == entry.raw_size
+                    && current.position.ordinal == entry.position.ordinal,
                 codec::IntegrityError::Metadata
             );
-        } else {
-            let key = keys
-                .key_for_id(self.block_key_id)
-                .context(codec::IntegrityError::MissingKey)?;
-            ensure!(
-                key.algorithm == self.algorithm
-                    && self.nonce.as_ref().is_some_and(|n| n.len() == 12),
-                codec::IntegrityError::Metadata
-            );
+            entry.position.clone_from(&current.position);
         }
         Ok(())
     }
+
+    pub fn validate(&self, _keys: &dyn codec::KeySource) -> Result<()> {
+        let maximum = self.payload_size()?;
+        ensure!(
+            !self.location_id.is_nil()
+                && self.algorithm == "none"
+                && self.block_key_id.is_none()
+                && self.nonce.is_none()
+                && !self.compressed
+                && self.digest.as_ref().is_some_and(|hash| hash.len() == 32)
+                && self.stored_size.is_some_and(|size| size
+                    >= frame::HEADER.len() as i64 + i64::from(self.member_count)
+                    && size <= maximum as i64),
+            codec::IntegrityError::Metadata
+        );
+        Ok(())
+    }
+
     pub fn payload_size(&self) -> Result<usize> {
         ensure!(
             self.id.is_valid()
-                && (1..=MAX_RAW as i64).contains(&self.raw_size)
-                && (2..=MAX_MEMBERS as i32).contains(&self.member_count),
+                && (2..=MAX_MEMBERS as i32).contains(&self.member_count)
+                && (i64::from(self.member_count)..=MAX_RAW as i64).contains(&self.raw_size),
             "invalid pack dimensions"
         );
-        Ok(self.raw_size as usize + 12 + self.member_count as usize * MEMBER_SIZE)
-    }
-    fn aad(&self) -> Result<Vec<u8>> {
-        self.payload_size()?;
-        let stored = self.stored_size.context("missing pack size")?;
-        ensure!(
-            stored > 0 && stored <= MAX_PAYLOAD as i64 + 16,
-            "invalid pack stored size"
-        );
-        let digest = self.digest.as_deref().context("missing pack digest")?;
-        ensure!(digest.len() == 32, "invalid pack digest");
-        let mut aad = MAGIC.to_vec();
-        aad.extend_from_slice(self.location_id.as_bytes());
-        aad.extend_from_slice(&self.raw_size.to_be_bytes());
-        aad.extend_from_slice(&stored.to_be_bytes());
-        aad.extend_from_slice(&self.member_count.to_be_bytes());
-        aad.extend_from_slice(digest);
-        aad.push(u8::from(self.compressed));
-        aad.push(match self.algorithm.as_str() {
-            "none" => 0,
-            "aes-256-gcm" => 1,
-            "chacha20-poly1305" => 2,
-            _ => anyhow::bail!("invalid pack algorithm"),
-        });
-        aad.extend_from_slice(
-            &u16::try_from(self.block_key_id.map_or(0, |id| id.to_string().len()))?.to_be_bytes(),
-        );
-        aad.extend_from_slice(
-            self.block_key_id
-                .map_or_else(|| Vec::new(), |id| id.to_string().into_bytes())
-                .as_slice(),
-        );
-        Ok(aad)
+        Ok(frame::HEADER.len() + self.raw_size as usize + self.member_count as usize * 16)
     }
 }
 
@@ -241,347 +230,40 @@ impl Decoded {
     }
 }
 
-pub fn encode(
-    mut p: Pack,
-    members: &[(Chunk, Bytes)],
-    keys: &dyn codec::KeySource,
-    pool: &Pool,
-    strategy: Strategy,
-    should_try: bool,
-    accepted: Option<&crate::content::compression::Config>,
-) -> Result<(Pack, Vec<u8>)> {
-    let size = p.payload_size()?;
-    ensure!(
-        members.len() == p.member_count as usize,
-        "pack member count mismatch"
-    );
-    let mut raw = Vec::with_capacity(size);
-    raw.extend_from_slice(MAGIC);
-    raw.extend_from_slice(&(members.len() as u32).to_be_bytes());
-    let mut seen = std::collections::HashSet::new();
-    for (c, data) in members {
-        ensure!(
-            seen.insert(c.uuid)
-                && !c.uuid.is_nil()
-                && c.id.is_valid()
-                && !data.is_empty()
-                && data.len() <= codec::MAX
-                && data.len() == c.raw_size as usize
-                && blake3::hash(data).as_bytes().as_slice() == c.hash
-                && c.algorithm == members[0].0.algorithm
-                && c.block_key_id == members[0].0.block_key_id,
-            "invalid pack member"
-        );
-        raw.extend_from_slice(c.uuid.as_bytes());
-        raw.extend_from_slice(&c.hash);
-        raw.extend_from_slice(&(data.len() as u32).to_be_bytes());
-    }
-    for (_, data) in members {
-        raw.extend_from_slice(data);
-    }
-    ensure!(raw.len() == size, "pack raw length mismatch");
-    p.digest = Some(blake3::hash(&raw).as_bytes().to_vec());
-    let compressed = if let Some(config) = accepted {
-        pool.compress_for(&raw, should_try, config)?
-    } else {
-        pool.compress_with(&raw, should_try, strategy)?
-    };
-    p.compressed = compressed.is_some();
-    let encoded = compressed.unwrap_or(raw);
-    p.stored_size = Some(encoded.len() as i64 + if p.algorithm == "none" { 0 } else { 16 });
-    let encoded = seal(&p, encoded, keys)?;
-    Ok((p, encoded))
-}
-
-pub(crate) fn seal(p: &Pack, mut encoded: Vec<u8>, keys: &dyn codec::KeySource) -> Result<Vec<u8>> {
-    ensure!(
-        p.stored_size == Some(encoded.len() as i64 + if p.algorithm == "none" { 0 } else { 16 }),
-        "pack payload length mismatch"
-    );
-    if p.algorithm != "none" {
-        let key = keys
-            .key_for_id(p.block_key_id)
-            .context("missing pack key")?;
-        ensure!(key.algorithm == p.algorithm, "pack key algorithm mismatch");
-        let n: [u8; 12] = p
-            .nonce
-            .as_deref()
-            .context("missing reserved nonce")?
-            .try_into()?;
-        ensure!(
-            crate::content::nonce::id(Some(&n)).is_some()
-                && n[0] >> 3 == crate::content::nonce::PACK,
-            "invalid reserved nonce"
-        );
-        key.seal(n, &p.aad()?, &mut encoded)?;
-    } else {
-        ensure!(
-            p.block_key_id.is_none() && p.nonce.is_none(),
-            "invalid unencrypted pack"
-        );
-    }
-    Ok(encoded)
-}
-
-pub fn decode(
-    p: &Pack,
-    data: Vec<u8>,
-    keys: &dyn codec::KeySource,
-    pool: &Pool,
-) -> Result<Decoded> {
-    decode_read(p, data, keys, pool, true)
-}
-pub fn decode_read(
-    p: &Pack,
-    data: Vec<u8>,
+pub(crate) fn decode_index(
+    pack: &Pack,
+    file: Vec<u8>,
+    entries: &[frame::Entry],
     keys: &dyn codec::KeySource,
     pool: &Pool,
     verify: bool,
 ) -> Result<Decoded> {
-    let size = p.payload_size().context(codec::IntegrityError::Metadata)?;
-    let data = open(p, data, keys)?;
-    let raw = if p.compressed {
-        pool.decompress_pack(&data, size)
-            .context(codec::IntegrityError::Decompression)?
-    } else {
-        data
-    };
-    ensure!(raw.len() == size, codec::IntegrityError::Length);
-    ensure!(
-        !verify || Some(blake3::hash(&raw).as_bytes().as_slice()) == p.digest.as_deref(),
-        codec::IntegrityError::Hash
-    );
-    ensure!(
-        &raw[..8] == MAGIC && u32::from_be_bytes(raw[8..12].try_into()?) == p.member_count as u32,
-        codec::IntegrityError::Metadata
-    );
-    let mut members = Vec::with_capacity(p.member_count as usize);
-    let mut offset = 12 + p.member_count as usize * MEMBER_SIZE;
-    let mut seen = std::collections::HashSet::new();
-    for entry in raw[12..offset].chunks_exact(MEMBER_SIZE) {
-        let id = Uuid::from_bytes(entry[..16].try_into()?);
-        let hash: [u8; 32] = entry[16..48].try_into()?;
-        let len = u32::from_be_bytes(entry[48..52].try_into()?) as usize;
-        ensure!(
-            !id.is_nil()
-                && seen.insert(id)
-                && (1..=codec::MAX).contains(&len)
-                && offset + len <= raw.len(),
-            codec::IntegrityError::Metadata
-        );
-        ensure!(
-            !verify || blake3::hash(&raw[offset..offset + len]).as_bytes() == &hash,
-            codec::IntegrityError::Hash
-        );
+    frame::validate_file(pack, &file)?;
+    frame::validate_entries(
+        entries,
+        file.len() as u64,
+        pack.raw_size,
+        pack.member_count,
+        false,
+    )?;
+    let mut bytes = Vec::with_capacity(entries.iter().map(|entry| entry.raw_size as usize).sum());
+    let mut members = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let range = entry
+            .position
+            .range(entry.raw_size, file.len() as u64, pack.member_count)?;
+        let body = file[range.start as usize..range.end as usize].to_vec();
+        let raw = frame::decode_entry(pack, entry, body, keys, pool, verify)?;
         members.push(Member {
-            id,
-            hash,
-            start: offset,
-            len,
+            id: entry.uuid,
+            hash: entry.hash,
+            start: bytes.len(),
+            len: raw.len(),
         });
-        offset += len;
+        bytes.extend_from_slice(&raw);
     }
-    ensure!(offset == raw.len(), codec::IntegrityError::Length);
     Ok(Decoded {
-        bytes: Bytes::from(raw),
+        bytes: bytes.into(),
         members,
     })
-}
-
-pub(crate) fn open(p: &Pack, mut data: Vec<u8>, keys: &dyn codec::KeySource) -> Result<Vec<u8>> {
-    ensure!(
-        Some(data.len() as i64) == p.stored_size,
-        codec::IntegrityError::Length
-    );
-    let aad = p.aad().context(codec::IntegrityError::Metadata)?;
-    if p.algorithm != "none" {
-        let key = keys
-            .key_for_id(p.block_key_id)
-            .context(codec::IntegrityError::MissingKey)?;
-        ensure!(
-            key.algorithm == p.algorithm,
-            codec::IntegrityError::Metadata
-        );
-        key.open(
-            p.nonce
-                .as_deref()
-                .context(codec::IntegrityError::Metadata)?
-                .try_into()
-                .context(codec::IntegrityError::Metadata)?,
-            &aad,
-            &mut data,
-        )
-        .context(codec::IntegrityError::Authentication)?;
-    } else {
-        ensure!(
-            p.block_key_id.is_none() && p.nonce.is_none(),
-            codec::IntegrityError::Metadata
-        );
-    }
-    Ok(data)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::Secrets;
-    #[test]
-    fn pack_authenticates_index_members_and_opaque_nonce() {
-        for algorithm in ["none", "aes-256-gcm", "chacha20-poly1305"] {
-            let key_id = if algorithm == "none" { "" } else { "test" };
-            let secrets = Secrets {
-                database_password: String::new(),
-                replica_password: None,
-                credential_key: codec::Key::new("aes-256-gcm", [4; 32]).unwrap(),
-                keys: if key_id.is_empty() {
-                    Default::default()
-                } else {
-                    std::collections::BTreeMap::from([(
-                        key_id.into(),
-                        codec::Key::new(algorithm, [7; 32]).unwrap(),
-                    )])
-                },
-                runtime_keys: std::sync::Arc::new(std::sync::RwLock::new(
-                    std::collections::BTreeMap::new(),
-                )),
-                key_names: std::sync::Arc::new(std::sync::RwLock::new(if key_id.is_empty() {
-                    std::collections::BTreeMap::new()
-                } else {
-                    std::collections::BTreeMap::from([(Uuid::from_u128(0x200), key_id.into())])
-                })),
-            };
-            let pool = Pool::new(Default::default(), 1).unwrap();
-            let date = "2026-09-28T00:00:00Z".parse().unwrap();
-            let members: Vec<_> = (1..=3)
-                .map(|id| {
-                    let raw = Bytes::from(vec![id as u8; codec::MIN + id as usize]);
-                    (
-                        Chunk {
-                            uuid: Uuid::now_v7(),
-                            id: id.into(),
-                            encoding_id: id.into(),
-                            home_storage_id: None,
-                            address: None,
-                            location_id: Uuid::new_v4(),
-                            storage_id: None,
-                            hash: blake3::hash(&raw).as_bytes().to_vec(),
-                            raw_size: raw.len() as i32,
-                            stored_size: None,
-                            algorithm: algorithm.into(),
-                            block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x200)),
-                            compressed: false,
-                            nonce: None,
-                            format: 2,
-                            state: "ready".into(),
-                            created_at: date,
-                        },
-                        raw,
-                    )
-                })
-                .collect();
-            let p = Pack {
-                id: 7.into(),
-                home_storage_id: None,
-                address: None,
-                location_id: Uuid::new_v4(),
-                storage_id: None,
-                algorithm: algorithm.into(),
-                block_key_id: (algorithm != "none").then_some(Uuid::from_u128(0x200)),
-                raw_size: members.iter().map(|(c, _)| c.raw_size as i64).sum(),
-                stored_size: None,
-                compressed: false,
-                nonce: (algorithm != "none").then(|| {
-                    codec::typed_nonce(date, 7, crate::content::nonce::PACK)
-                        .unwrap()
-                        .to_vec()
-                }),
-                digest: None,
-                member_count: 3,
-                state: "preparing".into(),
-                created_at: date,
-            };
-            let (p, encoded) =
-                encode(p, &members, &secrets, &pool, Strategy::Always, true, None).unwrap();
-            let decoded = decode(&p, encoded.clone(), &secrets, &pool).unwrap();
-            assert!(p.compressed);
-            assert_eq!(&p.aad().unwrap()[..8], b"MOKYU\x00\x00\x04");
-            assert_eq!(&decoded.bytes[..8], b"MOKYU\x00\x00\x04");
-            for (c, raw) in &members {
-                assert_eq!(decoded.chunk(c).unwrap(), *raw);
-            }
-            let (uncompressed, encoded_raw) = encode(
-                p.clone(),
-                &members,
-                &secrets,
-                &pool,
-                Strategy::Always,
-                false,
-                None,
-            )
-            .unwrap();
-            assert!(!uncompressed.compressed);
-            let disabled = crate::content::compression::Config {
-                enabled: false,
-                ..Default::default()
-            };
-            let (configured, _) = encode(
-                p.clone(),
-                &members,
-                &secrets,
-                &pool,
-                Strategy::Always,
-                true,
-                Some(&disabled),
-            )
-            .unwrap();
-            assert!(!configured.compressed);
-            assert_eq!(
-                decode(&uncompressed, encoded_raw.clone(), &secrets, &pool)
-                    .unwrap()
-                    .bytes,
-                decoded.bytes
-            );
-            let mut damaged = encoded_raw.clone();
-            *damaged.last_mut().unwrap() ^= 1;
-            assert!(decode(&uncompressed, damaged.clone(), &secrets, &pool).is_err());
-            let weak = decode_read(&uncompressed, damaged, &secrets, &pool, false);
-            assert_eq!(weak.is_ok(), algorithm == "none");
-            let mut shortened = encoded_raw.clone();
-            shortened.pop();
-            assert!(decode_read(&uncompressed, shortened, &secrets, &pool, false).is_err());
-            if algorithm == "none" {
-                let mut broken_index = encoded_raw.clone();
-                broken_index[0] ^= 1;
-                assert!(decode_read(&uncompressed, broken_index, &secrets, &pool, false).is_err());
-                for (offset, value) in [(0, b'X'), (5, 1), (6, 1), (7, 0), (7, 1), (7, 2), (7, 3)] {
-                    let mut damaged = decoded.bytes.to_vec();
-                    damaged[offset] = value;
-                    let mut changed = uncompressed.clone();
-                    // Keep the digest valid so rejection checks the format marker.
-                    changed.digest = Some(blake3::hash(&damaged).as_bytes().to_vec());
-                    let error = decode(&changed, damaged, &secrets, &pool).err().unwrap();
-                    assert!(matches!(
-                        error.downcast_ref::<codec::IntegrityError>(),
-                        Some(codec::IntegrityError::Metadata)
-                    ));
-                }
-            }
-            let mut changed = p.clone();
-            changed.raw_size += 1;
-            assert!(decode(&changed, encoded.clone(), &secrets, &pool).is_err());
-            let mut damaged = encoded.clone();
-            damaged[0] ^= 1;
-            assert!(decode(&p, damaged, &secrets, &pool).is_err());
-            let mut changed = members[0].0.clone();
-            changed.hash[0] ^= 1;
-            assert!(decoded.chunk(&changed).is_err());
-            let chunk_nonce = codec::typed_nonce(date, 7, 0).unwrap();
-            let pack_nonce = codec::typed_nonce(date, 7, 1).unwrap();
-            assert_ne!(chunk_nonce, pack_nonce);
-            assert_eq!(pack_nonce[0] >> 3, 1);
-            if algorithm != "none" {
-                assert_eq!(p.nonce.unwrap(), pack_nonce);
-            }
-        }
-    }
 }

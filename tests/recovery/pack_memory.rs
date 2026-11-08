@@ -105,36 +105,43 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
         compressed: false,
         nonce: None,
         digest: None,
+        tier_index: None,
         member_count: 2,
         state: "ready".into(),
         created_at: chrono::Utc::now(),
     };
-    let (pack, encoded) = crate::content::pack::encode(
-        template.clone(),
-        &members,
-        &storage.secrets,
-        &storage.compression,
-        Strategy::Never,
-        false,
-        None,
-    )?;
+    let files = members
+        .iter()
+        .map(|(chunk, raw)| -> Result<_> {
+            let (chunk, file, _) = crate::content::codec::encode(
+                chunk.clone(),
+                raw.to_vec(),
+                &storage.secrets,
+                0,
+                &storage.compression,
+                false,
+            )?;
+            Ok((chunk, Bytes::from(file)))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut pack = template.clone();
+    let (encoded, index_rows) = crate::content::pack::frame::assemble(&mut pack, &files)?;
     sqlx::query("INSERT INTO packs(id,location_id,storage_id,encryption_algorithm,raw_size,stored_size,digest,member_count,state,pack_fingerprint) VALUES(?,?,?,'none',?,?,?,2,'ready','{}')")
         .bind(pack.id).bind(pack.location_id).bind(store_id).bind(pack.raw_size)
         .bind(pack.stored_size).bind(&pack.digest).execute(&pool).await?;
-    let mut offset = 0i64;
     for (index, (chunk, _)) in members.iter().enumerate() {
         sqlx::query("INSERT INTO chunks(uuid,id,storage_id,hash,raw_size,encryption_algorithm,state,current_encoding_id,pack_id) VALUES(?,?,?,?,?,'none','ready',?,?)").bind(chunk.uuid)
             .bind(chunk.id).bind(store_id).bind(&chunk.hash).bind(chunk.raw_size).bind(chunk.id).bind(pack.id).execute(&pool).await?;
         sqlx::query(
-            "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes) VALUES(?,?,?,?)",
+            "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm) VALUES(?,?,?,?,?,?,0,'none')",
         )
         .bind(pack.id)
         .bind(index as i64)
         .bind(chunk.id)
-        .bind(offset)
+        .bind(i64::try_from(index_rows[index].1.position.offset)?)
+        .bind(chunk.location_id).bind(chunk.raw_size)
         .execute(&pool)
         .await?;
-        offset += i64::from(chunk.raw_size);
     }
     let capacity = storage.pack_memory.available_permits();
     let work_capacity = storage.pack_work.available_permits();
@@ -162,6 +169,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
             let current = pack.clone();
             let template = template.clone();
             let inputs = members.clone();
+            let files = files.clone();
             let task = tokio::spawn(async move {
                 tokio::time::timeout(
                     Duration::from_secs(if outcome == "timeout" { 1 } else { 20 }),
@@ -185,21 +193,21 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
                                     if outcome == "error" {
                                         template.raw_size += 1;
                                     }
-                                    let (pack, bytes) = copy
-                                        .encode_pack(
-                                            template,
-                                            inputs.clone(),
-                                            Strategy::Never,
-                                            false,
-                                            &memory,
-                                            None,
-                                        )
-                                        .await?;
-                                    let decoded = crate::content::pack::decode(
+                                    let mut files = files.clone();
+                                    if outcome == "error" {
+                                        files[0].0.stored_size = None;
+                                    }
+                                    let (pack, bytes, index) =
+                                        copy.assemble_pack(template, files, &memory).await?;
+                                    let entries: Vec<_> =
+                                        index.into_iter().map(|(_, e)| e).collect();
+                                    let decoded = crate::content::pack::decode_index(
                                         &pack,
                                         bytes,
+                                        &entries,
                                         &copy.secrets,
                                         &copy.compression,
+                                        true,
                                     )?;
                                     assert_eq!(decoded.chunk(&inputs[0].0)?, inputs[0].1);
                                 } else {

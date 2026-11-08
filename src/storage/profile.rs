@@ -287,7 +287,7 @@ impl StorageProfile {
             let maximum = crate::config::bytes(&self.pack_max_size)?;
             let payload = maximum
                 + 12
-                + crate::content::pack::MEMBER_SIZE as u64
+                + crate::content::pack::MAX_MEMBER_TAG as u64
                     * (maximum / crate::content::codec::MIN as u64 + 1);
             anyhow::ensure!(
                 (payload * 4 + workspace).div_ceil(1024 * 1024)
@@ -437,10 +437,7 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         )
     );
     if storage_type == "local"
-        && (profile.cache_enabled
-            || profile.upload_cache
-            || profile.pack_enabled
-            || profile.pack_range_enabled)
+        && (profile.cache_enabled || profile.upload_cache || profile.pack_range_enabled)
     {
         return Err(crate::model::Error::LocalStorageFeatures.into());
     }
