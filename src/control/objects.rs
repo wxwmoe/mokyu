@@ -149,7 +149,8 @@ pub(super) async fn object_chunks(
                 cursor = row.offset_bytes + row.length;
                 if row.offset_bytes > after {
                     rows.push(serde_json::json!({
-                        "id": row.source.id.to_string(), "offset_bytes": row.offset_bytes.to_string(),
+                        "id": row.source.id.to_string(), "uuid": row.source.location_id,
+                        "offset_bytes": row.offset_bytes.to_string(),
                         "length": row.length, "source_offset": row.source_offset, "raw_size": row.source.size,
                         "compression":"none", "algorithm":"none", "source": if row.source.pending_upload { "pending" } else { "raw" }
                     }));
@@ -170,6 +171,13 @@ pub(super) async fn object_chunks(
     };
     let more = rows.len() > limit as usize;
     rows.truncate(limit as usize);
+    let total_items = if q.after.is_some() {
+        None
+    } else if more {
+        Some(app.objects.extent_count(object.id, object.payload_type == "raw").await?.to_string())
+    } else {
+        Some(rows.len().to_string())
+    };
     if !actor.admin {
         for row in &mut rows {
             if let Some(row) = row.as_object_mut() {
@@ -190,6 +198,7 @@ pub(super) async fn object_chunks(
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()?;
     Ok(Json(insights::ChunkPage {
+        total_items,
         payload_type: object.payload_type,
         chunks,
         next_offset,

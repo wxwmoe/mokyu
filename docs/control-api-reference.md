@@ -322,7 +322,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `GET /api/v1/usage/runtime` | 管理员可见的运行历史、本地缓存、待上传及近期任务 |
 | `GET /api/v1/storage/packs`、`GET /api/v1/storage/packs/{id}` | 授权范围的区块包及成员分页 |
 | `GET /api/v1/storage/packs/{id}/objects` | 当前引用文件，另需 bucket.list |
-| `GET /api/v1/buckets/{bucket}/object/chunks` | bucket/key/version 对象区块，需 storage.inspect；after/limit 分页 |
+| `GET /api/v1/buckets/{bucket}/object/chunks` | 需 `storage.inspect`，按 key、version、after、limit 分页。`uuid` 是逻辑区块或 raw 载体的持久 UUID，包成员的 `pack_uuid` 标识所属区块包。`id` 和 `pack_id` 保留数据库原生标识。首页的 `total_items` 统计该版本的全部区段 |
 
 ### 容量快照
 
@@ -403,7 +403,7 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 
 ## 后台任务
 
-`GET /api/v1/tasks` 支持 state/policy/bucket/storage/actor/token、分页游标和 limit（默认 50，最多 200），返回 items/next_cursor；policy 匹配 pack 任务的维护策略（如 reuse、range），其他任务匹配 task_type；storage 会筛选直接关联该后端存储或其存储桶的任务。`GET /api/v1/tasks/{id}` 返回 task_type、policy、状态、来源、发起者、处理计数、阻止原因及 detail。`POST /api/v1/tasks/{id}/actions` 提交 pause/resume。
+`GET /api/v1/tasks` 支持 state/policy/bucket/storage/actor/token、分页游标和 limit（默认 50，最多 200），返回 items/next_cursor；policy 匹配 pack 任务的维护策略（如 reuse、range），其他任务匹配 task_type；storage 会筛选直接关联该后端存储或其存储桶的任务。`GET /api/v1/tasks/{id}` 返回 task_type、policy、状态、来源、发起者、处理计数、阻止原因及 detail。上传及拆包任务可返回持久区块和区块包 UUID。数据流版本沿用数据库原生标识。`POST /api/v1/tasks/{id}/actions` 提交 pause/resume。
 
 单容器任务的 CLI 结果和巡检报告不含群集父子任务、节点与过期租约字段；执行令牌不作为公开任务字段返回。
 

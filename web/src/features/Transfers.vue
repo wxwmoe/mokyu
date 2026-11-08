@@ -47,6 +47,13 @@ function name(row: Row) { return row.transfer?.object_key || row.job?.input.key 
 function status(row: Row) { return row.job?.state || row.transfer?.status || 'active' }
 function needsFile(job: UploadJob) { return job.error instanceof ApiError && ['ResumeMismatch', 'FileReadFailed'].includes(job.error.code) }
 function progress(row: Row) { const size = Number(row.transfer?.expected_size || row.job?.input.size); const sent = row.job ? row.job.accepted + row.job.sending : Number(row.transfer?.received_bytes); return size > 0 ? Math.min(100, 100 * sent / size) : (status(row) === 'completed' ? 100 : 0) }
+function remainingTime(seconds?: number) {
+  if (seconds == null) return '—'
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor(seconds / 60) % 60
+  const tail = String(seconds % 60).padStart(2, '0')
+  return hours ? `${hours}:${String(minutes).padStart(2, '0')}:${tail}` : `${minutes}:${tail}`
+}
 function choose(transfer: Transfer) { selected.value = transfer; picker.value?.click() }
 function picked(event: Event) { const input = event.target as HTMLInputElement; try { if (input.files?.[0] && selected.value) reselect(selected.value, input.files[0]) } catch (error) { report(error) } finally { input.value = '' } }
 async function remove() {
@@ -64,7 +71,12 @@ async function remove() {
     <article v-for="row in rows" :key="row.id" class="transfer-row" :data-state="status(row)">
       <FileIcon :name="name(row)" /><div class="transfer-main"><div class="transfer-heading"><strong>{{ name(row).split('/').pop() }}</strong><span class="badge"><CircleCheck v-if="status(row) === 'completed'" :size="12" /><Clock v-else :size="12" />{{ t('transfer_' + status(row)) }}</span></div>
         <div class="transfer-context"><RouterLink :to="'/media/' + (row.transfer?.bucket_id || row.job?.bucket)">{{ row.transfer?.bucket_name || buckets.data.value?.find(b => b.id === row.job?.bucket)?.name }}<ArrowUpRight :size="11" /></RouterLink><span v-if="row.transfer">{{ row.transfer.owner }} · {{ row.transfer.source === 'web' ? t('browserUpload') : 'S3' }}</span></div>
-        <template v-if="!['completed', 'aborted'].includes(status(row))"><div class="transfer-progress" role="progressbar" :aria-label="name(row)" :aria-valuenow="Math.round(progress(row))" :aria-valuemin="0" :aria-valuemax="100"><span :style="{ width: progress(row) + '%' }" /></div><div class="transfer-detail"><span>{{ bytes(row.job ? row.job.accepted + row.job.sending : Number(row.transfer?.received_bytes || 0)) }}<template v-if="row.transfer?.expected_size || row.job"> / {{ bytes(Number(row.transfer?.expected_size || row.job?.input.size)) }}</template></span><span v-if="row.job?.state === 'checking'">{{ t('verifiedParts', { count: row.job.verified }) }}</span><span v-else-if="row.job?.speed">~ {{ bytes(row.job.speed) }}/s</span><span v-else-if="row.transfer?.expires_at">{{ t('transferExpires', { date: date(row.transfer.expires_at) }) }}</span></div></template>
+        <template v-if="!['completed', 'aborted'].includes(status(row))"><div class="transfer-progress" role="progressbar" :aria-label="name(row)" :aria-valuenow="Math.round(progress(row))" :aria-valuemin="0" :aria-valuemax="100"><span :style="{ width: progress(row) + '%' }" /></div><div class="transfer-detail"><span>{{ bytes(row.job ? row.job.accepted + row.job.sending : Number(row.transfer?.received_bytes || 0)) }}<template v-if="row.transfer?.expected_size || row.job"> / {{ bytes(Number(row.transfer?.expected_size || row.job?.input.size)) }}</template></span><span v-if="row.job?.state === 'checking'">{{ t('verifiedParts', { count: row.job.verified }) }}</span>
+          <span v-else-if="row.job?.state === 'uploading'" class="transfer-estimate">
+            <span>{{ row.job.speed ? bytes(row.job.speed) + '/s' : '—' }}</span>
+            <span>{{ t('transferTimeLeft', { time: remainingTime(row.job.remaining) }) }}</span>
+          </span>
+          <span v-else-if="status(row) === 'paused' && row.transfer?.expires_at">{{ t('transferExpires', { date: date(row.transfer.expires_at) }) }}</span></div></template>
         <div v-else-if="status(row) === 'completed'" class="transfer-durability"><CloudCheck v-if="row.transfer?.remote_state === 'stored'" :size="14" /><Clock v-else :size="14" /><span>{{ t('remote_' + (row.transfer?.remote_state || 'pending')) }}</span><span>{{ bytes(Number(row.transfer?.received_bytes || row.job?.input.size || 0)) }}</span></div>
         <p v-if="row.job?.error" class="transfer-error" role="alert">{{ errorText(row.job.error) }}</p>
       </div><div class="transfer-actions">

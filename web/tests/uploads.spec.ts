@@ -32,9 +32,14 @@ test('bounded browser multipart, pause, reload, full accepted-part validation, c
   await dialog.getByRole('button', { name: en.startUpload, exact: true }).click()
   await both
   const row = page.locator('.transfer-row').filter({ hasText: filename })
+  const expiryLabel = en.transferExpires.split('{date}')[0]
+  await expect(row.locator('.transfer-estimate')).toContainText(en.transferTimeLeft.split('{time}')[0].trim())
+  await expect(row).not.toContainText(expiryLabel)
   await row.getByRole('button', { name: en.pauseUpload, exact: true }).click()
   release()
   await expect(row).toHaveAttribute('data-state', 'paused', { timeout: 30000 })
+  await expect(row.locator('.transfer-estimate')).toHaveCount(0)
+  await expect(row).toContainText(expiryLabel)
   expect(count).toBe(2)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await page.screenshot({ path: '/results/step10-transfers.png', fullPage: true })
@@ -54,7 +59,10 @@ test('bounded browser multipart, pause, reload, full accepted-part validation, c
   await expect(row).not.toBeVisible({ timeout: 30000 })
   const saved = await (await request.get('/api/v1/uploads/' + transfer.id)).json()
   expect([saved.status, saved.remote_state]).toEqual(['completed', 'stored'])
-  const download = await request.get(`/api/v1/buckets/${bucket.id}/object/content?` + new URLSearchParams({ key: filename }))
+  const objects = await request.get(`/api/v1/buckets/${bucket.id}/objects?` + new URLSearchParams({ q: filename, mode: 'exact' }))
+  const [item] = (await objects.json()).items
+  const download = await request.get(`/api/v1/buckets/${bucket.id}/object/content?` + new URLSearchParams({ key: filename, version: item.id }))
+  expect(download.status()).toBe(200)
   expect((await download.body()).equals(buffer)).toBe(true)
   const incomplete = await (await request.post(`/api/v1/buckets/${bucket.id}/uploads`, { headers, data: { client_id: randomUUID(), key: filename + '-cancel', file_name: filename + '-cancel', size: '1' } })).json()
   await page.getByRole('button', { name: en.refresh, exact: true }).click()

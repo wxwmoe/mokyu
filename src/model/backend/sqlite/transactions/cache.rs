@@ -186,8 +186,8 @@ pub(in super::super) async fn cache_enqueue(pool: &SqlitePool, urgent: &[Uuid]) 
         tx.commit().await?;
         return Ok(true);
     }
-    let Some((first, stream, source)) = queries::due_upload(urgent)
-        .build_query_as::<(Id, Option<Id>, Option<Id>)>()
+    let Some((first, stream, source, first_uuid, source_pack_uuid)) = queries::due_upload(urgent)
+        .build_query_as::<(Id, Option<Id>, Option<Id>, Uuid, Option<Uuid>)>()
         .fetch_optional(&mut *tx)
         .await?
     else {
@@ -197,7 +197,7 @@ pub(in super::super) async fn cache_enqueue(pool: &SqlitePool, urgent: &[Uuid]) 
         &mut tx,
         "upload",
         None,
-        serde_json::json!({"first":first,"stream_id":stream,"source_pack_id":source}),
+        serde_json::json!({"first":first,"first_uuid":first_uuid,"stream_id":stream,"source_pack_id":source,"source_pack_uuid":source_pack_uuid}),
     )
     .await?;
     let (maximum, _, _) = queries::cache_policy(first).fetch_one(&mut *tx).await?;

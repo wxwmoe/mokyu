@@ -9,7 +9,7 @@ type Input = components['schemas']['UploadInput']
 export interface UploadJob {
   client: string; owner: string; bucket: string; input: Input; file?: File; transfer?: Transfer
   state: 'queued' | 'checking' | 'uploading' | 'paused' | 'completing' | 'completed' | 'failed' | 'aborted'
-  accepted: number; sending: number; speed: number; verified: number; error?: unknown
+  accepted: number; sending: number; speed: number; remaining?: number; verified: number; error?: unknown
   controller: AbortController; running: boolean; paused: boolean
 }
 export const uploads = reactive<UploadJob[]>([])
@@ -53,7 +53,7 @@ async function send(job: UploadJob, part: number, blob: Blob, digest: string): P
 function sendPart(job: UploadJob, part: number, blob: Blob, digest: string): Promise<Part> {
   valid(job)
   return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest(), started = performance.now()
+    const xhr = new XMLHttpRequest()
     let loaded = 0
     const abort = () => xhr.abort()
     xhr.open('PUT', `/api/v1/uploads/${job.transfer!.id}/parts/${part}`)
@@ -65,18 +65,21 @@ function sendPart(job: UploadJob, part: number, blob: Blob, digest: string): Pro
     xhr.setRequestHeader('Content-Type', 'application/octet-stream')
     xhr.upload.onprogress = event => {
       job.sending += event.loaded - loaded; loaded = event.loaded
-      job.speed = loaded / Math.max(0.1, (performance.now() - started) / 1000)
     }
     xhr.onload = () => {
       let reply: any
       try { reply = JSON.parse(xhr.responseText) } catch { reject(new ApiError(xhr.status, 'RequestFailed')); return }
-      if (xhr.status >= 200 && xhr.status < 300) resolve(reply)
-      else reject(new ApiError(xhr.status, reply.code || 'RequestFailed', reply.request_id))
+      if (xhr.status >= 200 && xhr.status < 300) {
+        job.sending -= loaded
+        loaded = 0
+        job.accepted += blob.size
+        resolve(reply)
+      } else reject(new ApiError(xhr.status, reply.code || 'RequestFailed', reply.request_id))
     }
     xhr.onerror = () => reject(new ApiError(0, 'Network'))
     xhr.ontimeout = () => reject(new ApiError(408, 'RequestTimeout'))
     xhr.onabort = () => reject(new DOMException('Aborted', 'AbortError'))
-    xhr.onloadend = () => { job.sending -= loaded; job.speed = 0; job.controller.signal.removeEventListener('abort', abort) }
+    xhr.onloadend = () => { job.sending -= loaded; job.controller.signal.removeEventListener('abort', abort) }
     job.controller.signal.addEventListener('abort', abort, { once: true })
     xhr.send(blob)
   })
@@ -91,6 +94,22 @@ async function receiptList(job: UploadJob) {
   return parts
 }
 function refresh() { queries.invalidateQueries({ queryKey: ['transfers'] }); queries.invalidateQueries({ queryKey: ['objects'] }); queries.invalidateQueries({ queryKey: ['quota'] }) }
+
+function measureUpload(job: UploadJob, size: number) {
+  const samples = [{ time: performance.now(), sent: job.accepted }]
+  job.speed = 0
+  job.remaining = undefined
+  return window.setInterval(() => {
+    const time = performance.now()
+    const sent = Math.min(size, job.accepted + job.sending)
+    // Retries can rewind a part. Count only new progress across both workers.
+    samples.push({ time, sent: Math.max(sent, samples[samples.length - 1].sent) })
+    while (samples.length > 2 && samples[1].time <= time - 5000) samples.shift()
+    const first = samples[0], last = samples[samples.length - 1]
+    job.speed = (last.sent - first.sent) * 1000 / (last.time - first.time)
+    job.remaining = job.speed > 0 ? Math.ceil((size - sent) / job.speed) : undefined
+  }, 1000)
+}
 
 // One file at a time, with two bounded part workers shared by the whole page.
 async function run(job: UploadJob) {
@@ -129,11 +148,12 @@ async function run(job: UploadJob) {
               await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** attempt)); valid(job)
             }
           }
-          job.accepted += blob.size
         } catch (error) { failure = error }
       }
     }
-    await Promise.all([partWorker(), partWorker()])
+    const meter = measureUpload(job, file.size)
+    try { await Promise.all([partWorker(), partWorker()]) }
+    finally { window.clearInterval(meter) }
     if (failure) throw failure
     if (job.paused) { job.state = 'paused'; return }
     job.state = 'completing'

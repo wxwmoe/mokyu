@@ -48,6 +48,7 @@ pub(crate) trait TaskControlStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<Value>>;
     async fn view(&self, principal: &Principal, task: Uuid) -> Result<Value>;
+    async fn file_uuids(&self, chunk: Option<Id>, pack: Option<Id>) -> Result<(Option<Uuid>, Option<Uuid>)>;
     async fn all(&self) -> Result<Vec<Value>>;
     async fn raw(&self, task: Uuid) -> Result<Option<Value>>;
 

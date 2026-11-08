@@ -103,7 +103,18 @@ def main():
         else:
             assert int(version) > 0
         parameters = urlencode(dict(key="original", version=version))
-        fixture.api(objects + "/object/chunks?" + parameters)
+        page = fixture.api(objects + "/object/chunks?" + parameters)
+        assert int(page["total_items"]) == len(page["items"]) and page["next_cursor"] is None
+        chunk_ids = {str(row["id"]): identity(row["uuid"]) for row in original}
+        pack_ids = {str(row["id"]): identity(row["location_id"]) for row in packs}
+        for extent in page["items"]:
+            assert uuid.UUID(extent["uuid"]) == chunk_ids[extent["id"]]
+            if extent["source"] == "pack":
+                assert uuid.UUID(extent["pack_uuid"]) == pack_ids[extent["pack_id"]]
+        first = fixture.api(objects + "/object/chunks?" + parameters + "&limit=1")
+        assert first["total_items"] == page["total_items"]
+        second = fixture.api(objects + "/object/chunks?" + parameters + "&limit=1&after=" + first["next_cursor"])
+        assert second["items"] == page["items"][1:2] and "total_items" not in second
         fixture.api(objects + "/object/chunks?" + urlencode(dict(key="original", version=wrong)), expected=400)
         fixture.put("versioned", raw)
         old = next(item["id"] for item in fixture.api(objects + "/objects")["items"] if item["object_key"] == "versioned")

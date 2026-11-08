@@ -280,6 +280,11 @@ pub(super) fn task_value(mut value: Value, single: bool) -> Value {
 
 #[async_trait::async_trait]
 impl TaskControlStore for Backend {
+    async fn file_uuids(&self, chunk: Option<Id>, pack: Option<Id>) -> Result<(Option<Uuid>, Option<Uuid>)> {
+        let uuid = |id| match id { Some(Id::Uuid(value)) => Some(value), _ => None };
+        Ok((uuid(chunk), uuid(pack)))
+    }
+
     async fn unpack_status(&self, pack: Id) -> Result<Option<Value>> {
         Ok(sqlx::query_scalar("SELECT to_jsonb(t) FROM tasks t WHERE task_type='unpack' AND detail->>'pack_id'=$1 ORDER BY created_at DESC LIMIT 1").bind(pack.to_string()).fetch_optional(&self.pool).await?.map(|value| task_value(value, self.single)))
     }

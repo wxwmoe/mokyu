@@ -410,7 +410,12 @@ pub(in super::super) async fn start_unpack(
     } else {
         queries::pack_storages(None).fetch_all(&mut *tx).await?
     };
-    let detail = serde_json::json!({"pack_id":pack,"all":all,"upper_time":chrono::Utc::now()});
+    let pack_uuid = if pack.is_some() {
+        queries::task_file_uuids(None, pack).fetch_one(&mut *tx).await?.1
+    } else {
+        None
+    };
+    let detail = serde_json::json!({"pack_id":pack,"pack_uuid":pack_uuid,"all":all,"upper_time":chrono::Utc::now()});
     let id = enqueue_storage_task(&mut tx, "unpack", detail, &storages).await?;
     tx.commit().await?;
     Ok(serde_json::json!({"task_id":id}))

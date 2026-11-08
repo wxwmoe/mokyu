@@ -106,6 +106,7 @@ pub(crate) trait ObjectStore: Send + Sync {
         sizes: (Option<i64>, Option<i64>),
     ) -> Result<Vec<MediaItem>>;
     async fn chunks(&self, stream: Id, after: i64, limit: i64) -> Result<Vec<Value>>;
+    async fn extent_count(&self, stream: Id, raw: bool) -> Result<i64>;
     async fn change(&self, input: ObjectChange) -> Result<bool>;
     async fn begin_operation(
         &self,

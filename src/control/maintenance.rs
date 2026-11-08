@@ -593,8 +593,24 @@ pub(super) async fn task(
     Extension(actor): Extension<Identity>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Job>, HttpError> {
-    let value = app.task_control.view(&actor.principal, id).await?;
-    Ok(Json(job(value)?))
+    let mut result = job(app.task_control.view(&actor.principal, id).await?)?;
+    let (pack_id, pack_uuid) = match result.task_type.as_str() {
+        "upload" => ("source_pack_id", "source_pack_uuid"),
+        "unpack" => ("pack_id", "pack_uuid"),
+        _ => return Ok(Json(result)),
+    };
+    let detail = &mut result.detail;
+    let missing = |id: &str, uuid: &str| {
+        if detail[uuid].is_null() { Id::from_json(&detail[id]).ok().flatten() } else { None }
+    };
+    let first = missing("first", "first_uuid");
+    let pack = missing(pack_id, pack_uuid);
+    if first.is_some() || pack.is_some() {
+        let (chunk, pack) = app.task_control.file_uuids(first, pack).await?;
+        if let Some(uuid) = chunk { detail["first_uuid"] = json!(uuid); }
+        if let Some(uuid) = pack { detail[pack_uuid] = json!(uuid); }
+    }
+    Ok(Json(result))
 }
 #[utoipa::path(post,path="/api/v1/tasks/{id}/actions",params(("id"=Uuid,Path)),request_body=PolicyAction,responses((status=204)))]
 pub(super) async fn task_action(

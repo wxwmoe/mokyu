@@ -70,7 +70,7 @@ pub(super) fn write_delay(
 
 pub(in super::super) fn due_upload(urgent: &[Uuid]) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT p.chunk_id,p.stream_id,p.source_pack_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id JOIN storage_profiles sp ON sp.storage_id=c.storage_id WHERE p.owner_task IS NULL AND p.next_retry_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)",
+        "SELECT p.chunk_id,p.stream_id,p.source_pack_id,c.uuid,(SELECT location_id FROM packs WHERE id=p.source_pack_id) FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id JOIN storage_profiles sp ON sp.storage_id=c.storage_id WHERE p.owner_task IS NULL AND p.next_retry_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)",
     );
     write_delay(&mut query, "p.created_at", "c.storage_id", urgent);
     query.push(" ORDER BY CASE WHEN p.created_at+(sp.write_backlog_max_age)*1000000<=CAST(unixepoch('subsec')*1000000 AS INTEGER) THEN 0 ELSE 1 END,p.next_retry_at,p.chunk_id LIMIT 1");

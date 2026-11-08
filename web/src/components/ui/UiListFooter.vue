@@ -1,15 +1,16 @@
 <script setup lang="ts">
-import { ChevronRight } from 'lucide-vue-next'
+import { ChevronLeft, ChevronRight } from 'lucide-vue-next'
 import { t } from '../../app/i18n'
-const props = defineProps<{ first?: boolean; next?: boolean; summary?: string }>()
-const emit = defineEmits<{ first: []; next: [] }>()
+const props = defineProps<{ first?: boolean; previous?: boolean; next?: boolean; summary?: string }>()
+const emit = defineEmits<{ first: []; previous: []; next: [] }>()
 </script>
 
 <template>
-  <div v-if="props.first || props.next || props.summary || $slots.after" class="list-footer">
+  <div v-if="props.first || props.previous || props.next || props.summary || $slots.after" class="list-footer">
     <span v-if="props.summary" class="list-footer-summary">{{ props.summary }}</span>
-    <div v-if="props.first || props.next" class="list-footer-actions">
+    <div v-if="props.first || props.previous || props.next" class="list-footer-actions">
       <button v-if="props.first" type="button" @click="emit('first')">{{ t('firstPage') }}</button>
+      <button v-if="props.previous" type="button" @click="emit('previous')"><ChevronLeft :size="15" />{{ t('previousPage') }}</button>
       <button v-if="props.next" type="button" @click="emit('next')">{{ t('nextPage') }}<ChevronRight :size="15" /></button>
     </div>
     <slot name="after" />

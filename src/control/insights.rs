@@ -17,6 +17,8 @@ use uuid::Uuid;
 #[derive(Serialize, Deserialize, ToSchema)]
 pub(super) struct ObjectChunk {
     id: String,
+    uuid: Uuid,
+    pack_uuid: Option<Uuid>,
     offset_bytes: String,
     length: i64,
     source_offset: i64,
@@ -38,6 +40,8 @@ pub(super) struct ObjectChunk {
 }
 #[derive(Serialize, ToSchema)]
 pub(super) struct ChunkPage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<String>,
     pub payload_type: String,
     #[serde(rename = "items")]
     pub chunks: Vec<ObjectChunk>,

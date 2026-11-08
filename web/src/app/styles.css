@@ -338,6 +338,8 @@ details > summary { cursor: pointer; font-size: var(--small-size, 12px); color: 
 .transfer-row { display: flex; gap: 18px; align-items: center; padding: 24px 4px; border-bottom: 1px solid var(--line-soft); }.transfer-row:last-of-type { border-bottom: 0; }
 .transfer-main { flex: 1; min-width: 0; }.transfer-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 5px; }.transfer-heading strong { font-size: 14px; overflow-wrap: anywhere; }.transfer-heading .badge { flex-shrink: 0; }
 .transfer-context { display: flex; flex-wrap: wrap; align-items: center; gap: 15px; font-size: var(--caption-size, 11px); color: var(--muted); }.transfer-context a { display: flex; align-items: center; gap: 4px; color: var(--muted); text-decoration: none; }.transfer-context a:hover { color: var(--rose); }
+.transfer-estimate { display: inline-flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 12px; margin-inline-start: auto; font-variant-numeric: tabular-nums; }
+.transfer-estimate > span { white-space: nowrap; }
 .transfer-progress { height: 5px; background: var(--rose-soft); border-radius: 10px; overflow: hidden; margin: 15px 0 7px; }.transfer-progress>span { height: 100%; display: block; background: linear-gradient(90deg, var(--rose), var(--lilac)); border-radius: inherit; transition: width .2s ease; }
 .transfer-detail { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: var(--caption-size, 10px); }.transfer-actions { display: flex; gap: 6px; margin-left: 10px; }.transfer-actions button { font-size: var(--caption-size, 11px); }
 .transfer-durability { display: flex; align-items: center; gap: 8px; color: var(--mint); font-size: var(--caption-size, 11px); margin-top: 14px; }.transfer-durability>span:last-child { margin-left: auto; color: var(--muted); }
@@ -446,9 +448,7 @@ details > summary { cursor: pointer; font-size: var(--small-size, 12px); color: 
 .object-fold { border-top: 1px solid var(--line-soft); font-size: var(--small-size, 12px); padding: 9px 0; }
 .object-fold summary { color: var(--muted); cursor: pointer; }
 .object-fold p, .object-fold dl { margin-top: 12px; }
-.metadata-fields { display: grid; grid-template-columns: 1fr; gap: 3px; overflow-wrap: anywhere; }
-.metadata-fields dt { margin-top: 8px; color: var(--muted); }
-.metadata-fields dd { margin-left: 0; }
+.object-facts dt { overflow-wrap: anywhere; }
 .break-anywhere { overflow-wrap: anywhere; }
 .access-note { background: var(--lilac-soft); color: var(--lilac); padding: 17px; border-radius: 14px; display: flex; gap: 12px; margin: 18px 0; font-size: var(--small-size, 12px); }
 .access-note p { color: var(--muted); margin-top: 6px; }

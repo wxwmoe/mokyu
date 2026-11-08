@@ -2444,6 +2444,7 @@ export interface components {
             items: components["schemas"]["ObjectChunk"][];
             next_cursor?: string | null;
             payload_type: string;
+            total_items?: string | null;
         };
         ClusterOverview: components["schemas"]["ClusterStatus"] & {
             nodes: components["schemas"]["NodeCount"][];
@@ -3344,6 +3345,8 @@ export interface components {
             pack_ordinal?: number | null;
             /** Format: int64 */
             pack_size?: number | null;
+            /** Format: uuid */
+            pack_uuid?: string | null;
             /** Format: int32 */
             payload_size?: number | null;
             range_reads?: string | null;
@@ -3355,6 +3358,8 @@ export interface components {
             source_offset: number;
             /** Format: int32 */
             stored_size?: number | null;
+            /** Format: uuid */
+            uuid: string;
         };
         ObjectDetail: {
             etag: string;

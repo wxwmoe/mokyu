@@ -196,8 +196,18 @@ pub(in super::super) fn task_view(id: Uuid) -> sqlx::QueryBuilder<MySql> {
     query
 }
 
+pub(in super::super) fn task_file_uuids(chunk: Option<Id>, pack: Option<Id>) -> Rows<'static, (Option<Uuid>, Option<Uuid>)> {
+    sqlx::query_as("SELECT (SELECT uuid FROM chunks WHERE id=?), (SELECT location_id FROM packs WHERE id=?)")
+        .bind(chunk)
+        .bind(pack)
+}
+
 #[async_trait::async_trait]
 impl TaskControlStore for Backend {
+    async fn file_uuids(&self, chunk: Option<Id>, pack: Option<Id>) -> Result<(Option<Uuid>, Option<Uuid>)> {
+        Ok(task_file_uuids(chunk, pack).fetch_one(&self.pool).await?)
+    }
+
     async fn unpack_status(&self, pack: Id) -> Result<Option<Value>> {
         sqlx::query("SELECT * FROM tasks WHERE task_type='unpack' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.pack_id')) AS BINARY)=? ORDER BY created_at DESC,id DESC LIMIT 1")
             .bind(pack.to_string()).fetch_optional(&self.pool).await?.map(|row| task_value(row,false)).transpose()
