@@ -19,6 +19,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dump_accepts_preview_before_and_after_the_operands() {
+        for args in [
+            [
+                "mokyu",
+                "dump",
+                "--preview",
+                "mokyu://media/photos/",
+                "s3://backup/mokyu/",
+            ],
+            [
+                "mokyu",
+                "dump",
+                "mokyu://media/photos/",
+                "s3://backup/mokyu/",
+                "--preview",
+            ],
+        ] {
+            assert!(matches!(
+                Args::try_parse_from(args).unwrap().command,
+                Some(Command::Dump(_))
+            ));
+        }
+    }
+
+    #[test]
     fn cache_flush_wait_keeps_wire_contract() {
         for args in [
             vec!["mokyu", "cli", "cache", "flush"],

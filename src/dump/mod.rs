@@ -1,5 +1,6 @@
 mod catalog;
 mod origin;
+mod selection;
 
 use self::{
     catalog::Catalog,
@@ -18,8 +19,11 @@ use uuid::Uuid;
 
 #[derive(clap::Args)]
 pub(crate) struct Args {
-    /// List the buckets in the selected recovery point.
-    #[arg(value_name="COMMAND",num_args=0..=2)]
+    /// Preview up to ten mappings and the total logical size.
+    #[arg(long)]
+    preview: bool,
+    /// ls [mokyu://BUCKET/PREFIX/] or mokyu://BUCKET/KEY TARGET.
+    #[arg(value_name="OPERAND",num_args=0..=2)]
     operands: Vec<String>,
 }
 
@@ -161,16 +165,35 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
 }
 
 pub(crate) async fn run(args: Args) -> Result<()> {
-    if args.operands.is_empty() {
-        println!("Usage: mokyu dump ls");
+    use selection::{Selection, Target};
+    if args.operands.is_empty() && !args.preview {
+        println!(
+            "Usage: mokyu dump ls [mokyu://BUCKET/PREFIX/]\n       mokyu dump [--preview] mokyu://BUCKET/KEY TARGET"
+        );
         return Ok(());
     }
-    ensure!(args.operands == ["ls"], "expected: mokyu dump ls");
+    let (logical, dest) = match args.operands.as_slice() {
+        [ls] if ls == "ls" && !args.preview => (None, None),
+        [ls, uri] if ls == "ls" && !args.preview => (Some(uri), None),
+        [uri, target] if uri.starts_with("mokyu://") => (Some(uri), Some(target)),
+        _ => anyhow::bail!(
+            "expected ls [mokyu://BUCKET/PREFIX/] or [--preview] mokyu://BUCKET/KEY TARGET"
+        ),
+    };
     let path = PathBuf::from(setting("MOKYU_DUMP_DB")?.unwrap_or_else(|| "./metadata.db".into()));
-    let (db, _) = database(&path).await?;
-    let mut stmt = db.prepare("SELECT name FROM buckets ORDER BY name")?;
-    for name in stmt.query_map([], |r| r.get::<_, String>(0))? {
-        println!("{}", name?);
-    }
-    Ok(())
+    let (db, identity) = database(&path).await?;
+    let Some(uri) = logical else {
+        let mut stmt = db.prepare("SELECT name FROM buckets ORDER BY name")?;
+        for name in stmt.query_map([], |r| r.get::<_, String>(0))? {
+            println!("{}", name?);
+        }
+        return Ok(());
+    };
+    let selection = Selection::parse(&db, uri)?;
+    let Some(dest) = dest else {
+        return selection.list(&db);
+    };
+    let target = Target::parse(dest, &selection)?;
+    ensure!(args.preview, "use --preview to inspect this export");
+    selection::preview(&db, &identity, &path, &selection, &target)
 }
