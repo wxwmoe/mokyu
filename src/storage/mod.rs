@@ -19,6 +19,7 @@ mod memory;
 pub(crate) mod model;
 mod multipart;
 pub(crate) mod pack_ranges;
+pub(crate) mod pack_writer;
 mod partial_map;
 pub(crate) mod permits;
 pub(crate) mod profile;
@@ -208,6 +209,7 @@ async fn build_store(
         None
     };
     let backend = StoreBackend {
+        pack_cleanup: Default::default(),
         local_write_policy: Default::default(),
         buffered_backend,
         profile: Arc::new(profile.clone()),
@@ -760,12 +762,10 @@ impl Storage {
                 .compression_config(&self.compression_idle_timeout)
                 .workspace_bytes()?;
             let maximum = config::bytes(&profile.pack_max_size)?;
-            let payload = maximum
-                + 12
-                + crate::content::pack::MAX_MEMBER_TAG as u64 * (maximum / codec::MIN as u64 + 1);
             if workspace > self.compression_workspace
                 || (profile.pack_enabled
-                    && (payload * 4 + workspace).div_ceil(1024 * 1024)
+                    && crate::content::pack::buffer_bytes(0, maximum, workspace)
+                        .div_ceil(1024 * 1024)
                         > u64::from(self.pack_memory_units))
             {
                 self.restart_required.store(true, Ordering::Release);
@@ -802,6 +802,9 @@ impl Storage {
         if let Some(mut backend) = backend {
             if let Some(previous) = targets.get(&storage_id) {
                 backend.local_write_policy = previous.local_write_policy.clone();
+                if backend.raw_root == previous.raw_root {
+                    backend.pack_cleanup = previous.pack_cleanup.clone();
+                }
             }
             backend.reuse_gates(&mut self.store_gates.lock().unwrap());
             if let Some(root) = &backend.raw_root {
@@ -1067,6 +1070,12 @@ impl Storage {
             let mut authorized = target.identity_marker.clone();
             authorized["metadata_journal"] = serde_json::to_value(intent)?;
             marker::verify(&document.value, &authorized)?;
+        }
+        if let Some(root) = target.raw_root.as_ref().and_then(|path| path.parent()) {
+            target
+                .pack_cleanup
+                .get_or_try_init(|| pack_writer::recover_local(root))
+                .await?;
         }
         target.identity_ready.store(true, Ordering::Release);
         Ok(())
@@ -2337,6 +2346,37 @@ impl Storage {
             .acquire_many_owned(units as u32)
             .await?)
     }
+    pub(crate) fn conversion_buffers(&self, wanted: usize, local: bool) -> (usize, u64) {
+        let room = (u64::from(self.pack_memory_units) * 1024 * 1024).saturating_sub(
+            crate::content::pack::buffer_bytes(0, 0, self.compression_workspace),
+        );
+        let output = if local {
+            0
+        } else {
+            (wanted as u64 + crate::content::pack::MAX_MEMBERS as u64 * 16 + 8)
+                .min(crate::content::pack::SINGLE_PUT as u64)
+                .min(room / 2)
+        };
+        let bytes = (wanted as u64).min(room - output);
+        (bytes as usize, bytes + output)
+    }
+    pub(crate) async fn pack_buffers(
+        &self,
+        buffered: u64,
+    ) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
+        let units = crate::content::pack::buffer_bytes(buffered, 0, self.compression_workspace)
+            .div_ceil(1024 * 1024);
+        ensure!(
+            units <= u64::from(self.pack_memory_units),
+            "pack buffers exceed available memory budget"
+        );
+        Ok(Arc::new(
+            self.pack_work
+                .clone()
+                .acquire_many_owned(u32::try_from(units)?)
+                .await?,
+        ))
+    }
     pub async fn pack_work(&self, size: usize) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
         let units = (size as u64 * 4 + self.compression_workspace).div_ceil(1024 * 1024);
         ensure!(
@@ -2425,26 +2465,90 @@ impl Storage {
         }
     }
 
-    pub(crate) async fn assemble_pack(
+    pub(crate) fn pack_members<'a>(
+        &'a self,
+        pack: &'a crate::content::pack::Pack,
+        entries: &'a [crate::content::pack::frame::Entry],
+    ) -> impl futures_util::Stream<Item = Result<Vec<u8>>> + 'a {
+        async_stream::try_stream! {
+            let storage=pack.storage_id.context("pack has no store")?;
+            self.ensure_storage_verified(storage).await?;
+            let target=self.store_backend(storage)?;
+            let _read=target.reads.acquire().await?;
+            let mut operation=self.operations[0].begin();
+            let path=self.pack_path_for(storage,pack.address())?;
+            let chunks=pack_writer::members(target.backend.clone(),path,pack,entries,self.backend_gets.clone(),self.diagnostics.clone());
+            futures_util::pin_mut!(chunks);
+            while let Some(result)=chunks.next().await {
+                if result.is_err(){operation.finish(true);}
+                yield result?;
+            }
+            operation.finish(false);
+            let size=u64::try_from(pack.stored_size.context(codec::IntegrityError::Length)?)?;
+            self.operations[0].bytes(size);
+            self.backend_read_bytes.fetch_add(size,Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) async fn store_pack_members(
         &self,
         mut pack: crate::content::pack::Pack,
-        files: Vec<(Chunk, Bytes)>,
-        memory: &Arc<tokio::sync::OwnedSemaphorePermit>,
+        files: impl futures_util::Stream<Item = Result<(Chunk, Bytes)>>,
+        metadata: &dyn crate::model::packing::PackingStore,
     ) -> Result<(
         crate::content::pack::Pack,
-        Vec<u8>,
-        Vec<(crate::model::Id, crate::content::pack::frame::Entry)>,
+        Vec<(Id, crate::content::pack::frame::Entry)>,
     )> {
-        let permit = self.cpu.clone().acquire_owned().await?;
-        let memory = memory.clone();
-        tokio::task::spawn_blocking(move || {
-            let (_permit, _memory) = (permit, memory);
+        use crate::content::pack::frame;
+        let storage = pack.storage_id.context("pack has no store")?;
+        self.ensure_storage_verified(storage).await?;
+        let target = self.store_backend(storage)?;
+        let _write = target.writes.acquire().await?;
+        self.background_writable()?;
+        let mut operation = self.operations[1].begin();
+        self.backend_puts.fetch_add(1, Ordering::Relaxed);
+        let result = async {
             #[cfg(feature = "fault-injection")]
-            crate::faults::blocking("pack-encode");
-            let (file, entries) = crate::content::pack::frame::assemble(&mut pack, &files)?;
-            Ok((pack, file, entries))
-        })
-        .await?
+            crate::faults::point("storage-put-permitted").await;
+            let path = self.pack_path_for(storage, pack.address())?;
+            let upper = pack.raw_size as usize
+                + 8
+                + pack.member_count as usize * crate::content::pack::MAX_MEMBER_TAG;
+            let mut writer = pack_writer::Writer::new(
+                target.backend.clone(),
+                path,
+                target.raw_root.as_ref().and_then(|p| p.parent()),
+                upper,
+            )
+            .await?;
+            {
+                let _space = self.local_space(&target, frame::HEADER.len() as u64)?;
+                writer.put(Bytes::from_static(frame::HEADER)).await?;
+            }
+            let mut builder = frame::Builder::new();
+            let mut entries = Vec::with_capacity(pack.member_count as usize);
+            futures_util::pin_mut!(files);
+            while let Some((chunk, file)) = files.try_next().await? {
+                let (position, body) = builder.append(&chunk, &file)?;
+                let _space = self.local_space(&target, body.len() as u64)?;
+                entries.push((chunk.id, frame::Entry::new(&chunk, position)?));
+                writer.put(file.slice(codec::FILE_HEADER.len()..)).await?;
+            }
+            let (size, digest) = builder.finish(pack.raw_size, pack.member_count)?;
+            pack.stored_size = Some(i64::try_from(size)?);
+            pack.digest = Some(digest.as_bytes().to_vec());
+            metadata.pack_metadata(&pack).await?;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("pack-prepared").await;
+            self.background_writable()?;
+            writer.finish().await?;
+            self.operations[1].bytes(size);
+            self.backend_write_bytes.fetch_add(size, Ordering::Relaxed);
+            Ok((pack, entries))
+        }
+        .await;
+        operation.finish(result.is_err());
+        result
     }
     pub(crate) async fn encoding_nonce(
         &self,
@@ -2791,6 +2895,12 @@ impl Storage {
             crate::model::Error::OperationAborted
         );
         self.check_storage_inner(&target).await?;
+        if let Some(root) = target.raw_root.as_ref().and_then(|path| path.parent()) {
+            target
+                .pack_cleanup
+                .get_or_try_init(|| pack_writer::recover_local(root))
+                .await?;
+        }
         target.identity_ready.store(true, Ordering::Release);
         Ok(target.is_local)
     }
@@ -2872,7 +2982,7 @@ impl Storage {
                 *physical_detail = serde_json::json!({"source":"pack","pack_id":p.id.to_string(),"location_id":p.location_id});
                 p.validate(&self.secrets)
                     .inspect_err(|e| self.diagnostics.content(e))?;
-                let capacity = p.payload_size().context(codec::IntegrityError::Metadata)?;
+                p.payload_size().context(codec::IntegrityError::Metadata)?;
                 ensure!(
                     self.physical.pack_contains(p.id, c.id).await?,
                     codec::IntegrityError::Metadata
@@ -2905,7 +3015,7 @@ impl Storage {
                         u64::try_from(p.stored_size.context(codec::IntegrityError::Metadata)?)?,
                         p.raw_size,
                         p.member_count,
-                        true,
+                        false,
                     )?;
                     for key in entries
                         .iter()
@@ -2931,32 +3041,33 @@ impl Storage {
                         );
                         return Ok(0);
                     }
-                    let memory = self.pack_memory(capacity).await?;
-                    let storage_id = p.storage_id.context(codec::IntegrityError::Metadata)?;
-                    let data = self
-                        .read_path_for(
-                            storage_id,
-                            &self.pack_path_for(storage_id, p.address())?,
-                            capacity + 16,
-                        )
-                        .await?;
-                    let size = data.len() as u64;
-                    let permit = self.cpu.clone().acquire_owned().await?;
-                    let pool = self.compression.clone();
-                    let secrets = self.secrets.clone();
-                    let pack = p.clone();
-                    let diagnostics = self.diagnostics.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let (_permit, _memory) = (permit, memory);
-                        #[cfg(feature = "fault-injection")]
-                        crate::faults::blocking("pack-inspect");
-                        crate::content::pack::decode_index(
-                            &pack, data, &entries, &secrets, &pool, true,
-                        )
-                        .map(drop)
-                        .inspect_err(|e| diagnostics.content(e))
-                    })
-                    .await??;
+                    let memory = self.pack_buffers(0).await?;
+                    let files = self.pack_members(&p, &entries);
+                    futures_util::pin_mut!(files);
+                    for entry in &entries {
+                        let body = files
+                            .try_next()
+                            .await?
+                            .context(codec::IntegrityError::Length)?;
+                        let chunk = entry.chunk(&p)?;
+                        let pool = self.compression.clone();
+                        let keys = self.secrets.clone();
+                        let cpu = self.cpu.clone().acquire_owned().await?;
+                        let held = memory.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let (_cpu, _memory) = (cpu, held);
+                            #[cfg(feature = "fault-injection")]
+                            crate::faults::blocking("pack-inspect");
+                            codec::decode_member(&chunk, body, &keys, 0, &pool, true).map(drop)
+                        })
+                        .await??;
+                    }
+                    ensure!(
+                        files.try_next().await?.is_none(),
+                        codec::IntegrityError::Length
+                    );
+                    let size =
+                        u64::try_from(p.stored_size.context(codec::IntegrityError::Length)?)?;
                     Ok(size)
                 }
                 .await;

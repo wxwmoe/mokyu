@@ -263,15 +263,6 @@ pub(in super::super) fn unused_pending_uploads(storage: Option<Uuid>) -> Scalar<
     sqlx::query_scalar("SELECT u.chunk_id FROM pending_uploads u JOIN chunks c ON c.id=u.chunk_id WHERE ($1::uuid IS NULL OR c.storage_id=$1) AND u.owner_task IS NULL AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=u.chunk_id) ORDER BY u.chunk_id LIMIT 128").bind(storage)
 }
 
-pub(crate) fn same_references(
-    a: Id,
-    b: Id,
-    distance: i64,
-) -> sqlx::query::QueryScalar<'static, sqlx::Postgres, bool, sqlx::postgres::PgArguments> {
-    sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM extents a JOIN chunks c ON c.id=a.chunk_id WHERE a.chunk_id=$1 AND (a.source_offset<>0 OR a.length<>c.raw_size OR NOT EXISTS(SELECT 1 FROM extents b JOIN chunks d ON d.id=b.chunk_id WHERE b.chunk_id=$2 AND b.stream_id=a.stream_id AND b.offset_bytes=a.offset_bytes+$3 AND b.source_offset=0 AND b.length=d.raw_size))) AND NOT EXISTS(SELECT 1 FROM extents b JOIN chunks c ON c.id=b.chunk_id WHERE b.chunk_id=$2 AND (b.source_offset<>0 OR b.length<>c.raw_size OR NOT EXISTS(SELECT 1 FROM extents a JOIN chunks d ON d.id=a.chunk_id WHERE a.chunk_id=$1 AND a.stream_id=b.stream_id AND a.offset_bytes=b.offset_bytes-$3 AND a.source_offset=0 AND a.length=d.raw_size)))")
-            .bind(a).bind(b).bind(distance)
-}
-
 #[async_trait::async_trait]
 impl UploadCacheStore for Backend {
     async fn bypass(&self, stream: Id) -> Result<bool> {

@@ -64,7 +64,7 @@ def main():
             identity = source(key).hex
             return root / 'cache/objects' / identity[-3:][::-1] / identity
 
-        configure(cdc_enabled=False, pack_enabled=False, pack_range_enabled=False,
+        configure(cdc_enabled=False, pack_enabled=False,
                   deduplication_enabled=False, cache_enabled=True, read_integrity='background')
         body = os.urandom(6 * 1024 * 1024 + 17)
         fixture.cold_put('full', body)

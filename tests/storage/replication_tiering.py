@@ -18,7 +18,7 @@ def wait_for(check, message, seconds=240):
 def configure(fixture, raw, pack=False):
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(cdc_enabled=not raw, deduplication_enabled=not raw, pack_enabled=pack,
-                   min_storage_duration='0s', pack_max_size='16MiB', pack_range_enabled=False,
+                   min_storage_duration='0s', pack_max_size='16MiB',
                    compression_enabled=pack, write_processing='inline', migration_concurrency=1)
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
 

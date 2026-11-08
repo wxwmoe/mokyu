@@ -139,11 +139,6 @@ pub(in super::super) fn pending_upload_mappings(
     query
 }
 
-pub(in super::super) fn same_references(a: Id, b: Id, distance: i64) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM extents a JOIN chunks c ON c.id=a.chunk_id WHERE a.chunk_id=? AND (a.source_offset<>0 OR a.length<>c.raw_size OR NOT EXISTS(SELECT 1 FROM extents b JOIN chunks d ON d.id=b.chunk_id WHERE b.chunk_id=? AND b.stream_id=a.stream_id AND b.offset_bytes=a.offset_bytes+? AND b.source_offset=0 AND b.length=d.raw_size))) AND NOT EXISTS(SELECT 1 FROM extents b JOIN chunks c ON c.id=b.chunk_id WHERE b.chunk_id=? AND (b.source_offset<>0 OR b.length<>c.raw_size OR NOT EXISTS(SELECT 1 FROM extents a JOIN chunks d ON d.id=a.chunk_id WHERE a.chunk_id=? AND a.stream_id=b.stream_id AND a.offset_bytes=b.offset_bytes-? AND a.source_offset=0 AND a.length=d.raw_size)))")
-        .bind(a).bind(b).bind(distance).bind(b).bind(a).bind(distance)
-}
-
 pub(in super::super) fn unclaim_uploads(task: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE pending_uploads SET owner_task=NULL WHERE owner_task=?").bind(task)
 }

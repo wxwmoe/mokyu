@@ -108,20 +108,17 @@ pub(in super::super) async fn changed_references(
     );
     chunk_ids(&mut query, chunks);
     query.build().execute(&mut *connection).await?;
+    if added {
+        return Ok(());
+    }
     let mut query = sqlx::QueryBuilder::new(
         "INSERT INTO pack_changes(pack_id,reason) SELECT DISTINCT pack_id,",
     );
     query
-        .push_bind(if added { "reuse" } else { "reclaim" })
+        .push("'reclaim'")
         .push(" FROM chunks WHERE pack_id IS NOT NULL AND id IN ");
     chunk_ids(&mut query, chunks);
-    query.push(" ON CONFLICT(pack_id) DO UPDATE SET generation=pack_changes.generation+1,next_check_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),reason=IIF(").push_bind(added).push(",'reuse',pack_changes.reason)");
-    query.build().execute(&mut *connection).await?;
-    let mut query = sqlx::QueryBuilder::new(
-        "INSERT INTO pack_maintenance(stream_id,reason) SELECT DISTINCT e.stream_id,'repack' FROM extents e JOIN streams s ON s.id=e.stream_id WHERE s.state='ready' AND s.stream_type='object' AND e.chunk_id IN ",
-    );
-    chunk_ids(&mut query, chunks);
-    query.push(" ON CONFLICT(stream_id) DO UPDATE SET generation=pack_maintenance.generation+1,progress_cursor=0,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),next_check_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)");
+    query.push(" ON CONFLICT(pack_id) DO UPDATE SET generation=pack_changes.generation+1,next_check_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),reason='reclaim'");
     query.build().execute(&mut *connection).await?;
     Ok(())
 }

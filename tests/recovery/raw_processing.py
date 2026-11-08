@@ -87,7 +87,7 @@ def main():
 
         configure(write_processing='unknown', succeeds=False)
         configure(write_processing='background')
-        configure(cdc_enabled=False, pack_range_enabled=False, deduplication_enabled=True,
+        configure(cdc_enabled=False, deduplication_enabled=True,
                   write_processing='background')
         publication = fixture.arm('source-before-publish')
         with ThreadPoolExecutor(max_workers=1) as pool:

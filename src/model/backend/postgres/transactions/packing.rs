@@ -30,6 +30,10 @@ pub(in super::super) async fn start_pack(
     automatic: bool,
     node: Option<Uuid>,
 ) -> Result<Value> {
+    ensure!(
+        matches!(policy, "pack" | "reclaim" | "repack") && (!automatic || policy != "repack"),
+        "invalid pack policy"
+    );
     let mut tx = pool.begin().await?;
     queries::lock_pack_policy(format!("mokyu:pack:{policy}"))
         .execute(&mut *tx)
@@ -318,22 +322,12 @@ pub(super) async fn commit_pack_outputs_in(
                 .unwrap_or(0)
         })
         .sum();
-    let upload: bool = queries::pack_is_upload(task.id)
-        .fetch_one(&mut **tx)
-        .await?;
-    let range: bool = queries::pack_is_range(task.id).fetch_one(&mut **tx).await?;
-
     queries::pack_work::publish_outputs(
         tx,
         rows,
         outputs,
         split,
-        range,
-        config::seconds(if range {
-            &settings.range_repack_after
-        } else {
-            &settings.repack_cooldown
-        })? as f64,
+        config::seconds(&settings.repack_cooldown)? as f64,
     )
     .await?;
     let retained: Vec<Id> = outputs
@@ -356,36 +350,11 @@ pub(super) async fn commit_pack_outputs_in(
             .execute(&mut **tx)
             .await?;
     }
-    if split {
-        queries::schedule_repacked_streams(
-            &retained,
-            config::seconds(&settings.repack_cooldown)? as f64,
-        )
-        .execute(&mut **tx)
-        .await?;
-    }
     let old: Vec<Id> = rows.iter().filter_map(|r| r.pack_id).collect();
     queries::retire_replaced_packs(old)
         .execute(&mut **tx)
         .await?;
     queries::record_pack_rewrite(task.id, json!({"before_bytes":before,"output_bytes":after,"temporary_added_bytes":added,"transition_bytes":before+added})).execute(&mut **tx).await?;
-    Ok(())
-}
-
-pub(in super::super) async fn record_range(
-    pool: &PgPool,
-    task: Execution,
-    id: Id,
-    processed: usize,
-    decision: Value,
-) -> Result<()> {
-    let mut tx = pool.begin().await?;
-    lock_execution(&mut tx, task).await?;
-    queries::mark_range_checked(id).execute(&mut *tx).await?;
-    queries::record_range_result(task.id, id.to_string(), processed as i64, decision)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
     Ok(())
 }
 

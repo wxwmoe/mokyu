@@ -18,7 +18,7 @@ def main():
     fixture = Fixture()
     assert fixture.backend
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(cdc_enabled=False, pack_range_enabled=False, upload_cache=False,
+    profile.update(cdc_enabled=False, upload_cache=False,
                    public_cache_validation='background', public_cache_refresh_interval='30s', public_cache_max_age='60s',
                    read_source_validation='background', source_validation_max_age='60s')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
@@ -141,7 +141,7 @@ def main():
     print('PASS body misses confirm current chunk sources through RPC and recover after health restoration', flush=True)
 
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(cdc_enabled=False, pack_range_enabled=False, read_integrity='off',
+    profile.update(cdc_enabled=False, read_integrity='off',
                    read_source_validation='strict', public_cache_validation='strict')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     key = 'unchecked'

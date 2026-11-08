@@ -163,6 +163,19 @@ impl Access {
             .with_nanosecond(0)
             .unwrap()
     }
+    pub fn pack_read(&self, stream: Id, start: i64, end: i64, savings: i64) {
+        let key = (stream, start, end, Self::hour());
+        let mut buffer = self.buffer.lock().unwrap();
+        if buffer.len() >= self.limit && !buffer.pack_reads.contains_key(&key) {
+            buffer.dropped = true;
+            self.gaps.fetch_add(1, Relaxed);
+            self.wake.notify_one();
+            return;
+        }
+        let entry = buffer.pack_reads.entry(key).or_default();
+        entry.requests += 1;
+        entry.saved += savings;
+    }
     pub fn chunk(&self, id: Id, range: bool, bytes: usize, origin: bool) {
         let key = (id, Self::hour());
         let mut buffer = self.buffer.lock().unwrap();

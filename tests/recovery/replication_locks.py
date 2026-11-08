@@ -12,7 +12,7 @@ def run():
     for fixture in (source, target):
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
         profile.update(cdc_enabled=False, deduplication_enabled=False, compression_enabled=False,
-                       pack_enabled=False, pack_range_enabled=False)
+                       pack_enabled=False)
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     data = b'durable body across a rolled-back publication' * 100
     source.put('retry', data)

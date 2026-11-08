@@ -196,7 +196,7 @@ async fn mysql_pack_publication_contract() -> Result<()> {
     finish(&backend, other).await?;
 
     // Unpacking can reuse an existing encoding and prepare only the missing one.
-    let task = execution(&backend, "range").await?;
+    let task = execution(&backend, "unpack").await?;
     rows.truncate(2);
     for row in &mut rows {
         row.pack_id = Some(pack.id);
@@ -291,62 +291,15 @@ async fn mysql_pack_publication_contract() -> Result<()> {
     };
     assert_eq!(current.encoding_id, physical.encoding_id);
     assert_eq!(
-        sqlx::query_scalar::<_, String>("SELECT reason FROM pack_maintenance WHERE stream_id=?")
-            .bind(stream)
-            .fetch_one(db)
-            .await?,
-        "repack"
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pack_maintenance WHERE stream_id=? AND reason='repack'"
+        )
+        .bind(stream)
+        .fetch_one(db)
+        .await?,
+        0
     );
-    assert!(sqlx::query_scalar::<_,bool>("SELECT split_at IS NOT NULL AND range_split_at IS NOT NULL AND repack_after>CURRENT_TIMESTAMP(6) FROM chunks WHERE id=?").bind(physical.id).fetch_one(db).await?);
-    assert!(
-        !queries::pack_exclusive(&[physical.id], 0., 3600., 60.)
-            .build_query_scalar::<bool>()
-            .fetch_one(db)
-            .await?
-    );
-
-    // A range split is eligible again only with full, fresh access coverage and no partial reads.
-    sqlx::query("UPDATE chunks SET repack_after='2000-01-01',reference_changed_at='2000-01-01' WHERE id IN (?,?)").bind(rows[0].chunk.id).bind(rows[1].chunk.id).execute(db).await?;
-    sqlx::query(
-        "UPDATE access_state SET coverage_since='2000-01-01',flushed_at=CURRENT_TIMESTAMP(6)",
-    )
-    .execute(db)
-    .await?;
-    assert!(
-        queries::pack_exclusive(&[physical.id], 0., 3600., 60.)
-            .build_query_scalar::<bool>()
-            .fetch_one(db)
-            .await?
-    );
-    sqlx::query("INSERT INTO chunk_access_windows(chunk_id,window_start,range_read_count) VALUES(?,CURRENT_TIMESTAMP(6),1)").bind(physical.id).execute(db).await?;
-    assert!(
-        !queries::pack_exclusive(&[physical.id], 0., 3600., 60.)
-            .build_query_scalar::<bool>()
-            .fetch_one(db)
-            .await?
-    );
-    sqlx::query("DELETE FROM chunk_access_windows WHERE chunk_id=?")
-        .bind(physical.id)
-        .execute(db)
-        .await?;
-    sqlx::query("UPDATE access_state SET coverage_since=NULL")
-        .execute(db)
-        .await?;
-    assert!(
-        !queries::pack_exclusive(&[physical.id], 0., 3600., 60.)
-            .build_query_scalar::<bool>()
-            .fetch_one(db)
-            .await?
-    );
-    sqlx::query("UPDATE access_state SET coverage_since='2000-01-01',flushed_at='2000-01-01'")
-        .execute(db)
-        .await?;
-    assert!(
-        !queries::pack_exclusive(&[physical.id], 0., 3600., 60.)
-            .build_query_scalar::<bool>()
-            .fetch_one(db)
-            .await?
-    );
+    assert!(sqlx::query_scalar::<_,bool>("SELECT split_at IS NOT NULL AND repack_after>CURRENT_TIMESTAMP(6) FROM chunks WHERE id=?").bind(physical.id).fetch_one(db).await?);
     finish(&backend, task).await?;
 
     // Failure retires only the task's prepared outputs and retains every readable source.

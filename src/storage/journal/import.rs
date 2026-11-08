@@ -436,7 +436,7 @@ impl Import<'_> {
                     .await?;
                     (id, Some(body))
                 } else {
-                    let _memory = self.app.storage.pack_memory(crate::content::codec::MAX).await?;
+                    let _memory = self.app.storage.pack_buffers(0).await?;
                     let span = member
                         .as_ref()
                         .map(|m| m.position.range(m.raw_size, size, pack.member_count))

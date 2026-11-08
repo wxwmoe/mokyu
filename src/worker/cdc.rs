@@ -73,16 +73,11 @@ impl App {
                 } else {
                     MAX
                 };
-                let memory = self
-                    .storage
-                    .pack_work(
-                        maximum
-                            + 12
-                            + (maximum / codec::MIN + 1) * crate::content::pack::MAX_MEMBER_TAG,
-                    )
-                    .await?;
-                let read = self.reads.acquire().await?;
                 let target = self.storage.store_backend(source.storage_id)?;
+                let (maximum, buffered) = self.storage.conversion_buffers(maximum, target.is_local);
+                ensure!(maximum >= MAX, "conversion buffers cannot hold one chunk");
+                let mut memory = self.storage.pack_buffers(buffered).await?;
+                let read = self.reads.acquire().await?;
                 let mut reader = self.storage.raw_reader_uncached(source, false).await?;
                 let mut cache = if matches!(&reader.file, crate::storage::raw::RawFile::Remote(_)) {
                     tokio::time::timeout(
@@ -174,6 +169,8 @@ impl App {
                                     &job,
                                 )
                                 .await?;
+                                drop(memory);
+                                memory = self.storage.pack_buffers(buffered).await?;
                                 bytes = 0;
                             }
                             bytes += length;

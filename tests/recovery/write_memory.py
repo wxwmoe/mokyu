@@ -125,7 +125,7 @@ def main():
         memory_size('8MiB')
         start()
         remote, database = Fixture(), Database()
-        configure(remote, cdc_enabled=False, pack_range_enabled=False, upload_cache=True,
+        configure(remote, cdc_enabled=False, upload_cache=True,
                   cache_enabled=True, write_durability='volatile')
         status = remote.cli('cache', 'status')
         assert status['write_memory'] == {'capacity': 8 * 1024 * 1024, 'used': 0}

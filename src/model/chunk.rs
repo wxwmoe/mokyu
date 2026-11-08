@@ -41,6 +41,12 @@ pub(crate) struct ReadExtent {
 
 impl ReadExtent {
     pub(crate) fn pack_range(&self) -> Option<(Uuid, std::ops::Range<u64>)> {
+        if !self.chunk.location_id.is_nil() {
+            return Some((
+                self.chunk.location_id,
+                0..u64::try_from(self.chunk.stored_size?).ok()?,
+            ));
+        }
         let start = u64::try_from(self.pack_offset?).ok()?;
         let length = u64::try_from(self.pack_length?).ok()?;
         Some((self.demand_pack?, start..start.checked_add(length)?))

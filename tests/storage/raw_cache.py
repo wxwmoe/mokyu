@@ -78,7 +78,7 @@ def main():
         def cache_path(identity):
             return data_path / 'cache' / 'objects' / identity.hex[-3:][::-1] / identity.hex
 
-        configure(cdc_enabled=False, pack_range_enabled=False, deduplication_enabled=False, cache_enabled=True)
+        configure(cdc_enabled=False, deduplication_enabled=False, cache_enabled=True)
         data = bytes(range(256)) * (6 * 1024 * 1024 // 256)
         fixture.cold_put('original', data)
         assert not files(), 'raw PUT unexpectedly filled a read cache'

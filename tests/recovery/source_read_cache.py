@@ -72,7 +72,7 @@ def main():
                 response = fixture.session.put(fixture.web + '/api/v1/storages/' + fixture.name + '/profile',
                     headers=fixture.headers, json={**defaults, **values}, timeout=15)
                 assert response.status_code == 400, response.text
-            policy(cdc_enabled=False, pack_range_enabled=False, public_cache_validation='background',
+            policy(cdc_enabled=False, public_cache_validation='background',
                    public_cache_refresh_interval='30s', public_cache_max_age='30s',
                    read_source_validation='background', source_validation_max_age='30s')
             body = bytes(range(256)) * 128
@@ -181,7 +181,7 @@ def main():
             assert source_stats()['hits'] == previous
             print('PASS chunks cache bounded health snapshots, failed refresh cannot extend expiry, strict mode bypasses cache', flush=True)
             if fixture.backend:
-                policy(pack_enabled=True, pack_interval='24h', pack_repack_interval='24h')
+                policy(pack_enabled=True, pack_interval='24h')
                 packed = os.urandom(9 * 1024 * 1024 + 17)
                 fixture.client.put_object(Bucket=fixture.name, Key='packed', Body=packed, ACL='public-read')
                 fixture.finished(fixture.cli('pack', 'run'))

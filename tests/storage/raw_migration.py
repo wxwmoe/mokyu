@@ -51,7 +51,7 @@ def main():
     print('PASS raw to encrypted chunks copy and encrypted chunks to raw move preserve logical bytes', flush=True)
     target.cli('storage', 'key', 'clear', target.name)
     profile = target.cli('storage', 'profile', 'show', target.name)
-    profile.update(cdc_enabled=False, deduplication_enabled=True, pack_range_enabled=False)
+    profile.update(cdc_enabled=False, deduplication_enabled=True)
     target.cli('storage', 'profile', 'set', target.name, '-', value=profile)
     raw = migrate(source, target, 'original', 'raw-copy', 'copy')
     assert raw['payload_type'] == 'raw' and not raw['items']

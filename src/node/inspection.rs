@@ -126,6 +126,39 @@ impl Reader {
                 );
                 return Ok(());
             }
+            if let PhysicalSource::Pack(pack) = &snapshot.physical {
+                let memory = self.pack_buffer_budget(&backend, 0, 0).await?;
+                let files = crate::storage::pack_writer::members(
+                    backend.store.backend.clone(),
+                    path,
+                    pack,
+                    &members,
+                    self.gets.clone(),
+                    self.diagnostics.clone(),
+                );
+                futures_util::pin_mut!(files);
+                for entry in &members {
+                    let bytes = files
+                        .try_next()
+                        .await?
+                        .context(codec::IntegrityError::Length)?;
+                    let chunk = entry.chunk(pack)?;
+                    let cpu = self.cpu.clone().acquire_owned().await?;
+                    let held = memory.clone();
+                    let keys = keys.clone();
+                    let pool = self.pool.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let (_cpu, _memory) = (cpu, held);
+                        codec::decode_member(&chunk, bytes, keys.as_ref(), 0, &pool, true).map(drop)
+                    })
+                    .await??;
+                }
+                ensure!(
+                    files.try_next().await?.is_none(),
+                    codec::IntegrityError::Length
+                );
+                return Ok(());
+            }
             let units = (bound as u64 * 4 + self.workspace).div_ceil(1024 * 1024);
             ensure!(
                 units <= u64::from(self.pack_units),
@@ -152,10 +185,7 @@ impl Reader {
                                 }),
                         );
                     }
-                    PhysicalSource::Pack(pack) => {
-                        pack::decode_index(&pack, bytes, &members, keys.as_ref(), &pool, true)?;
-                    }
-                    PhysicalSource::Raw(_) => unreachable!(),
+                    PhysicalSource::Pack(_) | PhysicalSource::Raw(_) => unreachable!(),
                 }
                 Ok::<_, anyhow::Error>(fills)
             })

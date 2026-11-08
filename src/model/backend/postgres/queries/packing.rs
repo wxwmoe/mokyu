@@ -142,22 +142,6 @@ pub(in super::super) fn pack_is_upload(task: Uuid) -> Scalar<'static, bool> {
         .bind(task)
 }
 
-pub(in super::super) fn pack_is_range(task: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar(
-        "SELECT task_type='pack' AND detail->>'policy'='range' FROM tasks WHERE id=$1",
-    )
-    .bind(task)
-}
-
-pub(in super::super) fn pack_exclusive<'q>(
-    ids: &'q [Id],
-    cooldown: f64,
-    window: f64,
-    flush: f64,
-) -> Scalar<'q, bool> {
-    sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM chunks c CROSS JOIN mokyu_meta g WHERE c.id=ANY($1) AND ((SELECT count(*) FROM extents WHERE chunk_id=c.id)<>1 OR NOT COALESCE(c.repack_after<=now(),true) OR (c.range_split_at IS NOT NULL AND (g.access_coverage_since IS NULL OR g.access_coverage_since>date_trunc('hour',now()-$3*interval '1 second') OR g.access_flushed_at IS NULL OR g.access_flushed_at<now()-$4*interval '1 second' OR EXISTS(SELECT 1 FROM chunk_access_windows w WHERE w.chunk_id=c.id AND w.range_reads>0 AND w.window_start>=date_trunc('hour',now()-$3*interval '1 second')))) OR (c.split_at IS NOT NULL AND c.reference_changed_at>now()-$2*interval '1 second')))").bind(ids).bind(cooldown).bind(window).bind(flush)
-}
-
 pub(in super::super) fn publish_prepared_pack(pack: Id) -> Statement<'static> {
     sqlx::query("UPDATE packs SET state='ready',unreferenced_at=NULL,stored_at=clock_timestamp() WHERE id=$1 AND state='preparing'").bind(pack)
 }
@@ -178,13 +162,6 @@ pub(in super::super) fn fail_dead_pack_chunks<'q>(ids: &'q [Id]) -> Statement<'q
     sqlx::query("UPDATE chunks SET state='failed',pack_id=NULL,unreferenced_at=COALESCE(unreferenced_at,now()) WHERE id=ANY($1)").bind(ids)
 }
 
-pub(in super::super) fn schedule_repacked_streams<'q>(
-    ids: &'q [Id],
-    cooldown: f64,
-) -> Statement<'q> {
-    sqlx::query("INSERT INTO pack_maintenance(stream_id,reason,next_check_at) SELECT DISTINCT e.stream_id,'repack',now()+$2*interval '1 second' FROM extents e JOIN streams s ON s.id=e.stream_id WHERE e.chunk_id=ANY($1) AND s.state='ready' ON CONFLICT(stream_id) DO UPDATE SET generation=pack_maintenance.generation+1,cursor=0,reason='repack',updated_at=now(),next_check_at=EXCLUDED.next_check_at").bind(ids).bind(cooldown)
-}
-
 pub(in super::super) fn retire_replaced_packs(ids: Vec<Id>) -> Statement<'static> {
     sqlx::query("UPDATE packs p SET state='retired',unreferenced_at=now() WHERE id=ANY($1) AND state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready')").bind(ids)
 }
@@ -199,15 +176,6 @@ pub(in super::super) fn record_pack_rewrite(task: Uuid, detail: Value) -> Statem
 
 pub(in super::super) fn mark_range_checked(pack: Id) -> Statement<'static> {
     sqlx::query("UPDATE packs SET range_checked_at=now() WHERE id=$1").bind(pack)
-}
-
-pub(in super::super) fn record_range_result(
-    task: Uuid,
-    cursor: String,
-    processed: i64,
-    decision: Value,
-) -> Statement<'static> {
-    sqlx::query("UPDATE tasks SET cursor=$2,processed=processed+$3,detail=detail||jsonb_build_object('last_range',$4::jsonb,'evaluated',COALESCE((detail->>'evaluated')::bigint,0)+1),updated_at=now() WHERE id=$1 AND state='running'").bind(task).bind(cursor).bind(processed).bind(decision)
 }
 
 #[async_trait::async_trait]
@@ -473,6 +441,25 @@ impl PackingStore for Backend {
         pack_work::next_pack_stream(&self.pool, after, offset, upper, storage).await
     }
 
+    async fn reclaim_estimate(&self, pack: Id, groups: &[Vec<Mapping>]) -> Result<i64> {
+        let mut db = self.pool.acquire().await?;
+        super::pack_work::reclaim_estimate(&mut db, pack, groups).await
+    }
+    async fn repack_benefit(&self, stream: Id, rows: &[Mapping]) -> Result<i64> {
+        let mut db = self.pool.acquire().await?;
+        super::pack_work::repack_benefit(&mut db, stream, rows).await
+    }
+    async fn next_repack_stream(
+        &self,
+        task: Uuid,
+        after: Id,
+        offset: i64,
+        upper: DateTime<Utc>,
+        storage: Uuid,
+    ) -> Result<Option<Id>> {
+        let mut db = self.pool.acquire().await?;
+        super::pack_work::next_repack_stream(&mut db, task, after, offset, upper, storage).await
+    }
     async fn advance_pack_task(
         &self,
         task: Execution,
@@ -577,72 +564,8 @@ impl PackingStore for Backend {
         )
         .await
     }
-    async fn same_references(&self, a: Id, b: Id, distance: i64) -> Result<bool> {
-        Ok(same_references(a, b, distance)
-            .fetch_one(&self.pool)
-            .await?)
-    }
-    async fn next_range_pack(
-        &self,
-        storage: Uuid,
-        cutoff: DateTime<Utc>,
-        window: f64,
-        minimum: i64,
-    ) -> Result<Option<Id>> {
-        pack_work::next_range_pack(&self.pool, storage, cutoff, window, minimum).await
-    }
-
-    async fn complete_range_task(&self, task: Execution) -> Result<()> {
-        if self.single {
-            return transactions::advance_pack_storage(&self.pool, task, 0).await;
-        }
-        sqlx::query(
-            "UPDATE tasks SET state='completed',updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$2 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp())",
-        )
-        .bind(task.id)
-        .bind(task.token).execute(&self.pool)
-        .await?;
-        Ok(())
-    }
-    async fn range_pack_blocked(&self, pack: Id) -> Result<bool> {
-        pack_work::range_pack_blocked(&self.pool, pack).await
-    }
-
-    async fn pack_range_totals(&self, pack: Id, window: f64) -> Result<(i64, i64, i64)> {
-        pack_work::pack_range_totals(&self.pool, pack, window).await
-    }
-
-    async fn pack_member_hits(&self, pack: Id, window: f64) -> Result<Vec<(Id, i64)>> {
-        pack_work::pack_member_hits(&self.pool, pack, window).await
-    }
-
     async fn pack_dimensions(&self, pack: Id) -> Result<(i64, i64, i32)> {
         pack_work::pack_dimensions(&self.pool, pack).await
-    }
-
-    async fn range_pack_layout(&self, pack: Id) -> Result<Vec<Mapping>> {
-        pack_work::range_pack_layout(&self.pool, pack).await
-    }
-
-    async fn defer_range_repack(
-        &self,
-        stream: Id,
-        window: f64,
-        flush: f64,
-        retry: f64,
-        offset: i64,
-    ) -> Result<()> {
-        pack_work::defer_range_repack(&self.pool, stream, window, flush, retry, offset).await
-    }
-
-    async fn record_range(
-        &self,
-        task: Execution,
-        id: Id,
-        processed: usize,
-        decision: Value,
-    ) -> Result<()> {
-        transactions::record_range(&self.pool, task, id, processed, decision).await
     }
 }
 
@@ -655,7 +578,7 @@ pub(in super::super) fn rewrite_counts<'q>(
     algorithm: &'q str,
     key: Option<Uuid>,
 ) -> Rows<'q, (i64, i64)> {
-    sqlx::query_as("SELECT count(*) FILTER (WHERE c.pack_id IS NULL AND (l.encoding_id IS NULL OR l.encoding_fingerprint IS DISTINCT FROM digest(concat_ws(':',$3::uuid::text,$2::text,l.standalone_compressed::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),'standalone'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND l.standalone_compressed))), count(*) FILTER (WHERE c.pack_id IS NOT NULL AND (p.pack_fingerprint IS DISTINCT FROM digest(concat_ws(':',NULL::text,'none',p.pack_compressed::text,p.member_count::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),coalesce(sp.pack_max_size,''),coalesce(sp.pack_range_enabled::text,''),coalesce(sp.pack_range_min_downloads::text,''),coalesce(sp.pack_range_min_savings_percent::text,''),coalesce(sp.pack_range_min_savings_bytes,''),'pack'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND p.pack_compressed) OR EXISTS (SELECT 1 FROM pack_members m WHERE m.pack_id=p.id AND (m.encryption_algorithm<>$2 OR m.block_key_id IS DISTINCT FROM $3 OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND m.compressed))))) FROM chunks c JOIN storage_profiles sp ON sp.storage_id=c.storage_id LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE c.storage_id=$1 AND c.state='ready'").bind(storage).bind(algorithm).bind(key)
+    sqlx::query_as("SELECT count(*) FILTER (WHERE c.pack_id IS NULL AND (l.encoding_id IS NULL OR l.encoding_fingerprint IS DISTINCT FROM digest(concat_ws(':',$3::uuid::text,$2::text,l.standalone_compressed::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),'standalone'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND l.standalone_compressed))), count(*) FILTER (WHERE c.pack_id IS NOT NULL AND (p.pack_fingerprint IS DISTINCT FROM digest(concat_ws(':',NULL::text,'none',p.pack_compressed::text,p.member_count::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),coalesce(sp.pack_max_size,''),'pack'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND p.pack_compressed) OR EXISTS (SELECT 1 FROM pack_members m WHERE m.pack_id=p.id AND (m.encryption_algorithm<>$2 OR m.block_key_id IS DISTINCT FROM $3 OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND m.compressed))))) FROM chunks c JOIN storage_profiles sp ON sp.storage_id=c.storage_id LEFT JOIN chunk_encodings l ON l.chunk_id=c.id AND l.state='ready' LEFT JOIN packs p ON p.id=c.pack_id AND p.state='ready' WHERE c.storage_id=$1 AND c.state='ready'").bind(storage).bind(algorithm).bind(key)
 }
 
 pub(in super::super) fn lock_rewrite_storage(storage: Uuid) -> Statement<'static> {
@@ -744,7 +667,7 @@ pub(in super::super) async fn rewrite_pack_candidate(
         " AND c.state='ready' AND (p.pack_fingerprint IS DISTINCT FROM digest(concat_ws(':',",
     );
     query.push("NULL::text,");
-    query.push("'none',p.pack_compressed::text,p.member_count::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),coalesce(sp.pack_max_size,''),coalesce(sp.pack_range_enabled::text,''),coalesce(sp.pack_range_min_downloads::text,''),coalesce(sp.pack_range_min_savings_percent::text,''),coalesce(sp.pack_range_min_savings_bytes,''),'pack'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND p.pack_compressed) OR EXISTS (SELECT 1 FROM pack_members m WHERE m.pack_id=p.id AND (m.encryption_algorithm<>");
+    query.push("'none',p.pack_compressed::text,p.member_count::text,coalesce(sp.compression_enabled::text,''),coalesce(sp.compression_strategy,''),coalesce(sp.compression_level::text,''),coalesce(sp.compression_sample_level::text,''),coalesce(sp.compression_min_savings_percent::text,''),coalesce(sp.compression_min_savings_bytes::text,''),coalesce(sp.pack_max_size,''),'pack'),'sha256') OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND p.pack_compressed) OR EXISTS (SELECT 1 FROM pack_members m WHERE m.pack_id=p.id AND (m.encryption_algorithm<>");
     query.push_bind(&job.target_algorithm).push(" OR m.block_key_id IS DISTINCT FROM ").push_bind(job.target_key_id).push(" OR ((NOT sp.compression_enabled OR sp.compression_strategy='never') AND m.compressed)))) AND c.id>");
     query.push_bind(after).push(" AND c.id<=");
     query.push_bind(job.upper_chunk_id).push("");

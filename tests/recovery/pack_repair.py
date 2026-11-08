@@ -10,7 +10,7 @@ def main():
     fixture, database = Fixture(), Database()
     assert fixture.backend, 'requires an isolated S3 pack backend'
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(pack_enabled=True, pack_interval='24h', pack_repack_interval='24h', unreferenced_grace='1s',
+    profile.update(pack_enabled=True, pack_interval='24h', unreferenced_grace='1s',
         min_storage_duration='0s', deleted_chunk_retention='1h')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     raw = os.urandom(9 * 1024 * 1024 + 17)

@@ -1,5 +1,5 @@
 use super::*;
-use crate::content::{compression::Strategy, pack::Pack};
+use crate::content::pack::Pack;
 use sqlx::sqlite::SqlitePoolOptions;
 use std::path::Path as FilePath;
 
@@ -146,7 +146,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
     let capacity = storage.pack_memory.available_permits();
     let work_capacity = storage.pack_work.available_permits();
     let cpu = storage.cpu.available_permits();
-    for operation in ["decode", "inspect", "encode", "chunk-encode"] {
+    for operation in ["decode", "inspect", "chunk-encode"] {
         for outcome in ["cancel", "timeout", "error", "panic", "success"] {
             let mut source = encoded.clone();
             if outcome == "error" {
@@ -167,9 +167,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
             let marker = Barrier::new(&format!("pack-{operation}"), outcome == "panic")?;
             let copy = storage.clone();
             let current = pack.clone();
-            let template = template.clone();
             let inputs = members.clone();
-            let files = files.clone();
             let task = tokio::spawn(async move {
                 tokio::time::timeout(
                     Duration::from_secs(if outcome == "timeout" { 1 } else { 20 }),
@@ -188,38 +186,14 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
                             }
                             _ => {
                                 let memory = copy.pack_work(current.payload_size()?).await?;
-                                if operation == "encode" {
-                                    let mut template = template;
-                                    if outcome == "error" {
-                                        template.raw_size += 1;
-                                    }
-                                    let mut files = files.clone();
-                                    if outcome == "error" {
-                                        files[0].0.stored_size = None;
-                                    }
-                                    let (pack, bytes, index) =
-                                        copy.assemble_pack(template, files, &memory).await?;
-                                    let entries: Vec<_> =
-                                        index.into_iter().map(|(_, e)| e).collect();
-                                    let decoded = crate::content::pack::decode_index(
-                                        &pack,
-                                        bytes,
-                                        &entries,
-                                        &copy.secrets,
-                                        &copy.compression,
-                                        true,
-                                    )?;
-                                    assert_eq!(decoded.chunk(&inputs[0].0)?, inputs[0].1);
-                                } else {
-                                    let (mut chunk, raw) = inputs[0].clone();
-                                    if outcome == "error" {
-                                        chunk.raw_size += 1;
-                                    }
-                                    let (chunk, bytes, _) = copy
-                                        .encode(chunk, raw.to_vec(), false, Some(&memory), None)
-                                        .await?;
-                                    assert_eq!(copy.decode(&chunk, bytes).await?.0, raw);
+                                let (mut chunk, raw) = inputs[0].clone();
+                                if outcome == "error" {
+                                    chunk.raw_size += 1;
                                 }
+                                let (chunk, bytes, _) = copy
+                                    .encode(chunk, raw.to_vec(), false, Some(&memory), None)
+                                    .await?;
+                                assert_eq!(copy.decode(&chunk, bytes).await?.0, raw);
                                 Ok::<_, anyhow::Error>(None)
                             }
                         }
@@ -235,7 +209,7 @@ async fn pack_memory_follows_blocking_work_and_last_reader() -> Result<()> {
                 } else {
                     assert!(task.await?.is_err());
                 }
-                let charged = if matches!(operation, "encode" | "chunk-encode") {
+                let charged = if operation != "decode" {
                     storage.pack_work.available_permits() < work_capacity
                 } else {
                     storage.pack_memory.available_permits() < capacity

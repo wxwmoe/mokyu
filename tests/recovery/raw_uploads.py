@@ -71,7 +71,7 @@ def main():
         def drain():
             wait(lambda: queued() == 0, 'raw uploads did not drain', seconds=150)
 
-        configure(cdc_enabled=False, deduplication_enabled=True, pack_range_enabled=False,
+        configure(cdc_enabled=False, deduplication_enabled=True,
                   write_processing='inline', upload_cache=False)
         data = bytes(range(256)) * (7 * 1024 * 1024 // 256) + b'cached tail'
         fixture.put('canonical', data)

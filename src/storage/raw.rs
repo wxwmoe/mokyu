@@ -1445,6 +1445,27 @@ impl RawFile {
         }))
     }
 
+    pub(crate) fn immutable(
+        backend: Arc<dyn object_store::ObjectStore>,
+        key: ObjectPath,
+        size: u64,
+        gets: Arc<std::sync::atomic::AtomicU64>,
+        diagnostics: Arc<super::diagnostics::Diagnostics>,
+    ) -> Self {
+        Self::Remote(RemoteReader {
+            backend,
+            key,
+            size,
+            etag: None,
+            version: None,
+            offset: 0,
+            body: None,
+            buffered: Bytes::new(),
+            gets,
+            diagnostics,
+        })
+    }
+
     pub(crate) fn remote_source(&self) -> Option<super::raw_segments::Remote> {
         let Self::Remote(remote) = self else {
             return None;

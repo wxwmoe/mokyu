@@ -94,7 +94,7 @@ def main():
         wait(lambda: (signals / (name + '.done')).exists(), 'runner did not ' + name, seconds=60)
 
     try:
-        configure(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False,
+        configure(cdc_enabled=False, deduplication_enabled=False,
                   write_processing='inline', upload_cache=True, upload_cache_size='32MiB',
                   cache_enabled=True, cache_soft_limit='64MiB')
         original = os.urandom(1200 * 1024)

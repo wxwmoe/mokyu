@@ -46,7 +46,7 @@ def main():
         for fixture, age in [(first, '24h'), (second, '7d')]:
             profile = fixture.cli('storage', 'profile', 'show', fixture.name)
             assert profile['multipart_idle_timeout'] == '24h' and profile['min_free_space'] == '1GiB'
-            profile.update(cdc_enabled=False, pack_range_enabled=False, multipart_idle_timeout=age, min_free_space='64MiB')
+            profile.update(cdc_enabled=False, multipart_idle_timeout=age, min_free_space='64MiB')
             fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         before = database.query('SELECT revision,min_free_space,multipart_idle_timeout FROM storage_profiles ORDER BY storage_id')
         stop()

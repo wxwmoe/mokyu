@@ -879,10 +879,17 @@ pub(super) fn stream(
             for (batch_index,batch) in value.segments.chunks(read::LANES).enumerate() {
                 let window=Arc::new(Window::new(batch.iter().filter_map(|segment| {
                     if span.start >= (segment.offset+segment.length) as u64 || span.end <= segment.offset as u64 { return None; }
+                    if let read::Source::Chunk{chunk}=&segment.source {
+                        return Some((chunk.location_id,0..u64::try_from(chunk.stored_size?).ok()?));
+                    }
                     let read::Source::Pack {pack,chunk,offset,..}=&segment.source else {return None;};
                     let size=u64::try_from(chunk.stored_size?).ok()?;
                     Some((pack.location_id,*offset..offset.checked_add(size)?))
                 })));
+                let mut all_origin=true;
+                let batch_start=span.start.max(batch[0].offset as u64);
+                let last=&batch[batch.len()-1];
+                let batch_end=span.end.min((last.offset+last.length) as u64);
                 let mut chunks=std::collections::HashMap::new();
                 let mut tasks=Vec::with_capacity(batch.len());
                 for (offset,segment) in batch.iter().enumerate() {
@@ -1000,6 +1007,10 @@ pub(super) fn stream(
                         if let read::Source::Chunk { chunk } | read::Source::Pack { chunk, .. } | read::Source::Local { chunk, .. } = &segment.source {
                             reads.node.access.chunk(chunk.id, current.reply.http_status == 206, length as usize, false);
                         }
+                    }
+                    all_origin &= origin;
+                    if begin+length as u64==batch_end && all_origin && window.multiple && !reads.reader.background && !current.verify {
+                        reads.node.access.pack_read(value.stream,batch_start as i64,batch_end as i64,window.savings);
                     }
                     yield bytes.slice(source_offset as usize..(source_offset + length) as usize);
                 }

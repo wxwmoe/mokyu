@@ -51,13 +51,10 @@ async fn mysql_pack_task_contract() -> Result<()> {
         .bind(first)
         .execute(db)
         .await?;
-    sqlx::query(
-        "UPDATE storage_profiles SET pack_enabled=(storage_id=?),pack_range_enabled=(storage_id=?)",
-    )
-    .bind(first)
-    .bind(second)
-    .execute(db)
-    .await?;
+    sqlx::query("UPDATE storage_profiles SET pack_enabled=(storage_id=?)")
+        .bind(first)
+        .execute(db)
+        .await?;
     let (a, b) = tokio::join!(
         transactions::start_pack(db, "pack", false),
         transactions::start_pack(db, "pack", false)
@@ -71,22 +68,9 @@ async fn mysql_pack_task_contract() -> Result<()> {
     assert_eq!(detail["execution_mode"], "single");
     assert_eq!(detail["storages"].as_array().unwrap().len(), 1);
     assert_eq!(detail["storage_id"], first.to_string());
-    assert_eq!(
-        queries::pack_storages(Some("range"))
-            .fetch_all(db)
-            .await?
-            .iter()
-            .map(|v| v.0)
-            .collect::<Vec<_>>(),
-        vec![second]
-    );
-    assert_eq!(
-        queries::pack_storages(Some("reuse"))
-            .fetch_all(db)
-            .await?
-            .len(),
-        2
-    );
+    for retired in ["range", "reuse"] {
+        assert!(transactions::start_pack(db, retired, false).await.is_err());
+    }
     sqlx::query("UPDATE tasks SET state='failed' WHERE id=?")
         .bind(pack_task)
         .execute(db)
@@ -194,7 +178,8 @@ async fn mysql_pack_task_contract() -> Result<()> {
         .bind(stream)
         .execute(db)
         .await?;
-    let task = TaskControlStore::enqueue(&backend, "pack", None, json!({"policy":"range"})).await?;
+    let task =
+        TaskControlStore::enqueue(&backend, "pack", None, json!({"policy":"reclaim"})).await?;
     let task = execute(&backend, task).await?;
     let stale = Execution {
         id: task.id,
@@ -259,7 +244,7 @@ async fn mysql_pack_task_contract() -> Result<()> {
     );
     transactions::defer_pack_queue(db, task, stream, 2, later).await?;
     let queued: (i64,String,bool)=sqlx::query_as("SELECT progress_cursor,reason,next_check_at>CURRENT_TIMESTAMP(6) FROM pack_maintenance WHERE stream_id=?").bind(stream).fetch_one(db).await?;
-    assert_eq!(queued, (0, "repack".into(), true));
+    assert_eq!(queued, (0, "pack".into(), true));
     transactions::finish_pack_queue(db, task, stream, 1).await?;
     assert!(
         transactions::finish_pack_queue(db, stale, stream, 2)
@@ -272,29 +257,6 @@ async fn mysql_pack_task_contract() -> Result<()> {
             .fetch_one(db)
             .await?,
         1
-    );
-    assert!(
-        transactions::record_range(db, stale, pack.into(), 2, json!({"decision":"split"}))
-            .await
-            .is_err()
-    );
-    assert!(
-        sqlx::query_scalar::<_, bool>("SELECT range_checked_at IS NULL FROM packs WHERE id=?")
-            .bind(pack)
-            .fetch_one(db)
-            .await?
-    );
-    transactions::record_range(db, task, pack.into(), 2, json!({"decision":"split"})).await?;
-    transactions::record_range(db, task, pack.into(), 1, json!({"decision":"keep"})).await?;
-    let row = backend.raw(task.id).await?.unwrap();
-    assert_eq!(row["processed"], 3);
-    assert_eq!(row["detail"]["evaluated"], 2);
-    assert_eq!(row["detail"]["last_range"], json!({"decision":"keep"}));
-    assert!(
-        sqlx::query_scalar::<_, bool>("SELECT range_checked_at IS NOT NULL FROM packs WHERE id=?")
-            .bind(pack)
-            .fetch_one(db)
-            .await?
     );
     transactions::finish_pack_queue(db, task, stream, 2).await?;
     transactions::finish_pack_change(db, task, pack.into(), 2).await?;

@@ -75,7 +75,8 @@ test('local storage can be disabled and restored, and invalid settings explain t
     await expect(card.getByRole('button', { name: en.disableStore, exact: true })).toBeVisible()
 
     const profile = await (await request.get(path + '/profile')).json()
-    for (const key of ['cache_enabled', 'upload_cache', 'pack_enabled', 'pack_range_enabled']) expect(profile[key]).toBe(false)
+    for (const key of ['cache_enabled', 'upload_cache']) expect(profile[key]).toBe(false)
+    expect(profile.pack_enabled).toBe(true)
     const invalid = await request.put(path + '/profile', { headers, data: { ...profile, cache_enabled: true } })
     expect(invalid.status()).toBe(400)
     expect((await invalid.json()).code).toBe('LocalStorageFeatures')

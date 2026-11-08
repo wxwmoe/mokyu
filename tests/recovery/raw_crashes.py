@@ -43,7 +43,7 @@ def main():
         start()
         fixture = Fixture()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=False, pack_range_enabled=False, upload_retention='1s', unreferenced_grace='1s',
+        profile.update(cdc_enabled=False, upload_retention='1s', unreferenced_grace='1s',
                        min_storage_duration='0s')
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         expected = b'previous durable value'

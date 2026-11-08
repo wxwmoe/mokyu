@@ -556,10 +556,8 @@ pub(in super::super) async fn copied(
         }
     }
     if !rows.is_empty() {
-        super::super::transactions::publish_pack_outputs_in(
-            db, task, &rows, outputs, false, false, 0., "0s",
-        )
-        .await?;
+        super::super::transactions::publish_pack_outputs_in(db, task, &rows, outputs, false, 0.)
+            .await?;
     }
     super::super::transactions::require_sources(db, Some(plan.candidate), &[]).await?;
     base::resize_writing_stream(plan.candidate, plan.prepared.end as i64)

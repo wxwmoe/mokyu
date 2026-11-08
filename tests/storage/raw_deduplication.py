@@ -36,7 +36,7 @@ def main():
     def count(table):
         return database.query('SELECT COUNT(*) AS n FROM ' + table + ' WHERE storage_id=%s', storage)[0]['n']
 
-    configure(cdc_enabled=False, pack_range_enabled=False, deduplication_enabled=False)
+    configure(cdc_enabled=False, deduplication_enabled=False)
     data = bytes(range(256)) * 128
     fixture.put('off-a', data)
     fixture.put('off-b', data)

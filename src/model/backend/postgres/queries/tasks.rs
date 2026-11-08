@@ -67,11 +67,11 @@ pub(in super::super) fn task_record(id: Uuid) -> Rows<'static, TaskRecord> {
 }
 
 pub(in super::super) fn defer_pack_changes(id: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE pack_changes SET next_check_at=(SELECT now()+(left(sp.pack_reuse_interval,-1)::bigint*CASE right(sp.pack_reuse_interval,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*interval '1 second' FROM packs p JOIN storage_profiles sp ON sp.storage_id=p.storage_id WHERE p.id=pack_changes.pack_id) WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=$1)").bind(id)
+    sqlx::query("UPDATE pack_changes SET next_check_at=(SELECT now()+(left(sp.pack_interval,-1)::bigint*CASE right(sp.pack_interval,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*interval '1 second' FROM packs p JOIN storage_profiles sp ON sp.storage_id=p.storage_id WHERE p.id=pack_changes.pack_id) WHERE pack_id IN (SELECT c.pack_id FROM pack_inputs i JOIN chunks c ON c.id=i.chunk_id WHERE i.task_id=$1)").bind(id)
 }
 
 pub(in super::super) fn defer_pack_maintenance(id: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE pack_maintenance SET next_check_at=(SELECT now()+(left(sp.pack_reuse_interval,-1)::bigint*CASE right(sp.pack_reuse_interval,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*interval '1 second' FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE s.id=pack_maintenance.stream_id) WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=$1)").bind(id)
+    sqlx::query("UPDATE pack_maintenance SET next_check_at=(SELECT now()+(left(sp.pack_interval,-1)::bigint*CASE right(sp.pack_interval,1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*interval '1 second' FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE s.id=pack_maintenance.stream_id) WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=$1)").bind(id)
 }
 
 pub(in super::super) fn lock_stale_tasks() -> Scalar<'static, Uuid> {

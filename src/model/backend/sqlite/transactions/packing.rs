@@ -315,7 +315,7 @@ pub(in super::super) async fn start_pack(
     automatic: bool,
 ) -> Result<Value> {
     ensure!(
-        matches!(policy, "pack" | "reuse" | "reclaim" | "repack" | "range"),
+        matches!(policy, "pack" | "reclaim" | "repack") && (!automatic || policy != "repack"),
         "invalid pack policy"
     );
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
@@ -521,28 +521,6 @@ pub(in super::super) async fn advance_pack_queue(
     Ok(())
 }
 
-pub(in super::super) async fn record_range(
-    pool: &SqlitePool,
-    task: Execution,
-    pack: Id,
-    processed: usize,
-    decision: Value,
-) -> Result<()> {
-    let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
-    lock_execution(&mut tx, task).await?;
-    queries::mark_range_checked(pack).execute(&mut *tx).await?;
-    queries::record_range_result(
-        task.id,
-        pack.to_string(),
-        i64::try_from(processed)?,
-        decision,
-    )
-    .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
 pub(in super::super) async fn pin_pack_inputs(
     pool: &SqlitePool,
     task: Execution,
@@ -730,9 +708,7 @@ pub(in super::super) async fn publish_pack_outputs_in(
     rows: &[Mapping],
     outputs: &[PackOutput],
     split: bool,
-    range: bool,
     cooldown: f64,
-    range_after: &str,
 ) -> Result<()> {
     for output in outputs {
         ensure!(
@@ -806,12 +782,7 @@ pub(in super::super) async fn publish_pack_outputs_in(
             &output.chunks,
             output.pack.as_ref().map(|p| p.id),
             split,
-            if range {
-                crate::config::seconds(range_after)? as f64
-            } else {
-                cooldown
-            },
-            range,
+            cooldown,
         )
         .build()
         .execute(&mut **tx)
@@ -889,22 +860,9 @@ pub(in super::super) async fn commit_pack_outputs_in(
         .fetch_one(&mut **tx)
         .await?;
     let after: i64 = outputs.iter().map(PackOutput::size).sum();
-    let (upload, range) = queries::pack_task_policy(task.id)
-        .fetch_one(&mut **tx)
-        .await?;
     let cooldown = crate::config::seconds(&settings.repack_cooldown)? as f64;
 
-    publish_pack_outputs_in(
-        tx,
-        task,
-        rows,
-        outputs,
-        split,
-        range,
-        cooldown,
-        &settings.range_repack_after,
-    )
-    .await?;
+    publish_pack_outputs_in(tx, task, rows, outputs, split, cooldown).await?;
     let dead: Vec<_> = ids
         .iter()
         .filter(|id| retained.binary_search(id).is_err())
@@ -919,12 +877,6 @@ pub(in super::super) async fn commit_pack_outputs_in(
             "pack acquired a new reference; retry maintenance"
         );
         queries::fail_dead_pack_chunks(&dead)
-            .build()
-            .execute(&mut **tx)
-            .await?;
-    }
-    if split {
-        queries::schedule_repacked_streams(&retained, cooldown)
             .build()
             .execute(&mut **tx)
             .await?;

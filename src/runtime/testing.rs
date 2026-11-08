@@ -213,7 +213,6 @@ impl Installation {
             let mut p = app.storage_profiles.load(self.storage).await?;
             p.cdc_enabled = false;
             p.pack_enabled = false;
-            p.pack_range_enabled = false;
             p.compression_enabled = false;
             p.deduplication_enabled = false;
             p.read_integrity = "off".into();

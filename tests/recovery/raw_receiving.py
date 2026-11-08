@@ -60,7 +60,7 @@ def main():
         def sources():
             return database.query('SELECT COUNT(*) AS n FROM raw_sources WHERE storage_id=%s', storage)[0]['n']
 
-        configure(cdc_enabled=False, deduplication_enabled=True, pack_range_enabled=False,
+        configure(cdc_enabled=False, deduplication_enabled=True,
                   write_processing='inline', upload_cache=False)
         data = bytes(range(256)) * (7 * 1024 * 1024 // 256) + b'last bytes'
         fixture.put('canonical', data)

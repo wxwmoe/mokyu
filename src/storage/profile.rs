@@ -71,20 +71,9 @@ pub(crate) struct StorageProfile {
     pub pack_max_size: String,
     pub pack_upload_flush_timeout: String,
     pub pack_interval: String,
-    pub pack_reuse_interval: String,
     pub pack_reclaim_interval: String,
-    pub pack_repack_interval: String,
     pub pack_repack_cooldown: String,
     pub pack_reclaim_min_savings_bytes: String,
-    pub pack_range_enabled: bool,
-    pub pack_range_interval: String,
-    pub pack_range_window: String,
-    pub pack_range_min_downloads: i32,
-    pub pack_range_min_savings_percent: i32,
-    pub pack_range_min_savings_bytes: String,
-    pub pack_range_repack_after: String,
-    pub pack_range_repack_window: String,
-    pub pack_range_repack_retry_interval: String,
     pub pack_concurrency: i32,
     pub integrity_concurrency: i32,
     pub integrity_rps: Option<i64>,
@@ -231,35 +220,15 @@ impl StorageProfile {
         Ok(())
     }
     pub(crate) fn pack_config(&self) -> crate::content::pack::Config {
-        use crate::content::pack::{CompressionStrategy, Config};
+        use crate::content::pack::Config;
         Config {
             enabled: self.pack_enabled,
             max_size: self.pack_max_size.clone(),
             upload_cache_timeout: self.pack_upload_flush_timeout.clone(),
-            compression_strategy: Some(if !self.compression_enabled {
-                CompressionStrategy::Never
-            } else {
-                match self.compression_strategy.as_str() {
-                    "never" => CompressionStrategy::Never,
-                    "sample" => CompressionStrategy::Sample,
-                    _ => CompressionStrategy::Always,
-                }
-            }),
             interval: self.pack_interval.clone(),
-            reuse_interval: self.pack_reuse_interval.clone(),
             reclaim_interval: self.pack_reclaim_interval.clone(),
-            repack_interval: self.pack_repack_interval.clone(),
             repack_cooldown: self.pack_repack_cooldown.clone(),
             reclaim_min_savings_bytes: self.pack_reclaim_min_savings_bytes.clone(),
-            range_optimization: self.pack_range_enabled,
-            range_interval: self.pack_range_interval.clone(),
-            range_window: self.pack_range_window.clone(),
-            range_min_downloads: self.pack_range_min_downloads as u32,
-            range_min_savings_percent: self.pack_range_min_savings_percent as u8,
-            range_min_savings_bytes: self.pack_range_min_savings_bytes.clone(),
-            range_repack_after: self.pack_range_repack_after.clone(),
-            range_repack_window: self.pack_range_repack_window.clone(),
-            range_repack_retry_interval: self.pack_range_repack_retry_interval.clone(),
             ..Default::default()
         }
     }
@@ -267,10 +236,7 @@ impl StorageProfile {
     pub(crate) fn maintenance_interval(&self, policy: &str) -> Result<u64> {
         crate::config::seconds(match policy {
             "pack" => &self.pack_interval,
-            "reuse" => &self.pack_reuse_interval,
             "reclaim" => &self.pack_reclaim_interval,
-            "repack" => &self.pack_repack_interval,
-            "range" => &self.pack_range_interval,
             _ => anyhow::bail!("unknown storage maintenance policy"),
         })
     }
@@ -285,22 +251,12 @@ impl StorageProfile {
             .workspace_bytes()?;
         if self.pack_enabled {
             let maximum = crate::config::bytes(&self.pack_max_size)?;
-            let payload = maximum
-                + 12
-                + crate::content::pack::MAX_MEMBER_TAG as u64
-                    * (maximum / crate::content::codec::MIN as u64 + 1);
             anyhow::ensure!(
-                (payload * 4 + workspace).div_ceil(1024 * 1024)
+                crate::content::pack::buffer_bytes(0, maximum, workspace).div_ceil(1024 * 1024)
                     <= u64::from(budget.pack_memory_units),
                 "storage pack_max_size exceeds node memory budget"
             );
         }
-        anyhow::ensure!(
-            crate::config::seconds(&config.metrics.access_retention)?
-                >= crate::config::seconds(&self.pack_range_window)?
-                    .max(crate::config::seconds(&self.pack_range_repack_window)?),
-            "statistics.access_retention must cover storage Range windows"
-        );
         Ok(())
     }
 
@@ -423,10 +379,7 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         _ => anyhow::bail!("min_free_space is required only for local storage"),
     }
     anyhow::ensure!(
-        profile.cdc_enabled
-            || (!profile.compression_enabled
-                && !profile.pack_enabled
-                && !profile.pack_range_enabled),
+        profile.cdc_enabled || (!profile.compression_enabled && !profile.pack_enabled),
         "raw storage cannot enable compression or packs"
     );
     anyhow::ensure!(
@@ -436,9 +389,7 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
             "write_processing must be inline or background"
         )
     );
-    if storage_type == "local"
-        && (profile.cache_enabled || profile.upload_cache || profile.pack_range_enabled)
-    {
+    if storage_type == "local" && (profile.cache_enabled || profile.upload_cache) {
         return Err(crate::model::Error::LocalStorageFeatures.into());
     }
     anyhow::ensure!(
@@ -460,15 +411,8 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         &profile.multipart_idle_timeout,
         &profile.pack_upload_flush_timeout,
         &profile.pack_interval,
-        &profile.pack_reuse_interval,
         &profile.pack_reclaim_interval,
-        &profile.pack_repack_interval,
         &profile.pack_repack_cooldown,
-        &profile.pack_range_interval,
-        &profile.pack_range_window,
-        &profile.pack_range_repack_after,
-        &profile.pack_range_repack_window,
-        &profile.pack_range_repack_retry_interval,
         &profile.integrity_batch_timeout,
     ] {
         anyhow::ensure!(
@@ -486,7 +430,6 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
     for size in [
         &profile.pack_max_size,
         &profile.pack_reclaim_min_savings_bytes,
-        &profile.pack_range_min_savings_bytes,
     ] {
         bytes(size)?;
     }
@@ -534,11 +477,6 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
     anyhow::ensure!(
         profile.integrity_rps.is_none_or(|v| v > 0) && profile.cache_entries.is_none_or(|v| v > 0),
         "rate and entry limits must be positive"
-    );
-    anyhow::ensure!(
-        profile.pack_range_min_downloads > 0
-            && (1..=100).contains(&profile.pack_range_min_savings_percent),
-        "invalid pack range thresholds"
     );
     Ok(())
 }

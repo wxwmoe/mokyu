@@ -412,13 +412,10 @@ impl Budget {
         let remaining = memory
             .saturating_sub(slots as u64 * slot_bytes)
             .saturating_sub(memory / 4);
-        let pack_required = {
-            let payload = maximum
-                + 12
-                + crate::content::pack::MAX_MEMBER_TAG as u64
-                    * (maximum / crate::content::codec::MIN as u64 + 1);
-            (payload * 4 + workspace).div_ceil(1024 * 1024) * 1024 * 1024
-        };
+        let pack_required = crate::content::pack::buffer_bytes(0, maximum, workspace)
+            .div_ceil(1024 * 1024)
+            * 1024
+            * 1024;
         let write_capacity = remaining
             .saturating_sub(pack_required.saturating_mul(2))
             .min(memory / 4);
@@ -464,16 +461,10 @@ impl Budget {
             * 65536;
         let pack_memory_units =
             ((remaining - response_cache_bytes) / 2 / (1024 * 1024)).min(u32::MAX as u64) as u32;
-        {
-            let payload = maximum
-                + 12
-                + crate::content::pack::MAX_MEMBER_TAG as u64
-                    * (maximum / crate::content::codec::MIN as u64 + 1);
-            ensure!(
-                (payload * 4 + workspace).div_ceil(1024 * 1024) <= u64::from(pack_memory_units),
-                "pack.max_size exceeds effective memory; lower the pack size or increase the container memory limit"
-            );
-        }
+        ensure!(
+            pack_required.div_ceil(1024 * 1024) <= u64::from(pack_memory_units),
+            "pack buffers exceed effective memory"
+        );
         let cpu_jobs = instance.cpu_jobs.unwrap_or(cpus.min(slots));
         let uploads = cpus.min(slots / 2).max(1);
         let reads = (cpus * 2).min(slots).max(1);

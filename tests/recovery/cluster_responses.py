@@ -16,7 +16,7 @@ def main():
     fixture = Fixture()
     assert fixture.backend, 'cluster fixture requires an isolated S3 backend'
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(cdc_enabled=False, pack_range_enabled=False)
+    profile.update(cdc_enabled=False)
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     domain = fixture.name + '.example.test'
     fixture.cli('domain', 'set', domain, fixture.name)

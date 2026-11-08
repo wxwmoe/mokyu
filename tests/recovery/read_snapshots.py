@@ -66,7 +66,7 @@ def main():
         process = subprocess.Popen(command, stdout=log, stderr=log, env=environment)
         wait(ready, 'service did not apply its S3 domain', seconds=60)
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=False, pack_range_enabled=False, deduplication_enabled=False,
+        profile.update(cdc_enabled=False, deduplication_enabled=False,
                        unreferenced_grace='1s', min_storage_duration='0s', upload_retention='1s')
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         fixture.cli('domain', 'set', 'public.example.test', fixture.name)

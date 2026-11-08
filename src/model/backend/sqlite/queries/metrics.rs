@@ -440,6 +440,7 @@ pub(in super::super) async fn expire_access(
     retention: f64,
     batch: i64,
 ) -> Result<()> {
+    sqlx::query("DELETE FROM pack_read_shapes WHERE (stream_id,start_bytes,end_bytes,observed_hour) IN (SELECT stream_id,start_bytes,end_bytes,observed_hour FROM pack_read_shapes WHERE observed_hour<unixepoch()-? ORDER BY observed_hour LIMIT ?)").bind(retention).bind(batch).execute(&mut *connection).await?;
     for sql in [
         super::super::queries::tier::EXPIRE,
         super::super::queries::tier::EXPIRE_TOTALS,

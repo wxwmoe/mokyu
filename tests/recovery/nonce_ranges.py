@@ -159,7 +159,7 @@ def main():
         before = database.query("SELECT block_key_id,type_tag,reserved_id FROM nonce_counters ORDER BY block_key_id,type_tag")
         fixture.cli("storage", "key", "clear", fixture.name)
         fixture.put("unencrypted", os.urandom(8192))
-        configure(cdc_enabled=False, pack_range_enabled=False)
+        configure(cdc_enabled=False)
         fixture.put("raw", os.urandom(8192))
         assert database.query("SELECT block_key_id,type_tag,reserved_id FROM nonce_counters ORDER BY block_key_id,type_tag") == before
         for row in database.query("SELECT nonce,nonce_id FROM chunk_encodings WHERE storage_id=%s AND encryption_algorithm='none'", storage):

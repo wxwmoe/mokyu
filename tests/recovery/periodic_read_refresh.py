@@ -17,7 +17,7 @@ def main():
     faults = Path(os.environ['MOKYU_TEST_PEER_FAULT_DIR'])
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(cdc_enabled=False, deduplication_enabled=False, cache_enabled=True,
-                   pack_enabled=False, pack_range_enabled=False, compression_enabled=False,
+                   pack_enabled=False, compression_enabled=False,
                    public_cache_validation='background', public_cache_refresh_interval='5s',
                    public_cache_max_age='30s', read_source_validation='background',
                    source_validation_max_age='60s')

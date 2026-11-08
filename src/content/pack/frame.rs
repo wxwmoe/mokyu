@@ -354,6 +354,37 @@ pub(crate) fn rewrite_entries(
     Ok(output)
 }
 
+pub(crate) fn recode_member(
+    source: &Pack,
+    target: &Pack,
+    before: &Entry,
+    after: &Entry,
+    encoded: Vec<u8>,
+    keys: &dyn codec::KeySource,
+    pool: &crate::content::compression::Pool,
+) -> Result<(Chunk, bytes::Bytes)> {
+    ensure!(
+        before.uuid == after.uuid
+            && before.hash == after.hash
+            && before.raw_size == after.raw_size
+            && (!after.position.encoding.compressed || before.position.encoding.compressed)
+            && before.position.encoding.location_id != after.position.encoding.location_id,
+        codec::IntegrityError::Metadata
+    );
+    let chunk = before.chunk(source)?;
+    let body = codec::open_body(&chunk, encoded, keys)?;
+    let body = bytes::Bytes::from(body);
+    let raw = codec::decode_cache_read(&chunk, body.clone(), chunk.compressed, pool, true)?;
+    let payload = if after.position.encoding.compressed {
+        body
+    } else {
+        raw
+    };
+    let target = after.chunk(target)?;
+    let file = codec::seal(&target, payload.to_vec(), keys)?;
+    Ok((target, bytes::Bytes::from(file)))
+}
+
 pub(crate) fn recode(
     source: &Pack,
     target: &mut Pack,
@@ -387,36 +418,20 @@ pub(crate) fn recode(
     let mut output = Vec::with_capacity(usize::try_from(size)?);
     output.extend_from_slice(HEADER);
     for (before, after) in old.iter().zip(new) {
-        ensure!(
-            before.uuid == after.uuid
-                && before.hash == after.hash
-                && before.raw_size == after.raw_size
-                && (!after.position.encoding.compressed || before.position.encoding.compressed)
-                && before.position.encoding.location_id != after.position.encoding.location_id,
-            codec::IntegrityError::Metadata
-        );
         let range =
             before
                 .position
                 .range(before.raw_size, file.len() as u64, source.member_count)?;
-        let chunk = before.chunk(source)?;
-        let body = codec::open_body(
-            &chunk,
+        let (_, file) = recode_member(
+            source,
+            target,
+            before,
+            after,
             file[range.start as usize..range.end as usize].to_vec(),
             keys,
+            pool,
         )?;
-        let body = bytes::Bytes::from(body);
-        let raw = codec::decode_cache_read(&chunk, body.clone(), chunk.compressed, pool, true)?;
-        let payload = if after.position.encoding.compressed {
-            body
-        } else {
-            raw
-        };
-        output.extend_from_slice(&codec::seal_body(
-            &after.chunk(target)?,
-            payload.to_vec(),
-            keys,
-        )?);
+        output.extend_from_slice(&file[codec::FILE_HEADER.len()..]);
     }
     ensure!(output.len() as u64 == size, codec::IntegrityError::Length);
     target.stored_size = Some(i64::try_from(size)?);

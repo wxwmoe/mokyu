@@ -53,7 +53,7 @@ def main():
         fixture = Fixture()
         database = Database()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False,
+        profile.update(cdc_enabled=False, deduplication_enabled=False,
                        upload_retention='1s', deleted_chunk_retention='1s', unreferenced_grace='1s', min_storage_duration='0s')
         profile.update({'upload_cache': True, 'cache_enabled': True} if arguments.s3_cache else {'min_free_space': '16MiB'})
         profile = fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)

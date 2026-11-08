@@ -49,7 +49,6 @@ pub(in super::super) async fn ready_stream_queues(
     stream: Id,
 ) -> Result<()> {
     sqlx::query("INSERT INTO pack_maintenance(stream_id) SELECT id FROM streams WHERE id=? AND state='ready' AND stream_type='object' AND EXISTS(SELECT 1 FROM extents WHERE stream_id=? AND chunk_id IS NOT NULL LIMIT 1 OFFSET 1) ON CONFLICT(stream_id) DO UPDATE SET generation=pack_maintenance.generation+1,progress_cursor=0,reason='pack',updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),next_check_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)").bind(stream).bind(stream).execute(&mut *connection).await?;
-    sqlx::query("INSERT INTO pack_changes(pack_id) SELECT DISTINCT c.pack_id FROM extents e JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=? AND c.pack_id IS NOT NULL ON CONFLICT(pack_id) DO UPDATE SET generation=pack_changes.generation+1,next_check_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),reason='reuse'").bind(stream).execute(connection).await?;
     Ok(())
 }
 

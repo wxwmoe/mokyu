@@ -490,6 +490,11 @@ impl App {
                 if let Some(capture)=&capture { let mut mapping=capture.lock().unwrap(); for row in &rows { mapping.record(row); } }
                 let mut context=crate::storage::ReadContext::user(range,app.read_checks.clone(),capture.clone());
                 context.ranges=crate::storage::pack_ranges::Window::new(rows.iter().filter_map(|row| row.pack_range()));
+                let first_position=position;
+                let cutoff=rows.last().map(|r| r.extent.offset_bytes+i64::from(r.extent.length)).unwrap_or(end).min(end);
+                let savings=context.ranges.savings;
+                let multiple=context.ranges.multiple;
+                let mut all_origin=true;
                 let context=Arc::new(context);
                 let mut loaded=futures_util::stream::iter(rows.into_iter().enumerate().map(|(index,row)| {
                     let app=app.clone();
@@ -514,6 +519,10 @@ impl App {
                     if position==end && let Some(capture)=&capture { capture.lock().unwrap().finish_source(); }
                     if let Some(id)=row.chunk_id {app.storage.access.chunk(id,range,count,false);}
                     if let Some(source)=source { app.storage.access.demand(&mut demand,source,count,origin); }
+                    all_origin &= origin;
+                    if position==cutoff && multiple && all_origin {
+                        app.storage.access.pack_read(stream.id,first_position,position,savings);
+                    }
                     yield data.slice(skip..skip+count);
                     if position==end {break;}
                 }

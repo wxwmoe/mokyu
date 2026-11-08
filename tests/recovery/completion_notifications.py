@@ -43,7 +43,7 @@ def main():
         for mode in ('notice', 'early', 'missing', 'superseded', 'chunks'):
             profile = fixture.cli('storage', 'profile', 'show', fixture.name)
             profile.update(cdc_enabled=mode == 'chunks', deduplication_enabled=False,
-                           upload_cache=False, pack_enabled=False, pack_range_enabled=False,
+                           upload_cache=False, pack_enabled=False,
                            compression_enabled=False)
             fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
             key = 'complete-' + mode

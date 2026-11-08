@@ -55,7 +55,8 @@ try:
     assert initial['profile_revision'] == 1 and initial['read_concurrency'] == 2
     assert not {'secret_key', 'access_key', 'identity_marker'} & initial.keys()
     plain = profile()
-    assert not any(plain[field] for field in ['cache_enabled', 'upload_cache', 'pack_enabled', 'pack_range_enabled'])
+    assert not any(plain[field] for field in ['cache_enabled', 'upload_cache'])
+    assert plain['pack_enabled']
     payload = {**plain, 'read_concurrency': 3}
     with ThreadPoolExecutor(max_workers=2) as pool:
         replies = list(pool.map(lambda _: admin.put(url + '/api/v1/storages/' + name + '/profile',

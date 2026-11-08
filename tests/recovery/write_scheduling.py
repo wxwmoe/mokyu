@@ -73,7 +73,7 @@ def main():
             remote.cli('storage', 'profile', 'set', remote.name, '-', value=profile, succeeds=False)
             invalid = remote.session.put(remote.web + '/api/v1/storages/' + remote.name + '/profile', headers=remote.headers, json=profile, timeout=15)
             assert invalid.status_code == 400 and invalid.headers.get('x-request-id'), invalid.text
-        configure(remote, cdc_enabled=False, pack_range_enabled=False, upload_cache=True, cache_enabled=True,
+        configure(remote, cdc_enabled=False, upload_cache=True, cache_enabled=True,
                   write_flush_interval='60s', write_backlog_max_age='5m', background_scheduling='foreground')
         profile = remote.cli('storage', 'profile', 'show', remote.name)
         assert profile['write_flush_interval'] == '60s' and profile['write_backlog_max_age'] == '300s'
@@ -98,7 +98,7 @@ def main():
         time.sleep(2)
         rejected(lambda: remote.put('blocked', data))
         other = Fixture()
-        configure(other, cdc_enabled=False, pack_range_enabled=False, upload_cache=True, cache_enabled=True)
+        configure(other, cdc_enabled=False, upload_cache=True, cache_enabled=True)
         other.put('independent', data)
         other.read('independent', data)
         configure(remote, upload_cache_overflow='fallback')
@@ -110,7 +110,7 @@ def main():
         print('PASS overdue reject/fallback and independent storage admission', flush=True)
 
         pressure = Fixture()
-        configure(pressure, cdc_enabled=False, pack_range_enabled=False, upload_cache=True, cache_enabled=True, write_flush_interval='60s', write_backlog_max_age='5m', upload_cache_overflow='reject')
+        configure(pressure, cdc_enabled=False, upload_cache=True, cache_enabled=True, write_flush_interval='60s', write_backlog_max_age='5m', upload_cache_overflow='reject')
         pressure.put('pressure', data)
         assert raw(pressure, 'pressure')['pending_upload']
         configure(pressure, upload_cache_size='1B')
@@ -135,13 +135,13 @@ def main():
             local = Fixture()
         finally:
             os.environ['MOKYU_TEST_BACKEND'] = backend
-        configure(local, cdc_enabled=False, pack_range_enabled=False, write_durability='buffered', write_flush_interval='4s')
+        configure(local, cdc_enabled=False, write_durability='buffered', write_flush_interval='4s')
         local.put('buffered', data)
         assert raw(local, 'buffered')['durability'] == 'buffered'
         local.read('buffered', data)
         wait(lambda: raw(local, 'buffered')['durability'] == 'durable', 'local sync did not run after delay', seconds=15)
         skewed = Fixture()
-        configure(skewed, cdc_enabled=False, pack_range_enabled=False, upload_cache=True, cache_enabled=True)
+        configure(skewed, cdc_enabled=False, upload_cache=True, cache_enabled=True)
         backend = os.environ.pop('MOKYU_TEST_BACKEND')
         try:
             local_chunks = Fixture()

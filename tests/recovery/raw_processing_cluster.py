@@ -27,7 +27,7 @@ def main():
         config=fixture.client.meta.config)
     bucket = uuid.UUID(fixture.bucket_id)
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(cdc_enabled=False, deduplication_enabled=True, pack_range_enabled=False, write_processing='background')
+    profile.update(cdc_enabled=False, deduplication_enabled=True, write_processing='background')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
 
     def arm(name):

@@ -70,7 +70,7 @@ def main():
                 WHERE o.bucket_id=%s AND o.object_key=%s''', bucket, key(name))
             return identity(row['file_uuid'])
 
-        configure(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False,
+        configure(cdc_enabled=False, deduplication_enabled=False,
                   upload_cache=True, cache_enabled=True, write_processing='inline')
         data = os.urandom(256 * 1024 + 11)
         marker = fixture.arm('raw-upload-before-process')

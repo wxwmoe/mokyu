@@ -13,7 +13,7 @@ def main():
     fixture = Fixture()
     endpoints = [os.environ['MOKYU_TEST_ENDPOINT'], os.environ['MOKYU_TEST_PEER_ENDPOINT']]
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(cdc_enabled=False, pack_range_enabled=False, public_cache_validation='background',
+    profile.update(cdc_enabled=False, public_cache_validation='background',
                    cors_cache_enabled=False, public_cache_refresh_interval='1s', public_cache_max_age='3s')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     rules = [dict(origins=['https://old.test'], methods=['GET', 'HEAD'])]

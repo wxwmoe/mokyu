@@ -50,8 +50,7 @@ const profileFields: ProfileField[] = [
   { key: 'min_storage_duration', valueType: 'text' }, { key: 'unreferenced_grace', valueType: 'text' }, { key: 'deleted_chunk_retention', valueType: 'text' }, { key: 'upload_retention', valueType: 'text' }, { key: 'multipart_idle_timeout', valueType: 'text' }, { key: 'min_free_space', valueType: 'text' },
   { key: 'cache_enabled', valueType: 'boolean' }, { key: 'cache_soft_limit', valueType: 'text' }, { key: 'cache_entries', valueType: 'number' }, { key: 'upload_cache', valueType: 'boolean' }, { key: 'upload_cache_size', valueType: 'text' }, { key: 'upload_cache_overflow', valueType: 'text' },
   { key: 'compression_enabled', valueType: 'boolean' }, { key: 'compression_strategy', valueType: 'text' }, { key: 'compression_level', valueType: 'number' }, { key: 'compression_sample_level', valueType: 'number' }, { key: 'compression_min_savings_percent', valueType: 'number' }, { key: 'compression_min_savings_bytes', valueType: 'number' },
-  { key: 'pack_enabled', valueType: 'boolean' }, { key: 'pack_max_size', valueType: 'text' }, { key: 'pack_upload_flush_timeout', valueType: 'text' }, { key: 'pack_interval', valueType: 'text' }, { key: 'pack_reuse_interval', valueType: 'text' }, { key: 'pack_reclaim_interval', valueType: 'text' }, { key: 'pack_repack_interval', valueType: 'text' }, { key: 'pack_repack_cooldown', valueType: 'text' }, { key: 'pack_reclaim_min_savings_bytes', valueType: 'text' },
-  { key: 'pack_range_enabled', valueType: 'boolean' }, { key: 'pack_range_interval', valueType: 'text' }, { key: 'pack_range_window', valueType: 'text' }, { key: 'pack_range_min_downloads', valueType: 'number' }, { key: 'pack_range_min_savings_percent', valueType: 'number' }, { key: 'pack_range_min_savings_bytes', valueType: 'text' }, { key: 'pack_range_repack_after', valueType: 'text' }, { key: 'pack_range_repack_window', valueType: 'text' }, { key: 'pack_range_repack_retry_interval', valueType: 'text' },
+  { key: 'pack_enabled', valueType: 'boolean' }, { key: 'pack_max_size', valueType: 'text' }, { key: 'pack_upload_flush_timeout', valueType: 'text' }, { key: 'pack_interval', valueType: 'text' }, { key: 'pack_reclaim_interval', valueType: 'text' }, { key: 'pack_repack_cooldown', valueType: 'text' }, { key: 'pack_reclaim_min_savings_bytes', valueType: 'text' },
   { key: 'pack_concurrency', valueType: 'number' }, { key: 'integrity_concurrency', valueType: 'number' }, { key: 'integrity_rps', valueType: 'number' }, { key: 'integrity_bandwidth', valueType: 'text' }, { key: 'integrity_batch_timeout', valueType: 'text' },
   { key: 'read_concurrency', valueType: 'number' }, { key: 'upload_concurrency', valueType: 'number' }, { key: 'control_concurrency', valueType: 'number' }, { key: 'pack_byte_budget', valueType: 'text' }, { key: 'integrity_byte_budget', valueType: 'text' }, { key: 'maintenance_concurrency', valueType: 'number' }, { key: 'maintenance_byte_budget', valueType: 'text' }, { key: 'migration_concurrency', valueType: 'number' }, { key: 'migration_byte_budget', valueType: 'text' },
 ]
@@ -111,10 +110,8 @@ function profileDefaults(type: string): Record<ProfileKey, string | number | boo
     cache_soft_limit: null, cache_entries: null, upload_cache: s3, upload_cache_size: null, upload_cache_overflow: 'fallback', compression_enabled: s3,
     compression_strategy: 'always', compression_level: 6, compression_sample_level: 3, compression_min_savings_percent: 2,
     compression_min_savings_bytes: 256, pack_enabled: true, pack_max_size: '32MiB', pack_upload_flush_timeout: '60s', pack_interval: '1h',
-    pack_reuse_interval: '5m', pack_reclaim_interval: '30m', pack_repack_interval: '24h', pack_repack_cooldown: '1h',
-    pack_reclaim_min_savings_bytes: '4MiB', pack_range_enabled: s3, pack_range_interval: '15m', pack_range_window: '24h',
-    pack_range_min_downloads: 8, pack_range_min_savings_percent: 50, pack_range_min_savings_bytes: '64MiB', pack_range_repack_after: '30d',
-    pack_range_repack_window: '7d', pack_range_repack_retry_interval: '7d', pack_concurrency: 1, integrity_concurrency: 1,
+    pack_reclaim_interval: '30m', pack_repack_cooldown: '1h',
+    pack_reclaim_min_savings_bytes: '4MiB', pack_concurrency: 1, integrity_concurrency: 1,
     integrity_rps: null, integrity_bandwidth: null, integrity_batch_timeout: '30s', read_concurrency: null, upload_concurrency: null,
     control_concurrency: null, pack_byte_budget: null, integrity_byte_budget: null, maintenance_concurrency: null,
     maintenance_byte_budget: null, migration_concurrency: null, migration_byte_budget: null,
@@ -151,7 +148,7 @@ watch(() => draft.type, value => {
   else {
     profileDraft.value.min_free_space = value === 'local' ? profileDraft.value.min_free_space || '1GiB' : null
     if (value !== 'local' && profileDraft.value.file_delivery === 'x_sendfile') setDelivery('application')
-    if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false, pack_range_enabled: false })
+    if (value === 'local') Object.assign(profileDraft.value, { cache_enabled: false, upload_cache: false })
     if (!canBufferInMemory.value && profileDraft.value.write_durability === 'volatile') profileDraft.value.write_durability = 'durable'
   }
 })
@@ -184,13 +181,13 @@ function setProfileBoolean(key: ProfileKey, value: boolean) {
   if (!canBufferInMemory.value && profileDraft.value.write_durability === 'volatile') profileDraft.value.write_durability = 'durable'
   if (key === 'cdc_enabled' && value) setDelivery('application')
   if (key === 'cdc_enabled' && !value) {
-    Object.assign(profileDraft.value, { compression_enabled: false, pack_enabled: false, pack_range_enabled: false })
+    Object.assign(profileDraft.value, { compression_enabled: false, pack_enabled: false })
     draft.block_key_id = ''
   }
 }
 function profileDisabled(key: string) {
   return (key === 'http_compression_enabled' && profileDraft.value?.file_delivery !== 'application')
-    || (draft.type === 'local' && (key.startsWith('cache_') || key.startsWith('pack_range_') || key.startsWith('upload_cache')))
+    || (draft.type === 'local' && (key.startsWith('cache_') || key.startsWith('upload_cache')))
     || (key === 'upload_cache_overflow' && !profileDraft.value?.upload_cache)
     || (profileDraft.value?.cdc_enabled === false && (key.startsWith('compression_') || key.startsWith('pack_')))
 }
@@ -287,7 +284,7 @@ async function toggle(row: Storage) {
                 <label v-else-if="['public_cache_validation', 'read_source_validation'].includes(field.key)"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft[field.key])" :options="['strict', 'background'].map(value => ({ value, label: t('storeReadValidation_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft[field.key] = $event" /><small v-if="field.key === 'read_source_validation'" class="field-help">{{ t(single ? 'profileHelp_read_source_validationSingle' : 'profileHelp_read_source_validation') }}</small></label>
                 <label v-else-if="field.key === 'background_scheduling'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.background_scheduling)" :options="['balanced', 'foreground'].map(value => ({ value, label: t('storeScheduling_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" aria-describedby="storage-scheduling-hint" @update:model-value="profileDraft.background_scheduling = $event" /><small id="storage-scheduling-hint" class="field-help">{{ t('storeSchedulingHint') }}</small></label>
                 <label v-else-if="field.key === 'compression_min_savings_bytes'"><span>{{ profileLabel(field.key) }}</span><UiByteInput :model-value="profileDraft.compression_min_savings_bytes as number | null" :aria-label="profileLabel(field.key)" aria-describedby="storage-compression-savings-hint" :disabled="busy || profileDisabled(field.key)" required @update:model-value="profileDraft.compression_min_savings_bytes = $event" /><small id="storage-compression-savings-hint" class="field-help">{{ t('byteSizeHint') }}</small></label>
-                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><span :class="{ 'input-unit': profileUnit(field.key) }"><input :aria-label="profileLabel(field.key)" :aria-describedby="profileUnit(field.key) ? 'storage-unit-' + field.key : ['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key) ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :min="field.key.endsWith('_concurrency') || field.key === 'pack_range_min_savings_percent' ? 1 : field.key === 'compression_min_savings_percent' ? 0 : undefined" :max="field.key.endsWith('_percent') ? 100 : undefined" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><span v-if="profileUnit(field.key)" :id="'storage-unit-' + field.key">{{ profileUnit(field.key) }}</span></span><small v-if="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key)" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
+                <label v-else><span class="profile-field-label">{{ profileLabel(field.key) }}<small v-if="profileDisabled(field.key)" class="profile-option-note">{{ t('storeOptionUnused') }}</small></span><span :class="{ 'input-unit': profileUnit(field.key) }"><input :aria-label="profileLabel(field.key)" :aria-describedby="profileUnit(field.key) ? 'storage-unit-' + field.key : ['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key) ? 'storage-profile-' + field.key + '-hint' : undefined" :type="field.valueType === 'number' ? 'number' : 'text'" :min="field.key.endsWith('_concurrency') ? 1 : field.key === 'compression_min_savings_percent' ? 0 : undefined" :max="field.key.endsWith('_percent') ? 100 : undefined" :value="profileDraft[field.key] ?? ''" :disabled="busy || profileDisabled(field.key)" @input="profileInput(field, $event)"><span v-if="profileUnit(field.key)" :id="'storage-unit-' + field.key">{{ profileUnit(field.key) }}</span></span><small v-if="['multipart_idle_timeout', 'min_free_space', 'write_flush_interval', 'write_backlog_max_age'].includes(field.key)" :id="'storage-profile-' + field.key + '-hint'" class="field-help">{{ t('profileHelp_' + field.key) }}</small></label>
               </div>
             </div>
           </details>

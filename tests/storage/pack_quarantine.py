@@ -10,7 +10,7 @@ def main():
     fixture = Fixture()
     assert fixture.backend, 'pack fixture requires MOKYU_TEST_BACKEND'
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(pack_enabled=True, pack_interval='24h', pack_repack_interval='24h')
+    profile.update(pack_enabled=True, pack_interval='24h')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     raw = os.urandom(9 * 1024 * 1024 + 17)
     fixture.put('original', raw)

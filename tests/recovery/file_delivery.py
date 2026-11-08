@@ -206,7 +206,7 @@ def main():
                 return fixture.client.put_object(Bucket=fixture.name, Key=key, Body=payload if body is None else body,
                     ACL='public-read', **metadata)
 
-            policy(cdc_enabled=False, pack_range_enabled=False, unreferenced_grace='1s', deleted_chunk_retention='1s')
+            policy(cdc_enabled=False, unreferenced_grace='1s', deleted_chunk_retention='1s')
             payload = os.urandom(65536)
             put()
             for _ in range(3):
@@ -252,7 +252,7 @@ def main():
                 os.environ.pop('MOKYU_TEST_BACKEND')
                 profile = remote.cli('storage', 'profile', 'show', remote.name)
                 reply = remote.session.put(remote.web + '/api/v1/storages/' + remote.name + '/profile', headers=remote.headers,
-                    json={**profile, 'cdc_enabled': False, 'pack_enabled': False, 'pack_range_enabled': False, 'compression_enabled': False, 'http_compression_enabled': False, 'file_delivery': 'x_sendfile', 'file_delivery_prefix': '/srv/raw/'}, timeout=15)
+                    json={**profile, 'cdc_enabled': False, 'pack_enabled': False, 'compression_enabled': False, 'http_compression_enabled': False, 'file_delivery': 'x_sendfile', 'file_delivery_prefix': '/srv/raw/'}, timeout=15)
                 assert reply.status_code == 400, reply.text
 
             if run := os.environ.get('MOKYU_TEST_PROXY_RUN'):

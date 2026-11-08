@@ -61,7 +61,7 @@ def main():
         return database.query('SELECT count(*) AS n FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE r.storage_id=%s AND u.node_id=%s', storage, nodes[node])[0]['n']
 
     try:
-        configure(cdc_enabled=False, pack_range_enabled=False, upload_cache=True,
+        configure(cdc_enabled=False, upload_cache=True,
                   cache_enabled=True, deduplication_enabled=False)
         data = os.urandom(256 * 1024)
         primary = arm(0, 'raw-upload-before-process')

@@ -1,7 +1,7 @@
 use super::{CompressionObservation, session::Run};
 use super::{
     Id,
-    metrics::{AccessBatch, ChunkCounts, PackCounts},
+    metrics::{AccessBatch, ChunkCounts, PackCounts, PackReads},
 };
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Timelike, Utc};
@@ -15,6 +15,7 @@ pub(crate) const ACCESS_LIMIT: usize = 8192;
 #[serde(deny_unknown_fields)]
 pub(crate) struct Access {
     pub(crate) sequence: i64,
+    pub(crate) pack_reads: Vec<((Id, i64, i64, DateTime<Utc>), PackReads)>,
     pub(crate) collecting: bool,
     pub(crate) cached: Vec<(super::tiering::CachedKey, super::tiering::CachedDemand)>,
     pub(crate) chunks: Vec<((Id, DateTime<Utc>), ChunkCounts)>,
@@ -29,6 +30,8 @@ pub(crate) struct Access {
 
 impl Access {
     pub(crate) fn new(sequence: i64, pending: AccessBatch) -> Self {
+        let mut pack_reads: Vec<_> = pending.pack_reads.into_iter().collect();
+        pack_reads.sort_by_key(|row| row.0);
         let mut chunks: Vec<_> = pending.chunks.into_iter().collect();
         let mut packs: Vec<_> = pending.packs.into_iter().collect();
         let mut members: Vec<_> = pending.members.into_iter().collect();
@@ -41,6 +44,7 @@ impl Access {
         demand.sort_by_key(|row| row.0);
         Self {
             cached,
+            pack_reads,
             sequence,
             collecting: pending.collecting,
             chunks,
@@ -53,6 +57,7 @@ impl Access {
 
     pub(crate) fn pending(self) -> AccessBatch {
         AccessBatch {
+            pack_reads: self.pack_reads.into_iter().collect(),
             cached_slots: self.cached.iter().map(|((ids, _), _)| ids.len() + 1).sum(),
             cached: self.cached.into_iter().collect(),
             collecting: self.collecting,
@@ -69,6 +74,7 @@ impl Access {
             .chunks
             .iter()
             .map(|((id, _), _)| *id)
+            .chain(self.pack_reads.iter().map(|((id, _, _, _), _)| *id))
             .chain(self.packs.iter().map(|((id, _), _)| *id))
             .chain(
                 self.members
@@ -86,7 +92,8 @@ impl Access {
             *at >= now - chrono::Duration::hours(24) && *at <= now + chrono::Duration::hours(1)
         };
         ensure!(
-            self.chunks.iter().all(|((_, at), _)| valid(at))
+            self.pack_reads.iter().all(|((_, _, _, at), _)| valid(at))
+                && self.chunks.iter().all(|((_, at), _)| valid(at))
                 && self.packs.iter().all(|((_, at), _)| valid(at))
                 && self.members.iter().all(|((_, _, at), _)| valid(at))
                 && self.demand.iter().all(|((_, _, at), _)| valid(at))
@@ -102,6 +109,7 @@ impl Access {
         ensure!(
             self.sequence > 0
                 && cached_slots
+                    + self.pack_reads.len()
                     + self.chunks.len()
                     + self.packs.len()
                     + self.members.len()
@@ -115,6 +123,21 @@ impl Access {
         };
         let count = |value: i64| (0..=1_000_000_000).contains(&value);
         let bytes = |value: i64| (0..=1i64 << 50).contains(&value);
+        let mut observations = HashSet::new();
+        for (key, saved) in &self.pack_reads {
+            ensure!(
+                id(key.0)
+                    && key.1 >= 0
+                    && key.1 < key.2
+                    && hour(key.3)
+                    && saved.requests > 0
+                    && count(saved.requests)
+                    && saved.saved >= 0
+                    && count(saved.saved)
+                    && observations.insert(key),
+                invalid()
+            );
+        }
         let mut shapes = HashSet::new();
         for (key, group) in &self.cached {
             let (ids, at) = key;

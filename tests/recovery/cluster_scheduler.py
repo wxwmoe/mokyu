@@ -42,7 +42,7 @@ def main():
 
     try:
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=True, pack_enabled=False, pack_range_enabled=False, compression_enabled=False,
+        profile.update(cdc_enabled=True, pack_enabled=False, compression_enabled=False,
             cache_enabled=True, upload_cache=True, write_flush_interval='0s')
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         held = arm(0, 'upload-before-prepare')

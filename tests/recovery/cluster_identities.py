@@ -18,7 +18,7 @@ def main():
     key = fixture.cli("key", "create", fixture.name + "-key", "block")
     fixture.cli("storage", "key", "set", fixture.name, key["id"])
     profile = fixture.cli("storage", "profile", "show", fixture.name)
-    profile.update(upload_cache=True, cache_enabled=True, pack_range_enabled=False, pack_max_size="16MiB")
+    profile.update(upload_cache=True, cache_enabled=True, pack_max_size="16MiB")
     fixture.cli("storage", "profile", "set", fixture.name, "-", value=profile)
     clients = [fixture.client, peer]
     bodies = [os.urandom(8192) for _ in range(16)]

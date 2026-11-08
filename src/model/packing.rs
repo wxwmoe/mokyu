@@ -72,6 +72,62 @@ pub(crate) fn select_members(
     (selected, cursor)
 }
 
+#[derive(sqlx::FromRow)]
+pub(crate) struct ReadPlacement {
+    pub(crate) offset_bytes: i64,
+    pub(crate) length: i32,
+    pub(crate) chunk_id: Id,
+    pub(crate) pack_id: Option<Id>,
+    pub(crate) physical_offset: Option<i64>,
+    pub(crate) encoded_size: Option<i32>,
+}
+
+pub(crate) type ProposedRanges = std::collections::BTreeMap<Id, std::ops::Range<u64>>;
+
+pub(crate) fn proposed_ranges(
+    rows: &[ReadPlacement],
+    selected: &[Mapping],
+) -> Option<ProposedRanges> {
+    let lengths: std::collections::BTreeMap<_, _> = rows
+        .iter()
+        .filter_map(|r| Some((r.chunk_id, u64::try_from(r.encoded_size?).ok()?)))
+        .collect();
+    let mut offset = 8;
+    selected
+        .iter()
+        .map(|member| {
+            let length = *lengths.get(&member.chunk.id)?;
+            let range = offset..offset + length;
+            offset += length;
+            Some((member.chunk.id, range))
+        })
+        .collect()
+}
+
+pub(crate) fn read_savings(rows: &[ReadPlacement], proposed: &ProposedRanges) -> Option<i64> {
+    let mut old = Vec::new();
+    let mut new = Vec::new();
+    for row in rows {
+        let length = u64::try_from(row.encoded_size?).ok()?;
+        let place = if let Some(pack) = row.pack_id {
+            let pos = u64::try_from(row.physical_offset?).ok()?;
+            ((1, pack), pos..pos + length)
+        } else {
+            ((0, row.chunk_id), 0..length)
+        };
+        new.push(if let Some(range) = proposed.get(&row.chunk_id) {
+            ((2, Id::default()), range.clone())
+        } else {
+            place.clone()
+        });
+        old.push(place);
+    }
+    let mut delta = 0i64;
+    crate::storage::pack_ranges::runs(old, |_, _| delta += 1);
+    crate::storage::pack_ranges::runs(new, |_, _| delta -= 1);
+    Some(delta)
+}
+
 #[async_trait]
 pub(crate) trait PackingStore: Send + Sync {
     async fn in_storage(&self, pack: Id, storage: Uuid) -> Result<bool>;
@@ -183,6 +239,16 @@ pub(crate) trait PackingStore: Send + Sync {
         upper: DateTime<Utc>,
         storage: Option<Uuid>,
     ) -> Result<Option<Id>>;
+    async fn reclaim_estimate(&self, pack: Id, groups: &[Vec<Mapping>]) -> Result<i64>;
+    async fn repack_benefit(&self, stream: Id, rows: &[Mapping]) -> Result<i64>;
+    async fn next_repack_stream(
+        &self,
+        task: Uuid,
+        after: Id,
+        offset: i64,
+        upper: DateTime<Utc>,
+        storage: Uuid,
+    ) -> Result<Option<Id>>;
     async fn advance_pack_task(
         &self,
         task: Execution,
@@ -238,35 +304,7 @@ pub(crate) trait PackingStore: Send + Sync {
         settings: &crate::content::pack::Config,
         flush_seconds: f64,
     ) -> Result<()>;
-    async fn same_references(&self, a: Id, b: Id, distance: i64) -> Result<bool>;
-    async fn next_range_pack(
-        &self,
-        storage: Uuid,
-        cutoff: DateTime<Utc>,
-        window: f64,
-        minimum: i64,
-    ) -> Result<Option<Id>>;
-    async fn complete_range_task(&self, task: Execution) -> Result<()>;
-    async fn range_pack_blocked(&self, pack: Id) -> Result<bool>;
-    async fn pack_range_totals(&self, pack: Id, window: f64) -> Result<(i64, i64, i64)>;
-    async fn pack_member_hits(&self, pack: Id, window: f64) -> Result<Vec<(Id, i64)>>;
     async fn pack_dimensions(&self, pack: Id) -> Result<(i64, i64, i32)>;
-    async fn range_pack_layout(&self, pack: Id) -> Result<Vec<Mapping>>;
-    async fn defer_range_repack(
-        &self,
-        stream: Id,
-        window: f64,
-        flush: f64,
-        retry: f64,
-        offset: i64,
-    ) -> Result<()>;
-    async fn record_range(
-        &self,
-        task: Execution,
-        id: Id,
-        processed: usize,
-        decision: Value,
-    ) -> Result<()>;
 }
 
 #[derive(Clone, serde::Deserialize)]

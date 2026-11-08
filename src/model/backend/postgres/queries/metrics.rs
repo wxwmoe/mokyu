@@ -435,6 +435,7 @@ pub(in super::super) fn access_coverage(dropped: bool, stale: f64) -> Statement<
 
 async fn expire_access(pool: &PgPool, retention: f64, batch: i64) -> Result<()> {
     for sql in [
+        "DELETE FROM pack_read_shapes WHERE (stream_id,start_bytes,end_bytes,observed_hour) IN (SELECT stream_id,start_bytes,end_bytes,observed_hour FROM pack_read_shapes WHERE observed_hour<EXTRACT(EPOCH FROM now())::double precision-$1::double precision ORDER BY observed_hour LIMIT $2)",
         super::super::queries::tier::EXPIRE,
         super::super::queries::tier::EXPIRE_TOTALS,
         "DELETE FROM chunk_access_windows WHERE (window_start,chunk_id) IN (SELECT window_start,chunk_id FROM chunk_access_windows WHERE window_start<now()-$1*interval '1 second' ORDER BY window_start LIMIT $2)",

@@ -86,7 +86,7 @@ def main():
         assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE 'multipart/fragment/%%'")
 
     try:
-        configure(cdc_enabled=False, deduplication_enabled=True, upload_cache=False, pack_range_enabled=False, upload_retention='1h')
+        configure(cdc_enabled=False, deduplication_enabled=True, upload_cache=False, upload_retention='1h')
         args = create('native')
         left, right = os.urandom(6 * 1024 * 1024 + 17), os.urandom(19000)
         last = put(peer, args, 3, right)

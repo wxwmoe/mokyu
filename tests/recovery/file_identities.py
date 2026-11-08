@@ -65,7 +65,7 @@ def main():
         fixture.read("original", raw)
 
         profile = fixture.cli("storage", "profile", "show", fixture.name)
-        profile.update(pack_enabled=True, pack_range_enabled=False, pack_max_size="16MiB",
+        profile.update(pack_enabled=True, pack_max_size="16MiB",
                        cache_enabled=True, min_storage_duration="0s")
         fixture.cli("storage", "profile", "set", fixture.name, "-", value=profile)
         fixture.finished(fixture.cli("pack", "run"))

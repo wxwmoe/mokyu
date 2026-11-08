@@ -23,7 +23,7 @@ def run(restart):
         assert not remote, 'native source fixture uses its ordinary S3 endpoint'
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
         profile.update(cdc_enabled=export != 'raw', deduplication_enabled=export != 'raw',
-            pack_enabled=export == 'pack', compression_enabled=export == 'pack', pack_range_enabled=False)
+            pack_enabled=export == 'pack', compression_enabled=export == 'pack')
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     client = fixture.backend if remote else fixture.client
     bucket = fixture.remote_bucket if remote else fixture.name

@@ -17,47 +17,12 @@ enum Progress {
         generation: i64,
         cursor: i64,
     },
-    Range {
-        pack: Id,
-        report: Value,
-    },
 }
 
 #[derive(Serialize, Deserialize)]
 enum Rule {
-    Combine {
-        before: i64,
-        physical: usize,
-    },
-    Split {
-        before: i64,
-        minimum: Option<u64>,
-    },
-    Range {
-        partial: i64,
-        observed: i64,
-        full: i64,
-        before: i64,
-        hits: BTreeMap<Id, i64>,
-    },
-}
-
-impl Rule {
-    fn benefit(&self, outputs: &[(Vec<Id>, i64)]) -> Option<crate::worker::range::Benefit> {
-        let Self::Range {
-            partial,
-            observed,
-            full,
-            before,
-            hits,
-        } = self
-        else {
-            return None;
-        };
-        Some(crate::worker::range::benefit(
-            *partial, *observed, *full, *before, hits, outputs,
-        ))
-    }
+    Combine { before: i64, physical: usize },
+    Split { before: i64, minimum: Option<u64> },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -111,18 +76,6 @@ async fn advance(
             }
             Some(format!("{stream}:{cursor}"))
         }
-        Progress::Range { pack, report } => {
-            queries::mark_range_checked(*pack).execute(&mut *db).await?;
-            queries::record_range_result(
-                task.id,
-                pack.to_string(),
-                processed as i64,
-                report.clone(),
-            )
-            .execute(db)
-            .await?;
-            return Ok(());
-        }
     };
     p::advance_cursor(db, task, next, processed as i64).await?;
     Ok(())
@@ -175,40 +128,27 @@ async fn split(
         .filter(|r| !live.contains(&r.chunk.id))
         .map(|r| r.chunk.raw_size as u64)
         .sum::<u64>();
-    let boundaries = if unpack {
-        vec![false; alive.len().saturating_sub(1)]
-    } else {
-        p::reference_boundaries(&mut *db, &alive).await?
-    };
-    let mut reference_split = false;
+    let minimum = config::bytes(&settings.reclaim_min_savings_bytes)?;
+    let reclaim = !unpack;
     let mut group_size = 0;
-    for (index, row) in alive.into_iter().enumerate() {
-        let join = if let Some(group) = selected.groups.last() {
-            let last = group.last().unwrap();
-            let same = boundaries[index - 1];
-            reference_split |= !same;
-            !unpack
-                && same
-                && last.offset_bytes + i64::from(last.chunk.raw_size) == row.offset_bytes
-                && group_size + row.chunk.raw_size as u64 <= maximum
-        } else {
-            false
-        };
-        if join {
-            selected.groups.last_mut().unwrap().push(row.clone());
-            group_size += row.chunk.raw_size as u64;
-        } else {
-            selected.groups.push(vec![row.clone()]);
-            group_size = row.chunk.raw_size as u64;
+    if unpack || dead > 0 {
+        for row in alive {
+            let size = row.chunk.raw_size as u64;
+            if !unpack
+                && group_size + size <= maximum
+                && let Some(group) = selected.groups.last_mut()
+            {
+                group.push(row.clone());
+                group_size += size;
+            } else {
+                selected.groups.push(vec![row.clone()]);
+                group_size = size;
+            }
         }
     }
-    let reclaim = !unpack && !reference_split && dead > 0;
-    let minimum = config::bytes(&settings.reclaim_min_savings_bytes)?;
-    if (!unpack
-        && dead == 0
-        && selected.groups.len() == 1
-        && selected.groups[0].len() == selected.rows.len())
-        || (reclaim && dead < minimum)
+    if reclaim
+        && !selected.groups.is_empty()
+        && p::reclaim_estimate(&mut *db, id, &selected.groups).await? < minimum.max(1) as i64
     {
         selected.groups.clear();
     }
@@ -226,17 +166,7 @@ async fn combine(
     repack: bool,
     settings: &pack::Config,
     byte_budget: Option<u64>,
-    flush: f64,
-) -> Result<(Vec<Mapping>, i64, Rule)> {
-    p::defer_range_repack(
-        &mut *db,
-        stream,
-        config::seconds(&settings.range_repack_window)? as f64,
-        flush,
-        config::seconds(&settings.range_repack_retry_interval)? as f64,
-        from,
-    )
-    .await?;
+) -> Result<(Vec<Mapping>, Vec<Mapping>, i64, Rule)> {
     let rows = p::pack_candidates(
         &mut *db,
         stream,
@@ -257,12 +187,27 @@ async fn combine(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
-    let counts = p::pack_counts(&mut *db, &pack_ids).await?;
-    valid &= counts.len() == pack_ids.len()
-        && counts.into_iter().all(|(id, count)| {
-            count as usize == group.iter().filter(|r| r.pack_id == Some(id)).count()
-        });
+    let members: BTreeSet<_> = group.iter().map(|row| row.chunk.id).collect();
+    let mut inputs = group.clone();
+    for pack in pack_ids {
+        let extra: Vec<_> = p::pack_layout(&mut *db, pack)
+            .await?
+            .into_iter()
+            .filter(|row| !members.contains(&row.chunk.id))
+            .collect();
+        let ids: Vec<_> = extra.iter().map(|row| row.chunk.id).collect();
+        if inputs.len() + extra.len() > crate::content::pack::MAX_MEMBERS
+            || (!ids.is_empty() && !p::live(&mut *db, &ids).await?.is_empty())
+        {
+            valid = false;
+            break;
+        }
+        inputs.extend(extra);
+    }
     let ids: Vec<_> = group.iter().map(|r| r.chunk.id).collect();
+    if valid && repack {
+        valid = p::repack_benefit(&mut *db, stream, &group).await? > 0;
+    }
     let before = if valid {
         p::physical_bytes(db, &ids).await?
     } else {
@@ -270,8 +215,10 @@ async fn combine(
     };
     if !valid {
         group.clear();
+        inputs.clear();
     }
     Ok((
+        inputs,
         group,
         cursor,
         Rule::Combine {
@@ -279,117 +226,6 @@ async fn combine(
             physical: physical.len(),
         },
     ))
-}
-
-async fn range(
-    db: &mut p::Connection,
-    id: Id,
-    settings: &pack::Config,
-    allow_pack: bool,
-) -> Result<Selected> {
-    let mut report = json!({"pack_id":id.to_string(),"applied":false});
-    let mut selected = Selected {
-        rows: vec![],
-        groups: vec![],
-        progress: Progress::Range {
-            pack: id,
-            report: Value::Null,
-        },
-        rule: Rule::Split {
-            before: 0,
-            minimum: None,
-        },
-    };
-    if p::range_pack_blocked(&mut *db, id).await? {
-        report["reason"] = json!("active_upload");
-    } else {
-        let window = config::seconds(&settings.range_window)? as f64;
-        let (partial, observed, full) = p::pack_range_totals(&mut *db, id, window).await?;
-        let hits: BTreeMap<_, _> = p::pack_member_hits(&mut *db, id, window)
-            .await?
-            .into_iter()
-            .collect();
-        let (before, raw, count) = p::pack_dimensions(&mut *db, id).await?;
-        selected.rows = p::range_pack_layout(&mut *db, id).await?;
-        if selected.rows.len() != count as usize
-            || selected
-                .rows
-                .iter()
-                .map(|r| i64::from(r.chunk.raw_size))
-                .sum::<i64>()
-                != raw
-            || hits.values().sum::<i64>() < partial
-            || partial < i64::from(settings.range_min_downloads)
-            || observed == 0
-        {
-            report["reason"] = json!("incomplete_evidence_or_layout");
-        } else {
-            let references: Vec<_> = selected.rows.iter().collect();
-            let boundaries = p::reference_boundaries(&mut *db, &references).await?;
-            let mut group_size = 0;
-            for (index, row) in selected.rows.iter().enumerate() {
-                let join = if let Some(group) = selected.groups.last() {
-                    let last = group.last().unwrap();
-                    allow_pack
-                        && settings.enabled
-                        && hits.contains_key(&last.chunk.id) == hits.contains_key(&row.chunk.id)
-                        && last.offset_bytes + i64::from(last.chunk.raw_size) == row.offset_bytes
-                        && group_size + row.chunk.raw_size as u64
-                            <= config::bytes(&settings.max_size)?
-                        && boundaries[index - 1]
-                } else {
-                    false
-                };
-                if join {
-                    selected.groups.last_mut().unwrap().push(row.clone());
-                    group_size += row.chunk.raw_size as u64;
-                } else {
-                    selected.groups.push(vec![row.clone()]);
-                    group_size = row.chunk.raw_size as u64;
-                }
-            }
-            selected.rule = Rule::Range {
-                partial,
-                observed,
-                full,
-                before,
-                hits,
-            };
-            if selected.groups.len() < 2 {
-                selected.groups.clear();
-                report["reason"] = json!("no_smaller_contiguous_layout");
-            } else {
-                let sources: Vec<_> = selected
-                    .groups
-                    .iter()
-                    .map(|g| {
-                        (
-                            g.iter().map(|r| r.chunk.id).collect(),
-                            g.iter()
-                                .map(|r| {
-                                    i64::from(r.chunk.stored_size.unwrap_or(r.chunk.raw_size + 16))
-                                })
-                                .sum::<i64>()
-                                + if g.len() > 1 {
-                                    8 + pack::MAX_MEMBER_TAG as i64 * g.len() as i64
-                                } else {
-                                    0
-                                },
-                        )
-                    })
-                    .collect();
-                let benefit = selected.rule.benefit(&sources).unwrap();
-                report["partial_downloads"] = json!(partial);
-                report["benefit"] = serde_json::to_value(&benefit)?;
-                if !benefit.worthwhile(settings)? {
-                    selected.groups.clear();
-                    report["reason"] = json!("insufficient_net_savings");
-                }
-            }
-        }
-    }
-    selected.progress = Progress::Range { pack: id, report };
-    Ok(selected)
 }
 
 async fn flush(db: &mut p::Connection) -> Result<f64> {
@@ -512,18 +348,13 @@ pub(super) async fn prepare(
     let storage = profile.storage_id;
     let policy = detail["policy"].as_str().unwrap_or("unpack");
     ensure!(
-        matches!(
-            policy,
-            "pack" | "repack" | "reuse" | "reclaim" | "range" | "unpack"
-        ),
+        matches!(policy, "pack" | "repack" | "reclaim" | "unpack"),
         Error::NodeOperationConflict
     );
     let unpack = policy == "unpack";
     let settings = profile.pack_config();
     let allow: bool = p::creation_allowed(&mut **db).await?;
-    if (matches!(policy, "pack" | "repack") && !settings.enabled)
-        || (policy == "range" && !settings.range_optimization)
-    {
+    if (matches!(policy, "pack" | "repack") && !settings.enabled) {
         advance(db, task, &Progress::Scan(None), 0, &settings).await?;
         return Ok(None);
     }
@@ -543,21 +374,7 @@ pub(super) async fn prepare(
     let flush = flush(db).await?;
     for _ in 0..32 {
         let cursor: Option<String> = p::cursor(&mut **db, task.id).await?;
-        let selected = if policy == "range" {
-            if let Some(id) = p::next_range_pack(
-                &mut **db,
-                storage,
-                cutoff.context("missing Range snapshot")?,
-                config::seconds(&settings.range_window)? as f64,
-                i64::from(settings.range_min_downloads),
-            )
-            .await?
-            {
-                Some(range(db, id, &settings, allow).await?)
-            } else {
-                None
-            }
-        } else if unpack || matches!(policy, "reuse" | "reclaim") {
+        let selected = if unpack || policy == "reclaim" {
             let next = if automatic {
                 p::next_pack_change(
                     &mut **db,
@@ -612,14 +429,12 @@ pub(super) async fn prepare(
                 } else {
                     (Id::default(), 0)
                 };
-                p::next_pack_stream(
-                    &mut **db,
-                    after,
-                    offset,
-                    cutoff.context("missing pack snapshot")?,
-                    Some(storage),
-                )
-                .await?
+                let upper = cutoff.context("missing pack snapshot")?;
+                if policy == "repack" {
+                    p::next_repack_stream(&mut **db, task.id, after, offset, upper, storage).await?
+                } else {
+                    p::next_pack_stream(&mut **db, after, offset, upper, Some(storage)).await?
+                }
                 .map(|id| (id, if id == after { offset } else { 0 }))
             };
             if let Some((stream, offset)) = next {
@@ -628,16 +443,8 @@ pub(super) async fn prepare(
                     .as_deref()
                     .map(config::bytes)
                     .transpose()?;
-                let (rows, cursor, rule) = combine(
-                    db,
-                    stream,
-                    offset,
-                    policy == "repack",
-                    &settings,
-                    budget,
-                    flush,
-                )
-                .await?;
+                let (rows, group, cursor, rule) =
+                    combine(db, stream, offset, policy == "repack", &settings, budget).await?;
                 let progress = if let Some(generation) = generation {
                     Progress::Queue {
                         stream,
@@ -648,10 +455,10 @@ pub(super) async fn prepare(
                     Progress::Scan(Some(format!("{stream}:{cursor}")))
                 };
                 Some(Selected {
-                    groups: if rows.is_empty() {
+                    groups: if group.is_empty() {
                         vec![]
                     } else {
-                        vec![rows.clone()]
+                        vec![group]
                     },
                     rows,
                     progress,
@@ -970,7 +777,7 @@ pub(super) async fn finish(
     let work::Outcome::Packed(result) = outcome else {
         return Err(Error::NodeOperationConflict.into());
     };
-    let mut snapshot: Snapshot = serde_json::from_value(detail["node_pack"].clone())?;
+    let snapshot: Snapshot = serde_json::from_value(detail["node_pack"].clone())?;
     ensure!(
         result.chunks.len() == batch.chunks.len()
             && snapshot.ready.len() == batch.chunks.len()
@@ -1012,25 +819,17 @@ pub(super) async fn finish(
                 && after <= before + 8 + pack::MAX_MEMBER_TAG as i64 * batch.chunks.len() as i64
         }
         Rule::Split { before, minimum } => {
-            minimum.is_none_or(|n| before.saturating_sub(after) >= n as i64)
-        }
-        Rule::Range { .. } => {
-            let sources = outputs
+            let ready: BTreeSet<_> = snapshot.ready.iter().flatten().map(|c| c.id).collect();
+            let written: i64 = outputs
                 .iter()
-                .map(|o| (o.chunks.clone(), o.size()))
-                .collect::<Vec<_>>();
-            let benefit = snapshot.rule.benefit(&sources).unwrap();
-            let worthwhile = benefit.worthwhile(&settings)?;
-            if let Progress::Range { report, .. } = &mut snapshot.progress {
-                report["benefit"] = serde_json::to_value(benefit)?;
-                report["applied"] = json!(worthwhile);
-                report["reason"] = json!(if worthwhile {
-                    "repeated_partial_downloads"
-                } else {
-                    "encoded_layout_not_beneficial"
-                });
-            }
-            worthwhile
+                .filter(|out| {
+                    !out.independent
+                        .as_ref()
+                        .is_some_and(|c| ready.contains(&c.id))
+                })
+                .map(PackOutput::size)
+                .sum();
+            minimum.is_none_or(|n| before.saturating_sub(written) >= n as i64)
         }
     };
     if publish {

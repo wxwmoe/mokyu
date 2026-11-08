@@ -269,7 +269,6 @@ async fn raw_permit_order_cancellation_and_retry() -> Result<()> {
     profile.deduplication_enabled = false;
     profile.compression_enabled = false;
     profile.pack_enabled = false;
-    profile.pack_range_enabled = false;
     profile.upload_cache = false;
     profile.cache_enabled = false;
     app.storage_profiles

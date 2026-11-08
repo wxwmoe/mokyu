@@ -35,7 +35,7 @@ def main():
         aws_access_key_id=fixture.credentials['access_key'],
         aws_secret_access_key=fixture.credentials['secret_key'], config=fixture.client.meta.config)
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(cdc_enabled=False, deduplication_enabled=True, pack_range_enabled=False,
+    profile.update(cdc_enabled=False, deduplication_enabled=True,
                    cache_enabled=args.cache, unreferenced_grace='1s', upload_retention='1s')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
 

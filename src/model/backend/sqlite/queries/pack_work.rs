@@ -4,7 +4,7 @@ pub(in super::super) async fn ready_encoding(
     db: impl sqlx::SqliteExecutor<'_>,
     chunk: Id,
 ) -> Result<Option<(Id, Uuid, i32)>> {
-    Ok(sqlx::query_as("SELECT encoding_id,location_id,standalone_size FROM chunk_encodings WHERE chunk_id=? AND state='ready'").bind(chunk).fetch_optional(db).await?)
+    Ok(sqlx::query_as("SELECT encoding_id,location_id,standalone_size FROM chunk_encodings WHERE chunk_id=? AND state='ready' AND quarantined_at IS NULL ORDER BY encoding_id LIMIT 1").bind(chunk).fetch_optional(db).await?)
 }
 pub(in super::super) async fn pack_has_pending(
     db: impl sqlx::SqliteExecutor<'_>,
@@ -72,7 +72,7 @@ pub(in super::super) async fn pack_candidates(
     _cooldown: f64,
 ) -> Result<Vec<PackCandidate>> {
     let mut query = sqlx::QueryBuilder::<Sqlite>::new("SELECT ");
-    query.push(CHUNK_COLUMNS).push(",e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size) AS eligible,EXISTS(SELECT 1 FROM extents other WHERE other.chunk_id=c.id AND other.stream_id<>e.stream_id) AS shared FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=").push_bind(stream).push(" AND e.offset_bytes>=").push_bind(offset).push(" AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026");
+    query.push(CHUNK_COLUMNS).push(",e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size AND (c.repack_after IS NULL OR c.repack_after<=CAST(unixepoch('subsec')*1000000 AS INTEGER))) AS eligible,EXISTS(SELECT 1 FROM extents other WHERE other.chunk_id=c.id AND other.stream_id<>e.stream_id) AS shared FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=").push_bind(stream).push(" AND e.offset_bytes>=").push_bind(offset).push(" AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026");
     Ok(query
         .build_query_as::<PackCandidateRow>()
         .fetch_all(db)
@@ -114,6 +114,95 @@ pub(in super::super) async fn next_pack(
 ) -> Result<Option<Id>> {
     Ok(sqlx::query_scalar("SELECT id FROM packs WHERE state='ready' AND id>? AND (? IS NULL OR id=?) AND (? IS NULL OR storage_id=?) AND created_at<=COALESCE(?,CAST(unixepoch('subsec')*1000000 AS INTEGER)) ORDER BY id LIMIT 1").bind(after).bind(pack).bind(pack).bind(storage).bind(storage).bind(upper.map(|time|time.timestamp_micros())).fetch_optional(db).await?)
 }
+pub(in super::super) async fn reclaim_estimate(
+    db: &mut sqlx::SqliteConnection,
+    pack: Id,
+    groups: &[Vec<Mapping>],
+) -> Result<i64> {
+    let before: Option<i64> = sqlx::query_scalar("SELECT stored_size FROM packs p WHERE id=? AND NOT EXISTS(SELECT 1 FROM journal_protected_addresses h WHERE h.address=p.location_id)").bind(pack).fetch_optional(&mut *db).await?.flatten();
+    let Some(before) = before else { return Ok(0) };
+    let index:std::collections::BTreeMap<_,_>=sqlx::query_as::<_,(Id,Option<i32>,bool)>("SELECT m.chunk_id,m.encoded_size,EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.chunk_id=m.chunk_id AND e.storage_id=p.storage_id AND e.state='ready' AND e.quarantined_at IS NULL) FROM pack_members m JOIN packs p ON p.id=m.pack_id WHERE m.pack_id=?").bind(pack).fetch_all(db).await?.into_iter().map(|(id,size,ready)|(id,(size,ready))).collect();
+    let mut after = 0i64;
+    for group in groups {
+        after += 8;
+        for member in group {
+            let &(size, ready) = index.get(&member.chunk.id).context("missing pack member")?;
+            if group.len() == 1 && ready {
+                after -= 8;
+                continue;
+            }
+            after += i64::from(size.context("missing pack member length")?);
+        }
+    }
+    Ok(before - after)
+}
+
+pub(in super::super) async fn repack_benefit(
+    db: &mut sqlx::SqliteConnection,
+    stream: Id,
+    selected: &[Mapping],
+) -> Result<i64> {
+    let (Some(first), Some(last)) = (selected.first(), selected.last()) else {
+        return Ok(0);
+    };
+    const PLACEMENT: &str = "SELECT e.offset_bytes,e.length,c.id AS chunk_id,CASE WHEN l.encoding_id IS NULL THEN c.pack_id END AS pack_id,m.offset_bytes AS physical_offset,COALESCE(m.encoded_size,l.standalone_size,c.standalone_size) AS encoded_size FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' LEFT JOIN pack_members m ON l.encoding_id IS NULL AND m.pack_id=c.pack_id AND m.chunk_id=c.id WHERE e.stream_id=? AND e.offset_bytes+e.length>? AND e.offset_bytes<? ORDER BY e.offset_bytes";
+    let rows = sqlx::query_as::<_, crate::model::packing::ReadPlacement>(PLACEMENT)
+        .bind(stream)
+        .bind(first.offset_bytes)
+        .bind(last.offset_bytes + i64::from(last.chunk.raw_size))
+        .fetch_all(&mut *db)
+        .await?;
+    let Some(proposed) = crate::model::packing::proposed_ranges(&rows, selected) else {
+        return Ok(0);
+    };
+    // Include cold reads of every object whose members would move, including previously contiguous reads.
+    let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT r.stream_id,r.start_bytes,r.end_bytes,CAST(SUM(r.requests) AS INTEGER) FROM pack_read_shapes r WHERE EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=r.stream_id) AND EXISTS(SELECT 1 FROM extents e WHERE e.stream_id=r.stream_id AND e.offset_bytes<r.end_bytes AND e.offset_bytes+e.length>r.start_bytes AND e.chunk_id IN (",
+    );
+    {
+        let mut ids = query.separated(",");
+        for member in selected {
+            ids.push_bind(member.chunk.id);
+        }
+    }
+    query.push(")) GROUP BY r.stream_id,r.start_bytes,r.end_bytes LIMIT 257");
+    let shapes = query
+        .build_query_as::<(Id, i64, i64, i64)>()
+        .fetch_all(&mut *db)
+        .await?;
+    if shapes.len() > 256 {
+        return Ok(0);
+    }
+    let mut gain = 0i64;
+    for (id, start, end, requests) in shapes {
+        let rows = sqlx::query_as::<_, crate::model::packing::ReadPlacement>(PLACEMENT)
+            .bind(id)
+            .bind(start)
+            .bind(end)
+            .fetch_all(&mut *db)
+            .await?;
+        let Some(delta) = crate::model::packing::read_savings(&rows, &proposed) else {
+            return Ok(0);
+        };
+        gain = gain.saturating_add(delta.saturating_mul(requests));
+    }
+    Ok(gain)
+}
+
+pub(in super::super) async fn next_repack_stream(
+    db: &mut sqlx::SqliteConnection,
+    task: Uuid,
+    after: Id,
+    offset: i64,
+    upper: DateTime<Utc>,
+    storage: Uuid,
+) -> Result<Option<Id>> {
+    if after == Id::default() {
+        sqlx::query("INSERT INTO pack_repack_queue(task_id,stream_id,saved_gets) SELECT ?,r.stream_id,SUM(r.saved_gets) FROM pack_read_shapes r JOIN streams s ON s.id=r.stream_id JOIN buckets b ON b.id=s.bucket_id WHERE b.storage_id=? AND s.state='ready' AND r.observed_hour<=? AND EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id) GROUP BY r.stream_id HAVING SUM(r.saved_gets)>0 ON CONFLICT(task_id,stream_id) DO NOTHING").bind(task).bind(storage).bind(upper.timestamp()).execute(&mut *db).await?;
+    }
+    Ok(sqlx::query_scalar("SELECT q.stream_id FROM pack_repack_queue q LEFT JOIN pack_repack_queue previous ON previous.task_id=q.task_id AND previous.stream_id=? WHERE q.task_id=? AND (previous.stream_id IS NULL OR q.saved_gets<previous.saved_gets OR (q.saved_gets=previous.saved_gets AND (q.stream_id>previous.stream_id OR (q.stream_id=previous.stream_id AND ?>=0)))) AND EXISTS(SELECT 1 FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=q.stream_id AND b.storage_id=?) ORDER BY q.saved_gets DESC,q.stream_id LIMIT 1").bind(after).bind(task).bind(offset).bind(storage).fetch_optional(db).await?)
+}
+
 pub(in super::super) async fn next_pack_stream(
     db: impl sqlx::SqliteExecutor<'_>,
     after: Id,
@@ -197,35 +286,6 @@ pub(crate) async fn advance_pack_queue(
         .await?;
     Ok(())
 }
-pub(in super::super) async fn next_range_pack(
-    db: impl sqlx::SqliteExecutor<'_>,
-    storage: Uuid,
-    cutoff: DateTime<Utc>,
-    window: f64,
-    minimum: i64,
-) -> Result<Option<Id>> {
-    Ok(sqlx::query_scalar("SELECT p.id FROM packs p JOIN pack_access_windows w ON w.pack_id=p.id WHERE p.storage_id=? AND p.state='ready' AND p.created_at<=? AND (p.range_checked_at IS NULL OR p.range_checked_at<?) AND w.window_start>=CAST((CAST(unixepoch('subsec')*1000000 AS INTEGER)-?)/3600000000 AS INTEGER)*3600000000 GROUP BY p.id,p.range_checked_at HAVING SUM(w.partial_downloads)>=? AND (p.range_checked_at IS NULL OR MAX(w.updated_at)>p.range_checked_at) ORDER BY SUM(w.partial_bytes) DESC,p.id LIMIT 1").bind(storage).bind(cutoff.timestamp_micros()).bind(cutoff.timestamp_micros()).bind((window * 1_000_000.) as i64).bind(minimum).fetch_optional(db).await?)
-}
-pub(in super::super) async fn range_pack_blocked(
-    db: impl sqlx::SqliteExecutor<'_>,
-    pack: Id,
-) -> Result<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack_id=?) OR EXISTS(SELECT 1 FROM chunks c JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id WHERE c.pack_id=? AND s.state='writing')").bind(pack).bind(pack).fetch_one(db).await?)
-}
-pub(in super::super) async fn pack_range_totals(
-    db: impl sqlx::SqliteExecutor<'_>,
-    pack: Id,
-    window: f64,
-) -> Result<(i64, i64, i64)> {
-    Ok(sqlx::query_as("SELECT CAST(COALESCE(SUM(partial_downloads),0) AS INTEGER),CAST(COALESCE(SUM(partial_bytes),0) AS INTEGER),CAST(COALESCE(SUM(downloads-partial_downloads),0) AS INTEGER) FROM pack_access_windows WHERE pack_id=? AND window_start>=CAST((CAST(unixepoch('subsec')*1000000 AS INTEGER)-?)/3600000000 AS INTEGER)*3600000000").bind(pack).bind((window * 1_000_000.) as i64).fetch_one(db).await?)
-}
-pub(in super::super) async fn pack_member_hits(
-    db: impl sqlx::SqliteExecutor<'_>,
-    pack: Id,
-    window: f64,
-) -> Result<Vec<(Id, i64)>> {
-    Ok(sqlx::query_as("SELECT chunk_id,CAST(SUM(downloads) AS INTEGER) FROM pack_member_access_windows WHERE pack_id=? AND window_start>=CAST((CAST(unixepoch('subsec')*1000000 AS INTEGER)-?)/3600000000 AS INTEGER)*3600000000 GROUP BY chunk_id").bind(pack).bind((window * 1_000_000.) as i64).fetch_all(db).await?)
-}
 pub(in super::super) async fn pack_dimensions(
     db: impl sqlx::SqliteExecutor<'_>,
     pack: Id,
@@ -237,27 +297,6 @@ pub(in super::super) async fn pack_dimensions(
             .await?,
     )
 }
-pub(in super::super) async fn range_pack_layout(
-    db: impl sqlx::SqliteExecutor<'_>,
-    pack: Id,
-) -> Result<Vec<Mapping>> {
-    Ok(super::packing::pack_layout(pack, true)
-        .build_query_as()
-        .fetch_all(db)
-        .await?)
-}
-pub(in super::super) async fn defer_range_repack(
-    db: impl sqlx::SqliteExecutor<'_>,
-    stream: Id,
-    window: f64,
-    flush: f64,
-    retry: f64,
-    offset: i64,
-) -> Result<()> {
-    sqlx::query("UPDATE chunks AS c SET repack_after=CAST(unixepoch('subsec')*1000000 AS INTEGER)+? FROM access_state g WHERE c.id IN (SELECT chunk_id FROM extents WHERE stream_id=? AND offset_bytes>=? ORDER BY offset_bytes LIMIT 1026) AND c.range_split_at IS NOT NULL AND c.repack_after<=CAST(unixepoch('subsec')*1000000 AS INTEGER) AND (g.coverage_since IS NULL OR g.coverage_since>CAST((CAST(unixepoch('subsec')*1000000 AS INTEGER)-?)/3600000000 AS INTEGER)*3600000000 OR g.flushed_at IS NULL OR g.flushed_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-? OR EXISTS(SELECT 1 FROM chunk_access_windows w WHERE w.chunk_id=c.id AND w.range_read_count>0 AND w.window_start>=CAST((CAST(unixepoch('subsec')*1000000 AS INTEGER)-?)/3600000000 AS INTEGER)*3600000000))").bind((retry*1_000_000.) as i64).bind(stream).bind(offset).bind((window*1_000_000.) as i64).bind((flush*1_000_000.) as i64).bind((window*1_000_000.) as i64).execute(db).await?;
-    Ok(())
-}
-
 pub(in super::super) type Connection = sqlx::SqliteConnection;
 pub(in super::super) type Tx<'a> = sqlx::Transaction<'a, sqlx::Sqlite>;
 pub(in super::super) use super::packing::pack_record as source_pack;
@@ -353,32 +392,6 @@ pub(in super::super) async fn clear_snapshot(db: &mut Connection, task: Uuid) ->
 }
 pub(in super::super) async fn live(db: &mut Connection, ids: &[Id]) -> Result<Vec<Id>> {
     Ok(sqlx::query_scalar("SELECT DISTINCT chunk_id FROM extents WHERE chunk_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?))").bind(sqlx::types::Json(ids)).fetch_all(db).await?)
-}
-pub(in super::super) async fn pack_counts(
-    db: &mut Connection,
-    ids: &[Id],
-) -> Result<Vec<(Id, i64)>> {
-    Ok(sqlx::query_as("SELECT pack_id,count(*) FROM chunks WHERE pack_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?)) AND state='ready' GROUP BY pack_id").bind(sqlx::types::Json(ids)).fetch_all(db).await?)
-}
-pub(in super::super) async fn reference_boundaries(
-    db: &mut Connection,
-    rows: &[&Mapping],
-) -> Result<Vec<bool>> {
-    if rows.len() < 2 {
-        return Ok(Vec::new());
-    }
-    let pairs = rows
-        .windows(2)
-        .map(|r| {
-            (
-                r[0].chunk.id,
-                r[1].chunk.id,
-                r[1].offset_bytes - r[0].offset_bytes,
-            )
-        })
-        .collect::<Vec<_>>();
-    let rows=sqlx::query_scalar("WITH pairs AS (SELECT CAST(json_extract(value,'$[0]') AS INTEGER) AS a,CAST(json_extract(value,'$[1]') AS INTEGER) AS b,CAST(json_extract(value,'$[2]') AS INTEGER) AS distance,key AS position FROM json_each(?)) SELECT NOT EXISTS(SELECT 1 FROM extents e JOIN chunks c ON c.id=e.chunk_id WHERE e.chunk_id=v.a AND (e.source_offset<>0 OR e.length<>c.raw_size OR NOT EXISTS(SELECT 1 FROM extents f JOIN chunks d ON d.id=f.chunk_id WHERE f.chunk_id=v.b AND f.stream_id=e.stream_id AND f.offset_bytes=e.offset_bytes+v.distance AND f.source_offset=0 AND f.length=d.raw_size))) AND NOT EXISTS(SELECT 1 FROM extents f JOIN chunks d ON d.id=f.chunk_id WHERE f.chunk_id=v.b AND (f.source_offset<>0 OR f.length<>d.raw_size OR NOT EXISTS(SELECT 1 FROM extents e JOIN chunks c ON c.id=e.chunk_id WHERE e.chunk_id=v.a AND e.stream_id=f.stream_id AND e.offset_bytes=f.offset_bytes-v.distance AND e.source_offset=0 AND e.length=c.raw_size))) FROM pairs v ORDER BY v.position").bind(sqlx::types::Json(&pairs)).fetch_all(db).await?;
-    Ok(rows)
 }
 pub(in super::super) async fn prepare_outputs(
     db: &mut Connection,

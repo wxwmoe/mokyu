@@ -38,7 +38,7 @@ def main():
             name = 'chunks' if chunks else 'raw'
             profile = fixture.cli('storage', 'profile', 'show', fixture.name)
             fixture.cli('storage', 'profile', 'set', fixture.name, '-', value={**profile, 'cache_enabled': True}, succeeds=False)
-            profile.update(cdc_enabled=chunks, compression_enabled=chunks, pack_enabled=False, pack_range_enabled=False)
+            profile.update(cdc_enabled=chunks, compression_enabled=chunks, pack_enabled=False)
             fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
             fixture.put(name, payload)
             fixture.finished(fixture.cli('integrity', 'check', '--mode', 'full', '--bucket', fixture.name, '--key', name))

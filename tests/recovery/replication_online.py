@@ -13,7 +13,7 @@ def run(restart, conversion_boundary='cdc-before-read'):
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(upload_retention='1s', unreferenced_grace='1s', min_storage_duration='0s')
     if os.environ.get('MOKYU_TEST_REPLICATION_MODE') == 'raw':
-        profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False)
+        profile.update(cdc_enabled=False, deduplication_enabled=False)
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     checks = []
 

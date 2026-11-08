@@ -191,7 +191,13 @@ impl App {
                 })
                 .collect();
             self.pin_pack_inputs(execution, &mappings).await?;
-            let work = self.storage.pack_work(old.payload_size()?).await?;
+            let backend = self.storage.store_backend(job.storage_id)?;
+            let buffered = if backend.is_local {
+                0
+            } else {
+                old.payload_size()?.min(crate::content::pack::SINGLE_PUT)
+            };
+            let work = self.storage.pack_buffers(buffered as u64).await?;
             let (ids, mut source_index): (Vec<_>, Vec<_>) = self
                 .physical
                 .pack_index(old.id, None)
@@ -245,45 +251,34 @@ impl App {
                 first,
                 profile.compression_enabled && profile.compression_strategy != "never",
             )?;
-            let storage = old.storage_id.context("pack storage missing")?;
-            let file = self
+            let template = new_pack.clone();
+            let source = &old;
+            let files = async_stream::try_stream! {
+                use futures_util::TryStreamExt;
+                let members=self.storage.pack_members(source,&source_index);
+                futures_util::pin_mut!(members);
+                for ((before,after),id) in source_index.iter().zip(&target_index).zip(ids) {
+                    let bytes=members.try_next().await?.context(crate::content::codec::IntegrityError::Length)?;
+                    let source=(*source).clone();
+                    let target=template.clone();
+                    let before=before.clone();
+                    let after=after.clone();
+                    let keys=self.secrets.clone();
+                    let pool=self.storage.compression.clone();
+                    let cpu=self.storage.cpu.clone().acquire_owned().await?;
+                    let held=work.clone();
+                    let (mut chunk,file)=tokio::task::spawn_blocking(move ||{
+                        let (_cpu,_memory)=(cpu,held);
+                        crate::content::pack::frame::recode_member(&source,&target,&before,&after,bytes,&keys,&pool)
+                    }).await??;
+                    chunk.id=id;
+                    yield (chunk,file);
+                }
+                members.try_next().await?.is_none().then_some(()).ok_or(crate::content::codec::IntegrityError::Length)?;
+            };
+            let (new_pack, members) = self
                 .storage
-                .read_path_for(
-                    storage,
-                    &self.storage.pack_path_for(storage, old.address())?,
-                    usize::try_from(old.stored_size.context("missing pack size")?)?,
-                )
-                .await?;
-            let cpu = self.storage.cpu.clone().acquire_owned().await?;
-            let keys = self.secrets.clone();
-            let pool = self.storage.compression.clone();
-            let source = old.clone();
-            let (new_pack, encoded, members) = tokio::task::spawn_blocking(move || {
-                let (_cpu, _memory) = (cpu, work);
-                let encoded = crate::content::pack::frame::recode(
-                    &source,
-                    &mut new_pack,
-                    &file,
-                    &source_index,
-                    &target_index,
-                    &keys,
-                    &pool,
-                )?;
-                Ok::<_, anyhow::Error>((
-                    new_pack,
-                    encoded,
-                    ids.into_iter().zip(target_index).collect::<Vec<_>>(),
-                ))
-            })
-            .await??;
-            self.storage
-                .put_path_for(
-                    job.storage_id,
-                    &self
-                        .storage
-                        .pack_path_for(job.storage_id, new_pack.location_id)?,
-                    encoded,
-                )
+                .store_pack_members(new_pack, files, self.packing.as_ref())
                 .await?;
             #[cfg(feature = "fault-injection")]
             crate::faults::point("rewrite-pack-stored").await;

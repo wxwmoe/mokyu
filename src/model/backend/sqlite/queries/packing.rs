@@ -280,6 +280,25 @@ impl PackingStore for Backend {
     ) -> Result<Option<Id>> {
         super::pack_work::next_pack_stream(&self.read, after, offset, upper, storage).await
     }
+    async fn reclaim_estimate(&self, pack: Id, groups: &[Vec<Mapping>]) -> Result<i64> {
+        let mut db = self.read.acquire().await?;
+        super::pack_work::reclaim_estimate(&mut db, pack, groups).await
+    }
+    async fn repack_benefit(&self, stream: Id, rows: &[Mapping]) -> Result<i64> {
+        let mut db = self.read.acquire().await?;
+        super::pack_work::repack_benefit(&mut db, stream, rows).await
+    }
+    async fn next_repack_stream(
+        &self,
+        task: Uuid,
+        after: Id,
+        offset: i64,
+        upper: DateTime<Utc>,
+        storage: Uuid,
+    ) -> Result<Option<Id>> {
+        let mut db = self.write.acquire().await?;
+        super::pack_work::next_repack_stream(&mut db, task, after, offset, upper, storage).await
+    }
     async fn advance_pack_task(
         &self,
         task: Execution,
@@ -380,58 +399,8 @@ impl PackingStore for Backend {
         )
         .await
     }
-    async fn same_references(&self, a: Id, b: Id, distance: i64) -> Result<bool> {
-        Ok(same_references(a, b, distance)
-            .fetch_one(&self.read)
-            .await?)
-    }
-    async fn next_range_pack(
-        &self,
-        storage: Uuid,
-        cutoff: DateTime<Utc>,
-        window: f64,
-        minimum: i64,
-    ) -> Result<Option<Id>> {
-        super::pack_work::next_range_pack(&self.read, storage, cutoff, window, minimum).await
-    }
-    async fn complete_range_task(&self, task: Execution) -> Result<()> {
-        transactions::advance_pack_storage(&self.write, task, 0).await
-    }
-    async fn range_pack_blocked(&self, pack: Id) -> Result<bool> {
-        super::pack_work::range_pack_blocked(&self.read, pack).await
-    }
-    async fn pack_range_totals(&self, pack: Id, window: f64) -> Result<(i64, i64, i64)> {
-        super::pack_work::pack_range_totals(&self.read, pack, window).await
-    }
-    async fn pack_member_hits(&self, pack: Id, window: f64) -> Result<Vec<(Id, i64)>> {
-        super::pack_work::pack_member_hits(&self.read, pack, window).await
-    }
     async fn pack_dimensions(&self, pack: Id) -> Result<(i64, i64, i32)> {
         super::pack_work::pack_dimensions(&self.read, pack).await
-    }
-    async fn range_pack_layout(&self, pack: Id) -> Result<Vec<Mapping>> {
-        super::pack_work::range_pack_layout(&self.read, pack).await
-    }
-    async fn defer_range_repack(
-        &self,
-        stream: Id,
-        window: f64,
-        flush: f64,
-        retry: f64,
-        offset: i64,
-    ) -> Result<()> {
-        super::pack_work::defer_range_repack(&self.write, stream, window, flush, retry, offset)
-            .await
-    }
-
-    async fn record_range(
-        &self,
-        task: Execution,
-        id: Id,
-        processed: usize,
-        decision: Value,
-    ) -> Result<()> {
-        transactions::record_range(&self.write, task, id, processed, decision).await
     }
 }
 
@@ -617,7 +586,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for PackObject {
     }
 }
 
-const PACK_FINGERPRINT: &str = "json_array(hex(k.block_key_id),k.encryption_algorithm,k.pack_compressed,k.member_count,p.compression_enabled,p.compression_strategy,p.compression_level,p.compression_sample_level,p.compression_min_savings_percent,p.compression_min_savings_bytes,p.pack_max_size,p.pack_range_enabled,p.pack_range_min_downloads,p.pack_range_min_savings_percent,p.pack_range_min_savings_bytes,'pack')";
+const PACK_FINGERPRINT: &str = "json_array(hex(k.block_key_id),k.encryption_algorithm,k.pack_compressed,k.member_count,p.compression_enabled,p.compression_strategy,p.compression_level,p.compression_sample_level,p.compression_min_savings_percent,p.compression_min_savings_bytes,p.pack_max_size,'pack')";
 
 pub(in super::super) fn lock_pack_layout(ids: &[Id]) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
@@ -787,28 +756,6 @@ pub(in super::super) fn pack_added_bytes(task: Uuid) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT CAST(COALESCE(SUM(bytes),0) AS INTEGER) FROM (SELECT stored_size bytes FROM packs WHERE owner_task=? AND state='preparing' UNION ALL SELECT standalone_size+8 FROM chunk_encodings WHERE owner_task=? AND state='uploading') physical").bind(task).bind(task)
 }
 
-pub(in super::super) fn pack_task_policy(task: Uuid) -> Rows<'static, (bool, bool)> {
-    sqlx::query_as("SELECT task_type IN ('upload','cache_flush'),COALESCE(task_type='pack' AND json_extract(detail,'$.policy')='range',FALSE) FROM tasks WHERE id=?").bind(task)
-}
-
-pub(in super::super) fn pack_exclusive(
-    ids: &[Id],
-    cooldown: f64,
-    window: f64,
-    flush: f64,
-) -> sqlx::QueryBuilder<Sqlite> {
-    let mut query = sqlx::QueryBuilder::new(
-        "SELECT NOT EXISTS(SELECT 1 FROM chunks c CROSS JOIN access_state a WHERE c.id IN ",
-    );
-    chunk_ids(&mut query, ids);
-    query.push(" AND ((SELECT COUNT(*) FROM extents WHERE chunk_id=c.id)<>1 OR NOT COALESCE(c.repack_after<=CAST(unixepoch('subsec')*1000000 AS INTEGER),TRUE) OR (c.split_at IS NOT NULL AND c.reference_changed_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)-").push_bind((cooldown*1_000_000.) as i64)
-        .push(") OR (c.range_split_at IS NOT NULL AND (a.coverage_since IS NULL OR a.coverage_since>CAST((CAST(unixepoch('subsec')*1000000 AS INTEGER)-").push_bind((window*1_000_000.) as i64)
-        .push(")/3600000000 AS INTEGER)*3600000000 OR a.flushed_at IS NULL OR a.flushed_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-").push_bind((flush*1_000_000.) as i64)
-        .push(" OR EXISTS(SELECT 1 FROM chunk_access_windows w WHERE w.chunk_id=c.id AND w.range_read_count>0 AND w.window_start>=CAST((CAST(unixepoch('subsec')*1000000 AS INTEGER)-").push_bind((window*1_000_000.) as i64)
-        .push(")/3600000000 AS INTEGER)*3600000000)))))");
-    query
-}
-
 pub(in super::super) fn publish_prepared_pack(pack: Id, task: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE packs SET state='ready',unreferenced_at=NULL,stored_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),owner_task=NULL WHERE id=? AND owner_task=? AND state='preparing' AND stored_size IS NOT NULL AND digest IS NOT NULL").bind(pack).bind(task)
 }
@@ -843,12 +790,11 @@ pub(in super::super) fn publish_pack_layout(
     pack: Option<Id>,
     split: bool,
     cooldown: f64,
-    range: bool,
 ) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new("UPDATE chunks SET pack_id=");
     query.push_bind(pack).push(",split_at=IIF(").push_bind(split).push(",CAST(unixepoch('subsec')*1000000 AS INTEGER),split_at),repack_after=IIF(").push_bind(split)
         .push(",MAX(COALESCE(repack_after,CAST(unixepoch('subsec')*1000000 AS INTEGER)),CAST(unixepoch('subsec')*1000000 AS INTEGER)+").push_bind((cooldown*1_000_000.) as i64)
-        .push("),repack_after),range_split_at=CASE WHEN ").push_bind(range).push(" THEN CAST(unixepoch('subsec')*1000000 AS INTEGER) WHEN ").push_bind(!split && pack.is_some()).push(" THEN NULL ELSE range_split_at END WHERE id IN ");
+        .push("),repack_after) WHERE id IN ");
     chunk_ids(&mut query, ids);
     query
 }
@@ -866,19 +812,6 @@ pub(in super::super) fn fail_dead_pack_chunks(ids: &[Id]) -> sqlx::QueryBuilder<
         "UPDATE chunks SET state='failed',pack_id=NULL,unreferenced_at=COALESCE(unreferenced_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)) WHERE id IN ",
     );
     chunk_ids(&mut query, ids);
-    query
-}
-
-pub(in super::super) fn schedule_repacked_streams(
-    ids: &[Id],
-    cooldown: f64,
-) -> sqlx::QueryBuilder<Sqlite> {
-    let mut query = sqlx::QueryBuilder::new(
-        "INSERT INTO pack_maintenance(stream_id,reason,next_check_at) SELECT DISTINCT e.stream_id,'repack',CAST(unixepoch('subsec')*1000000 AS INTEGER)+",
-    );
-    query.push_bind((cooldown*1_000_000.) as i64).push(" FROM extents e JOIN streams s ON s.id=e.stream_id WHERE s.state='ready' AND s.stream_type='object' AND e.chunk_id IN ");
-    chunk_ids(&mut query, ids);
-    query.push(" ON CONFLICT(stream_id) DO UPDATE SET generation=pack_maintenance.generation+1,progress_cursor=0,reason='repack',updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),next_check_at=excluded.next_check_at");
     query
 }
 
@@ -906,7 +839,7 @@ pub(in super::super) fn active_pack_task(policy: &str) -> Scalar<'_, Uuid> {
 }
 
 pub(in super::super) fn pack_storages(policy: Option<&str>) -> Rows<'_, (Uuid, i64)> {
-    sqlx::query_as("SELECT s.id,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled AND CASE WHEN ? IN ('pack','repack') THEN p.pack_enabled WHEN ?='range' THEN p.pack_range_enabled ELSE TRUE END ORDER BY s.created_at,s.id").bind(policy).bind(policy)
+    sqlx::query_as("SELECT s.id,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled AND CASE WHEN ? IN ('pack','repack') THEN p.pack_enabled ELSE TRUE END ORDER BY s.created_at,s.id").bind(policy)
 }
 
 pub(in super::super) fn unpack_storage(pack: Id) -> Rows<'static, (Uuid, i64)> {
@@ -945,7 +878,7 @@ pub(in super::super) fn defer_pack_queue(
     generation: i64,
     later: DateTime<Utc>,
 ) -> Statement<'static> {
-    sqlx::query("UPDATE pack_maintenance SET progress_cursor=0,next_check_at=?,reason='repack' WHERE stream_id=? AND generation=?").bind(later.timestamp_micros()).bind(stream).bind(generation)
+    sqlx::query("UPDATE pack_maintenance SET progress_cursor=0,next_check_at=?,reason='pack' WHERE stream_id=? AND generation=?").bind(later.timestamp_micros()).bind(stream).bind(generation)
 }
 
 pub(in super::super) fn finish_pack_queue(stream: Id, generation: i64) -> Statement<'static> {
@@ -972,15 +905,6 @@ pub(in super::super) fn mark_range_checked(pack: Id) -> Statement<'static> {
     .bind(pack)
 }
 
-pub(in super::super) fn record_range_result(
-    task: Uuid,
-    cursor: String,
-    processed: i64,
-    decision: Value,
-) -> Statement<'static> {
-    sqlx::query("UPDATE tasks SET progress_cursor=?,processed=processed+?,detail=JSON_SET(detail,'$.last_range',json(?),'$.evaluated',COALESCE(CAST(detail->>'$.evaluated' AS INTEGER),0)+1),updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=?").bind(cursor).bind(processed).bind(decision).bind(task)
-}
-
 fn rewrite_needed(
     query: &mut sqlx::QueryBuilder<Sqlite>,
     pack: bool,
@@ -1004,7 +928,7 @@ fn rewrite_needed(
     });
     query.push(",p.compression_enabled,p.compression_strategy,p.compression_level,p.compression_sample_level,p.compression_min_savings_percent,p.compression_min_savings_bytes");
     if pack {
-        query.push(",p.pack_max_size,p.pack_range_enabled,p.pack_range_min_downloads,p.pack_range_min_savings_percent,p.pack_range_min_savings_bytes,'pack'");
+        query.push(",p.pack_max_size,'pack'");
     } else {
         query.push(",'standalone'");
     }

@@ -13,12 +13,12 @@ def main():
     db = Database()
     profile = hot.cli('storage', 'profile', 'show', hot.name)
     hot.cli('storage', 'profile', 'set', hot.name, '-', value={
-        **profile, 'cdc_enabled': False, 'pack_range_enabled': False, 'public_cache_validation': 'background',
+        **profile, 'cdc_enabled': False, 'public_cache_validation': 'background',
         'public_cache_refresh_interval': '30s', 'public_cache_max_age': '60s', 'cors_cache_enabled': True})
     hot.cli('bucket', 'cors', hot.name, '-', value=[dict(origins=['https://reader.test'], methods=['GET', 'HEAD'])])
     profile = writer.cli('storage', 'profile', 'show', writer.name)
     writer.cli('storage', 'profile', 'set', writer.name, '-', value={
-        **profile, 'cdc_enabled': False, 'pack_range_enabled': False, 'deduplication_enabled': False,
+        **profile, 'cdc_enabled': False, 'deduplication_enabled': False,
         'write_processing': 'inline', 'upload_cache': True})
     keys = [f'hot-{i}' for i in range(8)]
     for key in keys:

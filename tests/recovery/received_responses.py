@@ -61,7 +61,7 @@ def main():
 
             for chunked in (False, True):
                 fixture = Fixture()
-                policy(fixture, cdc_enabled=chunked, pack_range_enabled=False)
+                policy(fixture, cdc_enabled=chunked)
                 first, second = os.urandom(32768), os.urandom(32768)
                 before = cache(fixture)['entries']
                 put(fixture, first)
@@ -123,7 +123,7 @@ def main():
 
             if os.environ.get('MOKYU_TEST_BACKEND'):
                 fixture = Fixture()
-                policy(fixture, cdc_enabled=False, pack_range_enabled=False)
+                policy(fixture, cdc_enabled=False)
                 first, second = os.urandom(65536), os.urandom(65536)
                 put(fixture, first)
                 read(fixture, first)

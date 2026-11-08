@@ -74,7 +74,7 @@ def main():
             response = fixture.session.put(fixture.web + '/api/v1/storages/' + fixture.name + '/profile',
                 headers=fixture.headers, json={**defaults, **values}, timeout=15)
             assert response.status_code == 400, response.text
-        policy(cdc_enabled=False, pack_range_enabled=False, public_cache_validation='background',
+        policy(cdc_enabled=False, public_cache_validation='background',
                public_cache_refresh_interval='10s', public_cache_max_age='30s')
         fixture.cli('domain', 'set', 'public-cache.test', fixture.name)
         rules = [dict(origins=['https://client.test'], methods=['GET', 'HEAD'], headers=['range'], expose=['ETag'], max_age=60)]

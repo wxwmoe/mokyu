@@ -38,7 +38,7 @@ def main():
     fixture = Fixture()
     assert bool(fixture.backend) != arguments.local, 'backend does not match --local selection'
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-    profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False)
+    profile.update(cdc_enabled=False, deduplication_enabled=False)
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     pid_file = os.environ.get('MOKYU_TEST_PID_FILE')
     pid = int(Path(pid_file).read_text()) if pid_file else None

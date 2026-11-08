@@ -12,7 +12,7 @@ def main():
     assert fixture.backend
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value={
-        **profile, 'cdc_enabled': False, 'deduplication_enabled': False, 'pack_range_enabled': False,
+        **profile, 'cdc_enabled': False, 'deduplication_enabled': False,
         'write_processing': 'inline', 'upload_cache': False})
     fixture.put('ready', b'already durable')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value={

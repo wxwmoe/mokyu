@@ -17,12 +17,10 @@ pub const MAX_MEMBERS: usize = 4096;
 pub const MAX_MEMBER_TAG: usize = 16;
 pub const MAX_PAYLOAD: usize = MAX_RAW + frame::HEADER.len() + MAX_MEMBERS * MAX_MEMBER_TAG;
 
-#[derive(Clone, Copy, Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompressionStrategy {
-    Never,
-    Always,
-    Sample,
+pub(crate) const SINGLE_PUT: usize = 32 * 1024 * 1024 + MAX_MEMBERS * MAX_MEMBER_TAG + 8;
+
+pub(crate) fn buffer_bytes(plain: u64, output: u64, workspace: u64) -> u64 {
+    plain + output.min(SINGLE_PUT as u64) + 4 * codec::MAX as u64 + workspace
 }
 
 #[derive(Clone, Deserialize, serde::Serialize)]
@@ -32,23 +30,11 @@ pub struct Config {
     pub max_size: String,
     #[serde(rename = "upload_flush_timeout")]
     pub upload_cache_timeout: String,
-    pub compression_strategy: Option<CompressionStrategy>,
     pub maintenance_concurrency: usize,
     pub interval: String,
-    pub reuse_interval: String,
     pub reclaim_interval: String,
-    pub repack_interval: String,
     pub repack_cooldown: String,
     pub reclaim_min_savings_bytes: String,
-    pub range_optimization: bool,
-    pub range_interval: String,
-    pub range_window: String,
-    pub range_min_downloads: u32,
-    pub range_min_savings_percent: u8,
-    pub range_min_savings_bytes: String,
-    pub range_repack_after: String,
-    pub range_repack_window: String,
-    pub range_repack_retry_interval: String,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -56,23 +42,11 @@ impl Default for Config {
             enabled: true,
             max_size: "32MiB".into(),
             upload_cache_timeout: "60s".into(),
-            compression_strategy: None,
             maintenance_concurrency: 1,
             interval: "1h".into(),
-            reuse_interval: "5m".into(),
             reclaim_interval: "30m".into(),
-            repack_interval: "24h".into(),
             repack_cooldown: "1h".into(),
             reclaim_min_savings_bytes: "4MiB".into(),
-            range_optimization: true,
-            range_interval: "15m".into(),
-            range_window: "24h".into(),
-            range_min_downloads: 8,
-            range_min_savings_percent: 50,
-            range_min_savings_bytes: "64MiB".into(),
-            range_repack_after: "30d".into(),
-            range_repack_window: "7d".into(),
-            range_repack_retry_interval: "7d".into(),
         }
     }
 }
@@ -87,23 +61,11 @@ impl Config {
             "pack.maintenance_concurrency must be positive"
         );
         config::bytes(&self.reclaim_min_savings_bytes)?;
-        config::bytes(&self.range_min_savings_bytes)?;
-        ensure!(
-            self.range_min_downloads > 0 && (1..=100).contains(&self.range_min_savings_percent),
-            "pack Range thresholds must be positive; percentage must be 1..100"
-        );
         for time in [
             &self.upload_cache_timeout,
             &self.interval,
-            &self.reuse_interval,
             &self.reclaim_interval,
-            &self.repack_interval,
             &self.repack_cooldown,
-            &self.range_interval,
-            &self.range_window,
-            &self.range_repack_after,
-            &self.range_repack_window,
-            &self.range_repack_retry_interval,
         ] {
             config::seconds(time)?;
         }

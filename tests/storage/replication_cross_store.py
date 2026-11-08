@@ -12,7 +12,7 @@ def run():
     for fixture, raw in [(source, source_raw), (target, target_raw)]:
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
         profile.update(cdc_enabled=not raw, deduplication_enabled=not raw,
-                       pack_enabled=False, pack_range_enabled=False, compression_enabled=False)
+                       pack_enabled=False, compression_enabled=False)
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     data = random.Random(75).randbytes(6 * 1024 * 1024) + b'public transfer'
     source.put('original', data)

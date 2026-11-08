@@ -21,7 +21,7 @@ def run(restart):
     assert mode in ('raw', 'chunks', 'pack')
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(cdc_enabled=mode != 'raw', deduplication_enabled=mode != 'raw',
-        pack_enabled=mode == 'pack', compression_enabled=mode == 'pack', pack_range_enabled=False)
+        pack_enabled=mode == 'pack', compression_enabled=mode == 'pack')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     if mode == 'pack':
         key_name = fixture.name + '-key'

@@ -10,7 +10,7 @@ use crate::model::{
     StreamStore, TaskControlStore,
 };
 use anyhow::Result;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -66,11 +66,6 @@ async fn sqlite_packing_contract() -> Result<()> {
     let candidates = backend.pack_candidates(stream, 0, 60.).await?;
     assert_eq!(candidates.len(), 3);
     assert!(candidates.iter().all(|c| c.eligible && !c.shared));
-    assert!(
-        backend
-            .same_references(rows[0].chunk.id, rows[1].chunk.id, 32)
-            .await?
-    );
     let task = pack_publication_tests::execution(&backend, "pack").await?;
     backend.pin_pack_inputs(task, &rows[..2]).await?;
     let pack = pack_publication_tests::prepared(&backend, task, storage, &rows[..2]).await?;
@@ -95,8 +90,6 @@ async fn sqlite_packing_contract() -> Result<()> {
     assert!(backend.in_storage(pack.id, storage).await?);
     assert!(!backend.in_storage(pack.id, Uuid::new_v4()).await?);
     assert_eq!(backend.pack_layout(pack.id).await?.len(), 2);
-    assert_eq!(backend.range_pack_layout(pack.id).await?.len(), 2);
-    assert_eq!(backend.pack_dimensions(pack.id).await?, (72, 64, 2));
     assert_eq!(backend.pack_raw_size(pack.id).await?, 64);
     assert_eq!(backend.pack_stored_size(pack.id).await?, 72);
     assert_eq!(backend.pack_member_count(pack.id).await?, 2);
@@ -165,7 +158,6 @@ async fn sqlite_packing_contract() -> Result<()> {
     );
     assert!(!backend.pack_has_pending(pack.id).await?);
     assert!(!backend.pack_has_writers(pack.id).await?);
-    assert!(!backend.range_pack_blocked(pack.id).await?);
 
     // Only the union of live, authorized source intervals is visible to an inspector.
     for (name, lo, hi) in [
@@ -178,7 +170,6 @@ async fn sqlite_packing_contract() -> Result<()> {
         let copy = cache_tests::stream(&backend, buckets[1], name).await?;
         backend.reference(copy, 0, rows[0].chunk.id, 32).await?;
         assert!(backend.pack_has_writers(pack.id).await?);
-        assert!(backend.range_pack_blocked(pack.id).await?);
         sqlx::query("UPDATE extents SET source_offset=?,length=? WHERE stream_id=?")
             .bind(lo)
             .bind(hi - lo)
@@ -191,7 +182,7 @@ async fn sqlite_packing_contract() -> Result<()> {
         backend
             .next_pack_change(Utc::now(), "reuse", Some(storage))
             .await?
-            .is_some()
+            .is_none()
     );
     assert!(backend.pack_candidates(stream, 0, 60.).await?[0].shared);
     let user = Uuid::new_v4();
@@ -336,89 +327,23 @@ async fn sqlite_packing_contract() -> Result<()> {
         .execute(db)
         .await?;
 
-    sqlx::query("INSERT INTO pack_access_windows(pack_id,window_start,downloads,partial_downloads,partial_bytes) VALUES(?,(CAST(unixepoch('subsec')*1000000 AS INTEGER)/3600000000)*3600000000,12,10,400),(?,CAST(unixepoch('subsec')*1000000 AS INTEGER)-172800000000,100,90,9000)").bind(pack.id).bind(pack.id).execute(db).await?;
-    sqlx::query("INSERT INTO pack_member_access_windows(pack_id,window_start,chunk_id,downloads) VALUES(?,CAST(unixepoch('subsec')*1000000 AS INTEGER),?,7)").bind(pack.id).bind(rows[0].chunk.id).execute(db).await?;
-    assert_eq!(
-        backend.pack_range_totals(pack.id, 3600.).await?,
-        (10, 400, 2)
-    );
-    assert_eq!(
-        backend.pack_member_hits(pack.id, 3600.).await?,
-        vec![(rows[0].chunk.id, 7)]
-    );
+    let now = Utc::now().timestamp();
+    sqlx::query("INSERT INTO pack_read_shapes(stream_id,start_bytes,end_bytes,observed_hour,requests,saved_gets) VALUES(?,0,64,?,3,3)")
+        .bind(stream).bind(now).execute(db).await?;
+    let task = backend.start_pack("repack", false, None).await?;
+    let task: Uuid = task["task_id"].as_str().unwrap().parse()?;
     assert_eq!(
         backend
-            .next_range_pack(storage, Utc::now(), 3600., 10)
+            .next_repack_stream(task, Id::default(), 0, Utc::now(), storage)
             .await?,
-        Some(pack.id)
+        Some(stream)
     );
     assert_eq!(
         backend
-            .next_range_pack(storage, Utc::now(), 3600., 11)
+            .next_repack_stream(task, stream, -1, Utc::now(), storage)
             .await?,
         None
     );
-    sqlx::query("UPDATE storage_profiles SET pack_range_enabled=TRUE WHERE storage_id=?")
-        .bind(storage)
-        .execute(db)
-        .await?;
-    let range = backend.start_pack("range", false, None).await?;
-    let range = crate::model::task::Execution {
-        id: range["task_id"].as_str().unwrap().parse()?,
-        token: Uuid::new_v4(),
-    };
-    assert_eq!(
-        super::queries::claim_task(range.id, range.token)
-            .execute(db)
-            .await?
-            .rows_affected(),
-        1
-    );
-    backend
-        .record_range(range, pack.id, 2, json!({"result":"keep"}))
-        .await?;
-    assert_eq!(
-        backend
-            .next_range_pack(storage, Utc::now() + Duration::seconds(1), 3600., 1)
-            .await?,
-        None
-    );
-    backend.complete_range_task(range).await?;
-    assert_eq!(backend.raw(range.id).await?.unwrap()["state"], "completed");
-    let chunk = rows[2].chunk.id;
-    sqlx::query("UPDATE chunks SET split_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),range_split_at=CAST(unixepoch('subsec')*1000000 AS INTEGER),repack_after=NULL WHERE id=?").bind(chunk).execute(db).await?;
-    assert!(backend.stream_repack_after(stream, 3600.).await?.is_some());
-    sqlx::query("UPDATE chunks SET repack_after=CAST(unixepoch('subsec')*1000000 AS INTEGER)-1000000 WHERE id=?")
-        .bind(chunk)
-        .execute(db)
-        .await?;
-    backend
-        .defer_range_repack(stream, 3600., 60., 600., 64)
-        .await?;
-    assert!(
-        backend.stream_repack_after(stream, 0.).await?.unwrap()
-            > Utc::now() + Duration::seconds(500)
-    );
-    sqlx::query("UPDATE chunks SET repack_after=CAST(unixepoch('subsec')*1000000 AS INTEGER)-1000000 WHERE id=?")
-        .bind(chunk)
-        .execute(db)
-        .await?;
-    sqlx::query("UPDATE access_state SET coverage_since=CAST(unixepoch('subsec')*1000000 AS INTEGER)-172800000000,flushed_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)").execute(db).await?;
-    backend
-        .defer_range_repack(stream, 3600., 60., 600., 64)
-        .await?;
-    let deferred: bool = sqlx::query_scalar(
-        "SELECT repack_after>CAST(unixepoch('subsec')*1000000 AS INTEGER) FROM chunks WHERE id=?",
-    )
-    .bind(chunk)
-    .fetch_one(db)
-    .await?;
-    assert!(!deferred);
-    sqlx::query("INSERT INTO chunk_access_windows(chunk_id,window_start,range_read_count) VALUES(?,CAST(unixepoch('subsec')*1000000 AS INTEGER),1)").bind(chunk).execute(db).await?;
-    backend
-        .defer_range_repack(stream, 3600., 60., 600., 64)
-        .await?;
-    assert!(backend.stream_repack_after(stream, 0.).await?.is_some());
 
     // A historical member is no longer visible through the pack after it moves out.
     sqlx::query("UPDATE chunk_encodings SET state='ready' WHERE encoding_id=?")

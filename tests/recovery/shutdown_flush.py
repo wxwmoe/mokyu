@@ -65,7 +65,7 @@ def main():
             stop()
             start()
 
-        configure(cdc_enabled=False, upload_cache=True, cache_enabled=True, deduplication_enabled=False, pack_range_enabled=False)
+        configure(cdc_enabled=False, upload_cache=True, cache_enabled=True, deduplication_enabled=False)
         data = os.urandom(128 * 1024)
         held = arm('raw-upload-before-process')
         fixture.put('first', data)
@@ -170,7 +170,7 @@ def main():
         wait(lambda: not database.query('SELECT r.id FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id WHERE o.bucket_id=%s AND o.object_key=%s', bucket, 'convert' if database.type == 'postgres' else b'convert'), 'conversion did not recover', seconds=90)
         print('PASS shutdown persists raw independently of a paused conversion and restart resumes CDC', flush=True)
 
-        configure(cdc_enabled=False, pack_enabled=False, pack_range_enabled=False, write_processing='inline')
+        configure(cdc_enabled=False, pack_enabled=False, write_processing='inline')
         for seconds in (2, 0):
             settings(f'{seconds}s')
             held = arm('raw-upload-before-process')

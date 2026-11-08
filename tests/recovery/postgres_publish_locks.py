@@ -14,7 +14,7 @@ def main():
     db, home = Database(), Fixture()
     assert db.type == 'postgres' and home.backend
     profile = home.cli('storage', 'profile', 'show', home.name)
-    home.cli('storage', 'profile', 'set', home.name, '-', value={**profile, 'cdc_enabled': False, 'pack_range_enabled': False})
+    home.cli('storage', 'profile', 'set', home.name, '-', value={**profile, 'cdc_enabled': False})
     home.faults = Path(os.environ['MOKYU_TEST_DATA_FAULT_DIR'])
     gate = home.arm('node-raw-uploaded')
     payload = os.urandom(8192)

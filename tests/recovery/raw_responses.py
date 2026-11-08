@@ -51,7 +51,7 @@ def main():
         wait(ready, 'service did not start', seconds=60)
         fixture, database = Fixture(), Database()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=False, pack_range_enabled=False, unreferenced_grace='1s', min_storage_duration='0s')
+        profile.update(cdc_enabled=False, unreferenced_grace='1s', min_storage_duration='0s')
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         fixture.cli('domain', 'set', 'raw-cache.example.test', fixture.name)
         credentials = faults / 'response-credentials.json'

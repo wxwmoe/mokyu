@@ -107,12 +107,7 @@ async fn mysql_storage_contract() -> Result<()> {
         changed.min_storage_duration = invalid.into();
         assert!(changed.min_storage_seconds().is_err());
     }
-    assert!(
-        !profile.cache_enabled
-            && !profile.upload_cache
-            && !profile.pack_enabled
-            && !profile.pack_range_enabled
-    );
+    assert!(!profile.cache_enabled && !profile.upload_cache && !profile.pack_enabled);
     assert!(!profile.compression_enabled);
     assert_eq!(profile.request_timeout, "30s");
 
@@ -202,7 +197,6 @@ async fn mysql_storage_contract() -> Result<()> {
             && profile.upload_cache
             && profile.compression_enabled
             && profile.pack_enabled
-            && profile.pack_range_enabled
     );
     let mut one = profile.clone();
     one.request_timeout = "45s".into();

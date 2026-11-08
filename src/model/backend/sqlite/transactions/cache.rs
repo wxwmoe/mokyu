@@ -306,16 +306,9 @@ pub(in super::super) async fn cache_batch(
     let mut rows: Vec<crate::model::Mapping> = Vec::new();
     let mut raw = 0u64;
     for row in all {
-        if let Some(last) = rows.last()
-            && (last.offset_bytes + i64::from(last.chunk.raw_size) != row.offset_bytes
-                || raw + row.chunk.raw_size as u64 > maximum
-                || !queries::same_references(
-                    last.chunk.id,
-                    row.chunk.id,
-                    row.offset_bytes - last.offset_bytes,
-                )
-                .fetch_one(&mut *tx)
-                .await?)
+        if !rows.is_empty()
+            && (raw + row.chunk.raw_size as u64 > maximum
+                || rows.len() == crate::content::pack::MAX_MEMBERS)
         {
             break;
         }

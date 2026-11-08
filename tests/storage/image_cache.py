@@ -164,7 +164,7 @@ def run(f, request, page, case, checks, restart):
         profile = f.cli("storage", "profile", "show", f.name)
         f.cli("storage", "profile", "set", f.name, "-", value={**profile,
               "cdc_enabled": False, "deduplication_enabled": False, "pack_enabled": False,
-              "pack_range_enabled": False, "cache_enabled": False, "read_integrity": "off"})
+              "cache_enabled": False, "read_integrity": "off"})
         try:
             before = set(f.keys())
             damaged_key = upload(123)

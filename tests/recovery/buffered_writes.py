@@ -66,7 +66,7 @@ def main():
         if backend:
             os.environ['MOKYU_TEST_BACKEND'] = backend
         assert fixture.cli('storage', 'profile', 'show', fixture.name)['write_durability'] == 'durable'
-        configure(fixture, cdc_enabled=False, deduplication_enabled=True, pack_range_enabled=False)
+        configure(fixture, cdc_enabled=False, deduplication_enabled=True)
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
         for value in ['unknown', 'BUFFERED']:
             fixture.cli('storage', 'profile', 'set', fixture.name, '-',
@@ -294,7 +294,7 @@ def main():
 
         if backend:
             remote = Fixture()
-            configure(remote, cdc_enabled=False, pack_range_enabled=False, upload_cache=True,
+            configure(remote, cdc_enabled=False, upload_cache=True,
                       cache_enabled=True, write_durability='buffered')
             uploader = arm(remote, 'raw-upload-before-process')
             sync = arm(remote, 'buffered-before-sync')

@@ -118,7 +118,7 @@ def run(restart):
     try:
         for fixture in (source, target):
             profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-            profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False,
+            profile.update(cdc_enabled=False, deduplication_enabled=False,
                            upload_cache=False, cache_enabled=False, write_processing='inline')
             fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         source.client.put_object(Bucket=source.name, Key=key, Body=b'before', ACL='public-read',

@@ -17,7 +17,7 @@ def main():
     database = Database()
     for fixture in (origin, target):
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False)
+        profile.update(cdc_enabled=False, deduplication_enabled=False)
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     target.cli('cred', 'grant', target.credentials['access_key'], origin.name, '--read-only')
     data = bytes(range(256)) * (8 * 1024 * 1024 // 256) + b'end'

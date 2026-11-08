@@ -80,7 +80,7 @@ def main():
             response = fixture.session.put(fixture.web + '/api/v1/storages/' + fixture.name + '/profile',
                 headers=fixture.headers, json={**defaults, 'read_integrity': 'unchecked'}, timeout=15)
             assert response.status_code == 400, response.text
-            policy(fixture, cdc_enabled=False, pack_range_enabled=False)
+            policy(fixture, cdc_enabled=False)
             body = os.urandom(32768)
             put(fixture, 'raw', body)
             physical, = fixture.keys()
@@ -106,7 +106,7 @@ def main():
             print('PASS default inline, profile validation, explicit off and cache fencing on strict switch', flush=True)
 
             encoded = Fixture()
-            policy(encoded, cdc_enabled=False, pack_range_enabled=False, read_integrity='off')
+            policy(encoded, cdc_enabled=False, read_integrity='off')
             text = b'Identity-derived representations retain the original integrity evidence.\n' * 1800
             encoded.client.put_object(Bucket=encoded.name, Key='raw', Body=text, ACL='public-read', ContentType='text/plain')
             physical, = encoded.keys()
@@ -125,7 +125,7 @@ def main():
             assert response.content == text, 'derived encoding lost the unchecked source epoch'
 
             pending = Fixture()
-            policy(pending, cdc_enabled=False, pack_range_enabled=False, read_integrity='background')
+            policy(pending, cdc_enabled=False, read_integrity='background')
             pending.client.put_object(Bucket=pending.name, Key='raw', Body=text, ACL='public-read', ContentType='text/plain')
             physical, = pending.keys()
             pending.bytes(physical, altered)
@@ -151,7 +151,7 @@ def main():
             print('PASS identity-derived encodings retain unchecked epochs and pending failure evidence', flush=True)
 
             race = Fixture()
-            policy(race, cdc_enabled=False, pack_range_enabled=False, read_integrity='off')
+            policy(race, cdc_enabled=False, read_integrity='off')
             put(race, 'raw', body)
             physical, = race.keys()
             race.bytes(physical, bad)
@@ -172,7 +172,7 @@ def main():
             print('PASS a late unchecked builder cannot acquire the new reliable configuration generation', flush=True)
 
             faulty = Fixture()
-            policy(faulty, cdc_enabled=False, pack_range_enabled=False, read_integrity='background')
+            policy(faulty, cdc_enabled=False, read_integrity='background')
             put(faulty, 'raw', body)
             physical, = faulty.keys()
             faulty.bytes(physical, bad)
@@ -189,7 +189,7 @@ def main():
             print('PASS background returns before checking and isolates only after current backend confirmation', flush=True)
 
             busy = Fixture()
-            policy(busy, cdc_enabled=False, pack_range_enabled=False, read_integrity='background')
+            policy(busy, cdc_enabled=False, read_integrity='background')
             for index in range(5):
                 put(busy, str(index), body + bytes([index]))
             marker = arm(busy, 'read-integrity-check')
@@ -264,7 +264,7 @@ def main():
 
             if chunks.backend:
                 cached = Fixture()
-                policy(cached, cdc_enabled=False, pack_range_enabled=False, cache_enabled=True)
+                policy(cached, cdc_enabled=False, cache_enabled=True)
                 put(cached, 'raw', body)
                 assert get(cached).content == body
                 row, = database.query(f'SELECT {database.raw_location} AS file_uuid FROM raw_sources WHERE storage_id=%s', uuid.UUID(cached.store['id']))
@@ -289,7 +289,7 @@ def main():
                 print('PASS actual cached bytes are checked, bad cache is rejected and a healthy remote backend remains usable', flush=True)
                 settled(cached)
                 packed = Fixture()
-                policy(packed, pack_enabled=True, read_integrity='off', pack_interval='24h', pack_repack_interval='24h')
+                policy(packed, pack_enabled=True, read_integrity='off', pack_interval='24h')
                 payload = os.urandom(9 * 1024 * 1024 + 17)
                 put(packed, 'raw', payload)
                 packed.finished(packed.cli('pack', 'run'))

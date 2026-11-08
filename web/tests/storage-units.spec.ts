@@ -63,8 +63,6 @@ for (const [locale, text] of [['en', en], ['zh-CN', zh], ['ja', ja]] as const) {
     }
     await percent.fill('2')
     await openStorageGroup(editor, 'storeGroupPacking')
-    await expect(editor.locator('#storage-unit-pack_range_min_savings_percent')).toHaveText('%')
-    await expect(editor.getByRole('textbox', { name: text.profile_pack_range_min_savings_bytes, exact: true })).toHaveValue('64MiB')
     await openStorageGroup(editor, 'storeGroupWorker')
     await expect(editor.locator('#storage-unit-integrity_bandwidth')).toHaveText('/s')
     await expect(editor.locator('#storage-unit-integrity_rps')).toHaveText(text.unitRequestsPerSecond)

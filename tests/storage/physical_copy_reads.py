@@ -15,7 +15,7 @@ def run(*, bounded=True):
     backend = json.loads(Path(os.environ['MOKYU_TEST_BACKEND']).read_text())
     database = Database()
     source = fixture.cli('storage', 'profile', 'show', fixture.name)
-    source.update(cache_enabled=False, upload_cache=False, pack_range_enabled=False,
+    source.update(cache_enabled=False, upload_cache=False,
                   cdc_enabled=True, compression_enabled=False, min_storage_duration='0s')
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=source)
     key = fixture.cli('key', 'create', fixture.name + '-key', 'block', '-a', 'aes-256-gcm')
@@ -44,8 +44,7 @@ def run(*, bounded=True):
                              '--access', backend['access_key'], '--secret', backend['secret_key'])
         profile = fixture.cli('storage', 'profile', 'show', name)
         profile.update(cdc_enabled=not raw, cache_enabled=False, upload_cache=False,
-                       deduplication_enabled=False, compression_enabled=False, pack_enabled=False,
-                       pack_range_enabled=False)
+                       deduplication_enabled=False, compression_enabled=False, pack_enabled=False)
         fixture.cli('storage', 'profile', 'set', name, '-', value=profile)
         bucket = fixture.cli('bucket', 'create', name, '--storage', target['id'])
         fixture.cli('cred', 'grant', fixture.credentials['access_key'], name)

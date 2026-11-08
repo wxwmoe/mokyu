@@ -4,7 +4,7 @@ Mokyu 先检查对象权限、当前版本和读取策略。完整的匿名 GET 
 
 | 文件来源 | 代理只读挂载 | 交付方式 |
 | --- | --- | --- |
-| 本地存储 | 该后端的 `raw/` | Nginx X-Accel-Redirect 或 Apache X-Sendfile |
+| 本地存储 | 该后端的 `objects/` | Nginx X-Accel-Redirect 或 Apache X-Sendfile |
 | S3 后端 | 提供请求的 data、node 或单容器的 `cache/objects/` | Nginx X-Accel-Redirect，仅使用校验通过的完整文件 |
 
 同一入口同时服务两种来源时，给两者配置独立的内部 URI。只向受信代理开放 Mokyu 监听端口。示例先搭建 SQLite 与本地 raw，再说明如何接入 S3 缓存。
@@ -75,7 +75,7 @@ docker compose exec mokyu mokyu cli init admin
 docker compose exec mokyu mokyu cli storage create primary local --init
 docker compose exec -T mokyu mokyu cli storage profile show primary |
   jq '.cdc_enabled = false | .deduplication_enabled = false |
-      .compression_enabled = false | .pack_enabled = false | .pack_range_enabled = false |
+      .compression_enabled = false | .pack_enabled = false |
       .read_integrity = "off" | .http_compression_enabled = false | .file_delivery = "x_accel_redirect" |
       .file_delivery_prefix = "/_mokyu_raw/"' > config/raw-profile.json
 docker compose exec mokyu mokyu cli storage profile preview primary /config/raw-profile.json

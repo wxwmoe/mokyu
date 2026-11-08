@@ -3,6 +3,13 @@ use crate::model::{Id, node_pack as wire};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::collections::BTreeSet;
 
+struct Origin {
+    backend: Arc<Backend>,
+    path: Path,
+    chunk: codec::Chunk,
+    range: Option<(std::ops::Range<u64>, u64)>,
+}
+
 impl Reader {
     pub(super) async fn transfer_encoded(
         &self,
@@ -121,121 +128,88 @@ impl Reader {
         batch: wire::Batch,
     ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
         let attempts = layout(&batch)?;
-        let mut payload = 0u64;
-        for source in &batch.sources {
-            payload = payload
-                .checked_add(match source {
-                    wire::Source::Chunk { chunk } => {
-                        codec::validate_metadata(chunk, keys.as_ref())?;
-                        chunk.file_size()? as u64
-                    }
-                    wire::Source::Pack { pack, members } => {
-                        pack.validate(keys.as_ref())?;
-                        crate::model::source::manifest_digest(pack, members)?;
-                        pack.payload_size()? as u64 + 16
-                    }
-                })
-                .context("pack memory overflow")?;
-        }
-        let config = backend.profile.compression_config("0s");
-        let units = (payload.saturating_mul(4) + self.workspace.max(config.workspace_bytes()?))
-            .div_ceil(1024 * 1024);
-        ensure!(
-            units <= u64::from(self.pack_units),
-            "pack exceeds node memory budget"
-        );
-        let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
         let _io = self.acquire(&self.io, 1).await?;
         backend.store.verify().await?;
-        let mut raw = BTreeMap::<Id, (Vec<u8>, Bytes)>::new();
-        let mut originals = BTreeMap::new();
+        let mut origins = BTreeMap::new();
         for source in &batch.sources {
-            let (path, bound) = match source {
-                wire::Source::Chunk { chunk } => (
-                    crate::storage::location::Layout::S3.chunk(chunk.address()),
-                    codec::MAX_FILE,
-                ),
-                wire::Source::Pack { pack, .. } => (
-                    crate::storage::location::Layout::S3.pack(pack.address()),
-                    pack.payload_size()? + 16,
-                ),
-            };
-            self.gets.fetch_add(1, Ordering::Relaxed);
             let origin = crate::node::reads::backend(
                 materials,
                 source.storage().context("pack source storage missing")?,
             )?;
             if origin.profile.storage_id != backend.profile.storage_id {
-                origin.store.verify().await?;
+                origin.store.ensure_verified().await?;
             }
-            let bytes = read_bounded(origin.store.backend.as_ref(), &path, bound).await?;
-            let cpu = self.cpu.clone().acquire_owned().await?;
-            let hold = memory.clone();
-            let source = source.clone();
-            let keys = keys.clone();
-            let pool = self.pool.clone();
-            let (decoded, _memory) = tokio::task::spawn_blocking(move || {
-                let _cpu = cpu;
-                let mut data = Vec::new();
-                match source {
-                    wire::Source::Chunk { chunk } => {
-                        let (raw, _) = codec::decode_read(
-                            &chunk,
-                            bytes.clone(),
-                            keys.as_ref(),
-                            0,
-                            &pool,
-                            true,
-                        )?;
-                        data.push((chunk.uuid.into(), raw, chunk, Bytes::from(bytes)));
-                    }
-                    wire::Source::Pack { pack, members } => {
-                        pack::frame::validate_file(&pack, &bytes)?;
-                        let size = bytes.len() as u64;
-                        pack::frame::validate_entries(
-                            &members,
-                            size,
-                            pack.raw_size,
-                            pack.member_count,
-                            true,
-                        )?;
-                        for member in members {
-                            let span =
-                                member
-                                    .position
-                                    .range(member.raw_size, size, pack.member_count)?;
-                            let body = &bytes[span.start as usize..span.end as usize];
-                            let raw = pack::frame::decode_entry(
-                                &pack,
-                                &member,
-                                body.to_vec(),
-                                keys.as_ref(),
-                                &pool,
-                                true,
-                            )?;
-                            let mut file =
-                                Vec::with_capacity(codec::FILE_HEADER.len() + body.len());
-                            file.extend_from_slice(codec::FILE_HEADER);
-                            file.extend_from_slice(body);
-                            data.push((
-                                member.uuid.into(),
-                                raw,
-                                member.chunk(&pack)?,
-                                Bytes::from(file),
-                            ));
-                        }
+            match source {
+                wire::Source::Chunk { chunk } => {
+                    codec::validate_metadata(chunk, keys.as_ref())?;
+                    origins.insert(
+                        chunk.location_id,
+                        Origin {
+                            backend: origin,
+                            path: crate::storage::location::Layout::S3.chunk(chunk.address()),
+                            chunk: chunk.clone(),
+                            range: None,
+                        },
+                    );
+                }
+                wire::Source::Pack { pack, members } => {
+                    pack.validate(keys.as_ref())?;
+                    crate::model::source::manifest_digest(pack, members)?;
+                    let size =
+                        u64::try_from(pack.stored_size.context(codec::IntegrityError::Metadata)?)?;
+                    let path = crate::storage::location::Layout::S3.pack(pack.address());
+                    for member in members {
+                        let range =
+                            member
+                                .position
+                                .range(member.raw_size, size, pack.member_count)?;
+                        let chunk = member.chunk(pack)?;
+                        origins.entry(chunk.location_id).or_insert_with(|| Origin {
+                            backend: origin.clone(),
+                            path: path.clone(),
+                            chunk,
+                            range: Some((range, size)),
+                        });
                     }
                 }
-                Ok::<_, anyhow::Error>((data, hold))
-            })
-            .await??;
-            for (id, plain, chunk, file) in decoded {
-                raw.entry(id).or_insert_with(|| (chunk.hash.clone(), plain));
-                originals.insert(chunk.location_id, (chunk, file));
             }
         }
-        self.pack_data(backend, keys, batch, raw, originals, memory, attempts)
-            .await
+        let output = batch
+            .chunks
+            .iter()
+            .map(|item| u64::try_from(item.size))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .sum();
+        let memory = self.pack_buffer_budget(&backend, 0, output).await?;
+        self.pack_data(
+            backend,
+            keys,
+            batch,
+            BTreeMap::new(),
+            origins,
+            memory,
+            attempts,
+        )
+        .await
+    }
+
+    pub(super) async fn pack_buffer_budget(
+        &self,
+        backend: &Backend,
+        plain: u64,
+        output: u64,
+    ) -> Result<Arc<OwnedSemaphorePermit>> {
+        let work = self
+            .workspace
+            .max(backend.profile.compression_config("0s").workspace_bytes()?);
+        let bytes = pack::buffer_bytes(plain, output, work);
+        let units = u32::try_from(bytes.div_ceil(1024 * 1024))?;
+        ensure!(
+            units <= self.pack_units,
+            "pack buffers exceed node memory budget"
+        );
+        Ok(Arc::new(self.acquire(&self.packs, units).await?))
     }
 
     pub(crate) async fn pack_buffers(
@@ -254,14 +228,7 @@ impl Reader {
             .values()
             .map(|(_, bytes)| bytes.len() as u64)
             .sum::<u64>();
-        let config = backend.profile.compression_config("0s");
-        let units = (payload.saturating_mul(4) + self.workspace.max(config.workspace_bytes()?))
-            .div_ceil(1024 * 1024);
-        ensure!(
-            units <= u64::from(self.pack_units),
-            "pack exceeds node memory budget"
-        );
-        let memory = Arc::new(self.acquire(&self.packs, units as u32).await?);
+        let memory = self.pack_buffer_budget(&backend, payload, payload).await?;
         backend.store.verify().await?;
         self.pack_data(backend, keys, batch, raw, BTreeMap::new(), memory, attempts)
             .await
@@ -273,142 +240,158 @@ impl Reader {
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         batch: wire::Batch,
         raw: BTreeMap<Id, (Vec<u8>, Bytes)>,
-        mut originals: BTreeMap<Uuid, (codec::Chunk, Bytes)>,
+        origins: BTreeMap<Uuid, Origin>,
         memory: Arc<OwnedSemaphorePermit>,
         attempts: BTreeMap<(usize, usize), usize>,
     ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
         let config = backend.profile.compression_config("0s");
-        let storage = backend.profile.storage_id;
-        let mut data = Vec::with_capacity(batch.chunks.len());
-        for (index, target) in batch.chunks.iter().enumerate() {
-            let source = if batch.sources.is_empty() {
-                target.id
-            } else {
-                target.physical_id()?.into()
-            };
-            let (hash, bytes) = raw.get(&source).context("pack member body is missing")?;
-            ensure!(
-                hash == &target.hash && bytes.len() == target.size as usize,
-                "pack member identity differs"
-            );
-            data.push((batch.chunk(storage, index)?, bytes.clone()));
-        }
-        drop(raw);
-        let data = Arc::new(data);
-        let batch = Arc::new(batch);
-        let mut files = Vec::with_capacity(data.len());
-        for (index, (chunk, raw)) in data.iter().enumerate() {
-            if let Some((mut physical, file)) = originals.remove(&chunk.location_id) {
-                ensure!(
-                    physical.uuid == chunk.uuid && physical.hash == chunk.hash,
-                    codec::IntegrityError::Metadata
-                );
-                physical.id = chunk.id;
-                files.push((physical, file));
-                continue;
-            }
-            ensure!(
-                batch.chunks[index].ready.is_none() && batch.chunks[index].original.is_none(),
-                "missing immutable source encoding"
-            );
-            let cpu = self.cpu.clone().acquire_owned().await?;
-            let hold = memory.clone();
-            let keys = keys.clone();
-            let pool = self.pool.clone();
-            let config = config.clone();
-            let (mut chunk, raw) = (chunk.clone(), raw.clone());
-            let compress = batch.chunks[index].compress;
-            let file = tokio::task::spawn_blocking(move || {
-                let (_cpu, _hold) = (cpu, hold);
-                ensure!(
-                    raw.len() == chunk.raw_size as usize
-                        && blake3::hash(&raw).as_bytes().as_slice() == chunk.hash,
-                    codec::IntegrityError::Hash
-                );
-                let compressed = pool.compress_for(&raw, compress, &config)?;
-                chunk.compressed = compressed.is_some();
-                let body = compressed.unwrap_or_else(|| raw.to_vec());
-                chunk.stored_size = Some(i32::try_from(
-                    body.len() + if chunk.block_key_id.is_some() { 16 } else { 0 },
-                )?);
-                let encoded = codec::seal(&chunk, body, keys.as_ref())?;
-                Ok::<_, anyhow::Error>((chunk, Bytes::from(encoded)))
-            })
-            .await??;
-            files.push(file);
-        }
         let mut result = wire::Encoded {
-            chunks: files
-                .iter()
-                .map(|(chunk, _)| {
-                    wire::encoded(
-                        i64::from(chunk.stored_size.context("missing encoded chunk size")?),
-                        chunk.compressed,
-                    )
-                })
-                .collect::<Result<Vec<_>>>()?,
+            chunks: Vec::with_capacity(batch.chunks.len()),
             packs: Vec::new(),
         };
+        let mut cached = Vec::new();
         for &(start, end) in &batch.groups {
-            if let Some(&index) = attempts.get(&(start, end)) {
-                let mut pack = batch.pack(backend.profile.storage_id, index)?;
+            let mut pack = attempts
+                .get(&(start, end))
+                .map(|&attempt| batch.pack(backend.profile.storage_id, attempt))
+                .transpose()?;
+            let mut writer = if let Some(pack) = &pack {
                 ensure!(
                     pack.raw_size as u64 <= crate::config::bytes(&backend.profile.pack_max_size)?,
                     "pack exceeds profile size"
                 );
-                let members = files[start..end].to_vec();
+                let upper =
+                    pack.raw_size as usize + 8 + pack.member_count as usize * pack::MAX_MEMBER_TAG;
+                let mut writer = crate::storage::pack_writer::Writer::new(
+                    backend.store.backend.clone(),
+                    crate::storage::location::Layout::S3.pack(pack.address()),
+                    None,
+                    upper,
+                )
+                .await?;
+                writer.put(Bytes::from_static(pack::frame::HEADER)).await?;
+                Some(writer)
+            } else {
+                None
+            };
+            let mut builder = pack::frame::Builder::new();
+            for index in start..end {
+                let target = &batch.chunks[index];
+                let mut chunk = batch.chunk(backend.profile.storage_id, index)?;
                 let cpu = self.cpu.clone().acquire_owned().await?;
                 let hold = memory.clone();
-                let (pack, bytes) = tokio::task::spawn_blocking(move || {
-                    let (_cpu, _hold) = (cpu, hold);
-                    let (file, _) = pack::frame::assemble(&mut pack, &members)?;
-                    Ok::<_, anyhow::Error>((pack, file))
-                })
-                .await??;
-                backend
-                    .store
-                    .backend
-                    .put(
-                        &crate::storage::location::Layout::S3.pack(pack.address()),
-                        Bytes::from(bytes).into(),
+                let keys = keys.clone();
+                let pool = self.pool.clone();
+                let (file, plain) = if let Some(origin) = origins.get(&chunk.location_id) {
+                    ensure!(
+                        origin.chunk.uuid == chunk.uuid
+                            && origin.chunk.hash == chunk.hash
+                            && origin.chunk.raw_size == chunk.raw_size
+                            && pack::frame::Encoding::capture(&origin.chunk)?
+                                == pack::frame::Encoding::capture(&chunk)?,
+                        codec::IntegrityError::Metadata
+                    );
+                    let len = origin.chunk.file_size()?;
+                    let bound = if origin.range.is_some() {
+                        len - codec::FILE_HEADER.len()
+                    } else {
+                        len
+                    };
+                    self.gets.fetch_add(1, Ordering::Relaxed);
+                    let data = crate::storage::read_retry::bounded(
+                        origin.backend.store.backend.as_ref(),
+                        &origin.path,
+                        bound,
+                        origin.range.clone(),
+                        None,
                     )
                     .await?;
-                result.packs.push((
-                    index,
-                    wire::encoded(pack.stored_size.context("missing pack size")?, false)?,
-                    STANDARD.encode(pack.digest.context("missing pack digest")?),
-                ));
-            } else {
-                for index in start..end {
-                    let target = &batch.chunks[index];
-                    if let Some(ready) = target.ready {
-                        result.chunks[index] = ready;
+                    let mut file = if origin.range.is_some() {
+                        let mut file = Vec::with_capacity(len);
+                        file.extend_from_slice(codec::FILE_HEADER);
+                        file.extend_from_slice(&data);
+                        file
                     } else {
-                        backend
-                            .store
-                            .backend
-                            .put(
-                                &crate::storage::location::Layout::S3.chunk(target.location),
-                                files[index].1.clone().into(),
-                            )
-                            .await?;
-                    }
+                        data
+                    };
+                    let current = chunk.clone();
+                    let file = tokio::task::spawn_blocking(move || {
+                        let (_cpu, _hold) = (cpu, hold);
+                        codec::decode_read(&current, file.clone(), keys.as_ref(), 0, &pool, true)?;
+                        Ok::<_, anyhow::Error>(Bytes::from(std::mem::take(&mut file)))
+                    })
+                    .await??;
+                    (file, None)
+                } else {
+                    ensure!(
+                        target.ready.is_none() && target.original.is_none(),
+                        "missing immutable source encoding"
+                    );
+                    let (hash, plain) =
+                        raw.get(&target.id).context("pack member body is missing")?;
+                    ensure!(hash == &chunk.hash, codec::IntegrityError::Hash);
+                    let raw = plain.clone();
+                    let compress = target.compress;
+                    let config = config.clone();
+                    let (encoded, file) = tokio::task::spawn_blocking(move || {
+                        let (_cpu, _hold) = (cpu, hold);
+                        ensure!(
+                            raw.len() == chunk.raw_size as usize
+                                && blake3::hash(&raw).as_bytes().as_slice() == chunk.hash,
+                            codec::IntegrityError::Hash
+                        );
+                        let compressed = pool.compress_for(&raw, compress, &config)?;
+                        chunk.compressed = compressed.is_some();
+                        let body = compressed.unwrap_or_else(|| raw.to_vec());
+                        chunk.stored_size = Some(i32::try_from(
+                            body.len() + if chunk.block_key_id.is_some() { 16 } else { 0 },
+                        )?);
+                        let file = codec::seal(&chunk, body, keys.as_ref())?;
+                        Ok::<_, anyhow::Error>((chunk, Bytes::from(file)))
+                    })
+                    .await??;
+                    chunk = encoded;
+                    (file, Some(plain.clone()))
+                };
+                let count = wire::encoded(
+                    i64::from(chunk.stored_size.context("missing encoded size")?),
+                    chunk.compressed,
+                )?;
+                result.chunks.push(target.ready.unwrap_or(count));
+                if let Some(writer) = &mut writer {
+                    builder.append(&chunk, &file)?;
+                    writer.put(file.slice(codec::FILE_HEADER.len()..)).await?;
+                } else if target.ready.is_none() {
+                    backend
+                        .store
+                        .backend
+                        .put(
+                            &crate::storage::location::Layout::S3.chunk(target.location),
+                            file.into(),
+                        )
+                        .await?;
+                }
+                if let Some(raw) = plain {
+                    cached.push((
+                        if pack.is_some() {
+                            chunk.uuid
+                        } else {
+                            target.location
+                        },
+                        raw,
+                    ));
                 }
             }
+            if let (Some(pack), Some(writer)) = (pack.take(), writer) {
+                let (size, digest) = builder.finish(pack.raw_size, pack.member_count)?;
+                writer.finish().await?;
+                result.packs.push((
+                    attempts[&(start, end)],
+                    wire::encoded(i64::try_from(size)?, false)?,
+                    STANDARD.encode(digest.as_bytes()),
+                ));
+            }
         }
-        let packed = batch.packed_chunks()?;
-        let cached = data
-            .iter()
-            .enumerate()
-            .map(|(index, (chunk, raw))| {
-                let id = if packed[index] {
-                    chunk.uuid
-                } else {
-                    chunk.location_id
-                };
-                (id, raw.clone())
-            })
-            .collect();
         let fills = self
             .files
             .prepare_batch(cached, &backend.profile, memory)

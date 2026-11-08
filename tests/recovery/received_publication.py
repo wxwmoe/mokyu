@@ -15,7 +15,7 @@ def main():
     for chunked in (False, True):
         fixture = Fixture()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=chunked, pack_range_enabled=False)
+        profile.update(cdc_enabled=chunked)
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         previous = b'previous acknowledged value'
         fixture.put('object', previous)

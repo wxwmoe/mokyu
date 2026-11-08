@@ -15,7 +15,7 @@ def run():
     fixture = Fixture()
     if os.environ.get('MOKYU_TEST_REPLICATION_MODE') == 'raw':
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False)
+        profile.update(cdc_enabled=False, deduplication_enabled=False)
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     target = fixture.cli('bucket', 'create', fixture.name + '-target', '--storage', fixture.store['id'])
     target_id, target_name = target['id'], target['name']

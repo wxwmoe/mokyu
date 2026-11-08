@@ -44,7 +44,7 @@ def main():
         stop()
         start()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
-        profile.update(cdc_enabled=False, pack_range_enabled=False, cors_cache_enabled=True, public_cache_refresh_interval="1s", public_cache_max_age="3s")
+        profile.update(cdc_enabled=False, cors_cache_enabled=True, public_cache_refresh_interval="1s", public_cache_max_age="3s")
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
         fixture.cli('domain', 'set', 'cors.example.test', fixture.name)
         credentials = faults / 'cors-credentials.json'

@@ -17,7 +17,7 @@ def main():
                             aws_access_key_id=home.credentials['access_key'], aws_secret_access_key=home.credentials['secret_key'],
                             config=home.client.meta.config)
         profile = home.cli('storage', 'profile', 'show', home.name)
-        home.cli('storage', 'profile', 'set', home.name, '-', value={**profile, 'cdc_enabled': chunks, 'pack_range_enabled': False})
+        home.cli('storage', 'profile', 'set', home.name, '-', value={**profile, 'cdc_enabled': chunks})
         losing, winning = os.urandom(65536), os.urandom(32768)
         first = blocked(home, barrier, lambda: home.put('same-key', losing),
                         lambda: peer.put_object(Bucket=home.name, Key='same-key', Body=winning))

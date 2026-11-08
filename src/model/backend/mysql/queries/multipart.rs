@@ -153,20 +153,17 @@ pub(in super::super) async fn changed_references(
     );
     chunk_ids(&mut query, chunks);
     query.build().execute(&mut *connection).await?;
+    if added {
+        return Ok(());
+    }
     let mut query = sqlx::QueryBuilder::new(
         "INSERT INTO pack_changes(pack_id,reason) SELECT DISTINCT pack_id,",
     );
     query
-        .push_bind(if added { "reuse" } else { "reclaim" })
+        .push("'reclaim'")
         .push(" FROM chunks WHERE pack_id IS NOT NULL AND id IN ");
     chunk_ids(&mut query, chunks);
-    query.push(" ON DUPLICATE KEY UPDATE generation=pack_changes.generation+1,next_check_at=CURRENT_TIMESTAMP(6),reason=IF(").push_bind(added).push(",'reuse',pack_changes.reason)");
-    query.build().execute(&mut *connection).await?;
-    let mut query = sqlx::QueryBuilder::new(
-        "INSERT INTO pack_maintenance(stream_id,reason) SELECT DISTINCT e.stream_id,'repack' FROM extents e JOIN streams s ON s.id=e.stream_id WHERE s.state='ready' AND s.stream_type='object' AND e.chunk_id IN ",
-    );
-    chunk_ids(&mut query, chunks);
-    query.push(" ON DUPLICATE KEY UPDATE generation=pack_maintenance.generation+1,progress_cursor=0,updated_at=CURRENT_TIMESTAMP(6),next_check_at=CURRENT_TIMESTAMP(6)");
+    query.push(" ON DUPLICATE KEY UPDATE generation=pack_changes.generation+1,next_check_at=CURRENT_TIMESTAMP(6),reason='reclaim'");
     query.build().execute(&mut *connection).await?;
     Ok(())
 }
@@ -176,7 +173,6 @@ pub(in super::super) async fn ready_stream_queues(
     stream: Id,
 ) -> Result<()> {
     sqlx::query("INSERT INTO pack_maintenance(stream_id) SELECT id FROM streams WHERE id=? AND state='ready' AND stream_type='object' AND (SELECT offset_bytes FROM extents WHERE stream_id=? AND chunk_id IS NOT NULL ORDER BY offset_bytes LIMIT 1 OFFSET 1) IS NOT NULL ON DUPLICATE KEY UPDATE generation=pack_maintenance.generation+1,progress_cursor=0,reason='pack',updated_at=CURRENT_TIMESTAMP(6),next_check_at=CURRENT_TIMESTAMP(6)").bind(stream).bind(stream).execute(&mut *connection).await?;
-    sqlx::query("INSERT INTO pack_changes(pack_id) SELECT DISTINCT c.pack_id FROM extents e JOIN chunks c ON c.id=e.chunk_id WHERE e.stream_id=? AND c.pack_id IS NOT NULL ON DUPLICATE KEY UPDATE generation=pack_changes.generation+1,next_check_at=CURRENT_TIMESTAMP(6),reason='reuse'").bind(stream).execute(connection).await?;
     Ok(())
 }
 

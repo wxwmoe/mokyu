@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261107134057.
+-- Generated from the complete mysql migration chain through 20261108051001.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1428,6 +1428,28 @@ CREATE TABLE `pack_members` (
   CONSTRAINT `members_ordinal` CHECK ((`ordinal` between 0 and 4095))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `pack_read_shapes` (
+  `stream_id` bigint NOT NULL,
+  `start_bytes` bigint NOT NULL,
+  `end_bytes` bigint NOT NULL,
+  `requests` bigint NOT NULL,
+  `observed_hour` bigint NOT NULL,
+  `saved_gets` bigint NOT NULL,
+  PRIMARY KEY (`stream_id`,`start_bytes`,`end_bytes`,`observed_hour`),
+  KEY `pack_shapes_expiry` (`observed_hour`),
+  CONSTRAINT `pack_read_shapes_ibfk_1` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `pack_read_shapes_chk_1` CHECK (((`start_bytes` >= 0) and (`end_bytes` > `start_bytes`) and (`requests` > 0) and (`saved_gets` >= 0)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `pack_repack_queue` (
+  `task_id` binary(16) NOT NULL,
+  `stream_id` bigint NOT NULL,
+  `saved_gets` bigint NOT NULL,
+  PRIMARY KEY (`task_id`,`stream_id`),
+  KEY `pack_repack_priority` (`task_id`,`saved_gets` DESC,`stream_id`),
+  CONSTRAINT `pack_repack_queue_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `packs` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `location_id` binary(16) NOT NULL,
@@ -2583,10 +2605,8 @@ INSERT INTO `access_state` (`id`, `coverage_since`, `flushed_at`) VALUES ('1', C
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('cleanup', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('gc', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('pack', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
-INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('range', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('reclaim', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
 INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('repack', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
-INSERT INTO `maintenance_controls` (`policy`, `paused`, `last_scheduled_at`, `updated_at`) VALUES ('reuse', '0', CURRENT_TIMESTAMP(6), CURRENT_TIMESTAMP(6));
 INSERT INTO `notice_membership` (`id`) VALUES ('1');
 INSERT INTO `projects` (`id`, `name`, `description`, `builtin`, `allow_bucket_create`, `created_at`) VALUES (X'00000000000000000000000000000001', 'Default', '', '1', '0', CURRENT_TIMESTAMP(6));
 INSERT INTO `quota_scopes` (`scope`, `scope_id`, `used_bytes`, `reserved_bytes`, `inflight_bytes`, `object_count`, `bucket_count`, `logical_bytes_limit`, `inflight_bytes_limit`, `bucket_count_limit`) VALUES ('project', X'00000000000000000000000000000001', '0', '0', '0', '0', '0', NULL, NULL, NULL);

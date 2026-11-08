@@ -272,6 +272,10 @@ pub(in super::super) async fn flush_access(
 }
 
 pub(super) async fn persist_access(db: &mut PgConnection, pending: AccessBatch) -> Result<()> {
+    for ((stream, start, end, hour), saved) in &pending.pack_reads {
+        sqlx::query("INSERT INTO pack_read_shapes(stream_id,start_bytes,end_bytes,observed_hour,saved_gets,requests) SELECT id,$2,$3,$4,$5,$6 FROM streams WHERE id=$1 ON CONFLICT(stream_id,start_bytes,end_bytes,observed_hour) DO UPDATE SET saved_gets=pack_read_shapes.saved_gets+EXCLUDED.saved_gets,requests=pack_read_shapes.requests+EXCLUDED.requests").bind(stream).bind(start).bind(end).bind(hour.timestamp()).bind(saved.saved).bind(saved.requests).execute(&mut *db).await?;
+    }
+
     super::super::tier_access::demand(db, &pending).await?;
     if pending.chunks.is_empty() && pending.packs.is_empty() && pending.members.is_empty() {
         return Ok(());

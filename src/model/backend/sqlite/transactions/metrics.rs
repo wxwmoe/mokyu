@@ -85,6 +85,10 @@ pub(in super::super) async fn persist_node_access(
     pending: &AccessBatch,
     stale: f64,
 ) -> Result<()> {
+    for ((stream, start, end, hour), saved) in &pending.pack_reads {
+        sqlx::query("INSERT INTO pack_read_shapes(stream_id,start_bytes,end_bytes,observed_hour,saved_gets,requests) SELECT id,?,?,?,?,? FROM streams WHERE id=? ON CONFLICT(stream_id,start_bytes,end_bytes,observed_hour) DO UPDATE SET saved_gets=pack_read_shapes.saved_gets+excluded.saved_gets,requests=pack_read_shapes.requests+excluded.requests").bind(start).bind(end).bind(hour.timestamp()).bind(saved.saved).bind(saved.requests).bind(stream).execute(&mut **tx).await?;
+    }
+
     queries::flush_chunk_access(tx, pending).await?;
     queries::flush_pack_access(tx, pending).await?;
     queries::flush_member_access(tx, pending).await?;

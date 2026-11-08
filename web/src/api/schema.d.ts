@@ -4031,22 +4031,9 @@ export interface components {
             pack_enabled: boolean;
             pack_interval: string;
             pack_max_size: string;
-            pack_range_enabled: boolean;
-            pack_range_interval: string;
-            /** Format: int32 */
-            pack_range_min_downloads: number;
-            pack_range_min_savings_bytes: string;
-            /** Format: int32 */
-            pack_range_min_savings_percent: number;
-            pack_range_repack_after: string;
-            pack_range_repack_retry_interval: string;
-            pack_range_repack_window: string;
-            pack_range_window: string;
             pack_reclaim_interval: string;
             pack_reclaim_min_savings_bytes: string;
             pack_repack_cooldown: string;
-            pack_repack_interval: string;
-            pack_reuse_interval: string;
             pack_upload_flush_timeout: string;
             priority_aging: string;
             public_cache_max_age?: string;

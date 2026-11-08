@@ -40,12 +40,11 @@ impl App {
     pub(crate) async fn maintenance_schedule(&self) -> Result<Vec<(&'static str, u64, bool)>> {
         let profiles = self.storage_profiles.enabled_profiles().await?;
         let mut schedule = Vec::new();
-        for policy in ["pack", "reuse", "reclaim", "repack", "range"] {
+        for policy in ["pack", "reclaim"] {
             let minimum = profiles
                 .iter()
                 .filter(|profile| match policy {
-                    "pack" | "repack" => profile.pack_enabled && self.pack_creation_allowed(),
-                    "range" => profile.pack_range_enabled,
+                    "pack" => profile.pack_enabled && self.pack_creation_allowed(),
                     _ => true,
                 })
                 .map(|profile| profile.maintenance_interval(policy))
@@ -69,7 +68,19 @@ impl App {
         let schedule = self.maintenance_schedule().await?;
         let profiles = self.storage_profiles.enabled_profiles().await?;
         let configured = profiles.iter().any(|profile| profile.pack_enabled);
+        rows.retain(|row| {
+            row["policy"] == "repack"
+                || schedule
+                    .iter()
+                    .any(|(policy, _, _)| row["policy"] == *policy)
+        });
         for row in &mut rows {
+            if row["policy"] == "repack" {
+                row["enabled"] = json!(configured && self.pack_creation_allowed());
+                row["interval_seconds"] = json!(0);
+                row["next_run_at"] = Value::Null;
+                continue;
+            }
             let (_, seconds, enabled) = schedule
                 .iter()
                 .copied()
@@ -111,11 +122,12 @@ impl App {
     }
 
     pub async fn maintenance_change(&self, policy: &str, paused: bool) -> Result<Value> {
-        if !self
-            .maintenance_schedule()
-            .await?
-            .iter()
-            .any(|(k, _, _)| *k == policy)
+        if policy != "repack"
+            && !self
+                .maintenance_schedule()
+                .await?
+                .iter()
+                .any(|(k, _, _)| *k == policy)
         {
             return Err(s3s::s3_error!(InvalidArgument, "unknown maintenance policy").into());
         }
@@ -251,8 +263,7 @@ async fn schedule(app: &App) -> Result<Duration> {
             continue;
         }
         let due = age.is_none_or(|age| age >= interval as f64);
-        let changed = policy == "reuse" && app.maintenance_store.reuse_due().await?;
-        let remaining = if due || changed {
+        let remaining = if due {
             let result = if matches!(policy, "gc" | "cleanup") {
                 app.maintenance_start(policy).await
             } else {

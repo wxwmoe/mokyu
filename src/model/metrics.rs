@@ -109,8 +109,15 @@ pub(crate) struct PackCounts {
     pub(crate) useful: i64,
 }
 
+#[derive(Clone, Copy, Default, Serialize, Deserialize)]
+pub(crate) struct PackReads {
+    pub(crate) requests: i64,
+    pub(crate) saved: i64,
+}
+
 #[derive(Default)]
 pub(crate) struct AccessBatch {
+    pub(crate) pack_reads: HashMap<(Id, i64, i64, DateTime<Utc>), PackReads>,
     pub(crate) chunks: HashMap<(Id, DateTime<Utc>), ChunkCounts>,
     pub(crate) packs: HashMap<(Id, DateTime<Utc>), PackCounts>,
     pub(crate) members: HashMap<(Id, Id, DateTime<Utc>), i64>,
@@ -123,7 +130,8 @@ pub(crate) struct AccessBatch {
 
 impl AccessBatch {
     pub(crate) fn len(&self) -> usize {
-        self.chunks.len()
+        self.pack_reads.len()
+            + self.chunks.len()
             + self.packs.len()
             + self.members.len()
             + self.demand.len()

@@ -679,7 +679,6 @@ pub(crate) async fn update_record(
     if record.r#type == "local" {
         requested.cache_enabled = false;
         requested.upload_cache = false;
-        requested.pack_range_enabled = false;
     }
     validate_profile(&requested, &record.r#type)?;
     validate_profile_capacity(app, &requested).await?;

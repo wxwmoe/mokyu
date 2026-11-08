@@ -209,6 +209,10 @@ pub(in super::super) async fn persist_node_access(
     pending: &AccessBatch,
     stale: f64,
 ) -> Result<()> {
+    for ((stream, start, end, hour), saved) in &pending.pack_reads {
+        sqlx::query("INSERT INTO pack_read_shapes(stream_id,start_bytes,end_bytes,observed_hour,saved_gets,requests) SELECT id,?,?,?,?,? FROM streams WHERE id=? ON DUPLICATE KEY UPDATE saved_gets=pack_read_shapes.saved_gets+?,requests=pack_read_shapes.requests+?").bind(start).bind(end).bind(hour.timestamp()).bind(saved.saved).bind(saved.requests).bind(stream).bind(saved.saved).bind(saved.requests).execute(&mut **tx).await?;
+    }
+
     // Acquire the shared coverage row before updating any overlapping counters.
     queries::access_coverage(pending.dropped, stale)
         .execute(&mut **tx)

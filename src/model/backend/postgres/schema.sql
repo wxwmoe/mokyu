@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261107134057.
+-- Generated from the complete postgres migration chain through 20261108051001.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -122,13 +122,12 @@ CREATE FUNCTION public.enqueue_pack_extents() RETURNS trigger
 BEGIN
     PERFORM id FROM chunks WHERE id IN (SELECT chunk_id FROM changed) ORDER BY id FOR NO KEY UPDATE;
     UPDATE chunks SET reference_changed_at=now() WHERE id IN (SELECT chunk_id FROM changed);
-    INSERT INTO pack_changes(pack_id,reason)
-        SELECT DISTINCT c.pack_id,CASE WHEN TG_OP='DELETE' THEN 'reclaim' ELSE 'reuse' END FROM changed e JOIN chunks c ON c.id=e.chunk_id WHERE c.pack_id IS NOT NULL
-        ON CONFLICT(pack_id) DO UPDATE SET generation=pack_changes.generation+1,next_check_at=now(),reason=CASE WHEN EXCLUDED.reason='reuse' THEN 'reuse' ELSE pack_changes.reason END;
-    INSERT INTO pack_maintenance(stream_id,reason)
-        SELECT DISTINCT e.stream_id,'repack' FROM changed x JOIN extents e ON e.chunk_id=x.chunk_id
-        JOIN streams s ON s.id=e.stream_id WHERE s.state='ready'
-        ON CONFLICT(stream_id) DO UPDATE SET generation=pack_maintenance.generation+1,cursor=0,updated_at=now(),next_check_at=now();
+    IF TG_OP='DELETE' THEN
+        INSERT INTO pack_changes(pack_id,reason)
+        SELECT DISTINCT c.pack_id,'reclaim' FROM changed e JOIN chunks c ON c.id=e.chunk_id
+        WHERE c.pack_id IS NOT NULL
+        ON CONFLICT(pack_id) DO UPDATE SET generation=pack_changes.generation+1,next_check_at=now(),reason='reclaim';
+    END IF;
     RETURN NULL;
 END $$;
 
@@ -147,14 +146,6 @@ BEGIN
             reason='pack',
             updated_at=now(),
             next_check_at=now();
-        INSERT INTO pack_changes(pack_id)
-        SELECT DISTINCT c.pack_id
-        FROM extents e JOIN chunks c ON c.id=e.chunk_id
-        WHERE e.stream_id=NEW.id AND c.pack_id IS NOT NULL
-        ON CONFLICT(pack_id) DO UPDATE SET
-            generation=pack_changes.generation+1,
-            next_check_at=now(),
-            reason='reuse';
     END IF;
     RETURN NULL;
 END
@@ -778,10 +769,6 @@ BEGIN
             coalesce(p.compression_min_savings_percent::text, ''),
             coalesce(p.compression_min_savings_bytes::text, ''),
             coalesce(p.pack_max_size, ''),
-            coalesce(p.pack_range_enabled::text, ''),
-            coalesce(p.pack_range_min_downloads::text, ''),
-            coalesce(p.pack_range_min_savings_percent::text, ''),
-            coalesce(p.pack_range_min_savings_bytes, ''),
             'pack'),
         'sha256');
     RETURN NEW;
@@ -2051,6 +2038,22 @@ CREATE TABLE public.pack_members (
     CONSTRAINT pack_members_ordinal_check CHECK ((ordinal >= 0))
 );
 
+CREATE TABLE public.pack_read_shapes (
+    stream_id uuid NOT NULL,
+    start_bytes bigint NOT NULL,
+    end_bytes bigint NOT NULL,
+    requests bigint NOT NULL,
+    observed_hour bigint NOT NULL,
+    saved_gets bigint NOT NULL,
+    CONSTRAINT pack_read_shapes_check CHECK (((start_bytes >= 0) AND (end_bytes > start_bytes) AND (requests > 0) AND (saved_gets >= 0)))
+);
+
+CREATE TABLE public.pack_repack_queue (
+    task_id uuid NOT NULL,
+    stream_id uuid NOT NULL,
+    saved_gets bigint NOT NULL
+);
+
 CREATE TABLE public.packs (
     id uuid DEFAULT uuidv7() NOT NULL,
     encryption_algorithm text CONSTRAINT packs_algorithm_not_null NOT NULL,
@@ -3044,10 +3047,8 @@ CREATE TABLE public.web_uploads (
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('cleanup', 'false', now(), now());
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('gc', 'false', now(), now());
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('pack', 'false', now(), now());
-INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('range', 'false', now(), now());
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reclaim', 'false', now(), now());
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('repack', 'false', now(), now());
-INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reuse', 'false', now(), now());
 INSERT INTO "projects" ("id", "name", "description", "builtin", "allow_bucket_create", "created_at") VALUES ('00000000-0000-0000-0000-000000000001', 'Default', '', 'true', 'false', now());
 INSERT INTO "quota_scopes" ("scope", "scope_id", "used_bytes", "reserved_bytes", "inflight_bytes", "object_count", "bucket_count", "logical_bytes_limit", "inflight_bytes_limit", "bucket_count_limit", "cached_bytes", "cached_compressed") VALUES ('project', '00000000-0000-0000-0000-000000000001', '0', '0', '0', '0', '0', NULL, NULL, NULL, '0', 'false');
 INSERT INTO "redundancy_catalog" ("singleton") VALUES ('true');
@@ -3417,6 +3418,12 @@ ALTER TABLE ONLY public.pack_members
 
 ALTER TABLE ONLY public.pack_members
     ADD CONSTRAINT pack_members_pkey PRIMARY KEY (pack_id, ordinal);
+
+ALTER TABLE ONLY public.pack_read_shapes
+    ADD CONSTRAINT pack_read_shapes_pkey PRIMARY KEY (stream_id, start_bytes, end_bytes, observed_hour);
+
+ALTER TABLE ONLY public.pack_repack_queue
+    ADD CONSTRAINT pack_repack_queue_pkey PRIMARY KEY (task_id, stream_id);
 
 ALTER TABLE ONLY public.packs
     ADD CONSTRAINT packs_pkey PRIMARY KEY (id);
@@ -3811,6 +3818,10 @@ CREATE INDEX pack_member_access_lookup ON public.pack_member_access_windows USIN
 CREATE INDEX pack_members_chunk ON public.pack_members USING btree (chunk_id);
 
 CREATE INDEX pack_members_key ON public.pack_members USING btree (block_key_id) WHERE (block_key_id IS NOT NULL);
+
+CREATE INDEX pack_repack_priority ON public.pack_repack_queue USING btree (task_id, saved_gets DESC, stream_id);
+
+CREATE INDEX pack_shapes_expiry ON public.pack_read_shapes USING btree (observed_hour);
 
 CREATE INDEX packs_gc ON public.packs USING btree (unreferenced_at, id) WHERE (state = ANY (ARRAY['retired'::text, 'deleting'::text]));
 
@@ -4487,6 +4498,12 @@ ALTER TABLE ONLY public.pack_members
 
 ALTER TABLE ONLY public.pack_members
     ADD CONSTRAINT pack_members_pack_id_fkey FOREIGN KEY (pack_id) REFERENCES public.packs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.pack_read_shapes
+    ADD CONSTRAINT pack_read_shapes_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.pack_repack_queue
+    ADD CONSTRAINT pack_repack_queue_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.packs
     ADD CONSTRAINT packs_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);

@@ -44,23 +44,11 @@ impl EncodingPolicy {
     }
 
     pub(crate) fn pack_config(&self) -> crate::content::pack::Config {
-        use crate::content::{
-            compression::Strategy,
-            pack::{CompressionStrategy, Config},
-        };
+        use crate::content::pack::Config;
         Config {
             enabled: self.pack_enabled,
             max_size: self.pack_max_size.clone(),
             upload_cache_timeout: self.pack_flush_timeout.clone(),
-            compression_strategy: Some(if !self.compression.enabled {
-                CompressionStrategy::Never
-            } else {
-                match self.compression.strategy {
-                    Strategy::Never => CompressionStrategy::Never,
-                    Strategy::Always => CompressionStrategy::Always,
-                    Strategy::Sample => CompressionStrategy::Sample,
-                }
-            }),
             ..Default::default()
         }
     }

@@ -52,7 +52,7 @@ def main():
             value = row['value']
             value = uuid.UUID(bytes=bytes(value)) if isinstance(value,(bytes,bytearray,memoryview)) else uuid.UUID(str(value))
             return root/'cache/objects'/value.hex[-3:][::-1]/value.hex
-        configure(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False,
+        configure(cdc_enabled=False, deduplication_enabled=False,
             write_processing='inline', read_integrity='off')
         hot = os.urandom(6*1024*1024)
         fixture.put('hot', hot)

@@ -4,7 +4,7 @@ pub(crate) async fn ready_encoding(
     db: impl sqlx::PgExecutor<'_>,
     chunk: Id,
 ) -> Result<Option<(Id, Uuid, i32)>> {
-    Ok(sqlx::query_as("SELECT encoding_id,encoding_id,standalone_size FROM chunk_encodings WHERE chunk_id=$1 AND state='ready'").bind(chunk).fetch_optional(db).await?)
+    Ok(sqlx::query_as("SELECT encoding_id,encoding_id,standalone_size FROM chunk_encodings WHERE chunk_id=$1 AND state='ready' AND quarantined_at IS NULL ORDER BY encoding_id LIMIT 1").bind(chunk).fetch_optional(db).await?)
 }
 
 pub(crate) async fn pack_has_pending(db: impl sqlx::PgExecutor<'_>, pack: Id) -> Result<bool> {
@@ -57,7 +57,7 @@ pub(crate) async fn pack_candidates(
     offset: i64,
     _cooldown: f64,
 ) -> Result<Vec<PackCandidate>> {
-    Ok(sqlx::query_as::<_, PackCandidateRow>("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size) AS eligible,EXISTS(SELECT 1 FROM extents other WHERE other.chunk_id=c.id AND other.stream_id<>e.stream_id) AS shared FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=$1 AND e.offset_bytes>=$2 AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026").bind(stream).bind(offset).fetch_all(db).await?.into_iter().map(|r| PackCandidate {row:r.row,eligible:r.eligible,shared:r.shared}).collect())
+    Ok(sqlx::query_as::<_, PackCandidateRow>("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size AND (c.repack_after IS NULL OR c.repack_after<=now())) AS eligible,EXISTS(SELECT 1 FROM extents other WHERE other.chunk_id=c.id AND other.stream_id<>e.stream_id) AS shared FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=$1 AND e.offset_bytes>=$2 AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026").bind(stream).bind(offset).fetch_all(db).await?.into_iter().map(|r| PackCandidate {row:r.row,eligible:r.eligible,shared:r.shared}).collect())
 }
 
 pub(crate) async fn pack_member_count(db: impl sqlx::PgExecutor<'_>, pack: Id) -> Result<i64> {
@@ -81,6 +81,95 @@ pub(crate) async fn next_pack(
     storage: Option<Uuid>,
 ) -> Result<Option<Id>> {
     Ok(sqlx::query_scalar("SELECT id FROM packs WHERE state='ready' AND id>$1 AND ($2::uuid IS NULL OR id=$2) AND ($4::uuid IS NULL OR storage_id=$4) AND created_at<=COALESCE($3::timestamptz,now()) ORDER BY id LIMIT 1").bind(after).bind(pack).bind(upper).bind(storage).fetch_optional(db).await?)
+}
+
+pub(in super::super) async fn reclaim_estimate(
+    db: &mut sqlx::PgConnection,
+    pack: Id,
+    groups: &[Vec<Mapping>],
+) -> Result<i64> {
+    let before: Option<i64> = sqlx::query_scalar("SELECT stored_size FROM packs p WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM journal_protected_addresses h WHERE h.address=p.location_id)").bind(pack).fetch_optional(&mut *db).await?.flatten();
+    let Some(before) = before else { return Ok(0) };
+    let index:std::collections::BTreeMap<_,_>=sqlx::query_as::<_,(Id,Option<i32>,bool)>("SELECT m.chunk_id,m.encoded_size,EXISTS(SELECT 1 FROM chunk_encodings e WHERE e.chunk_id=m.chunk_id AND e.storage_id=p.storage_id AND e.state='ready' AND e.quarantined_at IS NULL) FROM pack_members m JOIN packs p ON p.id=m.pack_id WHERE m.pack_id=$1").bind(pack).fetch_all(db).await?.into_iter().map(|(id,size,ready)|(id,(size,ready))).collect();
+    let mut after = 0i64;
+    for group in groups {
+        after += 8;
+        for member in group {
+            let &(size, ready) = index.get(&member.chunk.id).context("missing pack member")?;
+            if group.len() == 1 && ready {
+                after -= 8;
+                continue;
+            }
+            after += i64::from(size.context("missing pack member length")?);
+        }
+    }
+    Ok(before - after)
+}
+
+pub(in super::super) async fn repack_benefit(
+    db: &mut sqlx::PgConnection,
+    stream: Id,
+    selected: &[Mapping],
+) -> Result<i64> {
+    let (Some(first), Some(last)) = (selected.first(), selected.last()) else {
+        return Ok(0);
+    };
+    const PLACEMENT: &str = "SELECT e.offset_bytes,e.length,c.id AS chunk_id,CASE WHEN l.encoding_id IS NULL THEN c.pack_id END AS pack_id,m.offset_bytes AS physical_offset,COALESCE(m.encoded_size,l.standalone_size,c.standalone_size) AS encoded_size FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' LEFT JOIN pack_members m ON l.encoding_id IS NULL AND m.pack_id=c.pack_id AND m.chunk_id=c.id WHERE e.stream_id=$1 AND e.offset_bytes+e.length>$2 AND e.offset_bytes<$3 ORDER BY e.offset_bytes";
+    let rows = sqlx::query_as::<_, crate::model::packing::ReadPlacement>(PLACEMENT)
+        .bind(stream)
+        .bind(first.offset_bytes)
+        .bind(last.offset_bytes + i64::from(last.chunk.raw_size))
+        .fetch_all(&mut *db)
+        .await?;
+    let Some(proposed) = crate::model::packing::proposed_ranges(&rows, selected) else {
+        return Ok(0);
+    };
+    // Include cold reads of every object whose members would move, including previously contiguous reads.
+    let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT r.stream_id,r.start_bytes,r.end_bytes,CAST(SUM(r.requests) AS BIGINT) FROM pack_read_shapes r WHERE EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=r.stream_id) AND EXISTS(SELECT 1 FROM extents e WHERE e.stream_id=r.stream_id AND e.offset_bytes<r.end_bytes AND e.offset_bytes+e.length>r.start_bytes AND e.chunk_id IN (",
+    );
+    {
+        let mut ids = query.separated(",");
+        for member in selected {
+            ids.push_bind(member.chunk.id);
+        }
+    }
+    query.push(")) GROUP BY r.stream_id,r.start_bytes,r.end_bytes LIMIT 257");
+    let shapes = query
+        .build_query_as::<(Id, i64, i64, i64)>()
+        .fetch_all(&mut *db)
+        .await?;
+    if shapes.len() > 256 {
+        return Ok(0);
+    }
+    let mut gain = 0i64;
+    for (id, start, end, requests) in shapes {
+        let rows = sqlx::query_as::<_, crate::model::packing::ReadPlacement>(PLACEMENT)
+            .bind(id)
+            .bind(start)
+            .bind(end)
+            .fetch_all(&mut *db)
+            .await?;
+        let Some(delta) = crate::model::packing::read_savings(&rows, &proposed) else {
+            return Ok(0);
+        };
+        gain = gain.saturating_add(delta.saturating_mul(requests));
+    }
+    Ok(gain)
+}
+
+pub(in super::super) async fn next_repack_stream(
+    db: &mut sqlx::PgConnection,
+    task: Uuid,
+    after: Id,
+    offset: i64,
+    upper: DateTime<Utc>,
+    storage: Uuid,
+) -> Result<Option<Id>> {
+    if after == Id::default() {
+        sqlx::query("INSERT INTO pack_repack_queue(task_id,stream_id,saved_gets) SELECT $1,r.stream_id,SUM(r.saved_gets) FROM pack_read_shapes r JOIN streams s ON s.id=r.stream_id JOIN buckets b ON b.id=s.bucket_id WHERE b.storage_id=$2 AND s.state='ready' AND r.observed_hour<=$3 AND EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id) GROUP BY r.stream_id HAVING SUM(r.saved_gets)>0 ON CONFLICT(task_id,stream_id) DO NOTHING").bind(task).bind(storage).bind(upper.timestamp()).execute(&mut *db).await?;
+    }
+    Ok(sqlx::query_scalar("SELECT q.stream_id FROM pack_repack_queue q LEFT JOIN pack_repack_queue previous ON previous.task_id=q.task_id AND previous.stream_id=$1 WHERE q.task_id=$2 AND (previous.stream_id IS NULL OR q.saved_gets<previous.saved_gets OR (q.saved_gets=previous.saved_gets AND (q.stream_id>previous.stream_id OR (q.stream_id=previous.stream_id AND $3::bigint>=0)))) AND EXISTS(SELECT 1 FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=q.stream_id AND b.storage_id=$4) ORDER BY q.saved_gets DESC,q.stream_id LIMIT 1").bind(after).bind(task).bind(offset).bind(storage).fetch_optional(db).await?)
 }
 
 pub(crate) async fn next_pack_stream(
@@ -140,7 +229,7 @@ pub(crate) async fn defer_pack_queue(
     generation: i64,
     later: DateTime<Utc>,
 ) -> Result<()> {
-    sqlx::query("WITH execution AS (SELECT id FROM tasks WHERE id=$4 AND state='running' AND lease_token=$5 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp()) FOR UPDATE) UPDATE pack_maintenance SET cursor=0,next_check_at=$3,reason='repack' WHERE stream_id=$1 AND generation=$2 AND EXISTS(SELECT 1 FROM execution)").bind(stream).bind(generation).bind(later).bind(task.id).bind(task.token).execute(db).await?;
+    sqlx::query("WITH execution AS (SELECT id FROM tasks WHERE id=$4 AND state='running' AND lease_token=$5 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp()) FOR UPDATE) UPDATE pack_maintenance SET cursor=0,next_check_at=$3,reason='pack' WHERE stream_id=$1 AND generation=$2 AND EXISTS(SELECT 1 FROM execution)").bind(stream).bind(generation).bind(later).bind(task.id).bind(task.token).execute(db).await?;
     Ok(())
 }
 
@@ -174,36 +263,6 @@ pub(crate) async fn advance_pack_queue(
     Ok(())
 }
 
-pub(crate) async fn next_range_pack(
-    db: impl sqlx::PgExecutor<'_>,
-    storage: Uuid,
-    cutoff: DateTime<Utc>,
-    window: f64,
-    minimum: i64,
-) -> Result<Option<Id>> {
-    Ok(sqlx::query_scalar("SELECT p.id FROM packs p JOIN pack_access_windows w ON w.pack_id=p.id WHERE p.storage_id=$4 AND p.state='ready' AND p.created_at<=$1 AND (p.range_checked_at IS NULL OR p.range_checked_at<$1) AND w.window_start>=date_trunc('hour',now()-$2*interval '1 second') GROUP BY p.id HAVING sum(w.partial_downloads)>=$3 AND max(w.updated_at)>COALESCE(p.range_checked_at,'-infinity'::timestamptz) ORDER BY sum(w.partial_bytes) DESC,p.id LIMIT 1").bind(cutoff).bind(window).bind(minimum).bind(storage).fetch_optional(db).await?)
-}
-
-pub(crate) async fn range_pack_blocked(db: impl sqlx::PgExecutor<'_>, pack: Id) -> Result<bool> {
-    Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pending_uploads WHERE source_pack_id=$1) OR EXISTS(SELECT 1 FROM chunks c JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id WHERE c.pack_id=$1 AND s.state='writing')").bind(pack).fetch_one(db).await?)
-}
-
-pub(crate) async fn pack_range_totals(
-    db: impl sqlx::PgExecutor<'_>,
-    pack: Id,
-    window: f64,
-) -> Result<(i64, i64, i64)> {
-    Ok(sqlx::query_as("SELECT COALESCE(sum(partial_downloads),0)::bigint,COALESCE(sum(partial_bytes),0)::bigint,COALESCE(sum(downloads-partial_downloads),0)::bigint FROM pack_access_windows WHERE pack_id=$1 AND window_start>=date_trunc('hour',now()-$2*interval '1 second')").bind(pack).bind(window).fetch_one(db).await?)
-}
-
-pub(crate) async fn pack_member_hits(
-    db: impl sqlx::PgExecutor<'_>,
-    pack: Id,
-    window: f64,
-) -> Result<Vec<(Id, i64)>> {
-    Ok(sqlx::query_as("SELECT chunk_id,sum(downloads)::bigint FROM pack_member_access_windows WHERE pack_id=$1 AND window_start>=date_trunc('hour',now()-$2*interval '1 second') GROUP BY chunk_id").bind(pack).bind(window).fetch_all(db).await?)
-}
-
 pub(crate) async fn pack_dimensions(
     db: impl sqlx::PgExecutor<'_>,
     pack: Id,
@@ -214,25 +273,6 @@ pub(crate) async fn pack_dimensions(
             .fetch_one(db)
             .await?,
     )
-}
-
-pub(crate) async fn range_pack_layout(
-    db: impl sqlx::PgExecutor<'_>,
-    pack: Id,
-) -> Result<Vec<Mapping>> {
-    Ok(sqlx::query_as("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,m.offset_bytes,c.pack_id FROM pack_members m JOIN chunks c ON c.id=m.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE m.pack_id=$1 AND c.pack_id=$1 AND c.state='ready' AND EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) ORDER BY m.ordinal LIMIT 4096").bind(pack).fetch_all(db).await?)
-}
-
-pub(crate) async fn defer_range_repack(
-    db: impl sqlx::PgExecutor<'_>,
-    stream: Id,
-    window: f64,
-    flush: f64,
-    retry: f64,
-    offset: i64,
-) -> Result<()> {
-    sqlx::query("UPDATE chunks c SET repack_after=now()+$4*interval '1 second' FROM mokyu_meta g WHERE c.range_split_at IS NOT NULL AND c.repack_after<=now() AND c.id IN (SELECT chunk_id FROM extents WHERE stream_id=$1 AND offset_bytes>=$5 ORDER BY offset_bytes LIMIT 1026) AND (g.access_coverage_since IS NULL OR g.access_coverage_since>date_trunc('hour',now()-$2*interval '1 second') OR g.access_flushed_at IS NULL OR g.access_flushed_at<now()-$3*interval '1 second' OR EXISTS(SELECT 1 FROM chunk_access_windows w WHERE w.chunk_id=c.id AND w.range_reads>0 AND w.window_start>=date_trunc('hour',now()-$2*interval '1 second')))").bind(stream).bind(window).bind(flush).bind(retry).bind(offset).execute(db).await?;
-    Ok(())
 }
 
 pub(crate) async fn prepare_outputs(
@@ -360,7 +400,6 @@ pub(crate) async fn publish_outputs(
     rows: &[Mapping],
     outputs: &[PackOutput],
     split: bool,
-    range: bool,
     cooldown: f64,
 ) -> Result<()> {
     let packs: Vec<_> = outputs
@@ -406,8 +445,8 @@ pub(crate) async fn publish_outputs(
         .iter()
         .flat_map(|o| o.chunks.iter().map(|_| o.pack.as_ref().map(|p| p.id)))
         .collect();
-    sqlx::query("UPDATE chunks c SET pack_id=v.pack,split_at=CASE WHEN $3 THEN now() ELSE split_at END,repack_after=CASE WHEN $3 THEN GREATEST(repack_after,now()+$4*interval '1 second') ELSE repack_after END,range_split_at=CASE WHEN $5 THEN now() WHEN NOT $3 AND v.pack IS NOT NULL THEN NULL ELSE range_split_at END FROM unnest($1::uuid[],$2::uuid[]) v(id,pack) WHERE c.id=v.id")
-        .bind(ids).bind(packs).bind(split).bind(cooldown).bind(range).execute(db).await?;
+    sqlx::query("UPDATE chunks c SET pack_id=v.pack,split_at=CASE WHEN $3 THEN now() ELSE split_at END,repack_after=CASE WHEN $3 THEN GREATEST(repack_after,now()+$4*interval '1 second') ELSE repack_after END FROM unnest($1::uuid[],$2::uuid[]) v(id,pack) WHERE c.id=v.id")
+        .bind(ids).bind(packs).bind(split).bind(cooldown).execute(db).await?;
     Ok(())
 }
 
@@ -419,19 +458,6 @@ pub(crate) async fn matching_references(
 ) -> Result<Vec<bool>> {
     Ok(sqlx::query_scalar("SELECT NOT EXISTS(SELECT 1 FROM extents a JOIN chunks c ON c.id=a.chunk_id WHERE a.chunk_id=v.a AND (a.source_offset<>0 OR a.length<>c.raw_size OR NOT EXISTS(SELECT 1 FROM extents b JOIN chunks d ON d.id=b.chunk_id WHERE b.chunk_id=v.b AND b.stream_id=a.stream_id AND b.offset_bytes=a.offset_bytes+v.distance AND b.source_offset=0 AND b.length=d.raw_size))) AND NOT EXISTS(SELECT 1 FROM extents b JOIN chunks c ON c.id=b.chunk_id WHERE b.chunk_id=v.b AND (b.source_offset<>0 OR b.length<>c.raw_size OR NOT EXISTS(SELECT 1 FROM extents a JOIN chunks d ON d.id=a.chunk_id WHERE a.chunk_id=v.a AND a.stream_id=b.stream_id AND a.offset_bytes=b.offset_bytes-v.distance AND a.source_offset=0 AND a.length=d.raw_size))) FROM unnest($1::uuid[],$2::uuid[],$3::bigint[]) WITH ORDINALITY v(a,b,distance,position) ORDER BY position")
         .bind(first).bind(second).bind(distances).fetch_all(db).await?)
-}
-
-pub(crate) async fn reference_boundaries(
-    db: impl sqlx::PgExecutor<'_>,
-    rows: &[&Mapping],
-) -> Result<Vec<bool>> {
-    let first: Vec<_> = rows.windows(2).map(|r| r[0].chunk.id).collect();
-    let second: Vec<_> = rows.windows(2).map(|r| r[1].chunk.id).collect();
-    let distances: Vec<_> = rows
-        .windows(2)
-        .map(|r| r[1].offset_bytes - r[0].offset_bytes)
-        .collect();
-    matching_references(db, &first, &second, &distances).await
 }
 
 pub(crate) type Connection = sqlx::PgConnection;
@@ -481,12 +507,6 @@ pub(in super::super) async fn live(db: &mut Connection, ids: &[Id]) -> Result<Ve
             .fetch_all(db)
             .await?,
     )
-}
-pub(in super::super) async fn pack_counts(
-    db: &mut Connection,
-    ids: &[Id],
-) -> Result<Vec<(Id, i64)>> {
-    Ok(sqlx::query_as("SELECT pack_id,count(*) FROM chunks WHERE pack_id=ANY($1) AND state='ready' GROUP BY pack_id").bind(ids).fetch_all(db).await?)
 }
 pub(in super::super) async fn creation_allowed(db: &mut Connection) -> Result<bool> {
     Ok(

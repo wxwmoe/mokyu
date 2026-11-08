@@ -191,20 +191,9 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::storage::profile::S
             pack_max_size: row.try_get("pack_max_size")?,
             pack_upload_flush_timeout: row.try_get("pack_upload_flush_timeout")?,
             pack_interval: row.try_get("pack_interval")?,
-            pack_reuse_interval: row.try_get("pack_reuse_interval")?,
             pack_reclaim_interval: row.try_get("pack_reclaim_interval")?,
-            pack_repack_interval: row.try_get("pack_repack_interval")?,
             pack_repack_cooldown: row.try_get("pack_repack_cooldown")?,
             pack_reclaim_min_savings_bytes: row.try_get("pack_reclaim_min_savings_bytes")?,
-            pack_range_enabled: row.try_get("pack_range_enabled")?,
-            pack_range_interval: row.try_get("pack_range_interval")?,
-            pack_range_window: row.try_get("pack_range_window")?,
-            pack_range_min_downloads: row.try_get("pack_range_min_downloads")?,
-            pack_range_min_savings_percent: row.try_get("pack_range_min_savings_percent")?,
-            pack_range_min_savings_bytes: row.try_get("pack_range_min_savings_bytes")?,
-            pack_range_repack_after: row.try_get("pack_range_repack_after")?,
-            pack_range_repack_window: row.try_get("pack_range_repack_window")?,
-            pack_range_repack_retry_interval: row.try_get("pack_range_repack_retry_interval")?,
             pack_concurrency: row.try_get("pack_concurrency")?,
             integrity_concurrency: row.try_get("integrity_concurrency")?,
             integrity_rps: row.try_get("integrity_rps")?,
@@ -268,20 +257,9 @@ const PROFILE_COLUMNS: &[&str] = &[
     "pack_max_size",
     "pack_upload_flush_timeout",
     "pack_interval",
-    "pack_reuse_interval",
     "pack_reclaim_interval",
-    "pack_repack_interval",
     "pack_repack_cooldown",
     "pack_reclaim_min_savings_bytes",
-    "pack_range_enabled",
-    "pack_range_interval",
-    "pack_range_window",
-    "pack_range_min_downloads",
-    "pack_range_min_savings_percent",
-    "pack_range_min_savings_bytes",
-    "pack_range_repack_after",
-    "pack_range_repack_window",
-    "pack_range_repack_retry_interval",
     "pack_concurrency",
     "integrity_concurrency",
     "integrity_rps",
@@ -371,11 +349,11 @@ pub(in super::super) fn insert_storage_profile(
     control: Option<i32>,
     remote: bool,
 ) -> Statement<'static> {
-    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled,pack_range_enabled,min_free_space) VALUES($1,$2,$3,$4,$5,$5,$5,true,$5,$6)").bind(id).bind(read).bind(upload).bind(control).bind(remote).bind((!remote).then_some("1GiB"))
+    sqlx::query("INSERT INTO storage_profiles(storage_id,read_concurrency,upload_concurrency,control_concurrency,cache_enabled,upload_cache,compression_enabled,pack_enabled,min_free_space) VALUES($1,$2,$3,$4,$5,$5,$5,true,$6)").bind(id).bind(read).bind(upload).bind(control).bind(remote).bind((!remote).then_some("1GiB"))
 }
 
 pub(in super::super) fn storage_profile_lock(id: Uuid) -> Rows<'static, StorageProfile> {
-    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,write_processing,CASE WHEN (SELECT deployment_mode FROM mokyu_meta WHERE singleton)='single' THEN write_durability END AS write_durability,write_flush_interval,write_backlog_max_age,background_scheduling,public_cache_validation,cors_cache_enabled,public_cache_refresh_interval,public_cache_max_age,read_source_validation,source_validation_max_age,read_integrity,file_delivery,file_delivery_prefix,http_compression_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,upload_cache_overflow,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reuse_interval,pack_reclaim_interval,pack_repack_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_range_enabled,pack_range_interval,pack_range_window,pack_range_min_downloads,pack_range_min_savings_percent,pack_range_min_savings_bytes,pack_range_repack_after,pack_range_repack_window,pack_range_repack_retry_interval,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=$1 FOR UPDATE").bind(id)
+    sqlx::query_as("SELECT storage_id,revision,cdc_enabled,deduplication_enabled,write_processing,CASE WHEN (SELECT deployment_mode FROM mokyu_meta WHERE singleton)='single' THEN write_durability END AS write_durability,write_flush_interval,write_backlog_max_age,background_scheduling,public_cache_validation,cors_cache_enabled,public_cache_refresh_interval,public_cache_max_age,read_source_validation,source_validation_max_age,read_integrity,file_delivery,file_delivery_prefix,http_compression_enabled,connect_timeout,request_timeout,max_retries,retry_timeout,priority_aging,min_storage_duration,unreferenced_grace,deleted_chunk_retention,upload_retention,multipart_idle_timeout,min_free_space,cache_enabled,cache_soft_limit,cache_entries,upload_cache,upload_cache_size,upload_cache_overflow,compression_enabled,compression_strategy,compression_level,compression_sample_level,compression_min_savings_percent,compression_min_savings_bytes,pack_enabled,pack_max_size,pack_upload_flush_timeout,pack_interval,pack_reclaim_interval,pack_repack_cooldown,pack_reclaim_min_savings_bytes,pack_concurrency,integrity_concurrency,integrity_rps,integrity_bandwidth,integrity_batch_timeout,read_concurrency,upload_concurrency,control_concurrency,pack_byte_budget,integrity_byte_budget,maintenance_concurrency,maintenance_byte_budget,migration_concurrency,migration_byte_budget FROM storage_profiles WHERE storage_id=$1 FOR UPDATE").bind(id)
 }
 
 pub(in super::super) fn update_storage_record<'q>(

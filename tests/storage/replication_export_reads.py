@@ -12,7 +12,7 @@ def run():
     fixture = Fixture()
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile.update(cdc_enabled=False, deduplication_enabled=False, cache_enabled=False,
-        upload_cache=False, compression_enabled=False, pack_enabled=False, pack_range_enabled=False)
+        upload_cache=False, compression_enabled=False, pack_enabled=False)
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
     backend = json.loads(Path(os.environ['MOKYU_TEST_BACKEND']).read_text())
     resource = fixture.api('/api/v1/external-buckets', dict(

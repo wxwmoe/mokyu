@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261107134057.
+-- Generated from the complete sqlite migration chain through 20261108051001.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -1122,6 +1122,25 @@ CREATE TABLE pack_members (
     CONSTRAINT members_offset CHECK (offset_bytes>=0)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE pack_read_shapes (
+    stream_id INTEGER NOT NULL REFERENCES streams(id) ON DELETE CASCADE,
+    start_bytes INTEGER NOT NULL,
+    end_bytes INTEGER NOT NULL,
+    requests INTEGER NOT NULL,
+    observed_hour INTEGER NOT NULL,
+    saved_gets INTEGER NOT NULL,
+    PRIMARY KEY (stream_id, start_bytes, end_bytes, observed_hour),
+    CHECK (start_bytes >= 0 AND end_bytes > start_bytes AND requests > 0 AND saved_gets >= 0)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE pack_repack_queue (
+    task_id BLOB NOT NULL,
+    stream_id INTEGER NOT NULL,
+    saved_gets INTEGER NOT NULL,
+    PRIMARY KEY (task_id,stream_id),
+    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE packs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     location_id BLOB CHECK (location_id IS NULL OR length(location_id)=16) NOT NULL UNIQUE,
@@ -1971,10 +1990,8 @@ INSERT INTO "access_state" ("id", "coverage_since", "flushed_at") VALUES (1, CAS
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('cleanup', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('gc', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('pack', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
-INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('range', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reclaim', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('repack', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
-INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "updated_at") VALUES ('reuse', 0, CAST(unixepoch('subsec')*1000000 AS INTEGER), CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "projects" ("id", "name", "description", "builtin", "allow_bucket_create", "created_at") VALUES (X'00000000000000000000000000000001', 'Default', '', 1, 0, CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "quota_scopes" ("scope", "scope_id", "used_bytes", "reserved_bytes", "inflight_bytes", "object_count", "bucket_count", "logical_bytes_limit", "inflight_bytes_limit", "bucket_count_limit") VALUES ('project', X'00000000000000000000000000000001', 0, 0, 0, 0, 0, NULL, NULL, NULL);
 INSERT INTO "redundancy_catalog" ("singleton") VALUES (1);
@@ -2195,6 +2212,10 @@ CREATE UNIQUE INDEX pack_members_chunk ON pack_members(pack_id,chunk_id);
 CREATE INDEX pack_members_chunk_id_fk ON pack_members(chunk_id);
 
 CREATE INDEX pack_members_key ON pack_members(block_key_id) WHERE block_key_id IS NOT NULL;
+
+CREATE INDEX pack_repack_priority ON pack_repack_queue(task_id,saved_gets DESC,stream_id);
+
+CREATE INDEX pack_shapes_expiry ON pack_read_shapes(observed_hour);
 
 CREATE INDEX packs_block_key_id_fk ON packs(block_key_id);
 

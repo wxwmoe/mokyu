@@ -129,7 +129,7 @@ def main():
 
         body = bytes(value & 63 for value in os.urandom(6 * 1024 * 1024 + 17))
         fixture.cold_put('packed', body)
-        configure(pack_enabled=True, compression_enabled=True, pack_range_enabled=False, pack_max_size='16MiB')
+        configure(pack_enabled=True, compression_enabled=True, pack_max_size='16MiB')
         fixture.finished(fixture.cli('pack', 'run'))
         chunk_hit('packed', body)
         empty()
@@ -193,7 +193,7 @@ def main():
         for chunks in [False, True]:
             profile = target.cli('storage', 'profile', 'show', target.name)
             target.cli('storage', 'profile', 'set', target.name, '-', value={**profile,
-                'cdc_enabled': chunks, 'pack_range_enabled': False, 'deduplication_enabled': False, 'cache_enabled': True})
+                'cdc_enabled': chunks, 'deduplication_enabled': False, 'cache_enabled': True})
             name = 'migration-chunks' if chunks else 'migration-raw'
             queued = fixture.api('/api/v1/media/actions', dict(bucket=fixture.bucket_id, action='copy',
                 target_bucket=target.bucket_id, confirm_storage_migration=True,

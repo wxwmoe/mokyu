@@ -33,7 +33,7 @@ impl App {
         let profiles = self.storage_profiles.enabled_profiles().await?;
         Ok(
             json!({"enabled":self.pack_creation_allowed() && profiles.iter().any(|profile| profile.pack_enabled),
-            "range_optimization":profiles.iter().any(|profile| profile.pack_range_enabled),"packs":rows,"profiles":profiles}),
+            "packs":rows,"profiles":profiles}),
         )
     }
     pub async fn pack_start(&self, policy: &str) -> Result<Value> {
@@ -41,18 +41,8 @@ impl App {
     }
     pub(crate) async fn start_pack(&self, policy: &str, automatic: bool) -> Result<Value> {
         self.writable()?;
-        if !["pack", "reuse", "reclaim", "repack", "range"].contains(&policy) {
+        if !["pack", "reclaim", "repack"].contains(&policy) {
             return Err(s3s::s3_error!(InvalidArgument, "unknown pack maintenance policy").into());
-        }
-        if policy == "range"
-            && !self
-                .storage_profiles
-                .enabled_profiles()
-                .await?
-                .iter()
-                .any(|profile| profile.pack_range_enabled)
-        {
-            return Err(s3s::s3_error!(OperationAborted, "Range optimization is disabled").into());
         }
         if matches!(policy, "pack" | "repack") && !self.pack_creation_allowed() {
             return Err(s3s::s3_error!(OperationAborted, "pack creation is disabled").into());
@@ -238,34 +228,54 @@ impl App {
         task: Execution,
         rows: &[Mapping],
         context: &ReadContext,
-        content_type: Option<&str>,
-        key: &str,
+        _content_type: Option<&str>,
+        _key: &str,
         allow_pack: bool,
         accepted: Option<&EncodingPolicy>,
         fills: &mut crate::storage::cache::Fills,
     ) -> Result<Vec<Output>> {
-        let raw_size: usize = rows.iter().map(|r| r.chunk.raw_size as usize).sum();
-        let memory = self
-            .storage
-            .pack_work(raw_size + 8 + rows.len() * crate::content::pack::MAX_MEMBER_TAG)
-            .await?;
-        let mut data = Vec::with_capacity(rows.len());
+        let raw_size = rows
+            .iter()
+            .map(|row| row.chunk.raw_size as usize)
+            .sum::<usize>();
+        let store = rows
+            .first()
+            .and_then(|row| row.chunk.storage_id)
+            .context("pack inputs have no store")?;
+        let target = self.storage.store_backend(store)?;
+        let buffer = if target.is_local {
+            0
+        } else {
+            raw_size.min(crate::content::pack::SINGLE_PUT)
+        };
+        let memory = self.storage.pack_buffers(buffer as u64).await?;
+        if rows.len() > 1
+            && allow_pack
+            && let Some(output) = self
+                .try_pack_output(task, rows, None, Some(context), &memory, accepted)
+                .await?
+        {
+            return Ok(vec![output]);
+        }
+        let mut outputs = Vec::with_capacity(rows.len());
         for row in rows {
             let raw = self.storage.get_with(&row.chunk, Some(context)).await?;
-            data.push((row.chunk.clone(), Bytes::copy_from_slice(&raw)));
+            let mut cache = Vec::new();
+            outputs.push(
+                self.independent_output(
+                    task,
+                    &row.chunk,
+                    row.pack_id.is_some(),
+                    Bytes::copy_from_slice(&raw),
+                    &memory,
+                    accepted,
+                    &mut cache,
+                )
+                .await?,
+            );
+            fills.extend(self.storage.prepare_batch(cache, memory.clone()));
         }
-        self.pack_data(
-            task,
-            rows,
-            &data,
-            &memory,
-            content_type,
-            key,
-            allow_pack,
-            accepted,
-            fills,
-        )
-        .await
+        Ok(outputs)
     }
 
     pub(crate) async fn pack_data(
@@ -274,8 +284,8 @@ impl App {
         rows: &[Mapping],
         data: &[(Chunk, Bytes)],
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
-        content_type: Option<&str>,
-        key: &str,
+        _content_type: Option<&str>,
+        _key: &str,
         allow_pack: bool,
         accepted: Option<&EncodingPolicy>,
         fills: &mut crate::storage::cache::Fills,
@@ -327,18 +337,17 @@ impl App {
             start = end;
             if rows.len() > 1
                 && let Some(output) = self
-                    .try_pack_output(
-                        task,
-                        rows,
-                        data,
-                        content_type,
-                        key,
-                        &memory,
-                        accepted,
-                        &mut cache,
-                    )
+                    .try_pack_output(task, rows, Some(data), None, memory, accepted)
                     .await?
             {
+                for (source, bytes) in data {
+                    if !self.storage.has_pending(source) {
+                        let mut member = source.clone();
+                        member.location_id = Uuid::nil();
+                        member.address = None;
+                        cache.push((member, bytes.clone()));
+                    }
+                }
                 outputs.push(output);
                 continue;
             }
@@ -364,12 +373,10 @@ impl App {
         &self,
         task: Execution,
         rows: &[Mapping],
-        data: &[(Chunk, Bytes)],
-        content_type: Option<&str>,
-        key: &str,
+        data: Option<&[(Chunk, Bytes)]>,
+        context: Option<&ReadContext>,
         memory: &std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
         accepted: Option<&EncodingPolicy>,
-        cache: &mut Vec<(Chunk, Bytes)>,
     ) -> Result<Option<Output>> {
         if !self.pack_creation_allowed() {
             return Ok(None);
@@ -401,59 +408,37 @@ impl App {
             .prepare_pack(storage_id, "none", None, raw_size, rows.len() as i32, task)
             .await?;
         drop(coord);
-        let mut files = Vec::with_capacity(rows.len());
-        for (row, (source, raw)) in rows.iter().zip(data) {
-            let file = if row.pack_id.is_some()
-                || source.stored_size.is_some()
-                    && self.packing.ready_encoding(source.id).await?.is_some()
-            {
-                self.storage.member_file(source).await?
-            } else {
-                let mut member = source.clone();
-                member.location_id = Uuid::now_v7();
-                member.address = None;
-                member.algorithm = algorithm.clone();
-                member.block_key_id = block_key_id;
-                member.created_at = chrono::Utc::now();
-                let (physical, file, _) = self
-                    .storage
-                    .encode(
-                        member,
-                        raw.to_vec(),
-                        source.stored_size.is_none() || source.compressed,
-                        Some(memory),
-                        accepted.map(|policy| &policy.compression),
-                    )
-                    .await?;
-                (physical, Bytes::from(file))
-            };
-            files.push(file);
-        }
-        let (p, encoded, entries) = self.storage.assemble_pack(p, files, memory).await?;
-        self.packing.pack_metadata(&p).await?;
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("pack-prepared").await;
-        let storage_id = p.storage_id.context("pack has no store")?;
-        self.storage
-            .put_path_for(
-                storage_id,
-                &self.storage.pack_path_for(storage_id, p.location_id)?,
-                encoded,
-            )
+        let files = async_stream::try_stream! {
+            for (index,row) in rows.iter().enumerate() {
+                let source=&row.chunk;
+                let file=if row.pack_id.is_some() || (source.stored_size.is_some() && self.packing.ready_encoding(source.id).await?.is_some()) {
+                    self.storage.member_file(source).await?
+                } else {
+                    let raw=match data {
+                        Some(data)=>data[index].1.to_vec(),
+                        None=>self.storage.get_with(source,context).await?.to_vec(),
+                    };
+                    let mut member=source.clone();
+                    member.location_id=Uuid::now_v7();
+                    member.address=None;
+                    member.algorithm=algorithm.clone();
+                    member.block_key_id=block_key_id;
+                    member.created_at=chrono::Utc::now();
+                    let (physical,file,_)=self.storage.encode(member,raw,source.stored_size.is_none() || source.compressed,Some(memory),accepted.map(|p|&p.compression)).await?;
+                    (physical,Bytes::from(file))
+                };
+                yield file;
+            }
+        };
+        let (p, entries) = self
+            .storage
+            .store_pack_members(p, files, self.packing.as_ref())
             .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pack-stored").await;
         self.packing
             .insert_pack_members(p.id, rows, &entries)
             .await?;
-        for (source, bytes) in data {
-            if !self.storage.has_pending(source) {
-                let mut member = source.clone();
-                member.address = None;
-                member.location_id = Uuid::nil();
-                cache.push((member, bytes.clone()));
-            }
-        }
         Ok(Some(Output {
             entries,
             chunks: rows.iter().map(|r| r.chunk.id).collect(),
@@ -541,59 +526,32 @@ impl App {
         // Logical GC may already have retired unreferenced members; the payload still contains them.
         let mut dead_bytes =
             total.saturating_sub(rows.iter().map(|r| i64::from(r.chunk.raw_size)).sum()) as u64;
-        let mut reference_split = false;
+        let mut group_size = 0;
+        let maximum = config::bytes(&settings.max_size)?;
         for row in &rows {
-            let alive: bool = self.packing.chunk_has_references(row.chunk.id).await?;
-            if !alive {
+            if !self.packing.chunk_has_references(row.chunk.id).await? {
                 dead_bytes += row.chunk.raw_size as u64;
                 continue;
             }
-            if let Some(last) = groups.last().and_then(|g| g.last()) {
-                reference_split |= !self
-                    .packing
-                    .same_references(
-                        last.chunk.id,
-                        row.chunk.id,
-                        row.offset_bytes - last.offset_bytes,
-                    )
-                    .await?;
-            }
-            let join = if let Some(last) = groups.last().and_then(|g| g.last()) {
-                !unpack
-                    && last.offset_bytes + i64::from(last.chunk.raw_size) == row.offset_bytes
-                    && self
-                        .packing
-                        .same_references(
-                            last.chunk.id,
-                            row.chunk.id,
-                            row.offset_bytes - last.offset_bytes,
-                        )
-                        .await?
-                    && groups
-                        .last()
-                        .unwrap()
-                        .iter()
-                        .map(|r| r.chunk.raw_size as u64)
-                        .sum::<u64>()
-                        + row.chunk.raw_size as u64
-                        <= config::bytes(&settings.max_size)?
-            } else {
-                false
-            };
-            if join {
-                groups.last_mut().unwrap().push(row.clone());
+            let size = row.chunk.raw_size as u64;
+            if !unpack
+                && group_size + size <= maximum
+                && let Some(group) = groups.last_mut()
+            {
+                group.push(row.clone());
+                group_size += size;
             } else {
                 groups.push(vec![row.clone()]);
+                group_size = size;
             }
         }
-        if (groups.is_empty() && !unpack)
-            || (!unpack && dead_bytes == 0 && groups.len() == 1 && groups[0].len() == rows.len())
-        {
+        if !unpack && (groups.is_empty() || dead_bytes == 0) {
             return Ok(0);
         }
-        let reclaim_only = !unpack && !reference_split && dead_bytes > 0;
+        let reclaim_only = !unpack;
         let minimum = config::bytes(&settings.reclaim_min_savings_bytes)?;
-        if reclaim_only && dead_bytes < minimum {
+        if reclaim_only && self.packing.reclaim_estimate(id, &groups).await? < minimum.max(1) as i64
+        {
             return Ok(0);
         }
         self.pin_pack_inputs(task, &rows).await?;
@@ -617,20 +575,15 @@ impl App {
         }
         if reclaim_only {
             let before: i64 = self.packing.pack_stored_size(id).await?;
-            let after: i64 = outputs
-                .iter()
-                .map(|o| {
-                    o.pack
-                        .as_ref()
-                        .and_then(|p| p.stored_size)
-                        .or_else(|| {
-                            o.independent
-                                .as_ref()
-                                .and_then(|c| c.stored_size.map(i64::from))
-                        })
-                        .unwrap_or(0)
-                })
-                .sum();
+            let mut after = 0i64;
+            for out in &outputs {
+                if let Some(chunk) = &out.independent
+                    && self.packing.ready_encoding(chunk.id).await?.is_some()
+                {
+                    continue;
+                }
+                after += out.size();
+            }
             if before.saturating_sub(after) < minimum as i64 {
                 return Ok(0);
             }
@@ -648,7 +601,6 @@ impl App {
         byte_budget: Option<u64>,
         settings: &crate::content::pack::Config,
     ) -> Result<(i64, usize)> {
-        self.defer_range_repack(stream, from, settings).await?;
         let rows: Vec<crate::model::packing::PackCandidate> = self
             .packing
             .pack_candidates(
@@ -659,7 +611,7 @@ impl App {
             .await?;
         let maximum = config::bytes(&settings.max_size)?.min(byte_budget.unwrap_or(u64::MAX));
         let (group, cursor) = crate::model::packing::select_members(rows, repack, maximum);
-        if group.len() < 2 {
+        if group.len() < 2 || (repack && self.packing.repack_benefit(stream, &group).await? <= 0) {
             return Ok((cursor, 0));
         }
         let physical: std::collections::HashSet<String> = group
@@ -673,20 +625,27 @@ impl App {
         if physical.len() < 2 {
             return Ok((cursor, 0));
         }
-        // Every old pack must be replaced whole; never split it just to fill a target.
-        for id in group
+        let members: std::collections::BTreeSet<_> = group.iter().map(|row| row.chunk.id).collect();
+        let mut inputs = group.clone();
+        for pack in group
             .iter()
-            .filter_map(|r| r.pack_id)
-            .collect::<std::collections::HashSet<_>>()
+            .filter_map(|row| row.pack_id)
+            .collect::<std::collections::BTreeSet<_>>()
         {
-            let count: i64 = self.packing.pack_member_count(id).await?;
-            if count as usize != group.iter().filter(|r| r.pack_id == Some(id)).count() {
-                return Ok((cursor, 0));
+            for old in self.packing.pack_layout(pack).await? {
+                if !members.contains(&old.chunk.id) {
+                    if self.packing.chunk_has_references(old.chunk.id).await?
+                        || inputs.len() == crate::content::pack::MAX_MEMBERS
+                    {
+                        return Ok((cursor, 0));
+                    }
+                    inputs.push(old);
+                }
             }
         }
         let (metadata, key): (Value, String) = self.packing.pack_stream_metadata(stream).await?;
         let context = ReadContext::default();
-        self.pin_pack_inputs(task, &group).await?;
+        self.pin_pack_inputs(task, &inputs).await?;
         let mut fills = Vec::new();
         let outputs = self
             .pack_output(
@@ -726,7 +685,7 @@ impl App {
             && new_size
                 <= old_size + 8 + crate::content::pack::MAX_MEMBER_TAG as i64 * group.len() as i64
         {
-            self.commit_outputs(task, &group, &outputs, false).await?;
+            self.commit_outputs(task, &inputs, &outputs, false).await?;
             crate::storage::cache::publish_fills(fills);
             return Ok((cursor, group.len()));
         }
@@ -754,14 +713,11 @@ impl App {
             self.packing.advance_pack_task(id, &None, 0).await?;
             return Ok(false);
         }
-        if policy == "range" {
-            return self.range_batch(id, &detail).await;
-        }
         if detail["automatic"] == true {
             return self.pack_queue_batch(id, policy, &detail).await;
         }
         let mut processed = 0usize;
-        let next = if unpack || matches!(policy, "reuse" | "reclaim") {
+        let next = if unpack || policy == "reclaim" {
             if detail["all"] == true {
                 ensure!(
                     !self.pack_creation_allowed(),
@@ -798,18 +754,19 @@ impl App {
             } else {
                 (Id::default(), 0)
             };
-            let stream: Option<Id> = self
-                .packing
-                .next_pack_stream(
-                    after,
-                    offset,
-                    detail["upper_time"]
-                        .as_str()
-                        .context("missing task snapshot")?
-                        .parse::<chrono::DateTime<chrono::Utc>>()?,
-                    storage_id,
-                )
-                .await?;
+            let upper = detail["upper_time"]
+                .as_str()
+                .context("missing pack snapshot")?
+                .parse::<chrono::DateTime<chrono::Utc>>()?;
+            let stream = if policy == "repack" {
+                self.packing
+                    .next_repack_stream(id.id, after, offset, upper, storage)
+                    .await?
+            } else {
+                self.packing
+                    .next_pack_stream(after, offset, upper, storage_id)
+                    .await?
+            };
             if let Some(stream) = stream {
                 let budget = if let Some(storage) = storage_id {
                     self.storage_profiles
@@ -854,7 +811,7 @@ impl App {
             .parse::<Uuid>()?;
         let storage_id = Some(storage);
         let settings = self.storage.pack_config(storage)?;
-        let next = if matches!(policy, "reuse" | "reclaim") {
+        let next = if policy == "reclaim" {
             let row: Option<(Id, i64)> = self
                 .packing
                 .next_pack_change(cutoff, policy, storage_id)
