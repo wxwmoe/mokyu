@@ -441,12 +441,27 @@ impl Writes {
             config.workspace_bytes()? <= self.reads.reader.workspace,
             "compression workspace exceeds node budget"
         );
+        let budget = if operation.packing {
+            self.reads.reader.write_batch_budget(&operation.backend)?
+        } else {
+            None
+        };
+        let (batch_limit, memory) = budget.map_or((BATCH_BYTES, None), |(n, p)| (n, Some(p)));
         let (tx, rx) = mpsc::channel(1);
         let (received, ()) = operation
             .guard(&self.reads.node, &[], async {
                 tokio::try_join!(
-                    self.receive(operation, body, check, trailers, length, config, tx),
-                    self.batches(operation, rx)
+                    self.receive(
+                        operation,
+                        body,
+                        check,
+                        trailers,
+                        length,
+                        config,
+                        tx,
+                        batch_limit
+                    ),
+                    self.batches(operation, rx, memory)
                 )
             })
             .await?;
@@ -998,6 +1013,7 @@ impl Writes {
         length: Option<u64>,
         config: crate::content::compression::Config,
         tx: mpsc::Sender<Batch>,
+        batch_limit: usize,
     ) -> Result<(u64, String, serde_json::Value, Vec<u8>)> {
         let slots = Arc::new(Semaphore::new(2));
         let mut slot = Some(slots.clone().acquire_owned().await?);
@@ -1042,7 +1058,7 @@ impl Writes {
                         .payload(operation, window[..take].to_vec(), config.clone())
                         .await?;
                     window.drain(..take);
-                    if bytes + take > BATCH_BYTES
+                    if bytes + take > batch_limit
                         || items.len() == crate::model::node_chunk::MAX_ITEMS
                     {
                         tx.send(Batch {
@@ -1080,7 +1096,12 @@ impl Writes {
         Ok((size, etag, sums, window))
     }
 
-    async fn batches(&self, operation: &Operation, mut rx: mpsc::Receiver<Batch>) -> Result<()> {
+    async fn batches(
+        &self,
+        operation: &Operation,
+        mut rx: mpsc::Receiver<Batch>,
+        memory: Option<Arc<OwnedSemaphorePermit>>,
+    ) -> Result<()> {
         let node = &self.reads.node;
         let mut offset = 0;
         let mut batch_id = 1;
@@ -1176,7 +1197,13 @@ impl Writes {
                     .guard(
                         node,
                         &grants,
-                        Box::pin(self.reads.reader.pack_buffers(backend, keys, packing, raw)),
+                        Box::pin(self.reads.reader.pack_buffers(
+                            backend,
+                            keys,
+                            packing,
+                            raw,
+                            memory.clone(),
+                        )),
                     )
                     .await?;
                 #[cfg(feature = "fault-injection")]

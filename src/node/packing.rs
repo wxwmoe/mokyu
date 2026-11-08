@@ -212,12 +212,32 @@ impl Reader {
         Ok(Arc::new(self.acquire(&self.packs, units).await?))
     }
 
+    pub(crate) fn write_batch_budget(
+        &self,
+        backend: &Backend,
+    ) -> Result<Option<(usize, Arc<OwnedSemaphorePermit>)>> {
+        let limit = crate::config::bytes(&backend.profile.pack_max_size)?
+            .min(crate::model::node_chunk::MAX_BYTES as u64);
+        let workspace = self
+            .workspace
+            .max(backend.profile.compression_config("0s").workspace_bytes()?);
+        // Two batches may hold input while the single publishing task encodes one output.
+        let units = pack::buffer_bytes(limit * 2, limit, workspace).div_ceil(1024 * 1024);
+        Ok(self
+            .packs
+            .clone()
+            .try_acquire_many_owned(u32::try_from(units)?)
+            .ok()
+            .map(|permit| (limit as usize, Arc::new(permit))))
+    }
+
     pub(crate) async fn pack_buffers(
         &self,
         backend: Arc<Backend>,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         batch: wire::Batch,
         raw: BTreeMap<Id, (Vec<u8>, Bytes)>,
+        reserved: Option<Arc<OwnedSemaphorePermit>>,
     ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
         let attempts = layout(&batch)?;
         ensure!(
@@ -228,7 +248,10 @@ impl Reader {
             .values()
             .map(|(_, bytes)| bytes.len() as u64)
             .sum::<u64>();
-        let memory = self.pack_buffer_budget(&backend, payload, payload).await?;
+        let memory = match reserved {
+            Some(permit) => permit,
+            None => self.pack_buffer_budget(&backend, payload, payload).await?,
+        };
         backend.store.verify().await?;
         self.pack_data(backend, keys, batch, raw, BTreeMap::new(), memory, attempts)
             .await
