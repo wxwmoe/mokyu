@@ -558,7 +558,7 @@ pub(super) fn parts_listing(bytes: &[u8], key: &str, upload: &str, after: u16) -
     let mut xml = s3s::xml::Deserializer::new(bytes);
     let mut items = Vec::new();
     let (mut remote_key, mut remote_upload, mut truncated, mut next) = (None, None, None, None);
-    xml.named_element("ListPartsResult", |xml| {
+    xml.named_element_any(&["ListPartsResult", "ListPartsResponse"], |xml| {
         xml.for_each_element(|xml, name| {
             match name {
                 b"Part" => {
@@ -803,6 +803,15 @@ mod completion_tests {
         let body = b"<ListPartsResult><Key>scope/file</Key><UploadId>id</UploadId><IsTruncated>true</IsTruncated><NextPartNumberMarker>2</NextPartNumberMarker><Part><PartNumber>2</PartNumber><ETag>&quot;abc&quot;</ETag><Size>13</Size></Part></ListPartsResult>";
         let page = parts_listing(body, "scope/file", "id", 1).unwrap();
         assert_eq!(page.next, Some(2));
+        let alternate = std::str::from_utf8(body)
+            .unwrap()
+            .replace("ListPartsResult", "ListPartsResponse");
+        assert_eq!(
+            parts_listing(alternate.as_bytes(), "scope/file", "id", 1)
+                .unwrap()
+                .items,
+            page.items
+        );
         assert_eq!(
             page.items,
             vec![UploadedPart {

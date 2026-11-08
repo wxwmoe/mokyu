@@ -1,8 +1,10 @@
 mod body;
 mod catalog;
 mod export;
+mod multipart;
 mod origin;
 mod output;
+mod resume;
 mod selection;
 mod verify;
 

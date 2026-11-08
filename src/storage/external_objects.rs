@@ -1,4 +1,5 @@
-use super::super::s3::{self, Parts, UploadedPart};
+use super::super::s3::{self, Parts};
+pub(crate) use super::super::s3::UploadedPart;
 use super::*;
 use axum::http::StatusCode;
 use std::collections::{BTreeMap, BTreeSet};
@@ -724,6 +725,22 @@ impl Client {
         parts: &[UploadedPart],
         condition: &Condition,
     ) -> Result<Written> {
+        self.complete_with_checksums(key, upload, parts, condition, None)
+            .await
+    }
+
+    pub(crate) async fn complete_with_checksums(
+        &self,
+        key: &str,
+        upload: &str,
+        parts: &[UploadedPart],
+        condition: &Condition,
+        checksums: Option<&[String]>,
+    ) -> Result<Written> {
+        ensure!(
+            checksums.is_none_or(|s| s.len() == parts.len()),
+            "invalid completion checksums"
+        );
         ensure!(
             opaque(upload) && !parts.is_empty() && parts.len() <= 10000,
             "invalid external completion"
@@ -745,10 +762,14 @@ impl Client {
             "external completion exceeds limit"
         );
         s3s::xml::Serializer::new(&mut body).element("CompleteMultipartUpload", |xml| {
-            for part in parts {
+            for (i, part) in parts.iter().enumerate() {
                 xml.element("Part", |xml| {
                     xml.content("PartNumber", &i32::from(part.number))?;
-                    xml.content("ETag", &part.etag)
+                    xml.content("ETag", &part.etag)?;
+                    if let Some(sums) = checksums {
+                        xml.content("ChecksumSHA256", &sums[i])?;
+                    }
+                    Ok(())
                 })?;
             }
             Ok(())

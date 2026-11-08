@@ -112,6 +112,10 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
     db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE;
       CREATE TABLE IF NOT EXISTS dump_sums(bucket BLOB,seq INTEGER,alg TEXT,value TEXT,PRIMARY KEY(bucket,seq,alg));
       CREATE TABLE IF NOT EXISTS dump_versions(bucket BLOB,seq INTEGER,dest TEXT,version TEXT,PRIMARY KEY(bucket,seq,dest));")?;
+    db.execute_batch(super::resume::SCHEMA)?;
+    let recovery = *blake3::hash(&serde_json::to_vec(id)?).as_bytes();
+    let mut resumed = 0;
+    let mut reused = 0u64;
     let reader = Reader::new(&db, &backend)?;
     let window = (memory / 5).min(32 * 1024 * 1024);
     let mut cursor = None;
@@ -128,6 +132,8 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
                 attrs: reader.attributes(sel.bucket, &item)?,
                 item: &item,
                 policy,
+                generation: sel.generation,
+                recovery,
                 window,
             };
             let mapped = target.mapped(&sel, &item.key)?;
@@ -152,6 +158,11 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
                     published += 1;
                     written += item.size as u64;
                 }
+                Ok(Outcome::Resumed(n)) => {
+                    resumed += 1;
+                    written += item.size as u64;
+                    reused += n;
+                }
                 Ok(Outcome::Verified) => verified += 1,
                 Ok(Outcome::Skipped) => skipped += 1,
                 Err(e) => {
@@ -166,7 +177,7 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
         }
     }
     eprintln!(
-        "{total} objects, {bytes} B total: {published} published ({written} B), {verified} verified, {skipped} skipped, {conflicts} conflicts, {failed} failed"
+        "{total} objects, {bytes} B total: {published} published, {resumed} resumed ({written} B published, {reused} B reused), {verified} verified, {skipped} skipped, {conflicts} conflicts, {failed} failed"
     );
     ensure!(
         conflicts + failed == 0,

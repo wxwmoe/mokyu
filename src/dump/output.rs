@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -28,6 +28,7 @@ pub(super) enum Policy {
 }
 pub(super) enum Outcome {
     Published,
+    Resumed(u64),
     Verified,
     Skipped,
 }
@@ -50,6 +51,8 @@ pub(super) struct Transfer<'a, 'r> {
     pub attrs: Attributes,
     pub policy: Policy,
     pub window: u64,
+    pub generation: i64,
+    pub recovery: [u8; 32],
 }
 pub(super) fn directory(path: &Path) -> Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -136,7 +139,7 @@ impl Transfer<'_, '_> {
         );
         Ok(())
     }
-    async fn check_local(&self, path: &Path) -> Result<Option<Outcome>> {
+    pub(super) async fn check_local(&self, path: &Path) -> Result<Option<Outcome>> {
         let Some(file) = existing_file(path)? else {
             return Ok(None);
         };
@@ -148,40 +151,6 @@ impl Transfer<'_, '_> {
                 Some(Outcome::Verified)
             }
         })
-    }
-    pub async fn local(&self, path: &Path) -> Result<Outcome> {
-        let dir = directory(super::parent(path))?;
-        let path = anchored(&dir).join(path.file_name().context("target filename missing")?);
-        if let Some(out) = self.check_local(&path).await? {
-            return Ok(out);
-        }
-        let mut temp = tempfile::Builder::new()
-            .prefix(".mokyu-dump-")
-            .suffix(".part")
-            .tempfile_in(anchored(&dir))?;
-        let mut pos = 0;
-        while pos < self.size() {
-            let data = self.read(pos, self.size()).await?;
-            temp.write_all(&data)?;
-            pos += data.len() as u64;
-        }
-        temp.as_file().sync_all()?;
-        let result = if self.policy == Policy::Overwrite {
-            temp.persist(&path)
-        } else {
-            temp.persist_noclobber(&path)
-        };
-        match result {
-            Ok(_) => dir.sync_all()?,
-            Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return self
-                    .check_local(&path)
-                    .await?
-                    .context("concurrent target disappeared");
-            }
-            Err(e) => return Err(e.error.into()),
-        }
-        Ok(Outcome::Published)
     }
     async fn remote_state(
         &self,
@@ -228,7 +197,7 @@ impl Transfer<'_, '_> {
             Err(conflict("S3 target content or metadata differs"))
         }
     }
-    async fn buffer(&self, from: u64, end: u64) -> Result<Bytes> {
+    pub(super) async fn buffer(&self, from: u64, end: u64) -> Result<Bytes> {
         let mut out = BytesMut::with_capacity(usize::try_from(end - from)?);
         let mut at = from;
         while at < end {
@@ -301,45 +270,53 @@ impl Transfer<'_, '_> {
         part: u64,
         buffer: u64,
     ) -> Result<Outcome> {
+        let task = self.task(dest)?;
+        let completing = self.reader.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dump_uploads WHERE task=? AND completing=1)",
+            [task],
+            |r| r.get::<_, bool>(0),
+        )?;
+        if completing && let Some(head) = verify::head(c, key, true).await? {
+            if verify::same(
+                self.reader,
+                self.bucket,
+                self.item,
+                &self.attrs,
+                c,
+                key,
+                &head,
+                self.window,
+            )
+            .await
+            .unwrap_or(false)
+            {
+                self.forget_upload(&task)?;
+                return Ok(Outcome::Verified);
+            }
+        }
         let condition = match self.remote_state(c, key, dest).await? {
             Ok(v) => v,
             Err(out) => return Ok(out),
         };
         let metadata = verify::headers(&self.attrs)?;
-        let written = if self.size() <= threshold {
+        let active = self.reader.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM dump_uploads WHERE task=?)",
+            [task],
+            |r| r.get::<_, bool>(0),
+        )?;
+        let written = if !active && self.size() <= threshold {
             ensure!(
                 self.size() <= crate::storage::external::objects::MAX_PART,
                 "MOKYU_DUMP_MULTIPART_THRESHOLD exceeds the S3 single PUT limit"
             );
-            self.put(c, key, &condition, &metadata, buffer).await
+            self.put(c, key, &condition, &metadata, buffer)
+                .await
+                .map(|w| (w, 0))
         } else {
-            let part = part.max(self.size().div_ceil(10000));
-            ensure!(
-                part <= buffer,
-                "MOKYU_DUMP_MEMORY_LIMIT is too small for the required S3 part"
-            );
-            let upload = c.start_upload(key, &metadata, None).await?;
-            let result = async {
-                let mut parts = Vec::new();
-                let mut at = 0;
-                while at < self.size() {
-                    let stop = self.size().min(at + part);
-                    let body = self.buffer(at, stop).await?;
-                    parts.push(
-                        c.upload_part(key, &upload, u16::try_from(parts.len() + 1)?, body)
-                            .await?,
-                    );
-                    at = stop;
-                }
-                c.complete_upload(key, &upload, &parts, &condition).await
-            }
-            .await;
-            if result.is_err() {
-                c.abort_upload(key, &upload).await?;
-            }
-            result
+            self.upload(c, key, task, &condition, &metadata, part, buffer)
+                .await
         };
-        let written = match written {
+        let (written, reused) = match written {
             Ok(w) => w,
             Err(e) => {
                 if !matches!(self.policy, Policy::Overwrite)
@@ -356,6 +333,11 @@ impl Transfer<'_, '_> {
                 params![self.bucket, self.item.seq, dest, version],
             )?;
         }
-        Ok(Outcome::Published)
+        self.forget_upload(&task)?;
+        Ok(if reused > 0 {
+            Outcome::Resumed(reused)
+        } else {
+            Outcome::Published
+        })
     }
 }
