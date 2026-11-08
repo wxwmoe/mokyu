@@ -189,7 +189,7 @@ async fn sqlite_pack_publication_contract() -> Result<()> {
     );
     assert_eq!(
         backend.raw(task.id).await?.unwrap()["detail"]["last_rewrite"],
-        json!({"before_bytes":80,"output_bytes":72,"temporary_added_bytes":72,"transition_bytes":152})
+        json!({"before_bytes":80,"output_bytes":72,"temporary_added_bytes":72,"transition_bytes":152,"mapped_byte_reduction":8})
     );
     assert!(transactions::pack_metadata(db, &pack).await.is_err());
     finish(&backend, task).await?;

@@ -18,7 +18,7 @@ pub(super) async fn check(
 ) -> Result<()> {
     let pool = &backend.pool;
     let run = session.run;
-    sqlx::query("UPDATE storage_profiles SET cdc_enabled=false,compression_enabled=false,pack_enabled=false,pack_range_enabled=false,upload_cache=false,write_processing='inline',upload_concurrency=1,read_concurrency=1 WHERE storage_id=$1").bind(storage).execute(pool).await?;
+    sqlx::query("UPDATE storage_profiles SET cdc_enabled=false,compression_enabled=false,pack_enabled=false,upload_cache=false,write_processing='inline',upload_concurrency=1,read_concurrency=1 WHERE storage_id=$1").bind(storage).execute(pool).await?;
     let intent = Intent {
         access: "writer".into(),
         credential_revision: revision,

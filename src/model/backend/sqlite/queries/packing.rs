@@ -284,6 +284,12 @@ impl PackingStore for Backend {
         let mut db = self.read.acquire().await?;
         super::pack_work::reclaim_estimate(&mut db, pack, groups).await
     }
+    async fn note_repack_decision(&self, task: Execution, detail: Value) -> Result<()> {
+        record_repack_decision(task, detail)
+            .execute(&self.write)
+            .await?;
+        Ok(())
+    }
     async fn repack_benefit(&self, stream: Id, rows: &[Mapping]) -> Result<i64> {
         let mut db = self.read.acquire().await?;
         super::pack_work::repack_benefit(&mut db, stream, rows).await
@@ -824,6 +830,17 @@ pub(in super::super) fn retire_replaced_packs(ids: &[Id]) -> sqlx::QueryBuilder<
     query
 }
 
+pub(in super::super) fn record_repack_decision(
+    task: Execution,
+    detail: Value,
+) -> Statement<'static> {
+    let name = if detail["reason"] == "fewer_origin_reads" {
+        "last_selected_repack"
+    } else {
+        "last_skipped_repack"
+    };
+    sqlx::query("UPDATE tasks SET detail=JSON_SET(detail,?,json(?)) WHERE id=? AND execution_token=? AND state='running'").bind(format!("$.{name}")).bind(detail).bind(task.id).bind(task.token)
+}
 pub(in super::super) fn record_pack_rewrite(task: Uuid, detail: Value) -> Statement<'static> {
     sqlx::query("UPDATE tasks SET detail=JSON_SET(detail,'$.last_rewrite',json(?)) WHERE id=?")
         .bind(detail)

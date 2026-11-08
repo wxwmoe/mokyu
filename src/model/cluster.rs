@@ -552,7 +552,7 @@ pub(crate) trait ClusterStore:
     async fn recover(&self, name: &str, role: &str) -> Result<()>;
     async fn credential(&self, id: Uuid) -> Result<Option<(String, Vec<u8>)>>;
     async fn leader(&self, key: i64) -> Result<Option<Box<dyn Leader>>>;
-    async fn maintenance_state(&self) -> Result<(serde_json::Value, bool, DateTime<Utc>)>;
+    async fn maintenance_state(&self) -> Result<(serde_json::Value, DateTime<Utc>)>;
 }
 #[async_trait::async_trait]
 pub(crate) trait NotificationChanges: Send {

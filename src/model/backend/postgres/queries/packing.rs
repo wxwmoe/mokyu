@@ -29,7 +29,7 @@ pub(in super::super) fn active_pack_task<'q>(policy: &'q str) -> Scalar<'q, Uuid
 
 pub(in super::super) fn pack_storages(policy: Option<&str>) -> Rows<'_, (Uuid, String, i64)> {
     sqlx::query_as(
-        "SELECT s.id,s.type,sp.revision FROM storages s JOIN storage_profiles sp ON sp.storage_id=s.id WHERE s.enabled AND CASE WHEN $1 IN ('pack','repack') THEN sp.pack_enabled WHEN $1='range' THEN sp.pack_range_enabled ELSE true END ORDER BY s.created_at,s.id",
+        "SELECT s.id,s.type,sp.revision FROM storages s JOIN storage_profiles sp ON sp.storage_id=s.id WHERE s.enabled AND CASE WHEN $1 IN ('pack','repack') THEN sp.pack_enabled ELSE true END ORDER BY s.created_at,s.id",
     ).bind(policy)
 }
 
@@ -166,6 +166,17 @@ pub(in super::super) fn retire_replaced_packs(ids: Vec<Id>) -> Statement<'static
     sqlx::query("UPDATE packs p SET state='retired',unreferenced_at=now() WHERE id=ANY($1) AND state='ready' AND NOT EXISTS(SELECT 1 FROM chunks WHERE pack_id=p.id AND state='ready')").bind(ids)
 }
 
+pub(in super::super) fn record_repack_decision(
+    task: Execution,
+    detail: Value,
+) -> Statement<'static> {
+    let name = if detail["reason"] == "fewer_origin_reads" {
+        "last_selected_repack"
+    } else {
+        "last_skipped_repack"
+    };
+    sqlx::query("UPDATE tasks SET detail=detail||jsonb_build_object($1::text,$2::jsonb) WHERE id=$3 AND lease_token=$4 AND state='running'").bind(name).bind(detail).bind(task.id).bind(task.token)
+}
 pub(in super::super) fn record_pack_rewrite(task: Uuid, detail: Value) -> Statement<'static> {
     sqlx::query(
         "UPDATE tasks SET detail=detail||jsonb_build_object('last_rewrite',$2::jsonb) WHERE id=$1",
@@ -444,6 +455,12 @@ impl PackingStore for Backend {
     async fn reclaim_estimate(&self, pack: Id, groups: &[Vec<Mapping>]) -> Result<i64> {
         let mut db = self.pool.acquire().await?;
         super::pack_work::reclaim_estimate(&mut db, pack, groups).await
+    }
+    async fn note_repack_decision(&self, task: Execution, detail: Value) -> Result<()> {
+        record_repack_decision(task, detail)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
     async fn repack_benefit(&self, stream: Id, rows: &[Mapping]) -> Result<i64> {
         let mut db = self.pool.acquire().await?;
@@ -886,12 +903,6 @@ pub(in super::super) fn finish_lifecycle_task(
 pub(in super::super) fn maintenance_schedule() -> Rows<'static, (String, bool, Option<f64>)> {
     sqlx::query_as(
         "SELECT c.policy,CASE WHEN c.policy='gc' THEN m.gc_paused ELSE c.paused END,extract(epoch FROM now()-c.last_scheduled_at)::double precision FROM maintenance_controls c CROSS JOIN mokyu_meta m",
-    )
-}
-
-pub(in super::super) fn due_pack_reuse() -> Scalar<'static, bool> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pack_changes WHERE reason='reuse' AND next_check_at<=now())",
     )
 }
 

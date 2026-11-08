@@ -22,8 +22,8 @@ export function requestHistory(runtime: Runtime | undefined) {
 }
 export function taskTone(taskType: string) {
   if (['gc', 'cleanup', 'purge', 'sweep', 'reclaim', 'pack_reclaim'].includes(taskType)) return 'mint'
-  if (['integrity', 'range', 'pack_range'].includes(taskType)) return 'sky'
-  if (['pack', 'reuse', 'pack_reuse'].includes(taskType)) return 'rose'
+  if (taskType === 'integrity') return 'sky'
+  if (taskType === 'pack') return 'rose'
   if (['upload', 'cache_flush'].includes(taskType)) return 'cream'
   return 'lilac'
 }

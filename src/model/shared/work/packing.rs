@@ -161,6 +161,7 @@ async fn split(
 
 async fn combine(
     db: &mut p::Connection,
+    task: Execution,
     stream: Id,
     from: i64,
     repack: bool,
@@ -205,8 +206,26 @@ async fn combine(
         inputs.extend(extra);
     }
     let ids: Vec<_> = group.iter().map(|r| r.chunk.id).collect();
-    if valid && repack {
-        valid = p::repack_benefit(&mut *db, stream, &group).await? > 0;
+    if repack {
+        let gain = if valid {
+            p::repack_benefit(&mut *db, stream, &group).await?
+        } else {
+            0
+        };
+        let reason = if !valid {
+            "shared_or_contiguous"
+        } else if gain <= 0 {
+            "no_read_savings"
+        } else {
+            "fewer_origin_reads"
+        };
+        queries::record_repack_decision(
+            task,
+            crate::model::packing::repack_decision(stream, gain, reason, &group),
+        )
+        .execute(&mut *db)
+        .await?;
+        valid &= gain > 0;
     }
     let before = if valid {
         p::physical_bytes(db, &ids).await?
@@ -443,8 +462,16 @@ pub(super) async fn prepare(
                     .as_deref()
                     .map(config::bytes)
                     .transpose()?;
-                let (rows, group, cursor, rule) =
-                    combine(db, stream, offset, policy == "repack", &settings, budget).await?;
+                let (rows, group, cursor, rule) = combine(
+                    db,
+                    task,
+                    stream,
+                    offset,
+                    policy == "repack",
+                    &settings,
+                    budget,
+                )
+                .await?;
                 let progress = if let Some(generation) = generation {
                     Progress::Queue {
                         stream,

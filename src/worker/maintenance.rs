@@ -300,11 +300,10 @@ pub async fn run(app: Arc<App>) -> Result<()> {
             app.maintenance.load(Ordering::Acquire),
             app.pack_creation_paused.load(Ordering::Acquire),
         );
-        let due = state.as_ref().is_none_or(|(revision, reuse, now)| {
-            *reuse
-                || previous
-                    .as_ref()
-                    .is_none_or(|(old, old_flags)| old != revision || *old_flags != flags)
+        let due = state.as_ref().is_none_or(|(revision, now)| {
+            previous
+                .as_ref()
+                .is_none_or(|(old, old_flags)| old != revision || *old_flags != flags)
                 || next.is_none_or(|next| next <= *now)
         });
         if due {
@@ -322,7 +321,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 if let Some(leader) = leader {
                     leader.finish().await?;
                 }
-                if let Some((revision, _, now)) = &state {
+                if let Some((revision, now)) = &state {
                     previous = Some((revision.clone(), flags));
                     next = Some(*now + chrono::TimeDelta::milliseconds(delay.as_millis() as i64));
                 }
@@ -330,7 +329,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
         }
         // Database time also detects clock changes without extending the recovery scan.
         let delay = state
-            .and_then(|(_, _, now)| next.map(|next| next - now))
+            .and_then(|(_, now)| next.map(|next| next - now))
             .and_then(|remaining| remaining.to_std().ok())
             .filter(|delay| !delay.is_zero())
             .unwrap_or(Duration::from_secs(1))

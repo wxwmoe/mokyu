@@ -611,7 +611,21 @@ impl App {
             .await?;
         let maximum = config::bytes(&settings.max_size)?.min(byte_budget.unwrap_or(u64::MAX));
         let (group, cursor) = crate::model::packing::select_members(rows, repack, maximum);
-        if group.len() < 2 || (repack && self.packing.repack_benefit(stream, &group).await? <= 0) {
+        let gain = if repack && group.len() >= 2 {
+            self.packing.repack_benefit(stream, &group).await?
+        } else {
+            0
+        };
+        let note = |why: &str| {
+            self.packing.note_repack_decision(
+                task,
+                crate::model::packing::repack_decision(stream, gain, why, &group),
+            )
+        };
+        if group.len() < 2 || (repack && gain <= 0) {
+            if repack {
+                note("no_read_savings").await?;
+            }
             return Ok((cursor, 0));
         }
         let physical: std::collections::HashSet<String> = group
@@ -623,6 +637,9 @@ impl App {
             })
             .collect();
         if physical.len() < 2 {
+            if repack {
+                note("already_contiguous").await?;
+            }
             return Ok((cursor, 0));
         }
         let members: std::collections::BTreeSet<_> = group.iter().map(|row| row.chunk.id).collect();
@@ -637,6 +654,9 @@ impl App {
                     if self.packing.chunk_has_references(old.chunk.id).await?
                         || inputs.len() == crate::content::pack::MAX_MEMBERS
                     {
+                        if repack {
+                            note("shared_carrier").await?;
+                        }
                         return Ok((cursor, 0));
                     }
                     inputs.push(old);
@@ -686,6 +706,9 @@ impl App {
                 <= old_size + 8 + crate::content::pack::MAX_MEMBER_TAG as i64 * group.len() as i64
         {
             self.commit_outputs(task, &inputs, &outputs, false).await?;
+            if repack {
+                note("fewer_origin_reads").await?;
+            }
             crate::storage::cache::publish_fills(fills);
             return Ok((cursor, group.len()));
         }

@@ -162,7 +162,7 @@ async fn sqlite_task_execution_contract() -> Result<()> {
     for (name, task_type, detail) in [
         ("pack", "pack", json!({"policy":"pack"})),
         ("repack", "pack", json!({"policy":"repack"})),
-        ("reuse", "pack", json!({"policy":"reuse"})),
+        ("reclaim", "pack", json!({"policy":"reclaim"})),
         ("unpack", "unpack", json!({})),
         ("gc", "gc", json!({})),
         ("cleanup", "cleanup", json!({})),
@@ -183,9 +183,11 @@ async fn sqlite_task_execution_contract() -> Result<()> {
     sqlx::query("UPDATE mokyu_meta SET maintenance=TRUE,gc_paused=TRUE,pack_creation_paused=TRUE")
         .execute(db)
         .await?;
-    sqlx::query("UPDATE maintenance_controls SET paused=TRUE WHERE policy IN ('cleanup','reuse')")
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "UPDATE maintenance_controls SET paused=TRUE WHERE policy IN ('cleanup','reclaim')",
+    )
+    .execute(db)
+    .await?;
     assert_eq!(
         claim_all(&backend, 0).await?,
         HashSet::from([tasks["sweep"], tasks["integrity"]])
@@ -202,12 +204,12 @@ async fn sqlite_task_execution_contract() -> Result<()> {
         claim_all(&backend, 1).await?,
         HashSet::from([tasks["unpack"]])
     );
-    sqlx::query("UPDATE maintenance_controls SET paused=FALSE WHERE policy='reuse'")
+    sqlx::query("UPDATE maintenance_controls SET paused=FALSE WHERE policy='reclaim'")
         .execute(db)
         .await?;
     assert_eq!(
         claim_all(&backend, 1).await?,
-        HashSet::from([tasks["reuse"]])
+        HashSet::from([tasks["reclaim"]])
     );
     sqlx::query("UPDATE mokyu_meta SET gc_paused=FALSE")
         .execute(db)

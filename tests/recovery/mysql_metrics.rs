@@ -146,7 +146,8 @@ async fn mysql_access_metrics_contract() -> Result<()> {
     sqlx::query("UPDATE pending_uploads SET last_error='fixture'")
         .execute(db)
         .await?;
-    let task = TaskControlStore::enqueue(&backend, "pack", None, json!({"policy":"range"})).await?;
+    let task =
+        TaskControlStore::enqueue(&backend, "pack", None, json!({"policy":"repack"})).await?;
     let pack = cache_tests::pack(&backend, storage, task).await?;
     let now = Utc::now().with_nanosecond(123456000).unwrap();
     transactions::sample_runtime(db, point(now - Duration::days(3)), 10. * 86400.).await?;
@@ -176,7 +177,7 @@ async fn mysql_access_metrics_contract() -> Result<()> {
             runtime.work[0].task_type.as_str(),
             runtime.work[0].processed.as_str()
         ),
-        (task, "range", "0")
+        (task, "repack", "0")
     );
     for n in 0..7 {
         TaskControlStore::enqueue(&backend, "integrity", None, json!({"n":n})).await?;

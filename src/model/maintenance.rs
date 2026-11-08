@@ -60,7 +60,6 @@ pub(crate) trait MaintenanceStore: Send + Sync {
         report: serde_json::Value,
     ) -> Result<()>;
     async fn schedule(&self) -> Result<Vec<(String, bool, Option<f64>)>>;
-    async fn reuse_due(&self) -> Result<bool>;
     async fn scheduled(&self, policy: &str) -> Result<()>;
 
     async fn chunk_candidates(

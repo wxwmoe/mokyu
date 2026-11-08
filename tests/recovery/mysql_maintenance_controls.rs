@@ -134,7 +134,7 @@ async fn mysql_maintenance_control_contract() -> Result<()> {
     transactions::finish_lifecycle_policy(db, task, 0, false, json!({"chunks":0})).await?;
     assert_eq!(backend.raw(id).await?.unwrap()["state"], "completed");
     let controls = queries::maintenance_controls(&mut *db.acquire().await?).await?;
-    assert_eq!(controls.len(), 7);
+    assert_eq!(controls.len(), 5);
     let gc = controls.iter().find(|c| c["policy"] == "gc").unwrap();
     assert_eq!(gc["latest"]["id"], id.to_string());
     assert_eq!(gc["latest"]["processed"], 6);
@@ -170,9 +170,8 @@ async fn mysql_maintenance_control_contract() -> Result<()> {
         .await?;
     queries::scheduled_maintenance("gc").execute(db).await?;
     let schedule = queries::maintenance_schedule().fetch_all(db).await?;
-    assert_eq!(schedule.len(), 7);
+    assert_eq!(schedule.len(), 5);
     assert!(schedule.iter().find(|v| v.0 == "gc").unwrap().2.unwrap() < 5.);
-    assert!(!queries::due_pack_reuse().fetch_one(db).await?);
     assert_eq!(queries::preparing_pack_count().fetch_one(db).await?, "0");
     transactions::change_pack_creation(db, true).await?;
     let unpack = TaskControlStore::enqueue(&backend, "unpack", None, json!({"all":true})).await?;

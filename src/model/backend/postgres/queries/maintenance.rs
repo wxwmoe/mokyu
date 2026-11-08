@@ -553,9 +553,6 @@ impl MaintenanceStore for Backend {
     async fn schedule(&self) -> Result<Vec<(String, bool, Option<f64>)>> {
         Ok(maintenance_schedule().fetch_all(&self.pool).await?)
     }
-    async fn reuse_due(&self) -> Result<bool> {
-        Ok(due_pack_reuse().fetch_one(&self.pool).await?)
-    }
     async fn scheduled(&self, policy: &str) -> Result<()> {
         scheduled_maintenance(policy).execute(&self.pool).await?;
         Ok(())

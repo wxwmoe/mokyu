@@ -933,7 +933,7 @@ pub(in super::super) async fn commit_pack_outputs_in(
         .build()
         .execute(&mut **tx)
         .await?;
-    queries::record_pack_rewrite(task.id, serde_json::json!({"before_bytes":before,"output_bytes":after,"temporary_added_bytes":added,"transition_bytes":before+added})).execute(&mut **tx).await?;
+    queries::record_pack_rewrite(task.id, serde_json::json!({"before_bytes":before,"output_bytes":after,"temporary_added_bytes":added,"transition_bytes":before+added,"mapped_byte_reduction":(before-after).max(0)})).execute(&mut **tx).await?;
 
     Ok(())
 }

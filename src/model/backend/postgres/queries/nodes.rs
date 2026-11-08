@@ -210,7 +210,7 @@ impl ClusterStore for Backend {
     async fn leader(&self, key: i64) -> Result<Option<Box<dyn Leader>>> {
         transactions::cluster_leader(&self.pool, key).await
     }
-    async fn maintenance_state(&self) -> Result<(Value, bool, DateTime<Utc>)> {
+    async fn maintenance_state(&self) -> Result<(Value, DateTime<Utc>)> {
         Ok(maintenance_state().fetch_one(&self.pool).await?)
     }
 }

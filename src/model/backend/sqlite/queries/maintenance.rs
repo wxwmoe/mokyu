@@ -393,9 +393,6 @@ impl MaintenanceStore for Backend {
     async fn schedule(&self) -> Result<Vec<(String, bool, Option<f64>)>> {
         Ok(maintenance_schedule().fetch_all(&self.read).await?)
     }
-    async fn reuse_due(&self) -> Result<bool> {
-        Ok(due_pack_reuse().fetch_one(&self.read).await?)
-    }
     async fn scheduled(&self, policy: &str) -> Result<()> {
         scheduled_maintenance(policy).execute(&self.write).await?;
         Ok(())
@@ -617,12 +614,6 @@ pub(in super::super) fn scheduled_maintenance(policy: &str) -> Statement<'_> {
 pub(in super::super) fn maintenance_schedule() -> Rows<'static, (String, bool, Option<f64>)> {
     sqlx::query_as(
         "SELECT c.policy,IIF(c.policy='gc',m.gc_paused,c.paused),(CAST(unixepoch('subsec')*1000000 AS INTEGER)-c.last_scheduled_at)/1000000.0 FROM maintenance_controls c CROSS JOIN mokyu_meta m",
-    )
-}
-
-pub(in super::super) fn due_pack_reuse() -> Scalar<'static, bool> {
-    sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM pack_changes WHERE reason='reuse' AND next_check_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER))",
     )
 }
 

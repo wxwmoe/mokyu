@@ -62,16 +62,16 @@ async fn mysql_pack_queue_contract() -> Result<()> {
     publish(&backend, source, 64).await?;
     assert_eq!(queue(&backend, source).await?, Some((1, 0, "pack".into())));
 
-    // A concurrent copy invalidates an old queue generation, even before its publication.
+    // Additional readers leave the original pack candidate and its cooldown intact.
     sqlx::query("UPDATE pack_maintenance SET progress_cursor=32,next_check_at=TIMESTAMPADD(DAY,1,CURRENT_TIMESTAMP(6)) WHERE stream_id=?").bind(source).execute(db).await?;
     let copy = cache_tests::stream(&backend, bucket, "copy").await?;
     backend
         .copy_references(copy, source, 0, 64, &[c0.id, c1.id])
         .await?;
-    assert_eq!(queue(&backend, source).await?, Some((2, 0, "pack".into())));
+    assert_eq!(queue(&backend, source).await?, Some((1, 32, "pack".into())));
     assert!(
         sqlx::query_scalar::<_, bool>(
-            "SELECT next_check_at<=CURRENT_TIMESTAMP(6) FROM pack_maintenance WHERE stream_id=?"
+            "SELECT next_check_at>CURRENT_TIMESTAMP(6) FROM pack_maintenance WHERE stream_id=?"
         )
         .bind(source)
         .fetch_one(db)
@@ -81,7 +81,7 @@ async fn mysql_pack_queue_contract() -> Result<()> {
     publish(&backend, copy, 64).await?;
     assert_eq!(queue(&backend, copy).await?, Some((1, 0, "pack".into())));
     assert!(backend.reference(copy, 64, c0.id, 32).await.is_err());
-    assert_eq!(queue(&backend, source).await?.unwrap().0, 2);
+    assert_eq!(queue(&backend, source).await?.unwrap().0, 1);
 
     let owner = TaskControlStore::enqueue(&backend, "pack", None, json!({"policy":"pack"})).await?;
     let pack = cache_tests::pack(&backend, storage, owner).await?;
@@ -98,32 +98,30 @@ async fn mysql_pack_queue_contract() -> Result<()> {
     let target = cache_tests::stream(&backend, bucket, "target").await?;
     backend.reference(target, 0, c0.id, 32).await?;
     assert_eq!(
-        sqlx::query_as::<_, (i64, String)>(
-            "SELECT generation,reason FROM pack_changes WHERE pack_id=?"
-        )
-        .bind(pack)
-        .fetch_one(db)
-        .await?,
-        (1, "reuse".into())
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_changes WHERE pack_id=?")
+            .bind(pack)
+            .fetch_one(db)
+            .await?,
+        0
     );
     let generation = queue(&backend, source).await?.unwrap().0;
     assert!(backend.reference(target, 0, c1.id, 32).await.is_err());
     assert_eq!(queue(&backend, source).await?.unwrap().0, generation);
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT generation FROM pack_changes WHERE pack_id=?")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_changes WHERE pack_id=?")
             .bind(pack)
             .fetch_one(db)
             .await?,
-        1
+        0
     );
     publish(&backend, target, 32).await?;
     assert!(queue(&backend, target).await?.is_none());
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT generation FROM pack_changes WHERE pack_id=?")
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pack_changes WHERE pack_id=?")
             .bind(pack)
             .fetch_one(db)
             .await?,
-        2
+        0
     );
 
     // Multipart replacement changes both the removed and surviving references.
@@ -178,7 +176,7 @@ async fn mysql_pack_queue_contract() -> Result<()> {
             chunk: replacement.id,
         })
         .await?;
-    assert!(queue(&backend, source).await?.unwrap().0 > before);
+    assert_eq!(queue(&backend, source).await?.unwrap().0, before);
     assert_eq!(
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM chunks WHERE id IN (?,?) AND reference_changed_at>'2000-01-01'"
@@ -196,7 +194,7 @@ async fn mysql_pack_queue_contract() -> Result<()> {
             .bind(pack)
             .fetch_one(db)
             .await?,
-        "reuse"
+        "reclaim"
     );
 
     let upload = MultipartStore::create(

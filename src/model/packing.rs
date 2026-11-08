@@ -31,6 +31,14 @@ impl PackOutput {
     }
 }
 
+pub(crate) fn repack_decision(stream: Id, gain: i64, reason: &str, rows: &[Mapping]) -> Value {
+    let estimated: i64 = rows
+        .iter()
+        .map(|m| i64::from(m.chunk.stored_size.unwrap_or(m.chunk.raw_size)))
+        .sum();
+    serde_json::json!({"stream_id":stream,"reason":reason,"estimated_payload_bytes":estimated,"estimated_saved_gets":gain})
+}
+
 pub(crate) struct PackCandidate {
     pub(crate) row: Mapping,
     pub(crate) eligible: bool,
@@ -240,6 +248,7 @@ pub(crate) trait PackingStore: Send + Sync {
         storage: Option<Uuid>,
     ) -> Result<Option<Id>>;
     async fn reclaim_estimate(&self, pack: Id, groups: &[Vec<Mapping>]) -> Result<i64>;
+    async fn note_repack_decision(&self, task: Execution, detail: Value) -> Result<()>;
     async fn repack_benefit(&self, stream: Id, rows: &[Mapping]) -> Result<i64>;
     async fn next_repack_stream(
         &self,

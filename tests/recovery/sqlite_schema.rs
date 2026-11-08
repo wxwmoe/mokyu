@@ -165,13 +165,13 @@ async fn sqlite_data_schema_contract() -> Result<()> {
             .bind(Uuid::new_v4()).bind(admin).bind(token).bind(client).bind([0u8;32].as_slice()).execute(db).await.is_err());
     }
     let task = Uuid::new_v4();
-    sqlx::query("INSERT INTO tasks(id,task_type,state,detail) VALUES(?,'pack','queued','{\"policy\":\"reuse\"}')").bind(task).execute(db).await?;
+    sqlx::query("INSERT INTO tasks(id,task_type,state,detail) VALUES(?,'pack','queued','{\"policy\":\"reclaim\"}')").bind(task).execute(db).await?;
     assert_eq!(
         sqlx::query_scalar::<_, String>("SELECT policy FROM tasks WHERE id=?")
             .bind(task)
             .fetch_one(db)
             .await?,
-        "reuse"
+        "reclaim"
     );
     sqlx::query("UPDATE tasks SET detail='{\"policy\":null}' WHERE id=?")
         .bind(task)
