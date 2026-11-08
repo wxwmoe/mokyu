@@ -65,7 +65,7 @@ async fn mysql_packing_contract() -> Result<()> {
     publish(&backend, stream, 96).await?;
     let candidates = backend.pack_candidates(stream, 0, 60.).await?;
     assert_eq!(candidates.len(), 3);
-    assert!(candidates.iter().all(|c| c.eligible && c.unit_count == 1));
+    assert!(candidates.iter().all(|c| c.eligible && !c.shared));
     assert!(
         backend
             .same_references(rows[0].chunk.id, rows[1].chunk.id, 32)
@@ -130,8 +130,10 @@ async fn mysql_packing_contract() -> Result<()> {
     assert!(detail["created_at"].as_str().unwrap().ends_with('Z'));
     assert_eq!(detail["digest"], format!("\\x{}", "07".repeat(32)));
     assert_eq!(
-        backend.pack_candidates(stream, 32, 60.).await?[0].unit_count,
-        2
+        backend.pack_candidates(stream, 32, 60.).await?[0]
+            .row
+            .pack_id,
+        Some(pack.id)
     );
     let cutoff = Utc::now();
     assert_eq!(
@@ -191,7 +193,7 @@ async fn mysql_packing_contract() -> Result<()> {
             .await?
             .is_some()
     );
-    assert!(!backend.pack_candidates(stream, 0, 60.).await?[0].eligible);
+    assert!(backend.pack_candidates(stream, 0, 60.).await?[0].shared);
     let user = Uuid::new_v4();
     let token = Uuid::new_v4();
     sqlx::query(

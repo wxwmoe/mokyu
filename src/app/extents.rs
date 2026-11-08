@@ -468,7 +468,7 @@ impl App {
             config::seconds(&app.config.requests.read_idle_timeout)?,
         ));
         let body = async_stream::try_stream! {
-            let _pin: &Active=pin.borrow();let (_reader,slot)=permits;let slot=Arc::new(slot);let primary=Arc::new(tokio::sync::Semaphore::new(crate::storage::read_buffer::UNITS));let spare=crate::storage::read_buffer::Spares::new(app.slots.clone());let read_context=Arc::new(crate::storage::ReadContext::user(range, app.read_checks.clone(), capture.clone()));
+            let _pin: &Active=pin.borrow();let (_reader,slot)=permits;let slot=Arc::new(slot);let primary=Arc::new(tokio::sync::Semaphore::new(crate::storage::read_buffer::UNITS));let spare=crate::storage::read_buffer::Spares::new(app.slots.clone());
             #[cfg(feature="fault-injection")]
             crate::faults::point("read-body").await;
             _pin.renew_read_lease().await?;
@@ -488,15 +488,12 @@ impl App {
                 } else {app.chunks.read_extents(stream.id,from,end).await?};
                 (!rows.is_empty()).then_some(()).context("object mapping is incomplete")?;
                 if let Some(capture)=&capture { let mut mapping=capture.lock().unwrap(); for row in &rows { mapping.record(row); } }
-                let mut pack_readers=std::collections::HashMap::<Uuid,std::sync::Weak<crate::storage::ReadContext>>::new();
+                let mut context=crate::storage::ReadContext::user(range,app.read_checks.clone(),capture.clone());
+                context.ranges=crate::storage::pack_ranges::Window::new(rows.iter().filter_map(|row| row.pack_range()));
+                let context=Arc::new(context);
                 let mut loaded=futures_util::stream::iter(rows.into_iter().enumerate().map(|(index,row)| {
                     let app=app.clone();
-                    let context=if let Some(pack)=row.demand_pack {
-                        pack_readers.get(&pack).and_then(std::sync::Weak::upgrade).unwrap_or_else(|| {
-                            let context=Arc::new(crate::storage::ReadContext::user(range,app.read_checks.clone(),capture.clone()));
-                            pack_readers.insert(pack,Arc::downgrade(&context));context
-                        })
-                    }else{read_context.clone()};
+                    let context=context.clone();
                     let primary=primary.clone();let slot=slot.clone();let spare=spare.clone();let recovery=recovery.clone();
                     async move {
                         let raw=usize::try_from(row.chunk.raw_size)?;

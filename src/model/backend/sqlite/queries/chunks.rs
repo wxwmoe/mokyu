@@ -205,7 +205,7 @@ impl ChunkStore for Backend {
     }
     async fn read_extents(&self, stream: Id, from: i64, until: i64) -> Result<Vec<ReadExtent>> {
         let mut query = sqlx::QueryBuilder::new("SELECT e.*,");
-        query.push(CHUNK_COLUMNS).push(",(SELECT p.location_id FROM packs p WHERE p.id=c.pack_id) AS demand_pack FROM (SELECT * FROM extents WHERE stream_id=").push_bind(stream).push(" AND offset_bytes>=").push_bind(from).push(" AND offset_bytes<").push_bind(until).push(" ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' ORDER BY e.offset_bytes");
+        query.push(CHUNK_COLUMNS).push(",p.location_id AS demand_pack,m.offset_bytes AS pack_offset,m.encoded_size AS pack_length FROM (SELECT * FROM extents WHERE stream_id=").push_bind(stream).push(" AND offset_bytes>=").push_bind(from).push(" AND offset_bytes<").push_bind(until).push(" ORDER BY offset_bytes LIMIT 64) e LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' LEFT JOIN packs p ON p.id=c.pack_id LEFT JOIN pack_members m ON m.pack_id=c.pack_id AND m.chunk_id=c.id ORDER BY e.offset_bytes");
         Ok(query.build_query_as().fetch_all(&self.read).await?)
     }
     async fn read_start(&self, stream: Id, position: i64) -> Result<Option<i64>> {

@@ -1616,6 +1616,8 @@ mod tests {
         };
         let row = ReadExtent {
             demand_pack: None,
+            pack_offset: None,
+            pack_length: None,
             extent: Extent {
                 stream_id: stream.id,
                 offset_bytes: 0,

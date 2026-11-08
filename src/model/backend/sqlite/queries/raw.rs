@@ -297,6 +297,17 @@ impl RawStore for Backend {
         )
         .await
     }
+    async fn conversion_duplicate(
+        &self,
+        task: Execution,
+        candidate: Id,
+        chunk: Id,
+        offset: i64,
+        length: i32,
+    ) -> Result<()> {
+        transactions::conversion_duplicate(&self.write, task, candidate, chunk, offset, length)
+            .await
+    }
     async fn commit_conversion_batch(
         &self,
         task: Execution,

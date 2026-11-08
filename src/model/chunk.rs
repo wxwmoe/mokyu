@@ -35,9 +35,16 @@ pub(crate) struct ReadExtent {
     pub(crate) extent: Extent,
     pub(crate) chunk: Chunk,
     pub(crate) demand_pack: Option<Uuid>,
+    pub(crate) pack_offset: Option<i64>,
+    pub(crate) pack_length: Option<i32>,
 }
 
 impl ReadExtent {
+    pub(crate) fn pack_range(&self) -> Option<(Uuid, std::ops::Range<u64>)> {
+        let start = u64::try_from(self.pack_offset?).ok()?;
+        let length = u64::try_from(self.pack_length?).ok()?;
+        Some((self.demand_pack?, start..start.checked_add(length)?))
+    }
     pub(crate) fn demand_source(&self) -> Option<super::tiering::Source> {
         if !self.chunk.location_id.is_nil() {
             Some(super::tiering::Source::Chunk(self.chunk.location_id))

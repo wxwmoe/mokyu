@@ -55,9 +55,9 @@ pub(crate) async fn pack_candidates(
     db: impl sqlx::PgExecutor<'_>,
     stream: Id,
     offset: i64,
-    cooldown: f64,
+    _cooldown: f64,
 ) -> Result<Vec<PackCandidate>> {
-    Ok(sqlx::query_as::<_, PackCandidateRow>("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size AND (SELECT count(*) FROM extents WHERE chunk_id=c.id)=1 AND COALESCE(c.repack_after<=now(),true) AND (c.split_at IS NULL OR c.reference_changed_at<=now()-$3*interval '1 second')) eligible,CASE WHEN c.pack_id IS NULL THEN 1 ELSE (SELECT count(*) FROM chunks WHERE pack_id=c.pack_id AND state='ready') END unit_count FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=$1 AND e.offset_bytes>=$2 AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026").bind(stream).bind(offset).bind(cooldown).fetch_all(db).await?.into_iter().map(|r| PackCandidate {row:r.row,eligible:r.eligible,unit_count:r.unit_count}).collect())
+    Ok(sqlx::query_as::<_, PackCandidateRow>("SELECT c.id,c.current_encoding_id AS current_encoding_id,COALESCE(l.encoding_id,'00000000-0000-0000-0000-000000000000'::uuid) AS location_id,c.storage_id,c.hash,c.raw_size,COALESCE(l.standalone_size,c.standalone_size) AS standalone_size,COALESCE(l.encryption_algorithm,c.encryption_algorithm) AS encryption_algorithm,COALESCE(l.block_key_id,c.block_key_id) AS block_key_id,COALESCE(l.standalone_compressed,c.standalone_compressed) AS standalone_compressed,COALESCE(l.nonce,c.nonce) AS nonce,c.format,c.state,c.created_at,e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size) AS eligible,EXISTS(SELECT 1 FROM extents other WHERE other.chunk_id=c.id AND other.stream_id<>e.stream_id) AS shared FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=$1 AND e.offset_bytes>=$2 AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026").bind(stream).bind(offset).fetch_all(db).await?.into_iter().map(|r| PackCandidate {row:r.row,eligible:r.eligible,shared:r.shared}).collect())
 }
 
 pub(crate) async fn pack_member_count(db: impl sqlx::PgExecutor<'_>, pack: Id) -> Result<i64> {
@@ -363,28 +363,6 @@ pub(crate) async fn publish_outputs(
     range: bool,
     cooldown: f64,
 ) -> Result<()> {
-    let positions: std::collections::BTreeMap<_, _> =
-        rows.iter().map(|r| (r.chunk.id, r.offset_bytes)).collect();
-    let mut first = Vec::new();
-    let mut second = Vec::new();
-    let mut distances = Vec::new();
-    for output in outputs.iter().filter(|o| o.pack.is_some()) {
-        for pair in output.chunks.windows(2) {
-            first.push(pair[0]);
-            second.push(pair[1]);
-            distances.push(
-                positions.get(&pair[1]).context("missing pack source")?
-                    - positions.get(&pair[0]).context("missing pack source")?,
-            );
-        }
-    }
-    anyhow::ensure!(
-        matching_references(&mut *db, &first, &second, &distances)
-            .await?
-            .into_iter()
-            .all(|same| same),
-        "pack reference boundaries changed; retry maintenance"
-    );
     let packs: Vec<_> = outputs
         .iter()
         .filter_map(|o| o.pack.as_ref().map(|p| p.id))

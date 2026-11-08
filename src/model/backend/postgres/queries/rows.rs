@@ -343,6 +343,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::model::chunk::ReadE
         use sqlx::Row;
         Ok(Self {
             demand_pack: sqlx::Row::try_get(row, "demand_pack")?,
+            pack_offset: sqlx::Row::try_get(row, "pack_offset")?,
+            pack_length: sqlx::Row::try_get(row, "pack_length")?,
             extent: sqlx::FromRow::from_row(row)?,
             chunk: sqlx::FromRow::from_row(row)?,
         })

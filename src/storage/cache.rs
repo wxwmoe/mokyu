@@ -275,6 +275,7 @@ impl Drop for LoadedPack {
 }
 #[derive(Default)]
 pub(crate) struct ReadContext {
+    pub(crate) ranges: super::pack_ranges::Window,
     pub(crate) pack: tokio::sync::Mutex<Option<Arc<LoadedPack>>>,
     pub(crate) observe: bool,
     pub(crate) range: bool,

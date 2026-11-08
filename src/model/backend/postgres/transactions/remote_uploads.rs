@@ -222,6 +222,38 @@ pub(in super::super) async fn claim_remote_cleanup(
     Ok(Some(value))
 }
 
+pub(in super::super) async fn conversion_duplicate(
+    pool: &sqlx::PgPool,
+    task: Execution,
+    candidate: Id,
+    chunk: Id,
+    offset: i64,
+    length: i32,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    lock_execution(&mut tx, task).await?;
+    require_writing_stream(&mut tx, candidate).await?;
+    ensure!(
+        queries::conversion_owned(candidate, task.id, task.token)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some()
+            && queries::conversion_chunk(chunk, candidate)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some(),
+        crate::model::Error::OperationAborted
+    );
+    queries::insert_chunk_extent(candidate, offset, length, chunk)
+        .execute(&mut *tx)
+        .await?;
+    queries::resize_writing_stream(candidate, offset + i64::from(length))
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(in super::super) async fn commit_conversion_batch(
     pool: &sqlx::PgPool,
     task: Execution,

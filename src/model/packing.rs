@@ -34,7 +34,42 @@ impl PackOutput {
 pub(crate) struct PackCandidate {
     pub(crate) row: Mapping,
     pub(crate) eligible: bool,
-    pub(crate) unit_count: i64,
+    pub(crate) shared: bool,
+}
+
+pub(crate) fn select_members(
+    rows: Vec<PackCandidate>,
+    repack: bool,
+    maximum: u64,
+) -> (Vec<Mapping>, i64) {
+    let mut selected = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let mut bytes = 0;
+    let mut cursor = -1;
+    for candidate in rows {
+        let row = candidate.row;
+        let end = row.offset_bytes + i64::from(row.chunk.raw_size);
+        if !candidate.eligible
+            || (!repack && (row.pack_id.is_some() || candidate.shared))
+            || !seen.insert(row.chunk.id)
+        {
+            cursor = end;
+            continue;
+        }
+        if bytes + row.chunk.raw_size as u64 > maximum
+            || selected.len() == crate::content::pack::MAX_MEMBERS
+        {
+            if selected.is_empty() {
+                cursor = end;
+                continue;
+            }
+            break;
+        }
+        bytes += row.chunk.raw_size as u64;
+        cursor = end;
+        selected.push(row);
+    }
+    (selected, cursor)
 }
 
 #[async_trait]

@@ -69,10 +69,10 @@ pub(in super::super) async fn pack_candidates(
     db: impl sqlx::SqliteExecutor<'_>,
     stream: Id,
     offset: i64,
-    cooldown: f64,
+    _cooldown: f64,
 ) -> Result<Vec<PackCandidate>> {
     let mut query = sqlx::QueryBuilder::<Sqlite>::new("SELECT ");
-    query.push(CHUNK_COLUMNS).push(",e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size AND (SELECT COUNT(*) FROM extents WHERE chunk_id=c.id)=1 AND COALESCE(c.repack_after<=CAST(unixepoch('subsec')*1000000 AS INTEGER),TRUE) AND (c.split_at IS NULL OR c.reference_changed_at<=CAST(unixepoch('subsec')*1000000 AS INTEGER)-").push_bind((cooldown * 1_000_000.) as i64).push(")) AS eligible,CAST(IIF(c.pack_id IS NULL,1,(SELECT COUNT(*) FROM chunks WHERE pack_id=c.pack_id AND state='ready')) AS INTEGER) AS unit_count FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=").push_bind(stream).push(" AND e.offset_bytes>=").push_bind(offset).push(" AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026");
+    query.push(CHUNK_COLUMNS).push(",e.offset_bytes,c.pack_id,(NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings q WHERE q.chunk_id=c.id AND q.state='ready' AND q.quarantined_at IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM packs q WHERE q.id=c.pack_id AND q.quarantined_at IS NOT NULL) AND e.source_offset=0 AND e.length=c.raw_size) AS eligible,EXISTS(SELECT 1 FROM extents other WHERE other.chunk_id=c.id AND other.stream_id<>e.stream_id) AS shared FROM extents e JOIN chunks c ON c.id=e.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' JOIN streams s ON s.id=e.stream_id WHERE e.stream_id=").push_bind(stream).push(" AND e.offset_bytes>=").push_bind(offset).push(" AND s.state='ready' AND c.state='ready' AND EXISTS(SELECT 1 FROM objects WHERE stream_id=s.id) ORDER BY e.offset_bytes LIMIT 1026");
     Ok(query
         .build_query_as::<PackCandidateRow>()
         .fetch_all(db)
@@ -81,7 +81,7 @@ pub(in super::super) async fn pack_candidates(
         .map(|r| PackCandidate {
             row: r.row,
             eligible: r.eligible,
-            unit_count: r.unit_count,
+            shared: r.shared,
         })
         .collect())
 }

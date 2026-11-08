@@ -244,50 +244,8 @@ async fn combine(
         config::seconds(&settings.repack_cooldown)? as f64,
     )
     .await?;
-    let mut cursor = rows.first().map_or(-1, |r| r.row.offset_bytes);
-    let mut rows = rows.into_iter().peekable();
-    let mut group = Vec::<Mapping>::new();
-    let mut size = 0u64;
     let maximum = config::bytes(&settings.max_size)?.min(byte_budget.unwrap_or(u64::MAX));
-    while let Some(first) = rows.next() {
-        let mut unit = vec![first];
-        if let Some(pack) = unit[0].row.pack_id {
-            while rows.peek().is_some_and(|r| r.row.pack_id == Some(pack)) {
-                unit.push(rows.next().unwrap());
-            }
-        }
-        let head = &unit[0];
-        let end = unit.last().unwrap().row.offset_bytes
-            + i64::from(unit.last().unwrap().row.chunk.raw_size);
-        let length = unit
-            .iter()
-            .map(|r| r.row.chunk.raw_size as u64)
-            .sum::<u64>();
-        let valid = unit.len() == head.unit_count as usize
-            && unit.iter().all(|r| r.eligible)
-            && (repack || head.row.pack_id.is_none())
-            && unit.windows(2).all(|r| {
-                r[0].row.offset_bytes + i64::from(r[0].row.chunk.raw_size) == r[1].row.offset_bytes
-            });
-        if !valid
-            || head.row.offset_bytes != cursor
-            || group.first().is_some_and(|r| {
-                r.chunk.algorithm != head.row.chunk.algorithm
-                    || r.chunk.block_key_id != head.row.chunk.block_key_id
-            })
-            || size + length > maximum
-            || group.len() + unit.len() > pack::MAX_MEMBERS
-        {
-            if !group.is_empty() {
-                break;
-            }
-            cursor = end;
-            continue;
-        }
-        size += length;
-        cursor = end;
-        group.extend(unit.into_iter().map(|r| r.row));
-    }
+    let (mut group, cursor) = crate::model::packing::select_members(rows, repack, maximum);
     let physical: BTreeSet<_> = group
         .iter()
         .map(|r| (r.pack_id.is_some(), r.pack_id.unwrap_or(r.chunk.id)))

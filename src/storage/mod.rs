@@ -18,6 +18,7 @@ pub(crate) mod marker;
 mod memory;
 pub(crate) mod model;
 mod multipart;
+pub(crate) mod pack_ranges;
 mod partial_map;
 pub(crate) mod permits;
 pub(crate) mod profile;
@@ -2259,7 +2260,9 @@ impl Storage {
                 let entry = self.pack_entry(&pack, c).await?;
                 self.ensure_key_loaded(entry.position.encoding.block_key_id)
                     .await?;
-                let body = self.read_pack_body(&pack, &entry).await?;
+                let body = self
+                    .read_pack_body(&pack, &entry, context.map(|ctx| &ctx.ranges))
+                    .await?;
                 let pool = self.compression_for(pack.storage_id)?.0;
                 let keys = self.secrets.clone();
                 let permit = self.cpu.clone().acquire_owned().await?;
@@ -2374,22 +2377,29 @@ impl Storage {
         &self,
         pack: &crate::content::pack::Pack,
         entry: &crate::content::pack::frame::Entry,
+        window: Option<&pack_ranges::Window>,
     ) -> Result<Vec<u8>> {
         let storage = pack.storage_id.context("pack has no store")?;
         let size = u64::try_from(pack.stored_size.context(codec::IntegrityError::Metadata)?)?;
         let span = entry
             .position
             .range(entry.raw_size, size, pack.member_count)?;
-        self.ensure_storage_verified(storage).await?;
-        let target = self.store_backend(storage)?;
-        let _permit = target.reads.acquire().await?;
-        self.read_path_permitted(
-            storage,
-            &self.pack_path_for(storage, pack.address())?,
-            entry.position.encoding.stored_size as usize,
-            Some((span, size)),
-        )
-        .await
+        let fetch = |range: std::ops::Range<u64>| async move {
+            self.ensure_storage_verified(storage).await?;
+            let target = self.store_backend(storage)?;
+            let _permit = target.reads.acquire().await?;
+            self.read_path_permitted(
+                storage,
+                &self.pack_path_for(storage, pack.address())?,
+                (range.end - range.start) as usize,
+                Some((range, size)),
+            )
+            .await
+        };
+        match window {
+            Some(window) => window.read(pack, span, size, &self.pack_work, fetch).await,
+            None => fetch(span).await,
+        }
     }
 
     pub(crate) async fn member_file(&self, chunk: &Chunk) -> Result<(Chunk, Bytes)> {
@@ -2402,7 +2412,7 @@ impl Storage {
             }
             Source::Pack(pack, _pin) => {
                 let entry = self.pack_entry(&pack, chunk).await?;
-                let body = self.read_pack_body(&pack, &entry).await?;
+                let body = self.read_pack_body(&pack, &entry, None).await?;
                 let mut physical = chunk.clone();
                 entry.position.encoding.apply(&mut physical)?;
                 self.ensure_key_loaded(physical.block_key_id).await?;

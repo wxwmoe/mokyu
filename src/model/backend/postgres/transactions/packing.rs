@@ -322,17 +322,7 @@ pub(super) async fn commit_pack_outputs_in(
         .fetch_one(&mut **tx)
         .await?;
     let range: bool = queries::pack_is_range(task.id).fetch_one(&mut **tx).await?;
-    if !split && !upload {
-        let exclusive: bool = queries::pack_exclusive(
-            &ids,
-            config::seconds(&settings.repack_cooldown)? as f64,
-            config::seconds(&settings.range_repack_window)? as f64,
-            flush_seconds,
-        )
-        .fetch_one(&mut **tx)
-        .await?;
-        ensure!(exclusive, "pack references changed; retry maintenance");
-    }
+
     queries::pack_work::publish_outputs(
         tx,
         rows,

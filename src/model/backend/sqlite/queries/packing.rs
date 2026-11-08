@@ -48,7 +48,7 @@ pub(super) struct PackCandidateRow {
     #[sqlx(flatten)]
     pub(super) row: Mapping,
     pub(super) eligible: bool,
-    pub(super) unit_count: i64,
+    pub(super) shared: bool,
 }
 
 #[async_trait::async_trait]

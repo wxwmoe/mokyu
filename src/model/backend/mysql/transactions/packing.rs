@@ -807,16 +807,6 @@ pub(in super::super) async fn publish_pack_outputs_in(
                     == output.chunks,
                 "pack members changed"
             );
-            for pair in output.chunks.windows(2) {
-                let a = rows.iter().find(|r| r.chunk.id == pair[0]).unwrap();
-                let b = rows.iter().find(|r| r.chunk.id == pair[1]).unwrap();
-                ensure!(
-                    queries::same_references(pair[0], pair[1], b.offset_bytes - a.offset_bytes)
-                        .fetch_one(&mut **tx)
-                        .await?,
-                    "pack reference boundaries changed; retry maintenance"
-                );
-            }
             ensure!(
                 queries::publish_prepared_pack(pack.id, task.id)
                     .execute(&mut **tx)
@@ -950,20 +940,7 @@ pub(in super::super) async fn commit_pack_outputs_in(
         .fetch_one(&mut **tx)
         .await?;
     let cooldown = crate::config::seconds(&settings.repack_cooldown)? as f64;
-    if !split && !upload {
-        ensure!(
-            queries::pack_exclusive(
-                &ids,
-                cooldown,
-                crate::config::seconds(&settings.range_repack_window)? as f64,
-                flush_seconds
-            )
-            .build_query_scalar::<bool>()
-            .fetch_one(&mut **tx)
-            .await?,
-            "pack references changed; retry maintenance"
-        );
-    }
+
     publish_pack_outputs_in(
         tx,
         task,

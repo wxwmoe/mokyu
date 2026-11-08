@@ -133,56 +133,57 @@ impl App {
                         let length = codec::cut(&window[..filled]);
                         (length, *blake3::hash(&window[..length]).as_bytes())
                     };
-                    if bytes + length > maximum
-                        || rows.iter().any(|r: &Mapping| r.chunk.hash == hash)
-                    {
-                        self.convert_batch(
-                            task,
-                            candidate,
-                            &mut rows,
-                            &mut data,
-                            &memory,
-                            content_type,
-                            &job,
-                        )
-                        .await?;
-                        bytes = 0;
-                    }
                     self.renew_write_lease(candidate).await?;
-                    let mutex = self.content_lock(source.storage_id, hash);
-                    let (chunk, reused) = {
-                        let _hash = mutex.lock().await;
-                        self.allocate_chunk(ChunkCreate {
-                            storage: source.storage_id,
-                            stream: candidate,
-                            hash,
-                            raw_size: length as i32,
-                            algorithm: job.encoding.algorithm.clone(),
-                            key: job.encoding.block_key_id,
-                        })
-                        .await?
-                    };
-                    if reused {
-                        self.convert_batch(
-                            task,
-                            candidate,
-                            &mut rows,
-                            &mut data,
-                            &memory,
-                            content_type,
-                            &job,
-                        )
-                        .await?;
-                        bytes = 0;
-                        self.reference(candidate, offset, &chunk).await?;
+                    if let Some(existing) =
+                        rows.iter().find(|row: &&Mapping| row.chunk.hash == hash)
+                    {
+                        self.raw
+                            .conversion_duplicate(
+                                task,
+                                candidate,
+                                existing.chunk.id,
+                                offset,
+                                existing.chunk.raw_size,
+                            )
+                            .await?;
                     } else {
-                        bytes += length;
-                        rows.push(Mapping {
-                            chunk: chunk.clone(),
-                            offset_bytes: offset,
-                            pack_id: None,
-                        });
-                        data.push((chunk, Bytes::copy_from_slice(&window[..length])));
+                        let mutex = self.content_lock(source.storage_id, hash);
+                        let (chunk, reused) = {
+                            let _hash = mutex.lock().await;
+                            self.allocate_chunk(ChunkCreate {
+                                storage: source.storage_id,
+                                stream: candidate,
+                                hash,
+                                raw_size: length as i32,
+                                algorithm: job.encoding.algorithm.clone(),
+                                key: job.encoding.block_key_id,
+                            })
+                            .await?
+                        };
+                        if reused {
+                            self.reference(candidate, offset, &chunk).await?;
+                        } else {
+                            if bytes + length > maximum || rows.len() >= 1024 {
+                                self.convert_batch(
+                                    task,
+                                    candidate,
+                                    &mut rows,
+                                    &mut data,
+                                    &memory,
+                                    content_type,
+                                    &job,
+                                )
+                                .await?;
+                                bytes = 0;
+                            }
+                            bytes += length;
+                            rows.push(Mapping {
+                                chunk: chunk.clone(),
+                                offset_bytes: offset,
+                                pack_id: None,
+                            });
+                            data.push((chunk, Bytes::copy_from_slice(&window[..length])));
+                        }
                     }
                     offset += length as i64;
                     window.copy_within(length..filled, 0);

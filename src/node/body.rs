@@ -7,9 +7,10 @@ use crate::{
     model::node_read as read,
     rpc::wire,
     storage::{
-        cache::{CacheFile, LoadedPack as Loaded},
+        cache::CacheFile,
         diagnostics::Diagnostics,
         model::{Options, Store},
+        pack_ranges::Window,
         raw::RawFile,
     },
 };
@@ -285,7 +286,7 @@ impl Reader {
         prepared: Arc<Prepared>,
         source: &read::Source,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
-        loaded: &mut Option<Loaded>,
+        window: &Window,
     ) -> Result<(Bytes, bool)> {
         let (chunk, local) = match source {
             read::Source::Chunk { chunk } | read::Source::Pack { chunk, .. } => (chunk, false),
@@ -366,7 +367,6 @@ impl Reader {
             ..
         } = source
         {
-            *loaded = None;
             let size = u64::try_from(pack.stored_size.context(codec::IntegrityError::Metadata)?)?;
             let position = pack::frame::Position {
                 ordinal: *ordinal,
@@ -375,20 +375,24 @@ impl Reader {
             };
             let span = position.range(chunk.raw_size, size, pack.member_count)?;
             let storage = pack.storage_id.context("pack storage missing")?;
-            let encoded = {
-                let _io = self.io(&prepared, Some(storage)).await?;
-                let backend = prepared.backend(storage)?;
-                backend.store.ensure_verified().await?;
-                self.gets.fetch_add(1, Ordering::Relaxed);
-                crate::storage::read_retry::bounded(
-                    backend.store.backend.as_ref(),
-                    &crate::storage::location::Layout::S3.pack(pack.address()),
-                    chunk.stored_size.context(codec::IntegrityError::Metadata)? as usize,
-                    Some((span, size)),
-                    Some(prepared.recovery.configured(backend.profile.max_retries)),
-                )
-                .await?
+            let fetch = |range: std::ops::Range<u64>| {
+                let prepared = &prepared;
+                async move {
+                    let _io = self.io(prepared, Some(storage)).await?;
+                    let backend = prepared.backend(storage)?;
+                    backend.store.ensure_verified().await?;
+                    self.gets.fetch_add(1, Ordering::Relaxed);
+                    crate::storage::read_retry::bounded(
+                        backend.store.backend.as_ref(),
+                        &crate::storage::location::Layout::S3.pack(pack.address()),
+                        (range.end - range.start) as usize,
+                        Some((range, size)),
+                        Some(prepared.recovery.configured(backend.profile.max_retries)),
+                    )
+                    .await
+                }
             };
+            let encoded = window.read(pack, span, size, &self.packs, fetch).await?;
             let cpu = self.cpu.clone().acquire_owned().await?;
             let chunk = chunk.clone();
             let pool = self.pool.clone();
@@ -399,7 +403,6 @@ impl Reader {
             })
             .await?;
         }
-        *loaded = None;
         let mut compressed = false;
         let encoded = if local {
             let _io = self.io(&prepared, None).await?;
@@ -874,7 +877,12 @@ pub(super) fn stream(
             let mut prefetch = if ranges.is_none() { next.take().map(load_next) } else { None };
             for span in spans {
             for (batch_index,batch) in value.segments.chunks(read::LANES).enumerate() {
-                let mut packs=std::collections::HashMap::new();
+                let window=Arc::new(Window::new(batch.iter().filter_map(|segment| {
+                    if span.start >= (segment.offset+segment.length) as u64 || span.end <= segment.offset as u64 { return None; }
+                    let read::Source::Pack {pack,chunk,offset,..}=&segment.source else {return None;};
+                    let size=u64::try_from(chunk.stored_size?).ok()?;
+                    Some((pack.location_id,*offset..offset.checked_add(size)?))
+                })));
                 let mut chunks=std::collections::HashMap::new();
                 let mut tasks=Vec::with_capacity(batch.len());
                 for (offset,segment) in batch.iter().enumerate() {
@@ -884,10 +892,7 @@ pub(super) fn stream(
                     let source_offset = segment.source_offset + (begin as i64 - segment.offset);
                     let length = (stop - begin) as i64;
                     let index=batch_index*read::LANES+offset;
-                    let loader = match &segment.source {
-                        read::Source::Pack {pack,..} => Some(packs.entry(pack.location_id).or_insert_with(||Arc::new(tokio::sync::Mutex::new(None))).clone()),
-                        _=>None,
-                    };
+                    let window=window.clone();
                     let read=reads.clone();let held=current.clone();let keys=keys.clone();
                     let src=segment.source.clone();
                     let group = match &src {
@@ -898,12 +903,7 @@ pub(super) fn stream(
                         match &src {
                             read::Source::Raw {..} => Ok((Bytes::new(),false)),
                             read::Source::Chunk {..} | read::Source::Local {..} | read::Source::Pack {..} => {
-                                if let Some(loader)=loader {
-                                    let mut loaded=loader.lock().await;
-                                    read.reader.chunk(&read.node,held.clone(),&src,keys,&mut loaded).await
-                                } else {
-                                    read.reader.chunk(&read.node,held.clone(),&src,keys,&mut None).await
-                                }
+                                read.reader.chunk(&read.node,held.clone(),&src,keys,&window).await
                             }
                             _=>read.reader.fragment(&read.node,held.clone(),&src).await.map(|bytes|(bytes,false))
                         }
@@ -911,7 +911,7 @@ pub(super) fn stream(
                     let job=if let Some(group)=group { chunks.entry(group).or_insert(work).clone() } else {work};
                     tasks.push(async move {(index,segment,begin,source_offset,length,crate::storage::read_retry::READ_AHEAD.scope(offset!=0,job).await)});
                 }
-                drop(packs);drop(chunks);
+                drop(chunks);
                 let mut ready=futures_util::stream::iter(tasks).buffered(read::LANES);
                 while let Some((index,segment,begin,source_offset,length,result))=current.guard(&reads.node,async {Ok(ready.next().await)}).await? {
 

@@ -5,7 +5,7 @@ pub(super) struct PackCandidateRow {
     #[sqlx(flatten)]
     pub(super) row: Mapping,
     pub(super) eligible: bool,
-    pub(super) unit_count: i64,
+    pub(super) shared: bool,
 }
 
 pub(in super::super) fn pack_ready_inputs<'q>(ids: &'q [Id]) -> Scalar<'q, Id> {

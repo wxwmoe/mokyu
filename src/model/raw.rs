@@ -243,6 +243,14 @@ pub(crate) trait RawStore: Send + Sync {
         encoding: &crate::model::cache::EncodingPolicy,
         buffered: bool,
     ) -> Result<(Id, Uuid)>;
+    async fn conversion_duplicate(
+        &self,
+        task: crate::model::task::Execution,
+        candidate: Id,
+        chunk: Id,
+        offset: i64,
+        length: i32,
+    ) -> Result<()>;
     async fn commit_conversion_batch(
         &self,
         task: crate::model::task::Execution,
