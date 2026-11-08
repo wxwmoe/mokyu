@@ -129,6 +129,7 @@ impl Connection {
             connection: self.clone(),
             access: access.to_owned(),
             secret: secret.to_owned(),
+            session_token: None,
             client,
             timeout: options.request_timeout,
             memory: None,
@@ -248,6 +249,7 @@ pub(crate) struct Client {
     connection: Connection,
     access: String,
     secret: String,
+    session_token: Option<header::HeaderValue>,
     client: HttpClient<hyper_rustls::HttpsConnector<HttpConnector>, Body>,
     timeout: Duration,
     memory: Option<std::sync::Arc<tokio::sync::OwnedSemaphorePermit>>,
@@ -282,6 +284,17 @@ pub(crate) fn buffered(
 }
 
 impl Client {
+    pub(crate) fn with_session_token(mut self, token: Option<&str>) -> Result<Self> {
+        self.session_token = token
+            .map(str::parse)
+            .transpose()
+            .context("invalid S3 session token")?;
+        if let Some(value) = &mut self.session_token {
+            value.set_sensitive(true);
+        }
+        Ok(self)
+    }
+
     pub(crate) async fn bytes(
         &self,
         method: Method,
@@ -333,6 +346,9 @@ impl Client {
                 .as_str()
                 .parse()?,
         );
+        if let Some(value) = &self.session_token {
+            headers.insert("x-amz-security-token", value.clone());
+        }
         headers.insert("x-amz-date", date.fmt_iso8601().as_str().parse()?);
         headers.insert("x-amz-content-sha256", digest.parse()?);
         let mut signed = headers

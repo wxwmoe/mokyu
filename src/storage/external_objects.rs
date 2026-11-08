@@ -65,7 +65,7 @@ pub(crate) enum Condition {
 }
 
 impl Condition {
-    fn apply(&self, headers: &mut HeaderMap) -> Result<()> {
+    pub(crate) fn apply(&self, headers: &mut HeaderMap) -> Result<()> {
         match self {
             Self::Absent => {
                 headers.insert(header::IF_NONE_MATCH, "*".parse()?);
@@ -87,7 +87,7 @@ pub(crate) struct Written {
 }
 
 impl Written {
-    fn headers(headers: &HeaderMap, etag: Option<String>) -> Result<Self> {
+    pub(crate) fn headers(headers: &HeaderMap, etag: Option<String>) -> Result<Self> {
         let header_etag = text(headers, "etag")?;
         ensure!(
             etag.as_ref()
@@ -166,7 +166,7 @@ impl Object {
         Ok(())
     }
 
-    fn headers(headers: &HeaderMap) -> Result<Self> {
+    pub(crate) fn headers(headers: &HeaderMap) -> Result<Self> {
         let mut metadata = BTreeMap::new();
         for name in headers.keys().filter(|name| metadata_header(name.as_str())) {
             metadata.insert(name.to_string(), text(headers, name.as_str())?.unwrap());
@@ -200,7 +200,10 @@ fn metadata_header(name: &str) -> bool {
     ) || name.starts_with("x-amz-meta-") && name.len() > 11
 }
 
-fn write_headers(metadata: &BTreeMap<String, String>, public: Option<bool>) -> Result<HeaderMap> {
+pub(crate) fn write_headers(
+    metadata: &BTreeMap<String, String>,
+    public: Option<bool>,
+) -> Result<HeaderMap> {
     ensure!(
         serde_json::to_vec(metadata)?.len() <= 64 * 1024,
         "external metadata exceeds limit"
@@ -448,7 +451,7 @@ pub(crate) fn listing(
 }
 
 impl Client {
-    async fn checked(&self, reply: Response<Body>) -> Result<Response<Body>> {
+    pub(crate) async fn checked(&self, reply: Response<Body>) -> Result<Response<Body>> {
         if reply.status().is_success() {
             return Ok(reply);
         }
@@ -459,7 +462,7 @@ impl Client {
             .into())
     }
 
-    async fn empty(&self, reply: Response<Body>) -> Result<HeaderMap> {
+    pub(crate) async fn empty(&self, reply: Response<Body>) -> Result<HeaderMap> {
         let (parts, body) = self.checked(reply).await?.into_parts();
         let bytes = self.bounded(body, 64 * 1024).await?;
         if let Some(error) = response_error(&bytes) {

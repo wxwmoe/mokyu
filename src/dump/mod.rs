@@ -1,6 +1,10 @@
+mod body;
 mod catalog;
+mod export;
 mod origin;
+mod output;
 mod selection;
+mod verify;
 
 use self::{
     catalog::Catalog,
@@ -194,6 +198,9 @@ pub(crate) async fn run(args: Args) -> Result<()> {
         return selection.list(&db);
     };
     let target = Target::parse(dest, &selection)?;
-    ensure!(args.preview, "use --preview to inspect this export");
-    selection::preview(&db, &identity, &path, &selection, &target)
+    if args.preview {
+        return selection::preview(&db, &identity, &path, &selection, &target);
+    }
+    drop(db);
+    export::run(&path, &identity, selection, target).await
 }
