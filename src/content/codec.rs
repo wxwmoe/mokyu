@@ -363,7 +363,39 @@ pub fn decode_read(
     compression: &crate::content::compression::Pool,
     verify: bool,
 ) -> Result<(Bytes, Bytes)> {
-    let encoded = open(c, encoded, keys)?;
+    decoded(
+        c,
+        open(c, encoded, keys)?,
+        min_savings_percent,
+        compression,
+        verify,
+    )
+}
+
+pub(crate) fn decode_member(
+    c: &Chunk,
+    body: Vec<u8>,
+    keys: &dyn KeySource,
+    min_savings_percent: u8,
+    compression: &crate::content::compression::Pool,
+    verify: bool,
+) -> Result<(Bytes, Bytes)> {
+    decoded(
+        c,
+        open_body(c, body, keys)?,
+        min_savings_percent,
+        compression,
+        verify,
+    )
+}
+
+fn decoded(
+    c: &Chunk,
+    encoded: Vec<u8>,
+    min_savings_percent: u8,
+    compression: &crate::content::compression::Pool,
+    verify: bool,
+) -> Result<(Bytes, Bytes)> {
     let plain = Bytes::from(encoded);
     let raw = decode_cache_read(c, plain.clone(), c.compressed, compression, verify)?;
     let cache = if cache_compressed(c, min_savings_percent) {

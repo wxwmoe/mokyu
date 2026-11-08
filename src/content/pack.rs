@@ -1,3 +1,5 @@
+pub(crate) mod frame;
+
 use crate::model::Id;
 use crate::{
     config,

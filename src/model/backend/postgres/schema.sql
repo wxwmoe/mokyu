@@ -2039,6 +2039,14 @@ CREATE TABLE public.pack_members (
     ordinal integer NOT NULL,
     chunk_id uuid NOT NULL,
     offset_bytes bigint NOT NULL,
+    encoding_uuid uuid,
+    encoded_size integer,
+    compressed boolean,
+    encryption_algorithm text,
+    block_key_id uuid,
+    nonce bytea,
+    CONSTRAINT pack_members_encoded_size_check CHECK (((encoded_size >= 1) AND (encoded_size <= 4194320))),
+    CONSTRAINT pack_members_nonce_check CHECK (((nonce IS NULL) OR (octet_length(nonce) = 12))),
     CONSTRAINT pack_members_offset_bytes_check CHECK ((offset_bytes >= 0)),
     CONSTRAINT pack_members_ordinal_check CHECK ((ordinal >= 0))
 );
@@ -3802,6 +3810,8 @@ CREATE INDEX pack_member_access_lookup ON public.pack_member_access_windows USIN
 
 CREATE INDEX pack_members_chunk ON public.pack_members USING btree (chunk_id);
 
+CREATE INDEX pack_members_key ON public.pack_members USING btree (block_key_id) WHERE (block_key_id IS NOT NULL);
+
 CREATE INDEX packs_gc ON public.packs USING btree (unreferenced_at, id) WHERE (state = ANY (ARRAY['retired'::text, 'deleting'::text]));
 
 CREATE INDEX packs_preparing_owner ON public.packs USING btree (owner_task) WHERE ((owner_task IS NOT NULL) AND (state = 'preparing'::text));
@@ -4468,6 +4478,9 @@ ALTER TABLE ONLY public.pack_member_access_windows
 
 ALTER TABLE ONLY public.pack_member_access_windows
     ADD CONSTRAINT pack_member_access_windows_pack_id_fkey FOREIGN KEY (pack_id) REFERENCES public.packs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.pack_members
+    ADD CONSTRAINT pack_members_block_key_id_fkey FOREIGN KEY (block_key_id) REFERENCES public.managed_keys(id);
 
 ALTER TABLE ONLY public.pack_members
     ADD CONSTRAINT pack_members_chunk_id_fkey FOREIGN KEY (chunk_id) REFERENCES public.chunks(id) ON DELETE CASCADE;

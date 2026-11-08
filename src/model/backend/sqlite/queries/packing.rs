@@ -693,6 +693,34 @@ pub(in super::super) fn pack_metadata(pack: &Pack) -> Statement<'_> {
         .bind(pack.stored_size).bind(pack.compressed).bind(&pack.nonce).bind(crate::content::nonce::id(pack.nonce.as_deref())).bind(&pack.digest).bind(pack.id).bind(pack.location_id).bind(pack.storage_id).bind(&pack.algorithm).bind(pack.block_key_id)
 }
 
+pub(in super::super) async fn write_pack_index(
+    db: &mut sqlx::SqliteConnection,
+    pack: Id,
+    members: &[(Id, crate::content::pack::frame::Entry)],
+) -> Result<()> {
+    for batch in members.chunks(512) {
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm,block_key_id,nonce) ",
+        );
+        query.push_values(batch, |mut row, (id, member)| {
+            let position = &member.position;
+            let encoding = &position.encoding;
+            row.push_bind(pack)
+                .push_bind(position.ordinal as i32)
+                .push_bind(*id)
+                .push_bind(position.offset as i64)
+                .push_bind(encoding.location_id)
+                .push_bind(encoding.stored_size)
+                .push_bind(encoding.compressed)
+                .push_bind(&encoding.algorithm)
+                .push_bind(encoding.block_key_id)
+                .push_bind(&encoding.nonce);
+        });
+        query.build().execute(&mut *db).await?;
+    }
+    Ok(())
+}
+
 pub(in super::super) fn insert_pack_members<'a>(
     pack: Id,
     chunks: impl Iterator<Item = &'a Chunk>,

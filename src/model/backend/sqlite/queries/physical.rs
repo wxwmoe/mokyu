@@ -156,6 +156,27 @@ impl PhysicalStore for Backend {
         .fetch_optional(&self.read)
         .await?)
     }
+    async fn pack_index(
+        &self,
+        pack: Id,
+        chunk: Option<Id>,
+    ) -> Result<Vec<(Id, crate::content::pack::frame::Entry)>> {
+        let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT m.chunk_id,c.uuid,c.hash,c.raw_size,m.ordinal,m.offset_bytes,m.encoding_uuid,m.encoded_size,m.compressed,m.encryption_algorithm,m.block_key_id,m.nonce FROM pack_members m JOIN chunks c ON c.id=m.chunk_id WHERE m.pack_id=",
+        );
+        query.push_bind(pack);
+        if let Some(chunk) = chunk {
+            query.push(" AND m.chunk_id=").push_bind(chunk);
+        }
+        query
+            .push(" ORDER BY m.ordinal LIMIT 4097")
+            .build_query_as::<crate::model::physical::PackMemberRow>()
+            .fetch_all(&self.read)
+            .await?
+            .into_iter()
+            .map(crate::model::physical::PackMemberRow::entry)
+            .collect()
+    }
     async fn inspection_members(&self, pack: Id) -> Result<Vec<(Chunk, i64)>> {
         let mut query = sqlx::QueryBuilder::new("SELECT ");
         query.push(CHUNK_COLUMNS).push(",m.offset_bytes FROM pack_members m JOIN chunks c ON c.id=m.chunk_id LEFT JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.state='ready' WHERE m.pack_id=").push_bind(pack).push(" ORDER BY m.ordinal LIMIT 4097");

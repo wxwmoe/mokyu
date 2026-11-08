@@ -57,6 +57,34 @@ pub(in super::super) fn unpack_storage(pack: Id) -> Rows<'static, (Uuid, String,
     sqlx::query_as("SELECT s.id,s.type,sp.revision FROM storages s JOIN storage_profiles sp ON sp.storage_id=s.id JOIN packs p ON p.storage_id=s.id WHERE p.id=$1").bind(pack)
 }
 
+pub(in super::super) async fn write_pack_index(
+    db: &mut sqlx::PgConnection,
+    pack: Id,
+    members: &[(Id, crate::content::pack::frame::Entry)],
+) -> Result<()> {
+    for batch in members.chunks(512) {
+        let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+            "INSERT INTO pack_members(pack_id,ordinal,chunk_id,offset_bytes,encoding_uuid,encoded_size,compressed,encryption_algorithm,block_key_id,nonce) ",
+        );
+        query.push_values(batch, |mut row, (id, member)| {
+            let position = &member.position;
+            let encoding = &position.encoding;
+            row.push_bind(pack)
+                .push_bind(position.ordinal as i32)
+                .push_bind(*id)
+                .push_bind(position.offset as i64)
+                .push_bind(encoding.location_id)
+                .push_bind(encoding.stored_size)
+                .push_bind(encoding.compressed)
+                .push_bind(&encoding.algorithm)
+                .push_bind(encoding.block_key_id)
+                .push_bind(&encoding.nonce);
+        });
+        query.build().execute(&mut *db).await?;
+    }
+    Ok(())
+}
+
 pub(in super::super) fn insert_pack_member(
     pack: Id,
     ordinal: i32,

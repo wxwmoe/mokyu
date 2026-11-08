@@ -1114,7 +1114,7 @@ CREATE TABLE pack_members (
     pack_id INTEGER NOT NULL,
     ordinal INTEGER NOT NULL,
     chunk_id INTEGER NOT NULL,
-    offset_bytes INTEGER NOT NULL,
+    offset_bytes INTEGER NOT NULL, encoding_uuid BLOB CHECK (encoding_uuid IS NULL OR length(encoding_uuid) = 16), encoded_size INTEGER CHECK (encoded_size BETWEEN 1 AND 4194320), compressed INTEGER CHECK (compressed IN (0, 1)), encryption_algorithm TEXT, block_key_id BLOB REFERENCES managed_keys(id), nonce BLOB CHECK (nonce IS NULL OR length(nonce) = 12),
     PRIMARY KEY (pack_id,ordinal),
     CONSTRAINT members_pack FOREIGN KEY (pack_id) REFERENCES packs(id) ON DELETE CASCADE,
     CONSTRAINT members_chunk FOREIGN KEY (chunk_id) REFERENCES chunks(id),
@@ -2193,6 +2193,8 @@ CREATE INDEX pack_member_access_windows_chunk_id_fk ON pack_member_access_window
 CREATE UNIQUE INDEX pack_members_chunk ON pack_members(pack_id,chunk_id);
 
 CREATE INDEX pack_members_chunk_id_fk ON pack_members(chunk_id);
+
+CREATE INDEX pack_members_key ON pack_members(block_key_id) WHERE block_key_id IS NOT NULL;
 
 CREATE INDEX packs_block_key_id_fk ON packs(block_key_id);
 

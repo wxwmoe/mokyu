@@ -1,10 +1,59 @@
-use crate::content::{codec::Chunk, pack::Pack};
+use crate::content::{
+    codec::Chunk,
+    pack::{
+        Pack,
+        frame::{Encoding, Entry, Position},
+    },
+};
 use crate::model::Id;
 use anyhow::Result;
 use async_trait::async_trait;
 use uuid::Uuid;
 
 pub(crate) type StagedUpload = (Id, Option<Uuid>, Option<String>, i64, Uuid);
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct PackMemberRow {
+    chunk_id: Id,
+    uuid: Uuid,
+    hash: Vec<u8>,
+    raw_size: i32,
+    ordinal: i32,
+    offset_bytes: i64,
+    encoding_uuid: Uuid,
+    encoded_size: i32,
+    compressed: bool,
+    encryption_algorithm: String,
+    block_key_id: Option<Uuid>,
+    nonce: Option<Vec<u8>>,
+}
+
+impl PackMemberRow {
+    pub(crate) fn entry(self) -> Result<(Id, Entry)> {
+        let encoding = Encoding {
+            location_id: self.encoding_uuid,
+            stored_size: self.encoded_size,
+            compressed: self.compressed,
+            algorithm: self.encryption_algorithm,
+            block_key_id: self.block_key_id,
+            nonce: self.nonce,
+        };
+        encoding.validate(self.raw_size)?;
+        Ok((
+            self.chunk_id,
+            Entry {
+                uuid: self.uuid,
+                hash: self.hash.as_slice().try_into()?,
+                raw_size: self.raw_size,
+                position: Position {
+                    ordinal: self.ordinal.try_into()?,
+                    offset: self.offset_bytes.try_into()?,
+                    encoding,
+                },
+            },
+        ))
+    }
+}
 
 #[derive(Clone, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "source", content = "metadata", rename_all = "snake_case")]
@@ -274,6 +323,7 @@ pub(crate) trait PhysicalStore: Send + Sync {
     async fn pack_chunks(&self, pack: Id) -> Result<Vec<Chunk>>;
     async fn pack_contains(&self, pack: Id, chunk: Id) -> Result<bool>;
     async fn inspection(&self, task: Uuid, pack: Id) -> Result<Option<Option<String>>>;
+    async fn pack_index(&self, pack: Id, chunk: Option<Id>) -> Result<Vec<(Id, Entry)>>;
     async fn inspection_members(&self, pack: Id) -> Result<Vec<(Chunk, i64)>>;
     async fn record_inspection(&self, task: Uuid, pack: Id, code: Option<&str>) -> Result<()>;
 }
