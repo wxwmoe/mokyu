@@ -494,16 +494,18 @@ impl Worker {
                             }
                             let path = match &item.source {
                                 work::Physical::Chunk => {
-                                    Path::from(crate::storage::chunk_name(item.location))
+                                    crate::storage::location::Layout::S3.chunk(item.location)
                                 }
-                                work::Physical::Pack => Path::from(format!(
-                                    "packs/{}",
-                                    crate::storage::chunk_name(item.location)
-                                )),
+                                work::Physical::Pack => {
+                                    crate::storage::location::Layout::S3.pack(item.location)
+                                }
                                 work::Physical::Raw { .. } => {
                                     crate::storage::raw::remote_path(item.location)
                                 }
-                                work::Physical::Staging { key } => Path::parse(key)?,
+                                work::Physical::Staging { key } => {
+                                    ensure!(crate::storage::is_fragment_key(key), "invalid staging key");
+                                    Path::parse(key)?
+                                }
                             };
                             let result: Result<work::Outcome> = async {
                                 let stored_at = if item.inspect_age {

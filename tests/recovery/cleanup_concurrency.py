@@ -70,7 +70,7 @@ sid = stream('pinned')
 location = scalar('SELECT l.encoding_id FROM chunks c JOIN extents e ON e.chunk_id=c.id '
                   'JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE e.stream_id=%s', (sid,))
 for extension in ('raw', 'zst'):
-    (data / 'cache' / 'chunks' / location.hex[-2:] / (location.hex + '.' + extension)).unlink(missing_ok=True)
+    (data / 'cache' / 'chunks' / location.hex[-3:][::-1] / (location.hex + '.' + extension)).unlink(missing_ok=True)
 marker = arm('cache-reserved')
 try:
     with ThreadPoolExecutor(max_workers=1) as pool:

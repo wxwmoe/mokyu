@@ -157,7 +157,7 @@ def main():
             row = source('changed-after-verify')
             identity = row['file_uuid']
             identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-            path = fixture.root / 'raw' / identity.hex[-2:] / identity.hex
+            path = fixture.root / 'objects' / identity.hex[-3:][::-1] / identity.hex
             marker = arm('read-body')
             before = status()['response_cache']['entries']
             with ThreadPoolExecutor(max_workers=1) as pool:

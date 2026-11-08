@@ -393,7 +393,7 @@ pub(crate) async fn create_installation_store(
             .config
             .instance
             .data_path
-            .join("storage/meta.json")
+            .join("storage/mokyu.json")
             .try_exists()?;
     let marker = match marker {
         Some(marker) => {
@@ -574,6 +574,7 @@ pub(crate) async fn update_record(
     validate_concurrency(read_concurrency, "read")?;
     validate_concurrency(upload_concurrency, "upload")?;
     validate_concurrency(control_concurrency, "control")?;
+    let previous = changing_type.then(|| (&row).into());
     let mut record = if storage_type == "local" {
         anyhow::ensure!(
             input.endpoint.is_none()
@@ -638,13 +639,19 @@ pub(crate) async fn update_record(
         )?
     };
     record.enabled = input.enabled.unwrap_or(row.enabled);
-    app.storage
-        .verify_store_record(record.clone())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, storage_id=%row.id, "storage verification failed");
-            problem(StatusCode::CONFLICT, "StorageVerificationFailed").0
-        })?;
+    if let Some(previous) = previous {
+        app.storage
+            .verify_relocation(&previous, &record, &profile)
+            .await
+    } else {
+        app.storage
+            .verify_store_with_profile(record.clone(), &profile)
+            .await
+    }
+    .map_err(|error| {
+        tracing::warn!(%error, storage_id=%row.id, "storage verification failed");
+        problem(StatusCode::CONFLICT, "StorageVerificationFailed").0
+    })?;
     let block_key_id = input.block_key_id.unwrap_or(row.block_key_id);
     let mut requested = if let Some(requested) = input.profile {
         anyhow::ensure!(

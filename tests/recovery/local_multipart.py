@@ -76,7 +76,7 @@ def main():
                     row['path'] = root / identifier(row['id']).hex
                 else:
                     ident = identifier(row['id']).hex
-                    row['path'] = (backend_root / 'raw' / ident[-2:] / ident).with_suffix('.partial')
+                    row['path'] = (backend_root / 'objects' / ident[-3:][::-1] / ident).with_suffix('.part')
                 source_ids.add(row['path'])
             return rows
 
@@ -100,9 +100,9 @@ def main():
                 JOIN raw_sources s ON s.id=r.source_id WHERE o.bucket_id=%s AND o.object_key=%s''',
                 uuid.UUID(fixture.bucket_id), key if database.type == 'postgres' else key.encode())
             ident = identifier(row['id']).hex
-            pending = backend_root / 'raw' / ident[-2:] / ident
+            pending = backend_root / 'objects' / ident[-3:][::-1] / ident
             if arguments.s3_cache and not pending.exists():
-                return Path(database.config['instance']['data_path']) / 'cache' / 'raw' / ident[-2:] / ident
+                return Path(database.config['instance']['data_path']) / 'cache' / 'objects' / ident[-3:][::-1] / ident
             return pending
 
         data = [os.urandom(5 * 1024 * 1024 + 3), os.urandom(5 * 1024 * 1024 + 5), b'last part']
@@ -230,7 +230,7 @@ def main():
                         WHERE r.storage_id=%s AND s.object_key=%s AND r.state='writing' ''',
                         uuid.UUID(fixture.store['id']), key if database.type == 'postgres' else key.encode())
                     ident = identifier(row['id']).hex
-                    checkpoint_path = (backend_root / 'raw' / ident[-2:] / ident).with_suffix('.partial')
+                    checkpoint_path = (backend_root / 'objects' / ident[-3:][::-1] / ident).with_suffix('.part')
                     source_ids.add(checkpoint_path)
                     # One copying batch may lead one confirmation batch; each is below 20 MiB.
                     wait(lambda: checkpoint_path.stat().st_size >= 32 * 1024 * 1024,
@@ -346,7 +346,7 @@ def main():
                     wait(lambda: marker.with_suffix('.hit').exists() or request.done(), 'copy did not reach confirmation')
                     assert not request.done(), request.exception()
                     space.write_text('low\n')
-                    assert os.statvfs(backend_root / 'raw').f_bavail == 0, 'space interposer is inactive'
+                    assert os.statvfs(backend_root / 'objects').f_bavail == 0, 'space interposer is inactive'
                     marker.unlink()
                     try:
                         request.result(timeout=30)

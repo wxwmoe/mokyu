@@ -273,6 +273,65 @@ impl Store {
         Ok(())
     }
 
+    pub(crate) async fn verify_relocation(
+        &self,
+        source: &Store,
+        source_layout: super::location::Layout,
+        target_layout: super::location::Layout,
+    ) -> Result<()> {
+        async fn digest(store: &dyn ObjectStore, path: &Path, size: u64) -> Result<blake3::Hash> {
+            let object = store
+                .get(path)
+                .await
+                .with_context(|| format!("missing relocation source {path}"))?;
+            ensure!(
+                object.meta.size == size,
+                "relocation size mismatch at {path}"
+            );
+            let mut reader = object.into_stream();
+            let mut hash = blake3::Hasher::new();
+            let mut actual = 0u64;
+            while let Some(bytes) = reader.try_next().await? {
+                actual = actual
+                    .checked_add(bytes.len() as u64)
+                    .context("relocation length overflow")?;
+                hash.update(&bytes);
+            }
+            ensure!(actual == size, "incomplete relocation source at {path}");
+            Ok(hash.finalize())
+        }
+
+        source.verify().await?;
+        self.verify().await?;
+        let mut files = source.backend.list(None);
+        while let Some(file) = files.try_next().await? {
+            let key = file.location.as_ref();
+            let Some((category, name)) = key.split_once('/') else {
+                continue;
+            };
+            let target = match category {
+                "objects" | "chunks" | "packs" => {
+                    let Some(id) = source_layout.parse_name(name) else {
+                        continue;
+                    };
+                    match category {
+                        "objects" => target_layout.object(id),
+                        "chunks" => target_layout.chunk(id),
+                        _ => target_layout.pack(id),
+                    }
+                }
+                "metadata" => file.location.clone(),
+                _ => continue,
+            };
+            let (original, copy) = tokio::try_join!(
+                digest(source.backend.as_ref(), &file.location, file.size),
+                digest(self.backend.as_ref(), &target, file.size),
+            )?;
+            ensure!(original == copy, "relocation content mismatch at {target}");
+        }
+        Ok(())
+    }
+
     pub async fn ensure_verified(&self) -> Result<()> {
         self.verified.get_or_try_init(|| self.verify()).await?;
         Ok(())
@@ -288,18 +347,27 @@ impl Store {
             )
         );
         drop(objects);
-        self.backend
+        let created = self
+            .backend
             .put_opts(
-                &Path::from("meta.json"),
+                &Path::from("mokyu.json"),
                 Bytes::from(serde_json::to_vec_pretty(&self.identity_marker)?).into(),
                 PutOptions {
                     mode: PutMode::Create,
                     ..Default::default()
                 },
             )
-            .await
-            .context("cannot initialize storage without overwriting its marker")?;
-        self.ensure_verified().await
+            .await;
+        match created {
+            Ok(_)
+            | Err(
+                object_store::Error::AlreadyExists { .. }
+                | object_store::Error::Precondition { .. },
+            ) => self.ensure_verified().await,
+            Err(error) => {
+                Err(error).context("cannot initialize storage without overwriting its marker")
+            }
+        }
     }
 }
 
@@ -326,7 +394,7 @@ mod tests {
         target
             .backend
             .put(
-                &Path::from("meta.json"),
+                &Path::from("mokyu.json"),
                 Bytes::from(serde_json::to_vec(&wrong).unwrap()).into(),
             )
             .await
@@ -334,10 +402,16 @@ mod tests {
         assert!(target.verify().await.is_err());
         target
             .backend
-            .delete(&Path::from("meta.json"))
+            .delete(&Path::from("mokyu.json"))
             .await
             .unwrap();
         assert!(target.verify().await.is_err());
-        assert!(target.backend.head(&Path::from("meta.json")).await.is_err());
+        assert!(
+            target
+                .backend
+                .head(&Path::from("mokyu.json"))
+                .await
+                .is_err()
+        );
     }
 }

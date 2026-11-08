@@ -105,8 +105,8 @@ class Fixture:
     def keys(self):
         if self.backend:
             return [item['Key'] for item in self.backend.list_objects_v2(Bucket=self.remote_bucket, Prefix=self.prefix).get('Contents', [])
-                    if not item['Key'].endswith('meta.json')]
-        return [str(path) for path in self.root.rglob('*') if path.is_file() and path.name != 'meta.json']
+                    if not item['Key'].endswith('mokyu.json')]
+        return [str(path) for path in self.root.rglob('*') if path.is_file() and path.name != 'mokyu.json']
 
     def bytes(self, path, value=None):
         if self.backend:

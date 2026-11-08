@@ -64,9 +64,9 @@ mokyu cli styles export --bucket photos --name-prefix q90. --output styles.txt
 | `storage list` | 列出存储名称、类型、连接范围、当前区块 key、三项存储并发上限、启用状态和更新时间；不返回凭据 |
 | `storage show NAME` | 显示一个存储的当前配置，不执行连接检查 |
 | `storage create NAME local --init [--key KEY] [--path PATH] [--prefix PREFIX]` | 明确初始化空的本地存储；省略 `--path` 使用 `/data/storage`，返回存储信息 |
-| `storage create NAME s3 --init [--key KEY] -e URL -b NAME -r REGION -a KEY -s SECRET [-p PREFIX]` | 明确初始化空的 S3 存储并写入 `meta.json`，返回存储信息 |
-| `storage update NAME [--type local\|s3] [--key KEY] [--path PATH] [-e URL] [-b NAME] [-r REGION] [-p PREFIX] [-a KEY] [-s SECRET] [--read N\|--clear-read-concurrency] [--upload N\|--clear-upload-concurrency] [--control N\|--clear-control-concurrency] [--enabled true\|false]` | 修改存储连接信息、当前 block key、并发上限或启停；切换 type 需单容器维护状态并排空上传、任务及待写来源，成功后重启；保存前核对已有 `meta.json`，不返回凭据 |
-| `storage check NAME` | 读取并核对存储的 `meta.json`，返回检查结果 |
+| `storage create NAME s3 --init [--key KEY] -e URL -b NAME -r REGION -a KEY -s SECRET [-p PREFIX]` | 明确初始化空的 S3 存储并写入 `mokyu.json`，返回存储信息 |
+| `storage update NAME [--type local\|s3] [--key KEY] [--path PATH] [-e URL] [-b NAME] [-r REGION] [-p PREFIX] [-a KEY] [-s SECRET] [--read N\|--clear-read-concurrency] [--upload N\|--clear-upload-concurrency] [--control N\|--clear-control-concurrency] [--enabled true\|false]` | 修改存储连接信息、当前 block key、并发上限或启停；切换 type 需单容器维护状态并排空上传、任务及待写来源，成功后重启；保存前核对已有 `mokyu.json`，不返回凭据 |
+| `storage check NAME` | 读取并核对存储的 `mokyu.json`，返回检查结果 |
 | `storage key set NAME KEY` | 将存储绑定到未撤销的 block key 名称或 UUID |
 | `storage key clear NAME` | 解除存储的当前 block key，新写入区块不加密 |
 | `storage profile show NAME` | 显示该 storage 的类型化连接、缓存、压缩、打包、巡检、代理文件交付和群集共享预算 |

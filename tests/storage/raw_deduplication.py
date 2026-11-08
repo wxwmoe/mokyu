@@ -8,6 +8,7 @@ import boto3
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from tests.storage.layout import carrier_key
 
 from tests.recovery.source_repair import Database
 from tests.storage.source_quarantine import Fixture, rejected, wait
@@ -115,7 +116,7 @@ def main():
     print('PASS raw usage counts unique files and attributes cross-bucket sharing', flush=True)
 
     identity = uuid.UUID(bytes=bytes(shared['file_uuid'])) if database.type != 'postgres' else uuid.UUID(str(shared['file_uuid']))
-    relative = 'raw/' + identity.hex[-2:] + '/' + identity.hex
+    relative = carrier_key('objects', identity.hex, bool(fixture.backend))
     physical = fixture.prefix + relative if fixture.backend else str(fixture.root / relative)
     fixture.bytes(physical, different)
     scope = dict(storage_id=str(storage), source='raw', id=str(shared['id']))

@@ -63,7 +63,7 @@ for name, raw, extension in [
     assert len(rows) == 1
     storage_id, raw_size, stored_size, compressed, algorithm = rows[0]
     name_hex = storage_id.hex
-    path = root / name_hex[-2:] / (name_hex + extension)
+    path = root / name_hex[-3:][::-1] / (name_hex + extension)
     payload_size = stored_size - (0 if algorithm == 'none' else 16)
     assert raw_size == len(raw)
     if name == 'weak':

@@ -380,7 +380,7 @@ def run(restart):
     if not target.backend:
         relocated = target.root.parent / (target.name + '-alternate')
         relocated.mkdir()
-        shutil.copyfile(target.root / 'meta.json', relocated / 'meta.json')
+        shutil.copyfile(target.root / 'mokyu.json', relocated / 'mokyu.json')
         response = target.session.put(
             target.web + '/api/v1/storages/' + target.name,
             headers=target.headers,

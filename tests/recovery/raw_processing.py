@@ -5,6 +5,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 from tests.recovery.source_repair import Database
 from tests.storage.source_quarantine import Fixture, rejected, wait
@@ -186,7 +187,7 @@ def main():
         fixture.read('empty-b', b'')
         original = source('first')
         original_id = identity(original['file_uuid'])
-        relative = 'raw/' + original_id.hex[-2:] + '/' + original_id.hex
+        relative = carrier_key('objects', original_id.hex, bool(fixture.backend))
         fixture.bytes(fixture.prefix + relative if fixture.backend else str(fixture.root / relative), b'!' + data[1:])
         scope = dict(storage_id=fixture.store['id'], source='raw', id=str(identity(original['id'])))
         fixture.finished(fixture.execute('quarantine', fixture.preview('quarantine', scope)))
@@ -208,7 +209,7 @@ def main():
         wait(lambda: marker.with_suffix('.hit').exists(), 'corrupt work did not pause')
         bad = source('corrupt')
         ident = identity(bad['file_uuid'])
-        relative = 'raw/' + ident.hex[-2:] + '/' + ident.hex
+        relative = carrier_key('objects', ident.hex, bool(fixture.backend))
         path = fixture.prefix + relative if fixture.backend else str(fixture.root / relative)
         fixture.bytes(path, b'!' + data[1:])
         marker.unlink()

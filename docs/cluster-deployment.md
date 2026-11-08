@@ -128,7 +128,7 @@ control 首次启动通过 PostgreSQL 注册，使用自己的 node.json 恢复�
 
 群集模式禁用 local 存储。单容器模式切换到群集模式时，Mokyu 会检查存储和运行状态，不会替部署管理员上传文件：
 
-1. 选择迁移方式：新建 S3 storage 和目标桶，由 Web/CLI 的对象复制或移动任务迁移；或在单容器维护状态下，自行完整搬运原存储命名空间和根 `meta.json` 到 S3，再修改原 storage 的类型与连接参数。具体边界见[存储格式](storage-format.md#原始文件)。
+1. 选择迁移方式：新建 S3 storage 和目标桶，由 Web/CLI 的对象复制或移动任务迁移；或在单容器维护状态下，自行完整搬运原存储命名空间和根 `mokyu.json` 到 S3，再修改原 storage 的类型与连接参数。具体边界见[存储格式](storage-format.md#原始文件)。
 2. 自行搬迁前完成或中止 Multipart、排空待写来源及后台任务，停用公共/S3 入口和后台清理，复制后核对完整性；修改类型后重启单容器。由 Mokyu 跨存储迁移时核对任务结果，再移除原 local 桶和 storage。桶的 storage 绑定不直接更改。
 3. 配置共享 S3 暂存并移除 local storage，再用 `cluster mode single_control` 或 `cluster mode cluster` 切入目标模式。
 

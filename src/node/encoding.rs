@@ -27,8 +27,8 @@ impl Reader {
                 codec::validate_metadata(source, keys.as_ref())?;
                 (
                     codec::MAX + 16,
-                    Path::from(crate::storage::chunk_name(source.address())),
-                    Path::from(crate::storage::chunk_name(target.location_id)),
+                    crate::storage::location::Layout::S3.chunk(source.address()),
+                    crate::storage::location::Layout::S3.chunk(target.location_id),
                 )
             }
             Rewrite::Pack {
@@ -49,14 +49,8 @@ impl Reader {
                 crate::model::source::manifest_digest(source, members)?;
                 (
                     source.payload_size()? + 16,
-                    Path::from(format!(
-                        "packs/{}",
-                        crate::storage::chunk_name(source.address())
-                    )),
-                    Path::from(format!(
-                        "packs/{}",
-                        crate::storage::chunk_name(target.location_id)
-                    )),
+                    crate::storage::location::Layout::S3.pack(source.address()),
+                    crate::storage::location::Layout::S3.pack(target.location_id),
                 )
             }
         };

@@ -46,7 +46,7 @@ def main():
         database = Database()
         storage = uuid.UUID(fixture.store['id'])
         bucket = uuid.UUID(fixture.bucket_id)
-        root = Path(database.config['instance']['data_path']) / 'pending' / 'raw'
+        root = Path(database.config['instance']['data_path']) / 'pending' / 'objects'
 
         def configure(**changes):
             profile = fixture.cli('storage', 'profile', 'show', fixture.name)
@@ -62,7 +62,7 @@ def main():
         def path(key):
             value = row(key)['file_uuid']
             identity = uuid.UUID(str(value)) if database.type == 'postgres' else uuid.UUID(bytes=bytes(value))
-            return root / identity.hex[-2:] / identity.hex
+            return root / identity.hex[-3:][::-1] / identity.hex
 
         def queued():
             return database.query('SELECT COUNT(*) AS n FROM raw_uploads u JOIN raw_sources r '

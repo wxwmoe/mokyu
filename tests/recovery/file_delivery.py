@@ -236,7 +236,7 @@ def main():
             before = status()['backend_read_bytes']
             reply = read(**{'X-Mokyu-File-Delivery': 'x_accel_redirect'})
             assert reply.status_code == 200 and not reply.content
-            assert re.fullmatch(r'/_mokyu_raw/[0-9a-f]{2}/[0-9a-f]{32}', reply.headers['X-Accel-Redirect'])
+            assert re.fullmatch(r'/_mokyu_raw/[0-9a-f]{3}/[0-9a-f]{32}', reply.headers['X-Accel-Redirect'])
             assert status()['backend_read_bytes'] == before
             assert queries(reply) == 1
             assert read().content == payload, 'direct clients without a proxy capability lost the body'
@@ -259,7 +259,7 @@ def main():
                 folder = Path(os.environ['MOKYU_TEST_CONFIG']).parent / 'proxy'
                 folder.mkdir()
                 proxy_configs(folder, run)
-                (folder / 'raw-path').write_text(str(fixture.root / 'raw'))
+                (folder / 'raw-path').write_text(str(fixture.root / 'objects'))
                 gates = [Gate(9000), Gate(9001)]
                 (folder / 'configured').touch()
                 wait(lambda: (folder / 'ready').exists(), 'proxy orchestrator did not start', seconds=120)
@@ -298,7 +298,7 @@ def main():
                         assert 'access-control-allow-origin' not in wrong.headers
                         options = requests.options(url, headers={**headers, 'Access-Control-Request-Method': 'GET'}, timeout=20)
                         assert options.status_code in (200, 204) and options.headers['access-control-allow-origin'] == 'https://reader.test'
-                    relative = Path(physical).relative_to(fixture.root / 'raw').as_posix()
+                    relative = Path(physical).relative_to(fixture.root / 'objects').as_posix()
                     assert requests.get(f'http://{proxy}:8080/_mokyu_raw/' + relative, timeout=20).status_code >= 400
                     client = boto3.client('s3', endpoint_url=f'http://{proxy}:8080', region_name='us-east-1',
                         aws_access_key_id=fixture.credentials['access_key'], aws_secret_access_key=fixture.credentials['secret_key'], config=fixture.client.meta.config)

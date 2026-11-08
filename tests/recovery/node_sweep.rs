@@ -44,24 +44,28 @@ pub(super) async fn check(
     let mut items: Vec<work::ListedObject> = orphans
         .iter()
         .map(|id| work::ListedObject {
-            path: crate::storage::chunk_name(*id),
+            path: crate::storage::location::Layout::S3.chunk(*id).to_string(),
             size: 3,
             modified: old,
         })
         .collect();
     items.extend([
         work::ListedObject {
-            path: format!("packs/{}", crate::storage::chunk_name(protected)),
+            path: crate::storage::location::Layout::S3
+                .pack(protected)
+                .to_string(),
             size: 4,
             modified: old,
         },
         work::ListedObject {
-            path: crate::storage::chunk_name(Uuid::now_v7()),
+            path: crate::storage::location::Layout::S3
+                .chunk(Uuid::now_v7())
+                .to_string(),
             size: 5,
             modified: now,
         },
         work::ListedObject {
-            path: "meta.json".into(),
+            path: "mokyu.json".into(),
             size: 6,
             modified: old,
         },
@@ -209,7 +213,11 @@ pub(super) async fn check(
     };
     assert_eq!(selected.len(), 3);
     assert!(selected.iter().all(|row| {
-        orphans.contains(&crate::storage::Storage::parse_physical_path(&row.path).unwrap())
+        orphans.contains(
+            &crate::storage::location::Layout::S3
+                .parse_chunk_or_pack(&row.path)
+                .unwrap(),
+        )
     }));
     let results = work::Completion {
         operation: deletion,
@@ -245,7 +253,9 @@ pub(super) async fn check(
     indexed(
         backend,
         storage,
-        crate::storage::Storage::parse_physical_path(&selected[1].path).unwrap(),
+        crate::storage::location::Layout::S3
+            .parse_chunk_or_pack(&selected[1].path)
+            .unwrap(),
     )
     .await?;
     sqlx::query("UPDATE tasks SET state='queued',error=NULL WHERE id=$1")

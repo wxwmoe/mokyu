@@ -60,7 +60,7 @@ def main():
 
     def path(source, cached=False):
         value = source.hex
-        return roots[0].parent / 'data' / ('cache' if cached else 'pending') / 'raw' / value[-2:] / value
+        return roots[0].parent / 'data' / ('cache' if cached else 'pending') / 'objects' / value[-3:][::-1] / value
 
     def queued():
         return database.query('SELECT u.* FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id '
@@ -106,7 +106,7 @@ def main():
         assert path(source).read_bytes() == original
         assert queued()[0]['node_id'] == first
         assert not fixture.keys(), 'early ACK uploaded a final object'
-        assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE %s", '__mokyu/multipart/fragment/%')
+        assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE %s", 'multipart/fragment/%')
         read(fixture.client, 'cached', original)
         start = time.monotonic()
         assert peer.head_object(Bucket=fixture.name, Key='cached')['ContentLength'] == len(original)
@@ -168,17 +168,17 @@ def main():
         pending_rows = database.query('''SELECT p.*,c.storage_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id
             WHERE c.storage_id=%s''', storage)
         assert pending_rows and all(row['node_id'] == first for row in pending_rows)
-        assert all(not row['staging_object_key'].startswith('__mokyu/') for row in pending_rows)
+        assert all(not row['staging_object_key'].startswith('multipart/') for row in pending_rows)
         read(fixture.client, 'chunks', chunked)
         pending(lambda: peer.get_object(Bucket=fixture.name, Key='chunks'))
-        retained = [roots[0].parent / 'data' / 'pending' / 'chunks' / uuid.UUID(row['staging_object_key'].split('.')[0]).hex[-2:] /
+        retained = [roots[0].parent / 'data' / 'pending' / 'chunks' / uuid.UUID(row['staging_object_key'].split('.')[0]).hex[-3:][::-1] /
                     (uuid.UUID(row['staging_object_key'].split('.')[0]).hex + '.' + row['staging_object_key'].split('.')[1]) for row in pending_rows]
         held.unlink(missing_ok=True)
         wait(lambda: not database.query('SELECT p.chunk_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE c.storage_id=%s', storage), 'chunks did not drain', seconds=150)
         read(peer, 'chunks', chunked)
         wait(lambda: all(not file.exists() for file in retained), 'released chunks remained pending')
         assert list((roots[0].parent / 'data' / 'cache' / 'chunks').glob('*/*'))
-        assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE %s", '__mokyu/multipart/fragment/%')
+        assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE %s", 'multipart/fragment/%')
         print('PASS chunks use owner-scoped local upload/pack work and retain ordinary read-cache files', flush=True)
 
         configure(cdc_enabled=False, pack_enabled=False)
@@ -212,7 +212,7 @@ def main():
             JOIN extents e ON e.fragment_id=f.id JOIN parts p ON p.stream_id=e.stream_id
             WHERE p.upload_id=%s''', uuid.UUID(upload))
         assert tails and sum(row['size'] for row in tails) < 8 * 1024 * 1024
-        assert all(row['staging_object_key'].startswith('__mokyu/multipart/fragment/') for row in tails)
+        assert all(row['staging_object_key'].startswith('multipart/fragment/') for row in tails)
         assert not database.query('SELECT p.chunk_id FROM pending_uploads p JOIN chunks c ON c.id=p.chunk_id WHERE c.storage_id=%s', storage)
         action('kill-primary')
         peer.complete_multipart_upload(Bucket=fixture.name, Key='tails', UploadId=upload,

@@ -147,7 +147,7 @@ def run(root):
                     copied.result()
                     name, durability, failure = row("copied")
                     assert (durability, failure) == ("durable", None)
-                    target = folder/"storage"/"raw"/name[-2:].lower()/name.lower()
+                    target = folder/"storage"/"objects"/name[-3:][::-1].lower()/name.lower()
                     assert target.read_bytes() == body
             finally:
                 disarm("local-memory-before-file")
@@ -167,7 +167,7 @@ def run(root):
             put(key, body)
             hit("local-memory-before-file")
             name = row(key)[0].lower()
-            partial = folder/"storage"/"raw"/name[-2:]/(name+".partial")
+            partial = folder/"storage"/"objects"/name[-3:][::-1]/(name+".part")
             partial.mkdir()
             disarm("local-memory-before-file")
             wait_for(lambda: cli("cache","status")["write_backlog"]["last_sync_error"])

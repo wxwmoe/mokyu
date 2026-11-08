@@ -55,7 +55,7 @@ def cache_path(key, extension):
         JOIN chunks c ON c.id=e.chunk_id JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id WHERE b.name=%s AND o.object_key=%s''', (bucket, key)).fetchall()
     assert len(rows) == 1
     name = rows[0][0].hex
-    return root / name[-2:] / (name + extension)
+    return root / name[-3:][::-1] / (name + extension)
 
 
 assert status()['resources']['cache_entries'] == 1

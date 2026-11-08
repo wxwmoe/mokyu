@@ -118,7 +118,7 @@ def main():
                                                 MultipartUpload={'Parts': [{'PartNumber': 1, 'ETag': part['ETag']}]})
         fixture.read('multipart', data)
         start()
-        assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE %s", '__mokyu/multipart/fragment/%')
+        assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE %s", 'multipart/fragment/%')
         print('PASS shutdown persists native remote Multipart parts without shared body staging', flush=True)
     finally:
         for marker in markers:

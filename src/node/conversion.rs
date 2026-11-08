@@ -85,10 +85,7 @@ impl Writes {
                     operation.backend.store.verify().await?;
                     let backend = operation.backend.store.backend.clone();
                     let meta = backend
-                        .head(&Path::from(format!(
-                            "raw/{}",
-                            crate::storage::chunk_name(source.address())
-                        )))
+                        .head(&crate::storage::location::Layout::S3.object(source.address()))
                         .await?;
                     ensure!(
                         meta.size == source.size as u64,

@@ -13,6 +13,7 @@ import tomllib
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 from tests.storage.source_quarantine import Fixture, rejected, wait
 
@@ -66,7 +67,7 @@ class Database:
 
 def location(fixture, identity, packed=False):
     value = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-    path = ('packs/' if packed else '') + value.hex[-2:] + '/' + value.hex
+    path = carrier_key('packs' if packed else 'chunks', value, bool(fixture.backend))
     return fixture.prefix + path if fixture.backend else str(fixture.root / path)
 
 

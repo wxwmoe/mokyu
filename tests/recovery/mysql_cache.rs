@@ -529,7 +529,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
                 new: false,
                 size: 32,
                 storage,
-                key: "__mokyu/multipart/remote",
+                key: "multipart/remote",
                 timeout: 1
             })
             .await

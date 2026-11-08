@@ -5,6 +5,7 @@ import subprocess
 import time
 import uuid
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 import boto3
 import psycopg
@@ -88,7 +89,7 @@ try:
         pack, standalone, packed, namespace = row
         assert (pack is not None) == (suffix == 'pack'), row
         location = (packed if pack else standalone).hex
-        path = '/'.join(filter(None, [namespace.rstrip('/'), 'packs' if pack else '', location[-2:], location]))
+        path = '/'.join(filter(None, [namespace.rstrip('/'), carrier_key('packs' if pack else 'chunks', location, True)]))
         sources[suffix] = {'Bucket': fixture['bucket'], 'Key': path}
     profile({'cache_enabled': False, 'upload_cache': False})
     for key, raw in content.items():

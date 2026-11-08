@@ -81,7 +81,7 @@ async fn retained(
     row: &ListedObject,
     before: chrono::DateTime<chrono::Utc>,
 ) -> Result<bool> {
-    let Some(id) = crate::storage::Storage::parse_physical_path(&row.path) else {
+    let Some(id) = crate::storage::location::Layout::S3.parse_chunk_or_pack(&row.path) else {
         return Ok(true);
     };
     Ok(row.modified > before || q::physical_indexed(id).fetch_one(db).await?)
@@ -231,7 +231,10 @@ pub(super) async fn listed(
         if row.modified > before {
             continue;
         }
-        if crate::storage::Storage::parse_physical_path(&row.path).is_none() {
+        if crate::storage::location::Layout::S3
+            .parse_chunk_or_pack(&row.path)
+            .is_none()
+        {
             detail["unrecognized"] = json!(
                 detail["unrecognized"]
                     .as_u64()

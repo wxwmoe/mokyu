@@ -8,6 +8,7 @@ import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 import boto3
 from botocore.config import Config
@@ -52,8 +53,8 @@ def main():
         payloads = {'raw': b'raw namespace relocation\n' * 8192, 'empty': b''}
         for key, data in payloads.items():
             fixture.put(key, data)
-        assert not (fixture.root / 'raw/meta.json').exists()
-        assert (fixture.root / 'meta.json').is_file()
+        assert not (fixture.root / 'objects/mokyu.json').exists()
+        assert (fixture.root / 'mokyu.json').is_file()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)
         profile.update(cdc_enabled=True)
         fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
@@ -95,12 +96,24 @@ def main():
         # Copy only after quiescing this fixture; no physical deletion is needed.
         fixture.cli('maintenance', 'enable')
         relocation_rejected('StorageVerificationFailed')
+        def remap(relative, remote_layout):
+            parts = relative.split('/')
+            if parts[0] in {'objects', 'chunks', 'packs'} and len(parts[-1]) == 32:
+                return carrier_key(parts[0], parts[-1], remote_layout)
+            return relative
+
+        # A marker and a byte-for-byte directory copy still have the local shard depth.
         for path in fixture.root.rglob('*'):
             if path.is_file():
                 with path.open('rb') as body:
                     remote.put_object(Bucket=backend['bucket'], Key=prefix + path.relative_to(fixture.root).as_posix(), Body=body)
-        marker_key = prefix + 'meta.json'
-        identity = (fixture.root / 'meta.json').read_bytes()
+        relocation_rejected('StorageVerificationFailed')
+        for path in fixture.root.rglob('*'):
+            if path.is_file():
+                with path.open('rb') as body:
+                    remote.put_object(Bucket=backend['bucket'], Key=prefix + remap(path.relative_to(fixture.root).as_posix(), True), Body=body)
+        marker_key = prefix + 'mokyu.json'
+        identity = (fixture.root / 'mokyu.json').read_bytes()
         invalid = json.loads(identity)
         invalid['storage_id'] = '00000000-0000-0000-0000-000000000000'
         remote.put_object(Bucket=backend['bucket'], Key=marker_key, Body=json.dumps(invalid).encode())
@@ -115,7 +128,7 @@ def main():
         fixture.cli('maintenance', 'disable')
         fixture.client.abort_multipart_upload(Bucket=fixture.name, Key='unfinished', UploadId=upload)
         fixture.cli('maintenance', 'enable')
-        marker = fixture.arm('raw-before-verify')
+        marker = fixture.arm('read-body')
         with ThreadPoolExecutor(max_workers=1) as executor:
             reading = executor.submit(fixture.read, 'raw', payloads['raw'])
             try:
@@ -173,12 +186,12 @@ def main():
             for item in page.get('Contents', []):
                 relative = item['Key'][len(prefix):]
                 assert relative and '..' not in Path(relative).parts
-                target = destination / relative
+                target = destination / remap(relative, False)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with remote.get_object(Bucket=backend['bucket'], Key=item['Key'])['Body'] as body, target.open('wb') as output:
                     for data in iter(lambda: body.read(256 * 1024), b''):
                         output.write(data)
-        assert not (destination / 'raw/meta.json').exists()
+        assert not (destination / 'objects/mokyu.json').exists()
         returning = ('storage', 'update', fixture.name, '--type', 'local', '--path', str(destination), '--prefix', '')
         crash_at('storage-relocated', returning)
         assert fixture.cli('storage', 'show', fixture.name)['type'] == 'local'

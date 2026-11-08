@@ -63,7 +63,7 @@ def main():
                 assert requests.get(url, headers=headers, timeout=10).content == payload
                 reply = requests.get(url, headers={**headers, 'X-Mokyu-File-Delivery': 'x_accel_redirect'}, timeout=10)
                 assert reply.status_code == 200 and not reply.content and reply.headers['x-accel-redirect'].startswith('/_mokyu_raw/')
-            raw = root / 'data/storage/raw'
+            raw = root / 'data/storage/objects'
             files = [path for path in raw.rglob('*') if path.is_file()]
             assert len(files) == 1 and files[0].read_bytes() == payload
             assert stat.S_IMODE(files[0].stat().st_mode) == 0o644

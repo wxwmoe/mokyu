@@ -11,7 +11,7 @@ fn mappings_reject_gaps_overflow_and_source_range_escape() {
         source: read::Source::Staged {
             fragment: Uuid::new_v4(),
             storage: Uuid::new_v4(),
-            key: "__mokyu/multipart/test".into(),
+            key: crate::storage::fragment_key(Uuid::new_v4()),
             size: 5,
             hash: vec![0; 32],
         },
@@ -91,10 +91,7 @@ async fn shared_raw_reader_validates_content_and_pins_remote_etag() -> Result<()
         revision: 1,
         quarantine_code: None,
     };
-    let path = Path::from(format!(
-        "raw/{}",
-        crate::storage::chunk_name(source.location_id)
-    ));
+    let path = crate::storage::location::Layout::S3.object(source.location_id);
     backend.put(&path, bytes.clone().into()).await?;
     let gets = Arc::new(AtomicU64::new(0));
     let diagnostics = Arc::new(Diagnostics::default());

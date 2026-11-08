@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{ops::Range, path::Path};
 use uuid::Uuid;
 
-const MAGIC: &[u8; 8] = b"MKYRAW01";
+const MAGIC: &[u8; 8] = b"MOKYU\0\0\x07";
 pub(super) const LIMIT: usize = 2 * 1024 * 1024;
 
 #[derive(Default, Serialize, Deserialize)]

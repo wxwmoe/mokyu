@@ -51,7 +51,7 @@ def main():
                 uuid.UUID(fixture.bucket_id), key if database.type=='postgres' else key.encode())
             value = row['value']
             value = uuid.UUID(bytes=bytes(value)) if isinstance(value,(bytes,bytearray,memoryview)) else uuid.UUID(str(value))
-            return root/'cache/raw'/value.hex[-2:]/value.hex
+            return root/'cache/objects'/value.hex[-3:][::-1]/value.hex
         configure(cdc_enabled=False, deduplication_enabled=False, pack_range_enabled=False,
             write_processing='inline', read_integrity='off')
         hot = os.urandom(6*1024*1024)
@@ -99,7 +99,7 @@ def main():
         pending=os.urandom(256*1024+31)
         fixture.put('necessary',pending)
         wait(marker.with_suffix('.hit').exists,'pending work not reached')
-        area = root/('pending/raw' if node else 'pending/chunks')
+        area = root/('pending/objects' if node else 'pending/chunks')
         assert any(area.glob('*/*'))
         job=fixture.cli('integrity','check','--mode','full','--bucket',fixture.name,'--key','cold-0')
         marker.unlink()

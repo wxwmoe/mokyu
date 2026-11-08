@@ -61,8 +61,8 @@ mod tests {
     #[test]
     fn storage_namespaces_cannot_alias_disposable_cache_files() -> Result<()> {
         let root = std::env::temp_dir().join(format!("mokyu-paths-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(root.join("cache/raw"))?;
-        for name in ["cache", "pending", "thumbnails"] {
+        std::fs::create_dir_all(root.join("cache/objects"))?;
+        for name in ["cache", "pending", "thumbnails", "node.json"] {
             assert!(validate_storage_path(&root, &root.join(name)).is_err());
             assert!(validate_storage_path(&root, &root.join(name).join("backend")).is_err());
         }
@@ -71,7 +71,7 @@ mod tests {
         validate_storage_path(&root, &root.join("storage"))?;
         #[cfg(unix)]
         {
-            std::os::unix::fs::symlink(root.join("cache/raw"), root.join("alias"))?;
+            std::os::unix::fs::symlink(root.join("cache/objects"), root.join("alias"))?;
             assert!(validate_storage_path(&root, &root.join("alias/new")).is_err());
         }
         std::fs::remove_dir_all(root)?;
@@ -230,7 +230,7 @@ pub(crate) fn validate_storage_path(
         Ok(path)
     }
     let storage = resolve(storage)?;
-    for name in ["cache", "pending", "thumbnails"] {
+    for name in ["cache", "pending", "thumbnails", "node.json"] {
         let reserved = resolve(&data.join(name))?;
         ensure!(
             !storage.starts_with(&reserved) && !reserved.starts_with(&storage),
@@ -285,9 +285,9 @@ impl Disk {
     pub(crate) async fn initialize(&self) -> Result<()> {
         for directory in [
             "cache/chunks",
-            "cache/raw",
+            "cache/objects",
             "pending/chunks",
-            "pending/raw",
+            "pending/objects",
             "pending/multipart/fragment",
             "pending/multipart/candidate",
         ] {

@@ -6,6 +6,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from botocore.exceptions import ClientError
+from tests.storage.layout import carrier_key
 
 from tests.recovery.source_repair import Database, location
 from tests.benchmarks.object_io import drain_raw
@@ -259,7 +260,7 @@ def main():
         original = source_row('corrupt')
         ident = original['file_uuid']
         ident = ident if isinstance(ident, uuid.UUID) else uuid.UUID(bytes=bytes(ident))
-        relative = 'raw/' + ident.hex[-2:] + '/' + ident.hex
+        relative = carrier_key('objects', ident.hex, remote)
         path = fixture.prefix + relative if remote else str(fixture.root / relative)
         fixture.bytes(path, b'!' + value[1:])
         marker.unlink()
@@ -338,7 +339,7 @@ def main():
             assert all(row['block_key_id'] == (accepted_key if database.type == 'postgres' else accepted_key.bytes)
                        and row['standalone_compressed'] for row in encodings), encodings
             assert not database.query('SELECT chunk_id FROM pending_uploads WHERE stream_id=%s', object_row('fallback')['id'])
-            assert not any('/raw/' in path for path in set(fixture.keys()) - keys)
+            assert not any('/objects/' in path for path in set(fixture.keys()) - keys)
             fixture.read('fallback', value)
             broken = database.query('SELECT c.id,c.current_encoding_id FROM extents e JOIN chunks c '
                                     'ON c.id=e.chunk_id WHERE e.stream_id=%s ORDER BY e.offset_bytes',

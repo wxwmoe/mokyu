@@ -44,7 +44,7 @@ async fn postgres_upload_preparation_is_atomic() -> Result<()> {
             .bind(storage).bind(vec![index as u8;32]).fetch_one(&pool).await?;
         ids.push(id);
         sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,staging_storage_id,staging_object_key,next_retry_at) VALUES($1,$2,$3,32,$4,$5,now())")
-            .bind(id).bind(stream).bind(index*32).bind(storage).bind(format!("__mokyu/multipart/preparation/{index}")).execute(&pool).await?;
+            .bind(id).bind(stream).bind(index*32).bind(storage).bind(format!("multipart/preparation/{index}")).execute(&pool).await?;
         super::queries::insert_chunk_extent(stream, index * 32, 32, id)
             .execute(&pool)
             .await?;
@@ -240,7 +240,7 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
             .bind(storage).bind(vec![n as u8;32]).fetch_one(&pool).await?;
         ids.push(id);
         sqlx::query("INSERT INTO pending_uploads(chunk_id,stream_id,offset_bytes,staged_size,staging_storage_id,staging_object_key,next_retry_at) VALUES($1,$2,$3,1,$4,$5,now())")
-            .bind(id).bind(stream).bind(n).bind(storage).bind(format!("__mokyu/multipart/pending/{n}")).execute(&pool).await?;
+            .bind(id).bind(stream).bind(n).bind(storage).bind(format!("multipart/fragment/{n:032x}")).execute(&pool).await?;
         if n < 2 {
             sqlx::query(
                 "INSERT INTO extents(stream_id,offset_bytes,length,chunk_id) VALUES($1,$2,1,$3)",
@@ -279,11 +279,17 @@ async fn postgres_pending_release_preserves_only_copy() -> Result<()> {
     let result = backend.release(&ids, false).await?;
     assert_eq!(
         result.keys,
-        vec![("__mokyu/multipart/pending/2".into(), None)]
+        vec![(
+            "multipart/fragment/00000000000000000000000000000002".into(),
+            None
+        )]
     );
     assert_eq!(
         result.staged,
-        vec![(storage, "__mokyu/multipart/pending/2".into())]
+        vec![(
+            storage,
+            "multipart/fragment/00000000000000000000000000000002".into()
+        )]
     );
     let kept: Vec<Id> =
         sqlx::query_scalar("SELECT chunk_id FROM pending_uploads ORDER BY chunk_id")

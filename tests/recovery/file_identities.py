@@ -91,7 +91,7 @@ def main():
         assert cached <= all_known, "cache name has no durable database identity"
         for path in (data / "cache" / "chunks").glob("*/*"):
             if path.suffix in (".raw", ".zst"):
-                assert path.parent.name == identity(path.stem).hex[-2:]
+                assert path.parent.name == identity(path.stem).hex[-3:][::-1]
 
         wrong = "42" if database.type == "postgres" else str(uuid.uuid4())
         objects = "/api/v1/buckets/" + fixture.bucket_id

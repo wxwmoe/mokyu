@@ -14,14 +14,11 @@ impl Reader {
         use crate::model::transfer::Input;
         let (path, bound) = match input {
             Input::Chunk { chunk } => (
-                Path::from(crate::storage::chunk_name(chunk.address())),
+                crate::storage::location::Layout::S3.chunk(chunk.address()),
                 codec::MAX + 16,
             ),
             Input::Pack { pack, .. } => (
-                Path::from(format!(
-                    "packs/{}",
-                    crate::storage::chunk_name(pack.address())
-                )),
+                crate::storage::location::Layout::S3.pack(pack.address()),
                 pack.payload_size()? + 16,
             ),
             Input::Raw { .. } => unreachable!(),
@@ -154,14 +151,11 @@ impl Reader {
         for source in &batch.sources {
             let (path, bound) = match source {
                 wire::Source::Chunk { chunk } => (
-                    Path::from(crate::storage::chunk_name(chunk.address())),
+                    crate::storage::location::Layout::S3.chunk(chunk.address()),
                     codec::MAX + 16,
                 ),
                 wire::Source::Pack { pack, .. } => (
-                    Path::from(format!(
-                        "packs/{}",
-                        crate::storage::chunk_name(pack.address())
-                    )),
+                    crate::storage::location::Layout::S3.pack(pack.address()),
                     pack.payload_size()? + 16,
                 ),
             };
@@ -357,7 +351,7 @@ impl Reader {
                         .store
                         .backend
                         .put(
-                            &Path::from(crate::storage::chunk_name(target.location)),
+                            &crate::storage::location::Layout::S3.chunk(target.location),
                             Bytes::from(encoded).into(),
                         )
                         .await?;
@@ -450,10 +444,7 @@ impl Reader {
             .store
             .backend
             .put(
-                &Path::from(format!(
-                    "packs/{}",
-                    crate::storage::chunk_name(target.location_id)
-                )),
+                &crate::storage::location::Layout::S3.pack(target.location_id),
                 Bytes::from(bytes).into(),
             )
             .await?;

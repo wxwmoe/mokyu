@@ -377,10 +377,7 @@ impl Reader {
                     .get(
                         &prepared,
                         pack.storage_id.context("pack storage missing")?,
-                        Path::from(format!(
-                            "packs/{}",
-                            crate::storage::chunk_name(pack.address())
-                        )),
+                        crate::storage::location::Layout::S3.pack(pack.address()),
                         pack.payload_size()? + 16,
                     )
                     .await?;
@@ -450,7 +447,7 @@ impl Reader {
             self.get(
                 &prepared,
                 chunk.storage_id.context("chunk storage missing")?,
-                Path::from(crate::storage::chunk_name(chunk.address())),
+                crate::storage::location::Layout::S3.chunk(chunk.address()),
                 usize::try_from(chunk.stored_size.context("chunk size missing")?)?,
             )
             .await?
@@ -492,10 +489,7 @@ impl Reader {
                 hash,
                 ..
             } => {
-                ensure!(
-                    key.starts_with(crate::storage::STAGING_PREFIX),
-                    "invalid staging key"
-                );
+                ensure!(crate::storage::is_fragment_key(key), "invalid staging key");
                 (
                     self.get(&prepared, *storage, Path::from(key.as_str()), codec::MAX)
                         .await?,
@@ -516,9 +510,7 @@ impl Reader {
                 let root = &node.config.instance.data_path;
                 let bytes = if let Some(file) = source.file_id {
                     let path = if let Some(raw) = source.raw_source {
-                        CacheFile::PendingRaw
-                            .path(root, raw)
-                            .with_extension("partial")
+                        CacheFile::PendingRaw.path(root, raw).with_extension("part")
                     } else {
                         root.join("pending/multipart/candidate")
                             .join(file.simple().to_string())

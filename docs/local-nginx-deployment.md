@@ -5,7 +5,7 @@ Mokyu 先检查对象权限、当前版本和读取策略。完整的匿名 GET 
 | 文件来源 | 代理只读挂载 | 交付方式 |
 | --- | --- | --- |
 | 本地存储 | 该后端的 `raw/` | Nginx X-Accel-Redirect 或 Apache X-Sendfile |
-| S3 后端 | 提供请求的 data、node 或单容器的 `cache/raw/` | Nginx X-Accel-Redirect，仅使用校验通过的完整文件 |
+| S3 后端 | 提供请求的 data、node 或单容器的 `cache/objects/` | Nginx X-Accel-Redirect，仅使用校验通过的完整文件 |
 
 同一入口同时服务两种来源时，给两者配置独立的内部 URI。只向受信代理开放 Mokyu 监听端口。示例先搭建 SQLite 与本地 raw，再说明如何接入 S3 缓存。
 
@@ -63,7 +63,7 @@ services:
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./mokyu-file-delivery.conf:/etc/nginx/mokyu-file-delivery.conf:ro
-      - ./data/storage/raw:/srv/mokyu/raw:ro
+      - ./data/storage/objects:/srv/mokyu/raw:ro
 ```
 
 先启动 Mokyu 并通过 CLI 初始化，创建存储后再启动 Nginx，避免 Docker 预先创建挂载目录而使空存储初始化失败：
@@ -80,7 +80,7 @@ docker compose exec -T mokyu mokyu cli storage profile show primary |
       .file_delivery_prefix = "/_mokyu_raw/"' > config/raw-profile.json
 docker compose exec mokyu mokyu cli storage profile preview primary /config/raw-profile.json
 docker compose exec mokyu mokyu cli storage profile set primary /config/raw-profile.json
-docker compose exec mokyu mkdir -p /data/storage/raw
+docker compose exec mokyu mkdir -p /data/storage/objects
 docker compose exec mokyu mokyu cli bucket create media
 docker compose exec mokyu mokyu cli cred create media
 docker compose exec mokyu mokyu cli domain set media.example.com:8081 media
@@ -216,7 +216,7 @@ Nginx 对可压缩类型启用原版动态 gzip，Mokyu 提供 Vary 和对象校
 ## 使用 S3 的本地读缓存
 
 1. 在 S3 后端的存储设置中关闭 CDC，打开磁盘读缓存，将文件交付设为 X-Accel-Redirect，前缀设为 `/_mokyu_cache_raw/`。HTTP 响应压缩随代理交付关闭。
-2. 将实际服务该请求的 Mokyu 节点的 `./data/cache/raw` 只读挂载到同一侧 Nginx 的 `/srv/mokyu/cache-raw`。复制上面完整的内部 location，把前缀改为 `/_mokyu_cache_raw/`、alias 改为 `/srv/mokyu/cache-raw/`。多个节点各自配置其本机代理与回退上游。
+2. 将实际服务该请求的 Mokyu 节点的 `./data/cache/objects` 只读挂载到同一侧 Nginx 的 `/srv/mokyu/cache-raw`。复制上面完整的内部 location，把前缀改为 `/_mokyu_cache_raw/`、alias 改为 `/srv/mokyu/cache-raw/`。多个节点各自配置其本机代理与回退上游。
 3. 首次完整读取按原流程从 S3 流式返回并按缓存策略回填。代理首次使用该缓存文件时核对完整摘要，同一文件的后续命中复用校验结果。文件替换或状态改变会重新校验。校验通过后，后续完整 GET 可交给 Nginx。分段缓存、待上传文件及多段拼接对象继续由应用读取。缓存逐出时可以直接回源。
 
 对象名与磁盘名独立。本地后端按当前物理地址查找，S3 缓存按来源 ID 查找，每个 UUID 均使用末两位作为分片目录。默认的 inline 读取完整性检查会选择应用交付；选用 background 或 off 后代理可参与。恢复应用交付时设 `file_delivery="application"`、`file_delivery_prefix=null`，按需重新开启 `http_compression_enabled`。代理日志可用于核对实际传输字节和状态码。

@@ -72,11 +72,20 @@ use std::{
 use tokio::{io::AsyncWriteExt, sync::Semaphore};
 use uuid::Uuid;
 
-pub(crate) const STAGING_PREFIX: &str = "__mokyu/multipart/";
+const STAGING_PREFIX: &str = "multipart/fragment/";
 pub(crate) const DEFAULT_STAGING_LIMIT: u64 = 1024 * 1024 * 1024;
 
 pub(crate) fn fragment_key(id: Uuid) -> String {
-    format!("{STAGING_PREFIX}fragment/{}", id.simple())
+    format!("{STAGING_PREFIX}{}", id.simple())
+}
+
+pub(crate) fn is_fragment_key(key: &str) -> bool {
+    key.strip_prefix(STAGING_PREFIX).is_some_and(|name| {
+        name.len() == 32
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    })
 }
 
 pub struct Storage {
@@ -200,7 +209,7 @@ async fn build_store(
     let raw_root = record.path.as_ref().map(|path| {
         PathBuf::from(path)
             .join(prefix.trim_matches('/'))
-            .join("raw")
+            .join("objects")
     });
     let compression = Arc::new(crate::content::compression::Pool::new(
         profile.compression_config(compression_idle_timeout),
@@ -542,7 +551,7 @@ impl Storage {
             s.physical.recover_memory(s.boot_id).await?;
             s.restore_cache().await?;
         }
-        assembly::probe(&s, s.disk.root.join("pending/raw"));
+        assembly::probe(&s, s.disk.root.join("pending/objects"));
         for target in s.targets.read().unwrap().values() {
             if let Some(root) = &target.raw_root {
                 assembly::probe(&s, root.clone());
@@ -865,22 +874,16 @@ impl Storage {
         })
     }
     pub fn path_for(&self, storage_id: Uuid, id: Uuid) -> Result<Path> {
-        let _ = self.store_backend(storage_id)?;
-        Ok(Path::from(chunk_name(id)))
+        Ok(location::Layout::for_local(self.store_backend(storage_id)?.is_local).chunk(id))
     }
     pub fn pack_path_for(&self, storage_id: Uuid, id: Uuid) -> Result<Path> {
-        let _ = self.store_backend(storage_id)?;
-        Ok(Path::from(format!("packs/{}", chunk_name(id))))
-    }
-    fn parse_path(path: &str) -> Option<Uuid> {
-        parse_chunk_name(path).or_else(|| parse_chunk_name(path.strip_prefix("chunks/")?))
-    }
-    pub(crate) fn parse_physical_path(path: &str) -> Option<Uuid> {
-        Self::parse_path(path).or_else(|| parse_chunk_name(path.strip_prefix("packs/")?))
+        Ok(location::Layout::for_local(self.store_backend(storage_id)?.is_local).pack(id))
     }
     pub fn parse_physical_path_for(&self, storage_id: Uuid, path: &str) -> Result<Option<Uuid>> {
-        let _ = self.store_backend(storage_id)?;
-        Ok(Self::parse_physical_path(path))
+        Ok(
+            location::Layout::for_local(self.store_backend(storage_id)?.is_local)
+                .parse_chunk_or_pack(path),
+        )
     }
     pub async fn list_physical_for(
         &self,
@@ -948,7 +951,7 @@ impl Storage {
         let reply = target
             .backend
             .get_opts(
-                &Path::from("meta.json"),
+                &Path::from("mokyu.json"),
                 GetOptions {
                     range: Some(GetRange::Bounded(0..1)),
                     ..Default::default()
@@ -1016,6 +1019,30 @@ impl Storage {
         self.verify_store_with_profile(record, &profile).await
     }
 
+    pub(crate) async fn verify_relocation(
+        &self,
+        source: &StoreRecord,
+        target: &StoreRecord,
+        profile: &StorageProfile,
+    ) -> Result<()> {
+        if let Some(path) = &target.path {
+            local::validate_storage_path(
+                &self.disk.root,
+                &PathBuf::from(path).join(target.prefix.trim_matches('/')),
+            )?;
+        }
+        let options = StoreOptions::from_profile(profile)?;
+        let previous = VerifiedStore::build(source, options, &self.secrets)?;
+        let next = VerifiedStore::build(target, options, &self.secrets)?;
+        let _permit = self.controls.acquire().await?;
+        next.verify_relocation(
+            &previous,
+            location::Layout::for_local(source.r#type == "local"),
+            location::Layout::for_local(target.r#type == "local"),
+        )
+        .await
+    }
+
     pub(crate) async fn verify_store_with_profile(
         &self,
         record: StoreRecord,
@@ -1044,7 +1071,7 @@ impl Storage {
             .backend
             .get(&Path::from("meta.json"))
             .await
-            .context("storage meta.json is required; restore it before using this store")?;
+            .context("storage mokyu.json is required; restore it before using this store")?;
         ensure!(
             result.meta.size <= 16 * 1024,
             "storage meta.json exceeds limit"
@@ -1085,7 +1112,7 @@ impl Storage {
                 let Some(object_key) = object_key else {
                     continue;
                 };
-                if object_key.starts_with(STAGING_PREFIX) {
+                if is_fragment_key(&object_key) {
                     continue;
                 }
                 let compressed = object_key.ends_with(".zst");
@@ -1236,15 +1263,12 @@ impl Storage {
         Ok(())
     }
     async fn read_staged(&self, storage_id: Uuid, key: &str, bound: usize) -> Result<Vec<u8>> {
-        ensure!(
-            key.starts_with(STAGING_PREFIX),
-            "invalid staging object key"
-        );
+        ensure!(is_fragment_key(key), "invalid staging object key");
         self.read_path_for(storage_id, &Path::from(key), bound)
             .await
     }
     pub(crate) async fn delete_staged(&self, storage_id: Uuid, key: &str) -> Result<()> {
-        if !key.starts_with(STAGING_PREFIX) {
+        if !is_fragment_key(key) {
             return Ok(());
         }
         let target = self.store_backend(storage_id)?;
@@ -1333,11 +1357,11 @@ impl Storage {
         if let Some(source) = source {
             let backend = self.store_backend(storage.context("multipart storage missing")?)?;
             return Ok(if let Some(root) = &backend.raw_root {
-                root.join(chunk_name(source)).with_extension("partial")
+                root.join(chunk_name(source)).with_extension("part")
             } else {
                 CacheFile::PendingRaw
                     .path(&self.disk.root, source)
-                    .with_extension("partial")
+                    .with_extension("part")
             });
         }
         Ok(self.disk.candidate_path(file))
@@ -1571,7 +1595,7 @@ impl Storage {
         }
         // Authoritative pending references have already been restored; never recover cache first.
         for namespace in ["pending", "cache"] {
-            for directory in ["chunks", "raw"] {
+            for directory in ["chunks", "objects"] {
                 let mut dirs =
                     tokio::fs::read_dir(self.disk.root.join(namespace).join(directory)).await?;
                 while let Some(dir) = dirs.next_entry().await? {
@@ -1598,8 +1622,11 @@ impl Storage {
                             dir.file_name().to_string_lossy(),
                             file.file_name().to_string_lossy()
                         );
+                        if !location::owns_node_file(&name, directory == "objects") {
+                            continue;
+                        }
                         if namespace == "cache"
-                            && directory == "raw"
+                            && directory == "objects"
                             && raw_partial::restore_file(
                                 &self.file_cache(),
                                 &name,
@@ -1610,16 +1637,16 @@ impl Storage {
                         {
                             continue;
                         }
-                        let cached = if directory == "raw" {
+                        let cached = if directory == "objects" {
                             parse_chunk_name(&name).map(|id| (id, CacheFile::Raw))
                         } else {
                             parse_cache_name(&name)
                                 .map(|(id, compressed)| (id, CacheFile::Chunk(compressed)))
                         };
                         if namespace == "pending" {
-                            if directory == "raw"
+                            if directory == "objects"
                                 && let Some(id) =
-                                    name.strip_suffix(".partial").and_then(parse_chunk_name)
+                                    name.strip_suffix(".part").and_then(parse_chunk_name)
                                 && self.raw_store.cached_checkpoint(id).await?.is_some()
                             {
                                 continue;
@@ -3035,7 +3062,7 @@ mod tests {
             "08/084F2FF912FF4C6DAEF1B416FEE7B800",
             "08/084f2ff912ff4c6daef1b416fee7b800/other",
             "08/../084f2ff912ff4c6daef1b416fee7b800",
-            "meta.json",
+            "mokyu.json",
         ] {
             assert!(parse_chunk_name(name).is_none());
             assert!(parse_cache_name(&format!("{name}.raw")).is_none());

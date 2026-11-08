@@ -30,7 +30,7 @@ impl File {
         policy.cold = false;
         let path = CacheFile::PendingRaw
             .path(files.root, id)
-            .with_extension("partial");
+            .with_extension("part");
         tokio::fs::create_dir_all(path.parent().unwrap())
             .await
             .map_err(receive_error)?;
@@ -250,7 +250,7 @@ impl File {
                 .await?
                 .sync_all()
                 .await?;
-            tokio::fs::File::open(root.join("pending/raw"))
+            tokio::fs::File::open(root.join("pending/objects"))
                 .await?
                 .sync_all()
                 .await?;

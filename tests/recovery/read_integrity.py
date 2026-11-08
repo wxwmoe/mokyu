@@ -5,6 +5,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 import requests
 
@@ -269,7 +270,7 @@ def main():
                 row, = database.query(f'SELECT {database.raw_location} AS file_uuid FROM raw_sources WHERE storage_id=%s', uuid.UUID(cached.store['id']))
                 identity = row['file_uuid']
                 identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-                cache = Path(database.config['instance']['data_path']) / 'cache' / 'raw' / identity.hex[-2:] / identity.hex
+                cache = Path(database.config['instance']['data_path']) / 'cache' / 'objects' / identity.hex[-3:][::-1] / identity.hex
                 wait(cache.exists, 'raw disk cache was not populated')
                 cache.write_bytes(bytes([body[0] ^ 1]) + body[1:])
                 policy(cached, read_integrity='background')
@@ -297,7 +298,7 @@ def main():
                 assert get(packed).content == payload
                 detail = packed.api('/api/v1/packs/' + packs[0]['id'])
                 identity = detail['pack']['id' if database.type == 'postgres' else 'location_id'].replace('-', '')
-                physical = packed.prefix + 'packs/' + identity[-2:] + '/' + identity
+                physical = packed.prefix + carrier_key('packs', identity, True)
                 original = packed.bytes(physical)
                 packed.bytes(physical, original[:-1] + bytes([original[-1] ^ 1]))
                 assert get(packed).content != payload

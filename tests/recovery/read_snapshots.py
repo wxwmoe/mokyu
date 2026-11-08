@@ -173,7 +173,7 @@ def main():
             WHERE o.bucket_id=%s AND o.object_key=%s''', bucket, 'pinned' if database.type == 'postgres' else b'pinned')
         identity = row['file_uuid']
         identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-        path = fixture.root / 'raw' / identity.hex[-2:] / identity.hex
+        path = fixture.root / 'objects' / identity.hex[-3:][::-1] / identity.hex
         marker = arm('read-pinned')
         with ThreadPoolExecutor(max_workers=1) as executor:
             pending = executor.submit(fixture.read, 'pinned', body)

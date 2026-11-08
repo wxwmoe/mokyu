@@ -4,6 +4,7 @@ import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
+from tests.storage.layout import carrier_key
 
 import boto3
 import requests
@@ -149,7 +150,7 @@ def main():
     def raw_path():
         row, = database.query('SELECT r.id FROM objects o JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id WHERE o.bucket_id=%s AND o.object_key=%s', uuid.UUID(fixture.bucket_id), key)
         identity = str(row['id']).replace('-', '')
-        return fixture.prefix + 'raw/' + identity[-2:] + '/' + identity
+        return fixture.prefix + carrier_key('objects', identity, True)
     physical = raw_path()
     bad = bytes([body[0] ^ 1]) + body[1:]
     fixture.bytes(physical, bad)

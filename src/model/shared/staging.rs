@@ -12,7 +12,7 @@ pub(super) async fn reserve(
     limit: u64,
 ) -> Result<()> {
     ensure!(
-        key.starts_with(crate::storage::STAGING_PREFIX) && key.is_ascii() && key.len() <= 256,
+        crate::storage::is_fragment_key(key),
         s3s::s3_error!(InvalidArgument)
     );
     super::queries::storage_profile(storage)

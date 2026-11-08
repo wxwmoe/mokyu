@@ -311,7 +311,7 @@ impl Cache {
         self.ready
             .get_or_try_init(|| async {
                 self.disk.initialize().await?;
-                for area in ["chunks", "raw"] {
+                for area in ["chunks", "objects"] {
                     let root = self.root.join("cache").join(area);
                     tokio::fs::create_dir_all(&root).await?;
                     ensure!(
@@ -338,7 +338,10 @@ impl Cache {
                                 directory.file_name().to_string_lossy(),
                                 file.file_name().to_string_lossy()
                             );
-                            if area == "raw"
+                            if !crate::storage::location::owns_node_file(&name, area == "objects") {
+                                continue;
+                            }
+                            if area == "objects"
                                 && crate::storage::raw_partial::restore_file(
                                     &self.files(),
                                     &name,
@@ -349,7 +352,7 @@ impl Cache {
                             {
                                 continue;
                             }
-                            let parsed = if area == "raw" {
+                            let parsed = if area == "objects" {
                                 crate::storage::parse_chunk_name(&name)
                                     .map(|id| (id, CacheFile::Raw))
                             } else {

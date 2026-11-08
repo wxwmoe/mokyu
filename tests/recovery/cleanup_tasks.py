@@ -143,7 +143,7 @@ def chunk(owner, state):
 
 def fragment(owner, sealed):
     ident, body = uuid.uuid4(), os.urandom(64)
-    key = '__mokyu/multipart/fragment/' + ident.hex if backend else None
+    key = 'multipart/fragment/' + ident.hex if backend else None
     if backend:
         backend.put_object(Bucket=remote_bucket, Key=remote_key(key), Body=body)
         db.execute('INSERT INTO staging_objects(storage_id,object_key,bytes,created_at) '
@@ -199,8 +199,8 @@ try:
     db.execute('INSERT INTO extents(stream_id,offset_bytes,length,fragment_id) VALUES(%s,128,64,%s)', (retired, obsolete[0]))
     db.execute('INSERT INTO extents(stream_id,offset_bytes,length,fragment_id) VALUES(%s,64,64,%s)', (live, referenced[0]))
     history_task = expired_task()
-    orphan = '__mokyu/multipart/pending/' + uuid.uuid4().hex
-    recent = '__mokyu/multipart/pending/' + uuid.uuid4().hex
+    orphan = 'multipart/fragment/' + uuid.uuid4().hex
+    recent = 'multipart/fragment/' + uuid.uuid4().hex
     if backend:
         for key, age in [(orphan, 10), (recent, 0)]:
             backend.put_object(Bucket=remote_bucket, Key=remote_key(key), Body=b'orphan')

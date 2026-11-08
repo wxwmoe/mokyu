@@ -188,10 +188,9 @@ pub(super) async fn offer(
             .fetch_all(&mut **tx)
             .await?
         {
-            ensure!(
-                path.starts_with(crate::storage::STAGING_PREFIX) && path.len() <= 256,
-                Error::NodeWorkLimit
-            );
+            if !crate::storage::is_fragment_key(&path) {
+                continue;
+            }
             let location = Uuid::from_bytes(
                 blake3::hash(format!("{storage}/{path}").as_bytes()).as_bytes()[..16].try_into()?,
             );

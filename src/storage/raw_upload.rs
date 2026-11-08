@@ -455,7 +455,7 @@ impl Storage {
             for (location, source) in rows {
                 after = location;
                 let path = CacheFile::PendingRaw.path(&self.disk.root, location);
-                let partial = tokio::fs::symlink_metadata(path.with_extension("partial"))
+                let partial = tokio::fs::symlink_metadata(path.with_extension("part"))
                     .await
                     .context("multipart cache checkpoint is missing; restore its durable file")?;
                 ensure!(partial.is_file(), "multipart cache checkpoint was replaced");
@@ -512,7 +512,7 @@ impl Storage {
     pub(super) async fn remove_raw_checkpoint(&self, location: Uuid) -> Result<()> {
         let _write = self.cache_writes.lock().await;
         let path = CacheFile::PendingRaw.path(&self.disk.root, location);
-        let partial = path.with_extension("partial");
+        let partial = path.with_extension("part");
         let metadata = match tokio::fs::symlink_metadata(&partial).await {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),

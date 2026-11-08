@@ -6,6 +6,7 @@ import time
 import tomllib
 import uuid
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 import boto3
 import psycopg
@@ -108,7 +109,7 @@ print('PASS all modes, empty objects, shared chunks checked once, CLI, zero cach
 row = db.execute("SELECT c.id,l.encoding_id,l.standalone_size,l.encryption_algorithm,l.block_key_id,l.nonce,l.standalone_compressed,s.id FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id JOIN objects o ON o.stream_id=s.id WHERE o.bucket_id=%s AND o.object_key='a'", (bucket_id,)).fetchone()
 chunk, storage, stored, algorithm, key_id, nonce, compressed, stream = row
 storage = storage.hex
-path = '/'.join(filter(None, [backend_config.get('prefix', '').rstrip('/'), storage[-2:], storage]))
+path = '/'.join(filter(None, [backend_config.get('prefix', '').rstrip('/'), carrier_key('chunks', storage, True)]))
 remote = {'Bucket': backend_config['bucket'], 'Key': path}
 encoded = backend.get_object(**remote)['Body'].read()
 try:

@@ -57,7 +57,7 @@ def main():
         identity = source(fixture, key)['file_uuid']
         identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
         root = Path(database.config['instance']['data_path']) / 'pending' if fixture.backend else fixture.root
-        return root / 'raw' / identity.hex[-2:] / identity.hex
+        return root / 'objects' / identity.hex[-3:][::-1] / identity.hex
 
     try:
         start()

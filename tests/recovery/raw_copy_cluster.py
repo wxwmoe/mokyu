@@ -8,6 +8,7 @@ import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 from tests.recovery.source_repair import Database
 from tests.storage.source_quarantine import Fixture, rejected, wait
@@ -91,14 +92,14 @@ def run():
     fixture.put('warm', warm)
     source = mapping('warm')[0]
     identity = source['source_id'].hex
-    cache = Path(os.environ['MOKYU_TEST_CACHE_DIRS'].split(',')[0]) / identity[-2:] / identity
+    cache = Path(os.environ['MOKYU_TEST_CACHE_DIRS'].split(',')[0]) / identity[-3:][::-1] / identity
     fixture.read('warm', warm)
     wait(cache.is_file, 'raw cache was not filled')
     assert cache.read_bytes() == warm
     profile = fixture.cli('storage', 'profile', 'show', fixture.name)
     profile['read_integrity'] = 'off'
     fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
-    path = fixture.prefix + 'raw/' + identity[-2:] + '/' + identity
+    path = fixture.prefix + carrier_key('objects', identity, True)
     encoded = fixture.bytes(path)
     fixture.bytes(path, bytes([encoded[0] ^ 1]) + encoded[1:])
     try:

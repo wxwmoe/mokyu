@@ -4,6 +4,7 @@ import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 from tests.recovery.source_repair import Database
 from tests.storage.source_quarantine import Fixture, wait
@@ -49,7 +50,7 @@ def main():
             wait(lambda: status()['read_checks']['active'] == 0 and status()['cache_jobs_active'] == 0,
                  'background raw work did not drain')
             assert status()['read_checks']['used_bytes'] == 0
-            wait(lambda: not list((root / 'cache/raw').glob('*/*.tmp')), 'temporary cache file was retained')
+            wait(lambda: not list((root / 'cache/objects').glob('*/*.tmp')), 'temporary cache file was retained')
 
         def source(key):
             row, = database.query(f'''SELECT r.{database.raw_location} AS file_uuid FROM objects o
@@ -61,7 +62,7 @@ def main():
 
         def cache(key):
             identity = source(key).hex
-            return root / 'cache/raw' / identity[-2:] / identity
+            return root / 'cache/objects' / identity[-3:][::-1] / identity
 
         configure(cdc_enabled=False, pack_enabled=False, pack_range_enabled=False,
                   deduplication_enabled=False, cache_enabled=True, read_integrity='background')
@@ -149,7 +150,7 @@ def main():
 
         fixture.cold_put('bad', small)
         identity = source('bad').hex
-        physical = fixture.prefix + 'raw/' + identity[-2:] + '/' + identity
+        physical = fixture.prefix + carrier_key('objects', identity, True)
         fixture.bytes(physical, b'!' + small[1:])
         before = status()['read_checks']['failed']
         with fixture.client.get_object(Bucket=fixture.name, Key='bad')['Body'] as response:

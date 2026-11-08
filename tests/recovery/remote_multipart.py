@@ -5,6 +5,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 import boto3
 from botocore.config import Config
@@ -82,7 +83,7 @@ def main():
     def local_only(args):
         rows = database.query("SELECT f.staging_storage_id,f.file_id,m.node_id FROM parts p JOIN extents e ON e.stream_id=p.stream_id JOIN fragments f ON f.id=e.fragment_id LEFT JOIN multipart_files m ON m.id=f.file_id WHERE p.upload_id=%s", uuid.UUID(args['UploadId']))
         assert rows and all(row['staging_storage_id'] is None and row['file_id'] and row['node_id'] for row in rows), rows
-        assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE '__mokyu/multipart/fragment/%%'")
+        assert not database.query("SELECT object_key FROM staging_objects WHERE object_key NOT LIKE 'multipart/fragment/%%'")
 
     try:
         configure(cdc_enabled=False, deduplication_enabled=True, upload_cache=False, pack_range_enabled=False, upload_retention='1h')
@@ -93,7 +94,7 @@ def main():
         assert done(args)
         local_only(args)
         source = remote(args)
-        key = fixture.prefix + 'raw/' + source['raw_source_id'].hex[-2:] + '/' + source['raw_source_id'].hex
+        key = fixture.prefix + carrier_key('objects', source['raw_source_id'].hex, True)
         listed = fixture.backend.list_parts(Bucket=fixture.remote_bucket, Key=key, UploadId=source['upload_id'])['Parts']
         assert [part['PartNumber'] for part in listed] == [1, 3]
         action('kill-primary')
@@ -137,7 +138,7 @@ def main():
         fixture.finished(fixture.cli('maintenance', 'run', 'gc'))
         assert database.query('SELECT stream_id FROM extents WHERE stream_id=%s', old_stream)
         source = remote(args)
-        key = fixture.prefix + 'raw/' + source['raw_source_id'].hex[-2:] + '/' + source['raw_source_id'].hex
+        key = fixture.prefix + carrier_key('objects', source['raw_source_id'].hex, True)
         marker.unlink()
         def overwritten():
             rows = fixture.backend.list_parts(Bucket=fixture.remote_bucket, Key=key, UploadId=source['upload_id'])['Parts']
@@ -186,7 +187,7 @@ def main():
         args = create('abort')
         put(first, args, 1, b'abort this incomplete upload')
         source = remote(args)
-        key = fixture.prefix + 'raw/' + source['raw_source_id'].hex[-2:] + '/' + source['raw_source_id'].hex
+        key = fixture.prefix + carrier_key('objects', source['raw_source_id'].hex, True)
         first.abort_multipart_upload(**args)
         started = time.monotonic()
         try:
@@ -268,7 +269,7 @@ def main():
         args = create('expired')
         put(first, args, 1, b'expire this upload')
         source = remote(args)
-        key = fixture.prefix + 'raw/' + source['raw_source_id'].hex[-2:] + '/' + source['raw_source_id'].hex
+        key = fixture.prefix + carrier_key('objects', source['raw_source_id'].hex, True)
         database.query("UPDATE uploads SET touched_at=clock_timestamp()-interval '8 days' WHERE id=%s", uuid.UUID(args['UploadId']))
         fixture.finished(fixture.cli('maintenance', 'run', 'gc'))
         wait(lambda: remote(args)['state'] == 'aborted' and remote(args)['raw_source_id'] is None, 'expired native MPU was not cleaned', seconds=45)

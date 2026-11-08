@@ -190,7 +190,7 @@ impl Storage {
             return Ok(());
         }
         let root = if source.pending_upload {
-            self.disk.root.join("pending/raw")
+            self.disk.root.join("pending/objects")
         } else {
             target
                 .raw_root
@@ -452,7 +452,7 @@ impl Storage {
         directory(root).await?;
         let destination = path(root, location);
         directory(destination.parent().unwrap()).await?;
-        let temporary = destination.with_extension("partial");
+        let temporary = destination.with_extension("part");
         let mut options = tokio::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -791,12 +791,12 @@ impl Storage {
             .context("raw files require local storage")?;
         let destination = path(root, source.address());
         if !tokio::fs::try_exists(&destination).await?
-            && !tokio::fs::try_exists(destination.with_extension("partial")).await?
+            && !tokio::fs::try_exists(destination.with_extension("part")).await?
         {
             return Ok(());
         }
         let _permit = target.controls.acquire().await?;
-        for file in [destination.clone(), destination.with_extension("partial")] {
+        for file in [destination.clone(), destination.with_extension("part")] {
             match tokio::fs::remove_file(file).await {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -908,7 +908,7 @@ fn replay_part_size(size: u64, parts: &[i64]) -> Result<u64> {
 }
 
 pub(crate) fn remote_path(id: Uuid) -> ObjectPath {
-    ObjectPath::from(format!("raw/{}", super::chunk_name(id)))
+    super::location::Layout::S3.object(id)
 }
 
 pub(crate) enum RawWriter<'a> {

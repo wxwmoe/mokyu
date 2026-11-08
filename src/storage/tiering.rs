@@ -41,8 +41,8 @@ impl<'a> Site<'a> {
         let address = value.address();
         ensure!(!address.is_nil(), "missing tier address");
         let path = match value {
-            PhysicalSource::Chunk(_) => Path::from(super::chunk_name(address)),
-            PhysicalSource::Pack(_) => Path::from(format!("packs/{}", super::chunk_name(address))),
+            PhysicalSource::Chunk(_) => crate::storage::location::Layout::S3.chunk(address),
+            PhysicalSource::Pack(_) => crate::storage::location::Layout::S3.pack(address),
             PhysicalSource::Raw(_) => super::raw::remote_path(address),
         };
         Ok(Self {

@@ -223,7 +223,7 @@ pub(in super::super) fn lock_pending_chunks<'q>(
 }
 
 pub(in super::super) fn pending_staging_objects<'q>(ids: &'q [Id]) -> Rows<'q, (Id, Uuid, String)> {
-    sqlx::query_as("SELECT chunk_id,staging_storage_id,staging_object_key FROM pending_uploads WHERE chunk_id=ANY($1) AND staging_storage_id IS NOT NULL AND staging_object_key LIKE '__mokyu/multipart/%'").bind(ids)
+    sqlx::query_as("SELECT chunk_id,staging_storage_id,staging_object_key FROM pending_uploads WHERE chunk_id=ANY($1) AND staging_storage_id IS NOT NULL AND staging_object_key LIKE 'multipart/fragment/%'").bind(ids)
 }
 
 pub(in super::super) fn can_release_pending(

@@ -6,6 +6,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 import requests
 
@@ -131,8 +132,8 @@ def main():
                 'pinned' if database.type == 'postgres' else b'pinned')
             identity = row['file_uuid']
             identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-            pinned_path = (fixture.prefix + 'raw/' + identity.hex[-2:] + '/' + identity.hex if fixture.backend
-                           else str(fixture.root / 'raw' / identity.hex[-2:] / identity.hex))
+            pinned_path = (fixture.prefix + carrier_key('objects', identity.hex, True) if fixture.backend
+                           else str(fixture.root / 'objects' / identity.hex[-3:][::-1] / identity.hex))
             marker = fixture.arm('read-pinned')
             markers.append(marker)
             with ThreadPoolExecutor(max_workers=1) as pool:
@@ -193,7 +194,7 @@ def main():
                 assert source_stats()['hits'] > hits
                 detail = fixture.api('/api/v1/packs/' + packs[0]['id'])
                 identity = detail['pack']['id' if database.type == 'postgres' else 'location_id'].replace('-', '')
-                physical = fixture.prefix + 'packs/' + identity[-2:] + '/' + identity
+                physical = fixture.prefix + carrier_key('packs', identity, True)
                 original = fixture.bytes(physical)
                 fixture.bytes(physical, bytes([original[0] ^ 1]) + original[1:])
                 scope = dict(storage_id=fixture.store['id'], source='pack', id=packs[0]['id'])

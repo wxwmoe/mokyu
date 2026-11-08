@@ -17,7 +17,7 @@ def run():
     original, old_key, encoded = isolate(home, db, payload)
     etag = home.client.head_object(Bucket=home.name, Key='original')['ETag']
 
-    marker = home.prefix + 'meta.json'
+    marker = home.prefix + 'mokyu.json'
     identity = home.bytes(marker)
     before = set(home.keys())
     control_faults = home.faults

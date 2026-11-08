@@ -8,6 +8,7 @@ import time
 import tomllib
 import uuid
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 import boto3
 import psycopg
@@ -129,8 +130,8 @@ def restart(minimum, clear_age=False):
 
 
 def physical_key(source_type, storage):
-    prefix = 'packs/' if source_type == 'packs' else ''
-    return settings['prefix'].rstrip('/') + '/' + prefix + storage.hex[-2:] + '/' + storage.hex
+    directory = 'packs' if source_type == 'packs' else 'chunks'
+    return settings['prefix'].rstrip('/') + '/' + carrier_key(directory, storage, True)
 
 
 try:

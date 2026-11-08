@@ -30,8 +30,8 @@ def run():
     scope = dict(storage_id=hot.store['id'], source='chunk', id=str(original['current_encoding_id']))
     hot.finished(hot.execute('quarantine', hot.preview('quarantine', scope)))
 
-    home_marker = hot.prefix + 'meta.json'
-    cold_marker = cold.prefix + 'meta.json'
+    home_marker = hot.prefix + 'mokyu.json'
+    cold_marker = cold.prefix + 'mokyu.json'
     home_identity = hot.bytes(home_marker)
     cold_identity = cold.bytes(cold_marker)
     hot.bytes(home_marker, cold_identity)

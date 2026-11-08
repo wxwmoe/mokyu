@@ -5,7 +5,7 @@ use crate::{
     storage::model::{Options, Store},
 };
 use futures_util::StreamExt;
-use object_store::{ObjectStoreExt, path::Path};
+use object_store::ObjectStoreExt;
 use std::collections::{BTreeMap, HashMap};
 
 #[path = "checks.rs"]
@@ -151,7 +151,7 @@ async fn payload(reply: &wire::ReadReply, held: &Held) -> Result<Vec<u8>> {
         }
         let bytes = stores[&storage_id]
             .backend
-            .get(&Path::from(crate::storage::chunk_name(chunk.location_id)))
+            .get(&crate::storage::location::Layout::S3.chunk(chunk.location_id))
             .await?
             .bytes()
             .await?;

@@ -71,7 +71,7 @@ async fn upload(
         store
             .backend
             .put(
-                &Path::from(crate::storage::chunk_name(chunk.location_id)),
+                &crate::storage::location::Layout::S3.chunk(chunk.location_id),
                 encoded.into(),
             )
             .await?;

@@ -165,7 +165,7 @@ impl Storage {
             file.sync_all().await?;
             raw::verify_file(&mut raw::RawFile::Local(file), source, None).await?;
         } else {
-            let temp = dest.with_extension("partial");
+            let temp = dest.with_extension("part");
             // The immutable source lock serializes retries after a cancelled flush.
             match tokio::fs::remove_file(&temp).await {
                 Ok(()) => (),

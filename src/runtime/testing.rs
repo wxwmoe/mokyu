@@ -102,7 +102,7 @@ pub(super) fn prepare(
         state.write(root)?;
         state
     };
-    for name in ["mokyu.db", "storage", "storage/meta.json"] {
+    for name in ["mokyu.db", "storage", "storage/mokyu.json"] {
         let required = state.ready || (name == "mokyu.db" && state.namespace.is_some());
         match root.join(name).symlink_metadata() {
             Ok(meta) => ensure!(

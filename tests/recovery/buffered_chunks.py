@@ -62,10 +62,10 @@ def main():
         source = rows(fixture, key)[0]
         if source['cache_key']:
             identity = uuid.UUID(source['cache_key'].rsplit('.', 1)[0])
-            return Path(database.config['instance']['data_path']) / 'pending' / 'chunks' / identity.hex[-2:] / (identity.hex + '.raw')
+            return Path(database.config['instance']['data_path']) / 'pending' / 'chunks' / identity.hex[-3:][::-1] / (identity.hex + '.raw')
         identity = source['file_uuid']
         identity = uuid.UUID(bytes=identity) if isinstance(identity, bytes) else uuid.UUID(str(identity))
-        return fixture.root / identity.hex[-2:] / identity.hex
+        return fixture.root / 'chunks' / identity.hex[-3:][::-1] / identity.hex
 
     def synced(fixture, key):
         return all(not row['sync_pending'] for row in rows(fixture, key))
@@ -151,7 +151,7 @@ def main():
             if cached:
                 value = rows(fixture, 'commit')[0]['cache_uuid']
                 identity = uuid.UUID(bytes=value) if isinstance(value, bytes) else uuid.UUID(str(value))
-                destination = Path(database.config['instance']['data_path']) / 'cache/chunks' / identity.hex[-2:] / (identity.hex + '.raw')
+                destination = Path(database.config['instance']['data_path']) / 'cache/chunks' / identity.hex[-3:][::-1] / (identity.hex + '.raw')
                 wait(destination.is_file, 'chunk pending file did not enter read cache')
                 assert not cached.exists()
             print('PASS ' + label + ' explicit flush and cache ownership transfer', flush=True)

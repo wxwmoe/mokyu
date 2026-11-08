@@ -285,7 +285,7 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `GET /api/v1/storages` | 列出存储；返回 id、name、type、连接范围、prefix、block_key_id、三项并发上限、profile_revision、enabled、created_at、updated_at，不返回凭据 |
 | `POST /api/v1/storages` | 创建存储；请求包含 `{name,type,initialize,path?,endpoint?,bucket?,region?,prefix?,block_key_id?,access_key?,secret_key?,profile?}`，type 为 `local` 或 `s3`；`initialize` 必须明确为 `true`，profile 使用完整 typed storage profile |
 | `PUT /api/v1/storages/{name}` | 修改连接字段、prefix、block_key_id 或 enabled；name 和 id 不可修改；切换 type 需单容器维护状态并排空上传、任务及待写来源，核对目标 meta 后保存，成功后须重启；并发、压缩、区块包、缓存和维护预算通过 profile 保存 |
-| `POST /api/v1/storages/{name}/check` | 读取并核对已有 `meta.json`，无请求体 |
+| `POST /api/v1/storages/{name}/check` | 读取并核对已有 `mokyu.json`，无请求体 |
 | `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、单容器 write_durability、合并等待 write_flush_interval、积压阈值 write_backlog_max_age、后台调度 background_scheduling、公开快照 public_cache_validation / public_cache_refresh_interval / public_cache_max_age、独立 CORS 后台缓存 cors_cache_enabled（公共读 background 时强制生效）、来源快照 read_source_validation / source_validation_max_age、额外摘要 read_integrity、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
 | `GET /api/v1/storage-profile-presets?type=local\|s3` | 新建存储可用的三套读写模板及实际运行限制；群集只接受 s3 |
 | `GET /api/v1/storages/{name}/profile/presets` | 返回模板、当前匹配的 `selected`（自定义为 null）及 `constraints`；不包含密钥 |
@@ -294,13 +294,13 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `POST /api/v1/storages/{name}/rewrite` | 对存量物理编码执行 `preview`、`start`、`status`、`pause`、`resume` 或 `retry`；`start` 必须提交预览 confirmation |
 | `POST /api/v1/storages/{name}/unpack` | 对指定 pack 执行 `preview` 或 `start`；请求 `{action,pack_id,confirmation?}`，start 必须提交预览 confirmation |
 
-`local` 请求使用 `path`（省略时为 `/data/storage`），`s3` 请求需要 endpoint、bucket、region、access_key 和 secret_key；prefix 默认为空。创建前目标命名空间必须为空并写入身份标识。更新连接信息只接受与已有身份标识匹配的目标，不会为缺失的 `meta.json` 初始化目标；凭据只用于写入，响应不会返回明文。存储名称为 1～128 字节且不能含 `/` 或控制字符，endpoint 必须是无查询串或片段的 HTTP(S) URL。
+`local` 请求使用 `path`（省略时为 `/data/storage`），`s3` 请求需要 endpoint、bucket、region、access_key 和 secret_key；prefix 默认为空。创建前目标命名空间必须为空并写入身份标识。更新连接信息只接受与已有身份标识匹配的目标，不会为缺失的 `mokyu.json` 初始化目标；凭据只用于写入，响应不会返回明文。存储名称为 1～128 字节且不能含 `/` 或控制字符，endpoint 必须是无查询串或片段的 HTTP(S) URL。
 
 创建桶时，零个启用存储会失败，一个启用存储会自动绑定，多个启用存储必须在请求中提供 `storage_id`；桶绑定后不可更改。同一存储内的桶共享去重，不同 storage 之间不共享。群集模式拒绝 local 存储。存储管理限管理员或 system Token，并按通用约定要求最近验证密码。
 
 `storage_id` 表示逻辑存储后端；物理对象位置使用 `location_id`，不会把物理位置 UUID 当作存储名称或桶绑定。区块编码和 pack 的 block key 字段统一为 `block_key_id`。
 
-存储类型切换未满足单容器维护状态或排空条件时返回 `409 StorageNotDrained`，不会改变连接；成功后当前进程要求重启。请求中的 type、字段组合或存储名称无效时不会写入数据库；存储不存在、命名空间非空、`meta.json` 缺失或身份不匹配也会拒绝操作并返回错误。确认具体错误时使用响应中的 `code` 和 `request_id`；不要通过重复创建来初始化已有存储。
+存储类型切换未满足单容器维护状态或排空条件时返回 `409 StorageNotDrained`，不会改变连接；成功后当前进程要求重启。请求中的 type、字段组合或存储名称无效时不会写入数据库；存储不存在、命名空间非空、`mokyu.json` 缺失或身份不匹配也会拒绝操作并返回错误。确认具体错误时使用响应中的 `code` 和 `request_id`；不要通过重复创建来初始化已有存储。
 
 ## 存储洞察
 

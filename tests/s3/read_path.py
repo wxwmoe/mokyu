@@ -64,7 +64,7 @@ def cache_paths(key):
         JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id
         WHERE b.name=%s AND o.object_key=%s''', (bucket, prefix + key)).fetchall()
     return [path for (location,) in rows
-            for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'cache' / 'chunks' / location.hex[-2:]).glob(location.hex + '.*')]
+            for path in (Path(os.environ['MOKYU_TEST_DATA']) / 'cache' / 'chunks' / location.hex[-3:][::-1]).glob(location.hex + '.*')]
 
 
 def cache_idle():

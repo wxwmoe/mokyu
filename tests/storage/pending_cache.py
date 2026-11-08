@@ -42,7 +42,7 @@ def main():
 
     def path(namespace, area, value, extension=''):
         value = identity(value).hex
-        return root / namespace / area / value[-2:] / (value + extension)
+        return root / namespace / area / value[-3:][::-1] / (value + extension)
 
     def inode(file):
         value = file.stat()
@@ -76,8 +76,8 @@ def main():
         marker = fixture.arm('raw-upload-before-process')
         fixture.put('raw', data)
         wait(marker.with_suffix('.hit').exists, 'raw upload did not pause')
-        source = path('pending', 'raw', raw_id('raw'))
-        destination = path('cache', 'raw', raw_id('raw'))
+        source = path('pending', 'objects', raw_id('raw'))
+        destination = path('cache', 'objects', raw_id('raw'))
         before = inode(source)
         assert source.read_bytes() == data and not destination.exists()
         fixture.read('raw', data)
@@ -98,8 +98,8 @@ def main():
         marker = fixture.arm('raw-upload-before-process')
         fixture.put('disabled', data)
         wait(marker.with_suffix('.hit').exists, 'disabled-cache upload did not pause')
-        source = path('pending', 'raw', raw_id('disabled'))
-        destination = path('cache', 'raw', raw_id('disabled'))
+        source = path('pending', 'objects', raw_id('disabled'))
+        destination = path('cache', 'objects', raw_id('disabled'))
         assert source.read_bytes() == data
         marker.unlink()
         wait(lambda: not source.exists(), 'disabled-cache pending file was retained')
@@ -214,18 +214,18 @@ def main():
                 fixture.put(point, payload)
                 wait(marker.with_suffix('.hit').exists, 'handoff did not reach ' + point)
                 location = raw_id(point)
-                destination = path('cache', 'raw', location)
+                destination = path('cache', 'objects', location)
                 before = inode(destination)
                 stop(crash=True)
                 marker.unlink()
                 start()
-                assert not path('pending', 'raw', location).exists()
+                assert not path('pending', 'objects', location).exists()
                 assert inode(destination) == before and destination.read_bytes() == payload
                 fixture.read(point, payload)
             print('PASS crashes around unlink recover one cache file without duplicating disk charges', flush=True)
 
         wait(lambda: fixture.cli('status')['cache_jobs_active'] == 0, 'cache fills did not finish')
-        used = sum(file.stat().st_size for namespace in ('cache', 'pending') for area in ('chunks', 'raw')
+        used = sum(file.stat().st_size for namespace in ('cache', 'pending') for area in ('chunks', 'objects')
                    for file in (root / namespace / area).glob('*/*') if file.is_file())
         assert fixture.cli('status')['local_bytes'][1] == used
         assert not any((root / name).exists() for name in ('raw', 'chunks', 'multipart', 'read-cache'))

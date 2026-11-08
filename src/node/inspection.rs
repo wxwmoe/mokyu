@@ -95,7 +95,7 @@ impl Reader {
                     codec::validate_metadata(chunk, keys.as_ref())?;
                     (
                         codec::MAX + 16,
-                        Path::from(crate::storage::chunk_name(chunk.address())),
+                        crate::storage::location::Layout::S3.chunk(chunk.address()),
                     )
                 }
                 PhysicalSource::Pack(pack) => {
@@ -107,10 +107,7 @@ impl Reader {
                     );
                     (
                         pack.payload_size()? + 16,
-                        Path::from(format!(
-                            "packs/{}",
-                            crate::storage::chunk_name(pack.address())
-                        )),
+                        crate::storage::location::Layout::S3.pack(pack.address()),
                     )
                 }
                 PhysicalSource::Raw(_) => unreachable!(),

@@ -17,7 +17,7 @@ impl Cache {
 
     async fn recover_requests(&self, node: &NodeContext) -> Result<()> {
         // Receivers wait for uploads_ready; only interrupted, unpublished requests are present.
-        let mut directories = tokio::fs::read_dir(self.disk.root.join("pending/raw")).await?;
+        let mut directories = tokio::fs::read_dir(self.disk.root.join("pending/objects")).await?;
         while let Some(directory) = directories.next_entry().await? {
             if !directory.file_type().await?.is_dir() {
                 continue;
@@ -34,7 +34,7 @@ impl Cache {
                     );
                     if entry.file_type().await?.is_file()
                         && let Some(id) = name
-                            .strip_suffix(".partial")
+                            .strip_suffix(".part")
                             .and_then(crate::storage::parse_chunk_name)
                     {
                         batch.push(id);
@@ -69,7 +69,7 @@ impl Cache {
                         tokio::fs::remove_file(
                             CacheFile::PendingRaw
                                 .path(&self.disk.root, id)
-                                .with_extension("partial"),
+                                .with_extension("part"),
                         )
                         .await?;
                     }
@@ -87,7 +87,7 @@ impl Cache {
         node: &NodeContext,
         recover: bool,
     ) -> Result<()> {
-        let root = self.disk.root.join("pending/raw");
+        let root = self.disk.root.join("pending/objects");
         tokio::fs::create_dir_all(&root).await?;
         ensure!(
             tokio::fs::symlink_metadata(&root).await?.is_dir(),

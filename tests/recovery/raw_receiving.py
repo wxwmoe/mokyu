@@ -9,6 +9,7 @@ import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from tests.storage.layout import carrier_key
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -49,7 +50,7 @@ def main():
         assert fixture.backend, 'requires a disposable S3 backend'
         database = Database()
         storage = uuid.UUID(fixture.store['id'])
-        root = Path(database.config['instance']['data_path']) / 'pending' / 'raw'
+        root = Path(database.config['instance']['data_path']) / 'pending' / 'objects'
 
         def configure(**changes):
             profile = fixture.cli('storage', 'profile', 'show', fixture.name)
@@ -84,7 +85,7 @@ def main():
         fixture.read('multipart', data)
         assert set(fixture.keys()) == baseline and sources() == count
         assert fixture.cli('status')['backend_puts'] == puts, 'reuse sent a final S3 PUT'
-        wait(lambda: not list(root.rglob('*.partial')), 'successful request workspace was retained')
+        wait(lambda: not list(root.rglob('*.part')), 'successful request workspace was retained')
         print('PASS PUT, Copy and Multipart reuse healthy raw content without another final S3 object', flush=True)
 
         fixture.put('empty', b'')
@@ -124,7 +125,7 @@ def main():
         baseline = set(fixture.keys())
         print('PASS exact 5 MiB Multipart and Copy replay existing sources without another request file', flush=True)
         configure(cache_soft_limit=None)
-        wait(lambda: not list(root.rglob('*.partial')), 'failed request workspace was retained')
+        wait(lambda: not list(root.rglob('*.part')), 'failed request workspace was retained')
         print('PASS exhausted disk workspace returns SlowDown without publishing or uploading a duplicate', flush=True)
 
         for point in ('raw-before-reuse', 'raw-reused'):
@@ -134,7 +135,7 @@ def main():
                 try:
                     wait(lambda: marker.with_suffix('.hit').exists() or request.done(), point + ' was not reached')
                     assert not request.done(), request.exception()
-                    assert list(root.rglob('*.partial')), 'large request did not stage to disk'
+                    assert list(root.rglob('*.part')), 'large request did not stage to disk'
                     stop(crash=True)
                 finally:
                     marker.unlink(missing_ok=True)
@@ -146,7 +147,7 @@ def main():
                     raise AssertionError('crashed request unexpectedly returned success')
             start()
             fixture.read('canonical', data)
-            assert not list(root.rglob('*.partial')), 'restart retained unacknowledged request workspace'
+            assert not list(root.rglob('*.part')), 'restart retained unacknowledged request workspace'
             assert set(fixture.keys()) == baseline
         print('PASS crashes before and after reuse preserve the old object and clean unacknowledged workspace', flush=True)
 
@@ -157,7 +158,7 @@ def main():
             try:
                 wait(lambda: marker.with_suffix('.hit').exists() or request.done(), 'workspace verification did not pause')
                 assert not request.done(), request.exception()
-                paths = list(root.rglob('*.partial'))
+                paths = list(root.rglob('*.part'))
                 assert len(paths) == 1, paths
                 with paths[0].open('r+b') as file:
                     file.write(b'?')
@@ -167,7 +168,7 @@ def main():
                 marker.unlink(missing_ok=True)
         fixture.read('canonical', data)
         assert set(fixture.keys()) == baseline
-        wait(lambda: not list(root.rglob('*.partial')), 'corrupt workspace was not released')
+        wait(lambda: not list(root.rglob('*.part')), 'corrupt workspace was not released')
         print('PASS changed request workspace cannot publish a final S3 object or replace existing data', flush=True)
 
         shared = b'concurrent first writer' * 4096
@@ -189,7 +190,7 @@ def main():
             WHERE o.bucket_id=%s AND o.object_key=%s""", uuid.UUID(fixture.bucket_id),
             'bad-candidate' if database.type == 'postgres' else b'bad-candidate')[0]
         identity = uuid.UUID(str(old['file_uuid'])) if database.type == 'postgres' else uuid.UUID(bytes=bytes(old['file_uuid']))
-        physical = fixture.prefix + 'raw/' + identity.hex[-2:] + '/' + identity.hex
+        physical = fixture.prefix + carrier_key('objects', identity.hex, True)
         marker = fixture.arm('raw-candidate-found')
         with ThreadPoolExecutor(max_workers=1) as pool:
             request = pool.submit(fixture.put, 'new-reference', incoming)

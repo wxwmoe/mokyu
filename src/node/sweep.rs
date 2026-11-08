@@ -54,7 +54,9 @@ impl Worker {
                 "sweep requires maintenance"
             );
             ensure!(
-                crate::storage::Storage::parse_physical_path(&item.path).is_some(),
+                crate::storage::location::Layout::S3
+                    .parse_chunk_or_pack(&item.path)
+                    .is_some(),
                 "invalid sweep path"
             );
             let path = Path::parse(&item.path)?;

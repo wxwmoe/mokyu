@@ -85,7 +85,7 @@ def main():
                 if row['pack_id'] is None:
                     value = database.query('SELECT location_id FROM chunk_encodings WHERE encoding_id=%s', row['current_encoding_id'])[0]['location_id']
                 value = identity(value).hex
-                if any((root / 'cache/chunks' / value[-2:] / (value + suffix)).exists() for suffix in ['.raw', '.zst']):
+                if any((root / 'cache/chunks' / value[-3:][::-1] / (value + suffix)).exists() for suffix in ['.raw', '.zst']):
                     matches.append(row)
             assert matches, ('no published chunk cache', key, status()['local_bytes'])
             row = matches[0]
@@ -104,7 +104,7 @@ def main():
                 JOIN raw_ranges x ON x.stream_id=o.stream_id JOIN raw_sources r ON r.id=x.source_id
                 WHERE o.bucket_id=%s AND o.object_key=%s''', uuid.UUID(owner.bucket_id), key if database.type == 'postgres' else key.encode())
             value = identity(row['file_uuid']).hex
-            return root / 'cache/raw' / value[-2:] / value
+            return root / 'cache/objects' / value[-3:][::-1] / value
 
         def raw_hit(key, body):
             idle()
@@ -121,7 +121,7 @@ def main():
         for mode in ['metadata', 'head']:
             before = status()['backend_read_bytes']
             fixture.finished(fixture.cli('integrity', 'check', '--mode', mode, '--bucket', fixture.name, '--key', 'checked'))
-            marker = len(fixture.bytes(fixture.prefix + 'meta.json')) if node and mode == 'head' else 0
+            marker = len(fixture.bytes(fixture.prefix + 'mokyu.json')) if node and mode == 'head' else 0
             assert status()['backend_read_bytes'] - before == marker, 'metadata/head downloaded a payload'
         fixture.finished(fixture.cli('integrity', 'check', '--mode', 'full', '--bucket', fixture.name, '--key', 'checked'))
         chunk_hit('checked', small + b'checked')
@@ -158,7 +158,7 @@ def main():
         idle()
         after = status()
         assert after['backend_gets'] - before['backend_gets'] == (3 if node else 2)
-        extra = len(fixture.bytes(fixture.prefix + 'meta.json')) if node else 0
+        extra = len(fixture.bytes(fixture.prefix + 'mokyu.json')) if node else 0
         assert after['backend_read_bytes'] - before['backend_read_bytes'] == len(raw) + extra
         raw_hit('raw-check', raw)
         configure(deduplication_enabled=True, write_processing='inline', cache_enabled=False)

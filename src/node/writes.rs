@@ -1315,7 +1315,7 @@ impl Writes {
                                     .store
                                     .backend
                                     .put(
-                                        &Path::from(crate::storage::chunk_name(location)),
+                                        &crate::storage::location::Layout::S3.chunk(location),
                                         Bytes::from_owner(body).into(),
                                     )
                                     .await?;

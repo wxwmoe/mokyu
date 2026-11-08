@@ -2,9 +2,19 @@
 
 数据库保存对象路径、权限和物理引用；storage 保存原始文件、区块和区块包。storage 文件本身不能单独重建对象索引。格式编号独立于数据库 schema 和程序版本，新增格式只追加编号，不复用旧编号。
 
+## 文件头编号
+
+Mokyu 的格式标记共 8 字节。前 5 字节是 ASCII `MOKYU`，后 3 字节是按大端序存放的无符号编号。例如 `MOKYU\x00\x00\x03` 对应编号 `0x000003`。
+
+| 编号 | 用途 |
+| --- | --- |
+| `0x000003` | [独立区块的AAD 标记](#物理编码和完整性) |
+| `0x000004` | [整包编码前的区块包头及 AAD 标记](#区块包) |
+| `0x000007` | [raw 部分读缓存的 `.map` 文件头](#本地目录和缓存) |
+
 ## 原始文件
 
-单容器本地 raw 可选 `write_durability=volatile`。普通 PUT 可在共享内存额度内保留一份正文，并为最终文件预留空间。读取直接使用这份正文。后台将正文写入同目录的 `.partial` 文件，同步后发布到原始物理 UUID，再同步目录并更新来源状态。恢复时核验已经发布的文件，只有 RAM 副本的来源会被隔离。运行与恢复共用原有对象映射。适用条件见[后端配置](configuration.md)。
+单容器本地 raw 可选 `write_durability=volatile`。普通 PUT 可在共享内存额度内保留一份正文，并为最终文件预留空间。读取直接使用这份正文。后台将正文写入同目录的 `.part` 文件，同步后发布到原始物理 UUID，再同步目录并更新来源状态。恢复时核验已经发布的文件，只有 RAM 副本的来源会被隔离。运行与恢复共用原有对象映射。适用条件见[后端配置](configuration.md)。
 
 单容器的 `write_durability=buffered` 允许本地 chunks/raw 及 S3 写缓存文件完整写入后省略请求期的文件与发布目录同步。来源记录保留缓冲状态，由后台同步后标记持久；`cache status` 的 `buffered_files` 和 `buffered_chunks` 分别提供 raw 与区块待同步条目、字节与最早创建时间，`cache flush` 和正常退出也包含这些来源。可靠写入、复制和迁移引用缓冲来源前先同步。重启先核验未同步文件的长度和摘要，缺失或损坏的来源被隔离，运行中临时 I/O 故障保留重试，启动核验无法完成则终止启动并保留来源；这不能保证断电后最近写入不丢失，SQLite 元数据同步策略仍独立生效。
 
@@ -21,33 +31,33 @@ local 和 S3 storage 均可关闭 profile 的 `cdc_enabled`，新写入以原始
 复制可领先持久确认两个有界批次；确认目标范围和目录后，事务更新分片映射，再释放旧候选中无引用的范围。最后一批回收交给后台 GC，待回收标记和范围映射随数据库保存，重启后继续处理；Complete 仍等待最终文件、校验和元数据发布。其他硬链接存在或文件系统不支持打洞时保留旧范围，空间不足会拒绝继续复制，已有分片仍可重试。
 
 ```text
-<storage.prefix>/raw/<UUID 后两位>/<32 位小写 UUID>
-<storage.prefix>/raw/<UUID 后两位>/<32 位小写 UUID>.partial
+<storage.prefix>/objects/<分目录>/<32 位小写 UUID>
+<storage.prefix>/objects/<分目录>/<32 位小写 UUID>.part
 ```
 
-raw 与区块、区块包共用根目录 `meta.json` 的命名空间身份，不另建 raw 标记。本地与 S3 使用相同的最终相对路径和原始文件字节。物理路径只使用服务端 UUID，不使用桶名或对象键。`.partial` 用于本地接收和可恢复的 Multipart 组装；已确认范围可能仍被上传引用，不能手动删除，引用释放后由 GC 清理。远端使用有界 S3 multipart 传输，并记录 upload ID 供失败清理。单容器 Multipart 完成、Copy 和迁移按总长规划远端分片，从现有来源流式读取并校验，重试重新读取相同范围，不将整个分片放入内存；分片最多 10,000 个、每片不超过 5 GiB，仍受后端自身对象大小和请求超时限制。建议为远端配置 `AbortIncompleteMultipartUpload` 生命周期规则，清理创建请求已成功但响应丢失、尚无法登记 ID 的上传。
+raw 与区块、区块包共用根目录 `mokyu.json` 的命名空间身份，不另建 raw 标记。本地与 S3 保留相同的 UUID 和文件字节，各自按下文的分目录规则寻址。物理路径只使用服务端 UUID，不使用桶名或对象键。`.part` 用于本地接收和可恢复的 Multipart 组装；已确认范围可能仍被上传引用，不能手动删除，引用释放后由 GC 清理。远端使用有界 S3 multipart 传输，并记录 upload ID 供失败清理。单容器 Multipart 完成、Copy 和迁移按总长规划远端分片，从现有来源流式读取并校验，重试重新读取相同范围，不将整个分片放入内存；分片最多 10,000 个、每片不超过 5 GiB，仍受后端自身对象大小和请求超时限制。建议为远端配置 `AbortIncompleteMultipartUpload` 生命周期规则，清理创建请求已成功但响应丢失、尚无法登记 ID 的上传。
 
 `deduplication_enabled` 默认 false。开启后按 `storage_id + 完整正文 BLAKE3 + 长度` 共享健康的最终来源，不使用 Multipart ETag 作为内容身份；不同分片边界不影响去重。不使用写缓存时，`write_processing=inline` 在发布前登记或切换引用，远端 S3 在最终上传前查重；`background` 先可靠发布独立文件和待处理记录，再计算摘要并事务切换，重启继续。后台切换保留对象版本、ETag、权限和时间，等已有读者释放保护后才执行；持续长读可能推迟去重。多余副本由 GC 回收。群集原生 Multipart 的分片先上传，完整摘要在最终文件校验时计算，随后共享健康来源并回收多余候选；该路径不能省去重复分片的远端传输。关闭去重仅影响新写入，已有共享文件和待处理工作保持原有合同。
 
-未启用写缓存时，远端即时去重的 PUT 使用有界缓冲，大对象按实际接收量写入 `<data_path>/pending/raw/<后两位>/<UUID>.partial`，受节点缓存总额、后端 `cache_soft_limit` 和磁盘余量保护。空间不足返回 `503 SlowDown`，不发布部分对象；取消或重启后清理未确认请求的临时文件。Multipart、Copy 和迁移直接重放已有来源，避免再暂存整文件。命中健康来源时不上传最终文件，未命中时仍等待最终 S3 确认及对象发布；并发首次写入可能各自生成候选，随后合并引用。
+未启用写缓存时，远端即时去重的 PUT 使用有界缓冲，大对象按实际接收量写入 `<data_path>/pending/objects/<末三位倒序>/<UUID>.part`，受节点缓存总额、后端 `cache_soft_limit` 和磁盘余量保护。空间不足返回 `503 SlowDown`，不发布部分对象；取消或重启后清理未确认请求的临时文件。Multipart、Copy 和迁移直接重放已有来源，避免再暂存整文件。命中健康来源时不上传最终文件，未命中时仍等待最终 S3 确认及对象发布；并发首次写入可能各自生成候选，随后合并引用。
 
-S3 raw 开启 `upload_cache` 后，在 `<data_path>/pending/raw/<后两位>/<UUID>` 同步完整文件并提交对象映射即可响应；UUID 与最终后端文件相同。后台先复核并查重，只有未命中才上传最终 S3；inline 优先推进，background 按维护队列配额推进。上传配额不足时，`upload_cache_overflow=fallback` 回退同步查重和上传，请求全程等待；`reject` 返回 `503 SlowDown`，不发布本次对象。群集复用该流程，待上传文件属于接收节点，其他节点不能领取。
+S3 raw 开启 `upload_cache` 后，在 `<data_path>/pending/objects/<末三位倒序>/<UUID>` 同步完整文件并提交对象映射即可响应；UUID 与最终后端文件相同。后台先复核并查重，只有未命中才上传最终 S3；inline 优先推进，background 按维护队列配额推进。上传配额不足时，`upload_cache_overflow=fallback` 回退同步查重和上传，请求全程等待；`reject` 返回 `503 SlowDown`，不发布本次对象。群集复用该流程，待上传文件属于接收节点，其他节点不能领取。
 
-待上传记录按物理来源保存，原对象删除但 Copy 仍引用时继续排空。文件由 pin 保护，关闭缓存、缩小额度或重启均不会淘汰唯一副本；最终上传或引用切换后，原文件可作为普通读缓存回收，无需另行复制。单容器 S3 Multipart 的组装检查点位于节点 `pending/raw` 目录，其分片引用释放前仍受保护；已发布文件与检查点共用 inode 时只计一份缓存长度。启动发现唯一副本缺失或长度不符会中止恢复，不静默丢弃记录。
+待上传记录按物理来源保存，原对象删除但 Copy 仍引用时继续排空。文件由 pin 保护，关闭缓存、缩小额度或重启均不会淘汰唯一副本；最终上传或引用切换后，原文件可作为普通读缓存回收，无需另行复制。单容器 S3 Multipart 的组装检查点位于节点 `pending/objects` 目录，其分片引用释放前仍受保护；已发布文件与检查点共用 inode 时只计一份缓存长度。启动发现唯一副本缺失或长度不符会中止恢复，不静默丢弃记录。
 
 群集 raw 和 chunks 的写缓存保存在所属节点的 `instance.data_path`，上传完成后释放写入额度并保留普通读缓存，仍受现有 reader/Multipart pin 和淘汰规则管理。原节点携同数据目录重启可继续上传；其他节点不会接管无法访问的本地文件，节点永久丢失不由共享暂存恢复。跨节点 GET 在需要待上传来源时最多等待约 3 秒，超时返回 `503 SlowDown`、`Retry-After: 60` 和 `Cache-Control: no-store`；HEAD 和列表不等待正文，完整内存响应缓存命中也不等待。
 
 `mokyu cli cache status` 的 `raw_processing` 显示可选去重工作，`raw_uploads` 显示必须排空的来源及群集原生 Multipart 待传分片，两者均提供 `pending`、`bytes` 和 `failed`。`cache flush` 支持维护模式，只等待任务创建前的待上传来源与缓冲文件。后台失败保留来源与重试记录，不将未通过长度和摘要复核的来源登记为共享文件，也不保证整体处理吞吐提升。
 
-接收前先登记来源。默认持久确认时，本地在目标目录内独占创建 `.partial`，完整协议与摘要验证后同步文件、发布不可变名称并同步父目录，再提交逻辑映射；远端在完整上传确认后提交映射。覆盖创建新来源；失败不替换旧对象，未发布文件由来源记录和正常 GC 回收。原始来源保存 16 字节 MD5 摘要，普通读取先检查完整来源的长度和摘要；Range 按对象映射读取。
+接收前先登记来源。默认持久确认时，本地在目标目录内独占创建 `.part`，完整协议与摘要验证后同步文件、发布不可变名称并同步父目录，再提交逻辑映射；远端在完整上传确认后提交映射。覆盖创建新来源；失败不替换旧对象，未发布文件由来源记录和正常 GC 回收。原始来源保存 16 字节 MD5 摘要，普通读取先检查完整来源的长度和摘要；Range 按对象映射读取。
 
 关闭或重新开启 CDC 只影响新写入，已有原始文件与区块格式并存。原始文件进入既有巡检、隔离、完整复检和用量统计；它们没有区块重传去重恢复，可恢复原位置的正确字节后复检，或重新上传对象。`storage rewrite` 处理区块与区块包，不隐式转换原始对象。
 
-同一 storage 可在单容器维护状态下搬迁整个命名空间并修改连接类型；保留数据库、部署密钥、storage ID 和根 `meta.json`，同时复制历史 raw、区块与区块包。先完成或中止 Multipart、排空待写来源及后台任务，停止对原命名空间的写入；复制期间不能让两边独立写入。修改连接会核对根标记并更新 raw 来源介质，成功后须重启，旧连接不再提供数据服务。标记匹配不证明所有文件已迁齐，恢复入口前应核对完整性。
+同一 storage 可在单容器维护状态下搬迁整个命名空间并修改连接类型；保留数据库、部署密钥、storage ID 和根 `mokyu.json`，同时复制历史 raw、区块与区块包。先完成或中止 Multipart、排空待写来源及后台任务，停止对原命名空间的写入；复制期间不能让两边独立写入。修改连接会核对根标记并更新 raw 来源介质，成功后须重启，旧连接不再提供数据服务。标记匹配不证明所有文件已迁齐，恢复入口前应核对完整性。
 
 也可创建新的目标 storage 和桶，使用管理面板的跨存储复制或移动；任务按目标 CDC、去重、压缩与加密策略接收逻辑内容。该方式不修改原 storage 的连接，允许分批迁移。桶绑定的 storage ID 不变；这两种方式都不是跨数据库迁移。原始对象 Copy 先接收完整内容，再按目标去重设置选择来源；旧读取持有的文件在引用释放和保留期结束前不会回收。
 
-本地 raw 的完整匿名 GET 可按 storage profile 交给受信代理。代理只读挂载原始文件，配置前缀对应 `<storage path>/<prefix>/raw/`，后接 `<后两位>/<UUID>`，不得直接导出对象 key 或整个 data 目录。代理打开前发生回收时，必须回退 Mokyu 重新读取逻辑对象；配置与限制见[代理文件交付](local-nginx-deployment.md)。
+本地 raw 的完整匿名 GET 可按 storage profile 交给受信代理。代理只读挂载原始文件，配置前缀对应 `<storage path>/<prefix>/raw/`，后接 `<末三位倒序>/<UUID>`，不得直接导出对象 key 或整个 data 目录。代理打开前发生回收时，必须回退 Mokyu 重新读取逻辑对象；配置与限制见[代理文件交付](local-nginx-deployment.md)。
 
 ## 后台分块
 
@@ -72,7 +82,7 @@ S3 raw 开启 `upload_cache` 后，在 `<data_path>/pending/raw/<后两位>/<UUI
 
 每个 ready 独立来源保存物理 UUID、`standalone_size`、`standalone_compressed`、`encryption_algorithm`、`block_key_id`、`nonce_id`、nonce 和 `encoding_fingerprint`；区块包保存对应的 `pack_fingerprint`。fingerprint 绑定 key、算法、压缩和 storage profile，`storage rewrite` 用它判断是否需要处理。
 
-区块格式为 2，AAD 标记为 `MOKYU\0\0\x03`，绑定持久逻辑 UUID、物理 UUID、明文哈希、原始长度、编码长度、压缩标志、算法和 block key UUID。数据库整数主键不进入密文格式。读取顺序固定为认证、解密、有界解压、长度检查和 BLAKE3 检查；任何元数据或载荷不匹配都报告完整性错误。
+区块格式为 2，AAD 标记为 `MOKYU\x00\x00\x03`，绑定持久逻辑 UUID、物理 UUID、明文哈希、原始长度、编码长度、压缩标志、算法和 block key UUID。数据库整数主键不进入密文格式。读取顺序固定为认证、解密、有界解压、长度检查和 BLAKE3 检查；任何元数据或载荷不匹配都报告完整性错误。
 
 nonce 为 12 字节：前 4 字节编码来源类型和 UTC 日期，后 8 字节为独立的正整数 `nonce_id`。加密的物理区块编码和区块包分别使用类型标记 0 和 1；未加密来源的 `nonce_id`、nonce 和 `block_key_id` 均为空。逻辑区块、pack 成员和 raw 不单独分配 nonce。
 
@@ -83,19 +93,19 @@ nonce 为 12 字节：前 4 字节编码来源类型和 UTC 日期，后 8 字�
 ## 存储布局
 
 ```text
-<storage.prefix>/meta.json
-<storage.prefix>/<UUID 后两位>/<32 位小写 UUID>
-<storage.prefix>/packs/<UUID 后两位>/<32 位小写 UUID>
+<storage.prefix>/mokyu.json
+<storage.prefix>/chunks/<分目录>/<32 位小写 UUID>
+<storage.prefix>/packs/<分目录>/<32 位小写 UUID>
 ```
 
 `meta.json` 的 `format_version` 为 4，chunk/pack layout 分别为 `uuid-suffix2`、`uuid-suffix2-pack`，按 UUID 最后两位十六进制字符分目录，区块包位于 `packs/` 下。它包含 `deployment_id`、`storage_id`、chunk/pack layout、创建时间和版本诊断字段。创建 storage 时只允许在目标命名空间为空的情况下用条件写入初始化；编辑已有 storage 时必须读取并匹配完整 meta，缺失或不匹配会拒绝保存。修改 prefix 不会自动搬迁载荷。
 
-独立区块直接使用 UUID 分片路径。sweep 同时识别此前文档中的 `chunks/<分片>/<UUID>` 路径；任何仍被物理索引记录的 UUID 都受到保护。
+巡检仅识别符合当前后端分目录规则的区块与区块包。进入回收前还会核对持久引用及读取保护。
 
 群集只有尚未闭合的 CDC Multipart 尾块使用共享 staging storage 的保留前缀：
 
 ```text
-<storage.prefix>/__mokyu/multipart/fragment/<UUID>
+<storage.prefix>/multipart/fragment/<UUID>
 ```
 
 暂存对象不参与区块去重、普通目录、usage、rewrite 或 GC；由 `staging_objects` 和 runtime 的 staging 字节上限管理。其他载荷均使用有界内存、节点本地缓存或最终后端；单容器和群集复用本地 Multipart、raw/chunks 写缓存及回收机制。
@@ -110,7 +120,7 @@ HTTP 连接关闭或保活截止只结束等待，后台继续处理。进程中
 
 ## 区块包
 
-区块包只收集同一 storage、完整且连续的 CDC 区块，成员至少两个，原始成员总长受 profile 的 `pack_max_size` 限制。包整体可压缩并按包的 key 加密，成员索引和未压缩载荷摘要写入包头及数据库。包头及 AAD 标记为 `MOKYU\0\0\x04`；包头由 8 字节标记、4 字节成员数和每成员 52 字节索引组成，索引依次为 16 字节逻辑区块 UUID、32 字节 BLAKE3 和 4 字节原始长度，整数按大端保存。随后顺序保存成员原始正文。
+区块包只收集同一 storage、完整且连续的 CDC 区块，成员至少两个，原始成员总长受 profile 的 `pack_max_size` 限制。包整体可压缩并按包的 key 加密，成员索引和未压缩载荷摘要写入包头及数据库。包头及 AAD 标记为 `MOKYU\x00\x00\x04`；包头由 8 字节标记、4 字节成员数和每成员 52 字节索引组成，索引依次为 16 字节逻辑区块 UUID、32 字节 BLAKE3 和 4 字节原始长度，整数按大端保存。随后顺序保存成员原始正文。
 
 local storage 不创建新区块包；已有包保持可读，显式 `storage unpack` 才会拆包。S3 storage 可由普通 pack 调度器处理符合条件的存量独立区块，也可由显式 `storage rewrite` 按当前 profile 全量重写。保存 storage 表单或载入预设都不会自动启动这些任务。
 
@@ -122,13 +132,11 @@ S3 写缓存接收新块时先持久保存已校验的原始字节，不提前�
 
 ```text
 <data_path>/node.json
-<data_path>/cache/chunks/<后两位>/<UUID>{.zst|.raw}
-<data_path>/cache/raw/<后两位>/<UUID>
-<data_path>/cache/raw/<后两位>/<UUID>.part
-<data_path>/cache/raw/<后两位>/<UUID>.map
+<data_path>/cache/objects/<末三位倒序>/<UUID>{|.map|.part}
+<data_path>/cache/chunks/<末三位倒序>/<UUID>{.zst|.raw}
 <data_path>/cache/images/<派生键>/{metadata,output}
-<data_path>/pending/chunks/<后两位>/<UUID>{.zst|.raw}
-<data_path>/pending/raw/<后两位>/<UUID>{|.partial}
+<data_path>/pending/objects/<末三位倒序>/<UUID>{|.part}
+<data_path>/pending/chunks/<末三位倒序>/<UUID>{.zst|.raw}
 <data_path>/pending/multipart/fragment/<UUID>
 <data_path>/pending/multipart/candidate/<UUID>
 ```
@@ -151,7 +159,7 @@ raw 的每个物理来源按 1 MiB 分页，末页保留实际长度。每页保
 
 对已有数据启用严格分页读取前，可在主库检查 `SELECT COUNT(*) FROM raw_sources WHERE state = 'ready' AND page_count IS NULL`。通过 `mokyu cli integrity check --mode full --bucket <桶名>` 从物理来源核验并补建清单，检查任务结果并复查计数。为当前请求提供严格校验需要完整的相交页摘要，遇到缺失或损坏时，请求会报告读取失败。
 
-严格读取先取得相交页的权威摘要，按页核对正文，再输出客户端所需范围。部分磁盘缓存使用同一 UUID 的稀疏 `.part` 与校验过的 `.map`。索引绑定来源、物理地址、修订、大小和整源摘要，分别记录已写字节与通过校验的页。数据落盘后原子发布覆盖区间。中断恢复只承认已发布区间，空洞继续回源。全部补齐且整源 MD5 通过后，在原文件系统上改名为完整 raw 缓存。配额按部分文件实际占块及索引计量，无法查询分配量的平台按长度计量。完整文件和部分文件与 chunks 共享额度、淘汰及读取保护。
+严格读取先取得相交页的权威摘要，按页核对正文，再输出客户端所需范围。部分磁盘缓存使用同一 UUID 的稀疏 `.part` 与校验过的 `.map`。索引以 `MOKYU\x00\x00\x07` 开始，绑定来源、物理地址、修订、大小和整源摘要，分别记录已写字节与通过校验的页。数据落盘后原子发布覆盖区间。中断恢复只承认已发布区间，空洞继续回源。全部补齐且整源 MD5 通过后，在原文件系统上改名为完整 raw 缓存。配额按部分文件实际占块及索引计量，无法查询分配量的平台按长度计量。完整文件和部分文件与 chunks 共享额度、淘汰及读取保护。
 
 覆盖对象会选择当前来源，引用同一物理来源的对象可复用缓存。raw 的文件名使用后端物理 UUID，独立区块使用物理 UUID，Pack 解包成员使用逻辑 UUID。权限和来源状态仍由正常读取入口验证。来源复检直接访问后端。
 

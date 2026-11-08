@@ -74,7 +74,7 @@ def main():
                 uploading = executor.submit(fixture.put, "raw", body)
                 try:
                     wait(marker.with_suffix(".hit").exists, "raw creation boundary not reached")
-                    temporary, = fixture.root.rglob("*.partial")
+                    temporary, = fixture.root.rglob("*.part")
                     mode(temporary, 0o644)
                     other_user(temporary, True)
                     inode = temporary.stat().st_ino

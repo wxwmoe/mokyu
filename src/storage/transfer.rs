@@ -40,7 +40,7 @@ impl super::Storage {
         let existing = match tokio::fs::metadata(&path).await {
             Ok(value) => value.len(),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                match tokio::fs::metadata(path.with_extension("partial")).await {
+                match tokio::fs::metadata(path.with_extension("part")).await {
                     Ok(value) => value.len(),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
                     Err(error) => return Err(error.into()),
@@ -208,7 +208,7 @@ where
                 tokio::fs::create_dir_all(parent).await?;
                 super::raw::sync_directory(parent.parent().context("raw directory has no parent")?)
                     .await?;
-                let partial = destination.with_extension("partial");
+                let partial = destination.with_extension("part");
                 let mut options = tokio::fs::OpenOptions::new();
                 options.read(true).write(true).create(true).truncate(false);
                 #[cfg(unix)]

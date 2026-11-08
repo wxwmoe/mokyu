@@ -711,9 +711,7 @@ mod tests {
         let id = Uuid::new_v4();
         let mut request = super::super::raw_request::File::create_in(&files, id, policy).await?;
         request.append_in(&files, &[7; 4096]).await?;
-        let source = CacheFile::PendingRaw
-            .path(&root, id)
-            .with_extension("partial");
+        let source = CacheFile::PendingRaw.path(&root, id).with_extension("part");
         let metadata = tokio::fs::metadata(&source).await?;
         let target = Uuid::new_v4();
         request.cache_in(&files, target, policy, || Ok(())).await?;

@@ -107,9 +107,9 @@ bucket, bucket_id, client = create('retained')
 raw = os.urandom(1024 * 1024)
 client.put_object(Bucket=bucket, Key='retained', Body=raw)
 orphans = []
-for prefix in ('packs', '', 'chunks'):
+for prefix in ('packs', 'chunks'):
     location = uuid.uuid4().hex
-    path = directory / prefix / location[-2:] / location
+    path = directory / prefix / location[-3:][::-1] / location
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b'orphan')
     os.utime(path, (time.time() - 10, time.time() - 10))

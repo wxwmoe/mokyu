@@ -62,7 +62,7 @@ impl Storage {
                 .context("buffered chunk has no local root")?
                 .parent()
                 .context("local root is missing")?
-                .to_path_buf();
+                .join("chunks");
             let path = root.join(chunk_name(chunk.location_id));
             (root, path, false)
         };

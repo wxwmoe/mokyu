@@ -78,9 +78,9 @@ impl CacheFile {
                 .join("chunks")
                 .join(super::chunk_name(id))
                 .with_extension(if compressed { "zst" } else { "raw" }),
-            Self::Raw | Self::PendingRaw => root.join("raw").join(super::chunk_name(id)),
+            Self::Raw | Self::PendingRaw => root.join("objects").join(super::chunk_name(id)),
             Self::PartialRaw => root
-                .join("raw")
+                .join("objects")
                 .join(super::chunk_name(id))
                 .with_extension("part"),
         }
