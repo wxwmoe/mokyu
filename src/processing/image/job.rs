@@ -113,7 +113,7 @@ pub(crate) struct Product {
 }
 impl Product {
     pub fn path(&self) -> PathBuf {
-        self.entry.path.join("output")
+        self.entry.output_path()
     }
     pub async fn body(self) -> Result<Body> {
         let length = self.output.bytes;

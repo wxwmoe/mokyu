@@ -71,18 +71,19 @@ try:
     assert thumb.status_code == 200, thumb.text
     assert thumb.headers['content-type'] == 'image/png' and 'no-store' in thumb.headers['cache-control']
     assert struct.unpack('!II', thumb.content[16:24]) == (384, 192)
-    path = next(path / 'output' for path in cache_root.iterdir()
-                if path.is_dir() and (path / 'output').is_file() and (path / 'output').read_bytes() == thumb.content)
+    path = next(path for path in cache_root.glob('*/*') if path.is_file() and len(path.name)==64 and path.parent.name==path.name[:3] and path.read_bytes()==thumb.content)
     assert path.is_file(), cache_root
     before = thumbnail_bytes()
     assert before >= len(thumb.content) + 32
     assert admin.get(base + '/object/thumbnail', params=q).content == thumb.content
     assert thumbnail_bytes() == before
-    with path.open("r+b") as output: output.write(b"damaged preview")
+    with path.open("r+b") as output: output.truncate(13)
+    path.parent.chmod(0o555)
     cache_root.chmod(0o555)
     fallback = admin.get(base + '/object/thumbnail', params=q)
     assert fallback.status_code == 503, fallback.text
-    assert thumbnail_bytes() == before
+    assert thumbnail_bytes() <= before
+    path.parent.chmod(mode or 0o755)
     cache_root.chmod(mode or 0o755)
     assert admin.get(base + '/object/thumbnail', params=q).content == thumb.content
     assert path.read_bytes() == thumb.content

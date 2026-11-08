@@ -10,10 +10,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::{io::AsyncReadExt, sync::OnceCell};
+use tokio::sync::OnceCell;
 
 const ENTRIES: usize = 1024;
 const HEADER: usize = 64 * 1024;
+const MAGIC: &[u8; 8] = b"MOKYU\0\0\x08";
 const INDEX_MEMORY: usize = 4 * 1024 * 1024;
 pub(super) type Deferred = Arc<Mutex<VecDeque<(PathBuf, u64)>>>;
 pub(super) fn deferred(queue: &mut VecDeque<(PathBuf, u64)>, path: PathBuf, bytes: u64) {
@@ -33,6 +34,70 @@ pub(super) async fn remaining(path: &std::path::Path) -> u64 {
         }
     }
     bytes
+}
+
+fn regular_bytes(path: &std::path::Path) -> u64 {
+    std::fs::symlink_metadata(path)
+        .ok()
+        .filter(|s| s.is_file())
+        .map_or(0, |s| s.len())
+}
+
+fn remove_file(path: &std::path::Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn clean(path: &std::path::Path) -> std::io::Result<()> {
+    if path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .is_some_and(|n| n == "images")
+        && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+    {
+        return std::fs::remove_dir_all(path);
+    }
+    remove_file(&path.with_extension("meta"))?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::blocking("image-evict-meta");
+    remove_file(path)
+}
+
+fn residue(path: &std::path::Path) -> u64 {
+    if path
+        .parent()
+        .and_then(std::path::Path::file_name)
+        .is_some_and(|n| n == "images")
+        && std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+    {
+        return ["input", "output", "metadata"]
+            .iter()
+            .map(|n| regular_bytes(&path.join(n)))
+            .sum();
+    }
+    regular_bytes(path) + regular_bytes(&path.with_extension("meta"))
+}
+
+fn discard(
+    disk: &Disk,
+    pending: &mut VecDeque<(PathBuf, u64)>,
+    path: &std::path::Path,
+    charged: u64,
+) {
+    match clean(path) {
+        Ok(()) => disk.release(Area::Images, charged),
+        Err(error) => {
+            let left = residue(path);
+            disk.release(Area::Images, charged.saturating_sub(left));
+            if left > charged {
+                disk.account_existing(Area::Images, left - charged);
+            }
+            deferred(pending, path.to_owned(), left);
+            tracing::warn!(%error,"image cache cleanup deferred");
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -61,16 +126,7 @@ impl Drop for Entry {
     fn drop(&mut self) {
         if self.discard.load(Ordering::Relaxed) {
             let mut pending = self.deferred.lock().unwrap();
-            match std::fs::remove_dir_all(&self.path) {
-                Ok(()) => self.disk.release(Area::Images, self.bytes),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    self.disk.release(Area::Images, self.bytes)
-                }
-                Err(error) => {
-                    deferred(&mut pending, self.path.clone(), self.bytes);
-                    tracing::warn!(%error, "image cache cleanup deferred");
-                }
-            }
+            discard(&self.disk, &mut pending, &self.path, self.bytes);
         }
     }
 }
@@ -96,27 +152,28 @@ impl Entry {
                     .then(|| Arc::new(self.metadata.spans.clone()))
             })
     }
+    pub(super) fn output_path(&self) -> PathBuf {
+        if self
+            .path
+            .file_name()
+            .is_some_and(|n| n == self.metadata.key.as_str())
+        {
+            self.path.clone()
+        } else {
+            self.path.join("output")
+        }
+    }
     pub async fn open(&self) -> Result<tokio::fs::File> {
-        use tokio::io::AsyncSeekExt;
-        let mut file = tokio::fs::File::open(self.path.join("output")).await?;
+        let path = self.output_path();
+        ensure!(
+            tokio::fs::symlink_metadata(&path).await?.is_file(),
+            "invalid cached image file"
+        );
+        let file = tokio::fs::File::open(path).await?;
         ensure!(
             file.metadata().await?.len() == self.metadata.output.bytes,
             "invalid cached image size"
         );
-        let mut digest = blake3::Hasher::new();
-        let mut buffer = vec![0u8; 65536];
-        loop {
-            let n = file.read(&mut buffer).await?;
-            if n == 0 {
-                break;
-            }
-            digest.update(&buffer[..n]);
-        }
-        ensure!(
-            digest.finalize().to_hex().as_str() == self.metadata.digest,
-            "invalid cached image digest"
-        );
-        file.rewind().await?;
         Ok(file)
     }
 }
@@ -155,76 +212,79 @@ impl Cache {
             .get_or_init(|| async {
                 let result = async {
                     super::job::recover(&self.disk, &self.deferred).await?;
-                    let mut files = tokio::fs::read_dir(&self.root).await?;
-                    while let Some(file) = files.next_entry().await? {
-                        let name = file.file_name();
-                        let Some(name) = name.to_str().filter(|n| digest_name(n)) else {
-                            continue;
-                        };
-                        if !file.file_type().await?.is_dir() {
+                    let mut dirs = tokio::fs::read_dir(&self.root).await?;
+                    while let Some(dir) = dirs.next_entry().await? {
+                        let name = dir.file_name();
+                        let Some(shard) = name.to_str() else { continue };
+                        if !dir.file_type().await?.is_dir() {
                             continue;
                         }
-                        let record = async {
-                            let raw = crate::storage::read_bounded(
-                                file.path().join("metadata"),
-                                HEADER + 32,
-                            )
-                            .await?;
-                            ensure!(
-                                raw.len() > 32
-                                    && blake3::hash(&raw[32..]).as_bytes().as_slice() == &raw[..32],
-                                "invalid image metadata digest"
-                            );
-                            let metadata: Metadata = serde_json::from_slice(&raw[32..])?;
-                            ensure!(
-                                metadata.source_id.starts_with(super::job::SOURCE_PREFIX)
-                                    && metadata.source_id.len() <= 512
-                                    && metadata.spans.len() <= 256
-                                    && metadata.source.format.len() <= 32
-                                    && metadata.image.format.len() <= 32,
-                                "invalid image source descriptor"
-                            );
-                            ensure!(
-                                metadata.key == name
-                                    && digest_name(&metadata.digest)
-                                    && metadata.output.bytes > 0
-                                    && metadata.output.bytes <= 128 * 1024 * 1024,
-                                "invalid image cache metadata"
-                            );
-                            ensure!(
-                                tokio::fs::metadata(file.path().join("output")).await?.len()
-                                    == metadata.output.bytes,
-                                "invalid image cache length"
-                            );
-                            Ok::<_, anyhow::Error>((metadata, raw.len() as u64))
-                        }
-                        .await;
-                        let Ok((metadata, header)) = record else {
-                            if let Err(error) = tokio::fs::remove_dir_all(file.path()).await {
-                                let bytes = remaining(&file.path()).await;
-                                self.disk.account_existing(Area::Images, bytes);
-                                deferred(&mut self.deferred.lock().unwrap(), file.path(), bytes);
-                                tracing::warn!(%error, "invalid image cache cleanup failed");
+                        if digest_name(shard) {
+                            let mut entries = tokio::fs::read_dir(dir.path()).await?;
+                            let mut old = false;
+                            let mut known = true;
+                            while let Some(e) = entries.next_entry().await? {
+                                known &= e.file_type().await?.is_file()
+                                    && matches!(
+                                        e.file_name().to_str(),
+                                        Some("metadata" | "output")
+                                    );
+                                old = true;
+                            }
+                            if old && known {
+                                self.remove_existing(&dir.path());
                             }
                             continue;
-                        };
-                        let bytes = metadata.output.bytes + header;
-                        let entry = Arc::new(Entry {
-                            metadata,
-                            path: file.path(),
-                            disk: self.disk.clone(),
-                            deferred: self.deferred.clone(),
-                            bytes,
-                            discard: AtomicBool::new(true),
-                            referenced: AtomicBool::new(false),
-                            footprint: Mutex::default(),
-                        });
-                        self.disk.account_existing(Area::Images, bytes);
-                        self.remember(
-                            entry.metadata.source_id.clone(),
-                            entry.metadata.source.clone(),
-                        );
-                        self.retain(entry, true);
+                        }
+                        if !(2..=3).contains(&shard.len()) || !hex(shard) {
+                            continue;
+                        }
+                        let mut files = tokio::fs::read_dir(dir.path()).await?;
+                        while let Some(entry) = files.next_entry().await? {
+                            let filename = entry.file_name();
+                            let Some(name) = filename.to_str() else {
+                                continue;
+                            };
+                            let key = name.strip_suffix(".meta").unwrap_or(name);
+                            if !digest_name(key) || entry.file_type().await?.is_dir() {
+                                continue;
+                            }
+                            let path = dir.path().join(key);
+                            if &key[..3] != shard {
+                                self.remove_existing(&path);
+                                continue;
+                            }
+                            let sidecar = path.with_extension("meta");
+                            if name == key {
+                                if !tokio::fs::symlink_metadata(&sidecar)
+                                    .await
+                                    .is_ok_and(|m| m.is_file())
+                                {
+                                    self.remove_existing(&path);
+                                }
+                                continue;
+                            }
+                            let Ok((metadata, bytes)) = Self::restore(&path, key).await else {
+                                self.remove_existing(&path);
+                                continue;
+                            };
+                            let entry = Arc::new(Entry {
+                                metadata,
+                                path,
+                                disk: self.disk.clone(),
+                                deferred: self.deferred.clone(),
+                                bytes,
+                                discard: AtomicBool::new(true),
+                                referenced: AtomicBool::new(false),
+                                footprint: Mutex::default(),
+                            });
+                            self.disk.account_existing(Area::Images, bytes);
+                            self.remember(
+                                entry.metadata.source_id.clone(),
+                                entry.metadata.source.clone(),
+                            );
+                            self.retain(entry, true);
+                        }
                     }
                     let old = self.disk.root.join("thumbnails");
                     if let Ok(mut files) = tokio::fs::read_dir(old).await {
@@ -253,17 +313,53 @@ impl Cache {
             .await;
         Ok(())
     }
+    async fn restore(path: &std::path::Path, key: &str) -> Result<(Metadata, u64)> {
+        let sidecar = path.with_extension("meta");
+        ensure!(
+            tokio::fs::symlink_metadata(&sidecar).await?.is_file(),
+            "invalid image sidecar"
+        );
+        let data = tokio::fs::symlink_metadata(path).await?;
+        ensure!(data.is_file(), "invalid image file");
+        let frame = crate::storage::read_bounded(sidecar, HEADER + 40).await?;
+        ensure!(
+            frame.len() > 40
+                && frame.starts_with(MAGIC)
+                && blake3::hash(&frame[40..]).as_bytes() == &frame[8..40],
+            "invalid image metadata frame"
+        );
+        let meta: Metadata = serde_json::from_slice(&frame[40..])?;
+        ensure!(
+            meta.key == key
+                && digest_name(&meta.digest)
+                && (1..=128 * 1024 * 1024).contains(&meta.output.bytes)
+                && meta.output.bytes == data.len(),
+            "invalid cached image metadata"
+        );
+        ensure!(
+            meta.source_id.starts_with(super::job::SOURCE_PREFIX)
+                && meta.source_id.len() <= 512
+                && meta.spans.len() <= 256
+                && meta.source.format.len() <= 32
+                && meta.image.format.len() <= 32,
+            "invalid image source descriptor"
+        );
+        Ok((meta, data.len() + frame.len() as u64))
+    }
+    fn remove_existing(&self, path: &std::path::Path) {
+        let mut pending = self.deferred.lock().unwrap();
+        if pending.iter().any(|(p, _)| p == path) {
+            return;
+        }
+        let bytes = residue(path);
+        self.disk.account_existing(Area::Images, bytes);
+        discard(&self.disk, &mut pending, path, bytes);
+    }
     pub(super) fn reap(&self) {
         let mut pending = self.deferred.lock().unwrap();
         for _ in 0..pending.len().min(32) {
             let (path, bytes) = pending.pop_front().unwrap();
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => self.disk.release(Area::Images, bytes),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    self.disk.release(Area::Images, bytes)
-                }
-                Err(_) => pending.push_back((path, bytes)),
-            }
+            discard(&self.disk, &mut pending, &path, bytes);
         }
     }
     fn retain(&self, entry: Arc<Entry>, persistent: bool) {
@@ -329,12 +425,23 @@ impl Cache {
             Err(error) => {
                 tracing::debug!(%error, "image cache entry rejected");
                 let mut index = self.index.lock().unwrap();
-                if let Some(old) = index.entries.remove(key) {
+                if index
+                    .entries
+                    .get(key)
+                    .is_some_and(|old| Arc::ptr_eq(old, &entry))
+                {
+                    let old = index.entries.remove(key).unwrap();
                     index.bytes -= old.bytes;
                     index.memory -= old.memory();
                     index.order.retain(|k| k != key);
                 }
-                index.transient.remove(key);
+                if index
+                    .transient
+                    .get(key)
+                    .is_some_and(|old| old.ptr_eq(&Arc::downgrade(&entry)))
+                {
+                    index.transient.remove(key);
+                }
                 entry.discard.store(true, Ordering::Relaxed);
                 None
             }
@@ -405,23 +512,65 @@ impl Cache {
         let path = temporary.path.clone();
         let raw = serde_json::to_vec(&metadata)?;
         ensure!(raw.len() <= HEADER, "image cache header exceeds bound");
-        let mut record = blake3::hash(&raw).as_bytes().to_vec();
+        ensure!(digest_name(&metadata.key), "invalid image cache key");
+        let mut record = Vec::with_capacity(40 + raw.len());
+        record.extend_from_slice(MAGIC);
+        record.extend_from_slice(blake3::hash(&raw).as_bytes());
         record.extend_from_slice(&raw);
-        tokio::fs::write(path.join("metadata"), &record).await?;
         let bytes = metadata.output.bytes + record.len() as u64;
-        let target = self.root.join(&metadata.key);
-        // Cleanup and publication share a gate so a deferred delete cannot remove a replacement.
-        let pending = self.deferred.clone();
+        tokio::fs::write(path.join("metadata"), record).await?;
+        let shard = self.root.join(&metadata.key[..3]);
+        let target = shard.join(&metadata.key);
         let from = path.clone();
         let to = target.clone();
-        let persistent = tokio::task::spawn_blocking(move || {
-            let pending = pending.lock().unwrap();
-            !pending.iter().any(|(path, _)| path == &to) && std::fs::rename(from, to).is_ok()
+        let disk = self.disk.clone();
+        let pending = self.deferred.clone();
+        let persistent = tokio::task::spawn_blocking(move || -> Result<bool> {
+            match std::fs::create_dir(&shard) {
+                Ok(()) => std::fs::File::open(shard.parent().unwrap())?.sync_all()?,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => ensure!(
+                    std::fs::symlink_metadata(&shard)?.is_dir(),
+                    "invalid image cache directory"
+                ),
+                Err(e) => return Err(e.into()),
+            }
+            let image = from.join("output");
+            let header = from.join("metadata");
+            std::fs::File::open(&image)?.sync_all()?;
+            std::fs::File::open(&header)?.sync_all()?;
+            let directory = std::fs::File::open(&shard)?;
+            let mut pending = pending.lock().unwrap();
+            if pending.iter().any(|(p, _)| p == &to) {
+                return Ok(false);
+            }
+            let meta = to.with_extension("meta");
+            if std::fs::symlink_metadata(&to).is_ok() || std::fs::symlink_metadata(&meta).is_ok() {
+                return Ok(false);
+            }
+            #[cfg(feature = "fault-injection")]
+            crate::faults::blocking("image-before-publish");
+            std::fs::rename(image, &to)?;
+            let finish = (|| -> std::io::Result<()> {
+                directory.sync_all()?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::blocking("image-body-published");
+                std::fs::rename(header, &meta)?;
+                directory.sync_all()
+            })();
+            if let Err(error) = finish {
+                let left = residue(&to);
+                disk.account_existing(Area::Images, left);
+                discard(&disk, &mut pending, &to, left);
+                return Err(error.into());
+            }
+            #[cfg(feature = "fault-injection")]
+            crate::faults::blocking("image-pair-published");
+            Ok(true)
         })
-        .await?;
+        .await??;
         let path = if persistent { target } else { path };
         temporary.charge.take().unwrap().commit_written(bytes);
-        temporary.retained = true;
+        temporary.retained = !persistent;
         let entry = Arc::new(Entry {
             metadata,
             path,
@@ -436,9 +585,11 @@ impl Cache {
         Ok(entry)
     }
 }
+fn hex(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
 fn digest_name(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    value.len() == 64 && hex(value)
 }

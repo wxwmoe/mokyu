@@ -12,6 +12,7 @@ Mokyu 的格式标记共 8 字节。前 5 字节是 ASCII `MOKYU`，后 3 字节
 | `0x000005` | [区块包文件头](#区块包) |
 | `0x000006` | [元数据恢复帧的标记](#存储布局) |
 | `0x000007` | [raw 部分读缓存的 `.map` 文件头](#本地目录和缓存) |
+| `0x000008` | [图片缓存的 `.meta` 文件头](#本地目录和缓存) |
 
 ## 原始文件
 
@@ -145,13 +146,13 @@ S3 写缓存接收新块时先持久保存已校验的原始字节，不提前�
 
 ## 本地目录和缓存
 
-各节点的本地目录由 `instance.data_path` 指定：
+各节点的本地目录由 `instance.data_path` 指定。花括号列出文件名后缀，空项表示无后缀。
 
 ```text
 <data_path>/node.json
 <data_path>/cache/objects/<末三位倒序>/<UUID>{|.map|.part}
 <data_path>/cache/chunks/<末三位倒序>/<UUID>{.zst|.raw}
-<data_path>/cache/images/<派生键>/{metadata,output}
+<data_path>/cache/images/<前三位正序>/<派生键>{|.meta}
 <data_path>/pending/objects/<末三位倒序>/<UUID>{|.part}
 <data_path>/pending/chunks/<末三位倒序>/<UUID>{.zst|.raw}
 <data_path>/pending/multipart/fragment/<UUID>
@@ -190,4 +191,4 @@ raw 的每个物理来源按 1 MiB 分页，末页保留实际长度。每页保
 
 写入调度由每个后端的 `write_flush_interval`、`write_backlog_max_age` 和 `background_scheduling` 控制，取值及准入边界见[配置参考](configuration.md)。`cache status` 的 `write_backlog` 提供各后端最早待写时间与快照距今秒数，合并等待不改变已选择的确认级别或回收保护。
 
-公开样式与管理缩略图共用 `cache/images`。键由经过验证的来源标识、规范化后的固定处理规则和实现版本生成；不以对象路径或 ETag 单独作为身份。元数据和输出共同发布，读出时检查长度和摘要；损坏或淘汰后可从当前授权的来源重建。该目录不需要备份，不能替代 `pending` 中的唯一副本。
+公开样式与管理缩略图共用 `cache/images`。键由经过验证的来源标识、规范化后的固定处理规则和实现版本生成；不以对象路径或 ETag 单独作为身份。先发布无后缀的原始图片，再发布同键的 `.meta`。元数据以 `MOKYU\x00\x00\x08` 开头，随后是 32 字节 BLAKE3 和至多 64 KiB 的 JSON。生成图片时计算一次正文 BLAKE3 作为 ETag。重启时核对元数据摘要、键和文件长度。正常命中的 HEAD 和 304 不读图片，Range 只读取所请求的字节。该目录不需要备份，不能替代 `pending` 中的唯一副本。

@@ -37,11 +37,11 @@ def run(f, request, page, case, checks, restart):
         restart()
 
     def files():
-        return {p.name: p for p in root.iterdir() if p.is_dir() and re.fullmatch("[a-f0-9]{64}", p.name)}
+        return {p.name: p for p in root.glob("*/*") if p.is_file() and re.fullmatch("[a-f0-9]{64}", p.name) and p.parent.name == p.name[:3]}
 
     def accounting():
         used = f.cli("status")["local_bytes"][2]
-        actual = sum(p.stat().st_size for entry in files().values() for p in entry.iterdir() if p.is_file())
+        actual = sum(p.stat().st_size for p in root.glob("*/*") if p.is_file() and re.fullmatch(r"[a-f0-9]{64}(?:\.meta)?", p.name))
         assert used == actual and used <= 98304, (used, actual)
 
     def upload(index, seed=None):
@@ -71,7 +71,7 @@ def run(f, request, page, case, checks, restart):
         keys = [upload(i) for i in range(8)]
         first = get(keys[0])
         before = files()
-        before_stats = {key: (path / "output").stat() for key, path in before.items()}
+        before_stats = {key: path.stat() for key, path in before.items()}
         version = f.session.get(f.web + "/api/v1/buckets/" + f.bucket_id + "/objects",
                                 params={"q": keys[0], "mode": "exact"}, timeout=20).json()["items"][0]["id"]
         preview = f.session.get(f.web + "/api/v1/buckets/" + f.bucket_id + "/object/thumbnail",
@@ -79,7 +79,7 @@ def run(f, request, page, case, checks, restart):
         assert preview.status_code == 200, preview.text[:200]
         assert preview.content == first.content and preview.headers["Cache-Control"] == "private, no-store"
         assert files().keys() == before.keys()
-        assert all((files()[key] / "output").stat().st_ino == stat.st_ino for key, stat in before_stats.items())
+        assert all(files()[key].stat().st_ino == stat.st_ino for key, stat in before_stats.items())
         checks.append("management thumbnail and equivalent public rule share the same immutable output inode")
         for key in keys[1:7]:
             get(key)
@@ -89,46 +89,57 @@ def run(f, request, page, case, checks, restart):
             replies = list(pool.map(get, [keys[7]] * 4))
         assert all(r.content == replies[0].content for r in replies)
         accounting()
-        target = next(path for path in files().values() if (path / "output").read_bytes() == replies[0].content)
-        with (target / "output").open("r+b") as output:
-            output.write(b"damaged!")
+        target = next(path for path in files().values() if path.read_bytes() == replies[0].content)
+        with target.open("r+b") as output:
+            output.truncate(13)
         assert get(keys[7]).content == replies[0].content
-        with (target / "output").open("r+b") as output:
-            output.write(b"damaged!")
+        with target.open("r+b") as output:
+            output.truncate(13)
+        target.parent.chmod(0o500)
         root.chmod(0o500)
         get(keys[7], 503)
+        target.parent.chmod(permissions)
         root.chmod(permissions)
         assert get(keys[7]).content == replies[0].content
         accounting()
-        with (target / "output").open("r+b") as output:
-            output.write(b"damaged!")
+        with target.open("r+b") as output:
+            output.truncate(13)
+        target.parent.chmod(0o500)
         root.chmod(0o500)
         barrier = f.arm("image-before-capture")
-        with ThreadPoolExecutor(1) as pool:
-            pending = pool.submit(get, keys[7])
-            try:
-                wait(lambda: barrier.with_suffix(".hit").exists(), "cleanup before replacement", 10)
-                root.chmod(permissions)
-            finally:
-                barrier.unlink(missing_ok=True)
-            assert pending.result(timeout=30).content == replies[0].content
-        assert not (target / "output").exists(), "replacement published into a pending deletion"
-        assert get(keys[7]).content == replies[0].content
+        with target.open("rb") as old:
+            with ThreadPoolExecutor(1) as pool:
+                pending = pool.submit(get, keys[7])
+                try:
+                    wait(lambda: barrier.with_suffix(".hit").exists(), "cleanup before replacement", 10)
+                    root.chmod(permissions)
+                    target.parent.chmod(permissions)
+                finally:
+                    barrier.unlink(missing_ok=True)
+                assert pending.result(timeout=30).content == replies[0].content
+            old_inode = os.fstat(old.fileno()).st_ino
+            if target.exists() and target.stat().st_ino == old_inode:
+                assert target.stat().st_size == 13
+            assert get(keys[7]).content == replies[0].content
+            assert target.read_bytes() == replies[0].content and target.stat().st_ino != old_inode
+            published = target.stat().st_ino
+            assert get(keys[7]).content == replies[0].content and target.stat().st_ino == published
         accounting()
-        checks.append("quota eviction, exact disk accounting, single-flight concurrency and same-size corruption recovery")
+        checks.append("quota eviction, exact disk accounting, single-flight concurrency and truncated image recovery")
         stale = root / (".work-" + str(uuid.uuid4()))
         stale.mkdir()
         (stale / "input").write_bytes(b"interrupted input")
         os.chown(stale, 10001, 10001)
         sentinel = root / "keep-unrecognized"
         sentinel.write_bytes(b"not an image cache entry")
-        retained = {key: (path / "output").stat().st_ino for key, path in files().items()}
+        retained = {key: path.stat().st_ino for key, path in files().items()}
         restart()
         assert not stale.exists() and sentinel.exists()
-        assert all((files()[key] / "output").stat().st_ino == inode for key, inode in retained.items())
+        assert all(files()[key].stat().st_ino == inode for key, inode in retained.items())
         assert get(keys[7]).content == replies[0].content
         accounting()
-        header = target / "metadata"
+        target = next(path for path in files().values() if path.read_bytes() == replies[0].content)
+        header = target.with_suffix(".meta")
         with header.open("r+b") as metadata:
             metadata.write(b"bad record")
         restart()
