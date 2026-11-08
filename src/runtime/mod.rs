@@ -39,6 +39,15 @@ pub(crate) fn run() -> Result<()> {
         }
         return Ok(());
     }
+    if let Some(Command::Dump(command)) = args.command {
+        set_process_title("dump");
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        return tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()?
+            .block_on(crate::dump::run(command));
+    }
     let role = match args.command.as_ref() {
         Some(Command::Control { .. }) => Role::Control,
         Some(Command::Worker { .. }) => Role::Worker,

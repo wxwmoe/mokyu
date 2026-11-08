@@ -5,6 +5,7 @@ mod cluster;
 mod config;
 mod content;
 mod control;
+mod dump;
 #[cfg(feature = "fault-injection")]
 mod faults;
 mod http;

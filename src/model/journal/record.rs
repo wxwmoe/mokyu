@@ -281,7 +281,7 @@ pub(crate) struct Change {
 }
 
 impl Change {
-    pub fn validate(&self) -> Result<()> {
+    pub(crate) fn validate_metadata(&self, size: i64) -> Result<()> {
         ensure!(
             !self.bucket.is_nil()
                 && self.generation > 0
@@ -301,6 +301,14 @@ impl Change {
             self.attributes.is_some() == (self.operation == Operation::Put),
             "invalid journal attributes"
         );
+        ensure!(
+            size == self.attributes.as_ref().map_or(0, |v| v.size),
+            "incomplete journal object"
+        );
+        Ok(())
+    }
+
+    pub fn validate(&self) -> Result<()> {
         let mut offset = 0i64;
         for range in &self.ranges {
             ensure!(
@@ -315,11 +323,7 @@ impl Change {
                 .checked_add(range.length)
                 .context("journal object length overflow")?;
         }
-        ensure!(
-            offset == self.attributes.as_ref().map_or(0, |v| v.size),
-            "incomplete journal object"
-        );
-        Ok(())
+        self.validate_metadata(offset)
     }
 }
 

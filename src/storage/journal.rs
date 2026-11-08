@@ -7,6 +7,7 @@ pub(crate) mod remote;
 pub(crate) mod replay;
 pub(crate) mod snapshot;
 pub(crate) mod source;
+pub(crate) mod stream;
 
 use crate::content::codec::Key;
 use anyhow::{Context, Result, ensure};

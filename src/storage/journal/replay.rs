@@ -1,7 +1,6 @@
 use super::{
     Format,
-    batch::{Decoder, ObjectRanges, Record},
-    verify_segment,
+    batch::{ObjectRanges, Record},
 };
 use crate::model::journal::record::{BlockKey, Change, Kind, Material, Operation, Reference};
 use anyhow::{Context, Result, ensure};
@@ -473,16 +472,17 @@ impl Catalog {
 }
 
 // The caller owns staging. Its recovery transaction is committed only after the seal validates.
+#[cfg(test)]
 pub(crate) fn stage_segment(
     format: &Format<'_>,
     path: &str,
     data: &[u8],
     first: u64,
     previous: [u8; 32],
-    decoder: &mut Decoder,
+    decoder: &mut super::batch::Decoder,
     mut stage: impl FnMut(Record) -> Result<()>,
 ) -> Result<(u64, [u8; 32])> {
-    verify_segment(format, path, data, first, previous, |frame| {
+    super::verify_segment(format, path, data, first, previous, |frame| {
         decoder.read(
             &frame.bytes,
             frame.sequence.last - frame.sequence.first + 1,

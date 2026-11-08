@@ -1,7 +1,4 @@
-use super::{
-    Format, FrameType, ROOT, Sequence,
-    batch::{Decoder, frames},
-};
+use super::{Format, FrameType, ROOT, Sequence, batch::frames};
 use crate::model::journal::record::{Attributes, Material, Span, WrappedKey};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -207,11 +204,12 @@ pub(crate) fn encode_pages(
     Ok(pages)
 }
 
+#[cfg(test)]
 pub(crate) fn decode_page(
     format: &Format<'_>,
     page: &Page,
     data: &[u8],
-    decoder: &mut Decoder,
+    decoder: &mut super::batch::Decoder,
     mut visit: impl FnMut(Row) -> Result<()>,
 ) -> Result<()> {
     ensure!(

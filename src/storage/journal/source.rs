@@ -1,8 +1,9 @@
 use super::{
     Format, FrameType, ROOT,
     batch::Decoder,
-    replay::{self, Catalog},
+    replay::Catalog,
     segment_path, snapshot,
+    stream::{self, Sink},
 };
 use crate::{
     content::codec::Key,
@@ -16,7 +17,7 @@ use anyhow::{Context, Result, ensure};
 use futures_util::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use uuid::Uuid;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -226,10 +227,22 @@ impl Source {
         buckets: Option<&std::collections::BTreeSet<Uuid>>,
         local: Option<&super::local::Local>,
     ) -> Result<(Catalog, Cut)> {
+        let mut memory = stream::Memory::default();
+        memory.catalog.select(buckets);
+        let cut = self.walk(store, fixed, buckets, local, &mut memory).await?;
+        Ok((memory.catalog, cut))
+    }
+
+    pub(crate) async fn walk(
+        &self,
+        store: &dyn ObjectStore,
+        fixed: Option<&Cut>,
+        buckets: Option<&std::collections::BTreeSet<Uuid>>,
+        local: Option<&super::local::Local>,
+        catalog: &mut (impl Sink + Send),
+    ) -> Result<Cut> {
         let key = Key::new("aes-256-gcm", self.material)?;
         let history = super::history::chain(store, &self.journal, self.connection.id, &key).await?;
-        let mut catalog = Catalog::default();
-        catalog.select(buckets);
         let mut checkpoint = None;
         let mut checkpoint_revision = None;
         let index_path = snapshot::index_path();
@@ -357,7 +370,7 @@ impl Source {
                         && manifest.sequence == index.sequence,
                     "invalid snapshot manifest"
                 );
-                catalog.replace_scope(&index.buckets, &index.excluded)?;
+                catalog.scope(&index.buckets, &index.excluded)?;
                 let mut decoder = Decoder::default();
                 let mut seen = std::collections::HashSet::new();
                 for page in manifest.pages {
@@ -376,16 +389,7 @@ impl Source {
                         );
                         continue;
                     }
-                    let data = bytes(
-                        store,
-                        &snapshot::page_path(page.owner, page.number),
-                        page.bytes,
-                    )
-                    .await?
-                    .context("missing snapshot page")?;
-                    snapshot::decode_page(&format, &page, &data, &mut decoder, |r| {
-                        catalog.snapshot_row(r, &format)
-                    })?;
+                    stream::page(store, &format, &page, &mut decoder, catalog).await?;
                 }
                 ensure!(decoder.complete(), "incomplete snapshot record");
                 sequence = manifest.sequence;
@@ -394,7 +398,6 @@ impl Source {
             let prefix = Path::from(format!("{ROOT}/changes/{}", epoch.simple()));
             let head = local.map(|l| l.head(&format)).transpose()?.flatten();
             let mut listed = store.list(Some(&prefix));
-            let mut paths = BTreeMap::new();
             while let Some(meta) = listed.try_next().await? {
                 let name = meta.location.to_string();
                 let active = local.is_some() && name.ends_with(".part");
@@ -416,15 +419,12 @@ impl Source {
                     continue;
                 }
                 if first > sequence && end.is_none_or(|p| first <= p.sequence) {
-                    ensure!(
-                        paths.insert(first, name).is_none(),
-                        "duplicate journal segment"
-                    );
+                    catalog.list(first, name)?;
                 }
             }
             let mut decoder = Decoder::default();
             let mut salvaged = end.and_then(|p| p.salvaged.clone());
-            for (first, physical) in paths {
+            while let Some((first, physical)) = catalog.pop()? {
                 let path = segment_path(epoch, first);
                 ensure!(
                     sequence.checked_add(1) == Some(first),
@@ -433,43 +433,35 @@ impl Source {
                 let pinned = salvaged.as_ref().filter(|s| s.first == first);
                 let open = head.filter(|h| h.first == first && !h.sealed);
                 let prefix_len = pinned.map(|v| v.bytes).or_else(|| open.map(|h| h.bytes));
-                (sequence, tail) = if let Some(size) = prefix_len {
+                let segment = stream::Segment {
+                    physical: &physical,
+                    first,
+                    previous: tail,
+                    prefix: prefix_len,
+                };
+                let (last, digest, bytes_hash) = segment
+                    .read(store, &format, &mut decoder, catalog)
+                    .await
+                    .with_context(|| format!("cannot read {path}"))?;
+                if let Some(size) = prefix_len {
                     ensure!(
-                        size > 0 && size <= u64::from(MAX_LIMIT),
-                        "invalid recovery prefix length"
-                    );
-                    let data = store.get_range(&Path::from(physical), 0..size).await?;
-                    let digest = *blake3::hash(&data).as_bytes();
-                    ensure!(
-                        data.len() as u64 == size && pinned.is_none_or(|s| s.digest == digest),
+                        pinned.is_none_or(|p| p.digest == bytes_hash),
                         "salvaged prefix changed"
                     );
-                    let point =
-                        super::verify_prefix(&format, &path, &data, first, tail, true, |f| {
-                            decoder.read(&f.bytes, f.sequence.last - f.sequence.first + 1, |r| {
-                                catalog.stage(r, &format)
-                            })
-                        })?;
                     if pinned.is_none() {
                         ensure!(
-                            open.is_some_and(|h| h.last == point.0 && h.tail == point.1),
+                            open.is_some_and(|h| h.last == last && h.tail == digest),
                             "local journal frontier disagrees"
                         );
                         salvaged = Some(marker::Salvaged {
                             first,
                             bytes: size,
-                            digest,
+                            digest: bytes_hash,
                         });
                     }
-                    point
-                } else {
-                    let data = bytes(store, &physical, u64::from(MAX_LIMIT))
-                        .await?
-                        .context("missing journal segment")?;
-                    replay::stage_segment(&format, &path, &data, first, tail, &mut decoder, |r| {
-                        catalog.stage(r, &format)
-                    })?
-                };
+                }
+                sequence = last;
+                tail = digest;
                 catalog.apply()?;
             }
             if end.is_none()
@@ -495,15 +487,12 @@ impl Source {
                 "fixed recovery checkpoint changed"
             );
         }
-        catalog.validate_pack_members()?;
-        Ok((
-            catalog,
-            Cut {
-                point: last.context("unknown checkpoint epoch")?,
-                checkpoint,
-                checkpoint_revision,
-            },
-        ))
+        catalog.finish()?;
+        Ok(Cut {
+            point: last.context("unknown checkpoint epoch")?,
+            checkpoint,
+            checkpoint_revision,
+        })
     }
 }
 pub(crate) fn client(c: &model::Connection) -> Result<crate::storage::external::Client> {

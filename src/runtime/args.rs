@@ -113,6 +113,8 @@ pub(super) enum Command {
         #[command(subcommand)]
         command: ToolCommand,
     },
+    /// List or export objects from a read-only metadata journal.
+    Dump(crate::dump::Args),
     Cli {
         #[command(subcommand)]
         command: cli::Command,
