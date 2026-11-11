@@ -113,6 +113,22 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 
 `buckets.image_policy` 和 `image_revision` 保存桶的图片策略及目录修订；`image_styles` 按桶和名称保存样式、启用状态和规则。导入令牌 `image_import_token` 用于协调分批导入。保存时核对修订、路径保留和映射系列，过期编辑不能覆盖同时发生的更改。派生图片不存入数据库，其丢失不影响原始对象。
 
+## 镜像回源
+
+| 表与字段 | 类型、默认值与约束 |
+| --- | --- |
+| `bucket_mirroring.bucket_id` | 桶 UUID 主键，外键随桶删除 |
+| `revision`、`enabled` | BIGINT 正修订；boolean 默认 false |
+| `config_encrypted` | 非空二进制配置，密文认证绑定桶 UUID 与修订 |
+| `mirroring_keys.bucket_id`、`object_key` | 联合主键；对象键沿用各数据库的不透明键表示，桶外键级联删除 |
+| `blocked` | 非空 boolean，默认 false；删除屏蔽不按时间自动过期 |
+| `task_id` | 可空 UUID、唯一索引；任务外键删除时置空 |
+| `revision` | 非空 BIGINT，默认 0，任务接受的规则修订 |
+| `external_id`、`external_revision` | 可空 UUID / BIGINT，固定当前源连接身份与修订 |
+| `missing_until`、`retry_after` | 非空 BIGINT，默认 0，分别为源站 404 缓存和失败退避的 Unix 秒期限 |
+
+UUID 在 PostgreSQL 为 UUID、MySQL 为 BINARY(16)、SQLite 为 BLOB；配置密文分别为 BYTEA、MEDIUMBLOB、BLOB。回源任务复用 `tasks` 的执行令牌、状态和进度。普通上传、删除、规则变更和最终发布在既有事务边界核验目标所有权，回源中间状态不进入对象元数据日志。
+
 ## 智能分层
 
 `bucket_tiering` 记录桶的热端、冷端及其命名空间、策略修订和开始观察的时间。`physical_demand` 按物理 UUID 记录最近读取、请求数、实际返回的源字节数和回源次数；`physical_demand_windows` 保存小时聚合。包成员单独统计需求，但不单独迁移。节点通过既有观测批次幂等提交，覆盖断档会重新开始降冷观察期。

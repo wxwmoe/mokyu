@@ -7,6 +7,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt;
 use s3s::{
     S3, S3Request, S3Response, S3Result,
     access::{S3Access, S3AccessContext},
@@ -567,11 +568,66 @@ impl S3 for Gateway {
                 || i.if_unmodified_since.is_some();
             let deadline = crate::app::readiness::deadline();
             let permits = self.0.admit(false).await?;
-            let (mut s, mut pin) = if light {
-                (self.0.metadata(b.id, &i.key).await?, None)
+            let initial = if light {
+                self.0.metadata(b.id, &i.key).await.map(|s| (s, None))
             } else {
-                let (s, pin) = self.0.current(b.id, &i.key).await?;
-                (s, Some(pin))
+                self.0
+                    .current(b.id, &i.key)
+                    .await
+                    .map(|(s, pin)| (s, Some(pin)))
+            };
+            let (mut s, mut pin) = match initial {
+                Ok(current) => current,
+                Err(error) if crate::app::mirroring::missing(&error) => {
+                    self.authorize_read(
+                        req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                        b.id,
+                    )
+                    .await?;
+                    if let Some(mut read) = self
+                        .0
+                        .mirror_read(
+                            &b,
+                            &i.key,
+                            &req.headers,
+                            false,
+                            light
+                                || i.range.is_some()
+                                || req.headers.contains_key("if-range")
+                                || i.checksum_mode.is_some(),
+                        )
+                        .await?
+                    {
+                        for (name, value) in [
+                            ("content-type", i.response_content_type.as_deref()),
+                            (
+                                "content-disposition",
+                                i.response_content_disposition.as_deref(),
+                            ),
+                            ("content-encoding", i.response_content_encoding.as_deref()),
+                            ("content-language", i.response_content_language.as_deref()),
+                            ("cache-control", i.response_cache_control.as_deref()),
+                        ] {
+                            if let Some(value) = value {
+                                read.headers.insert(name, value.parse()?);
+                            }
+                        }
+                        if let Some(value) = i.response_expires {
+                            read.headers.insert("expires", http_date(value)?.parse()?);
+                        }
+                        if let Some(mut body) = read.body.take() {
+                            read.body = Some(StreamingBlob::wrap(async_stream::stream! {
+                                let _permits = permits;
+                                while let Some(bytes) = body.next().await { yield bytes.map_err(std::io::Error::other); }
+                            }));
+                        }
+                        return Ok(get_read(read, false)?);
+                    }
+                    let (stream, pin) =
+                        crate::app::reads::scope(None, self.0.current(b.id, &i.key)).await?;
+                    (stream, Some(pin))
+                }
+                Err(error) => return Err(error),
             };
             loop {
                 if req.credentials.is_some() || !s.public_read {

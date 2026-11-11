@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261108051001.
+-- Generated from the complete postgres migration chain through 20261111193000.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -876,6 +876,14 @@ CREATE TABLE public.bucket_domains (
     bucket_id uuid CONSTRAINT domains_bucket_id_not_null NOT NULL
 );
 
+CREATE TABLE public.bucket_mirroring (
+    bucket_id uuid NOT NULL,
+    revision bigint NOT NULL,
+    enabled boolean DEFAULT false NOT NULL,
+    config_encrypted bytea NOT NULL,
+    CONSTRAINT bucket_mirroring_revision_check CHECK ((revision > 0))
+);
+
 CREATE TABLE public.bucket_tiering (
     bucket_id uuid NOT NULL,
     hot_storage uuid NOT NULL,
@@ -1559,6 +1567,18 @@ CREATE TABLE public.member_external_grants (
     bucket_id uuid NOT NULL,
     actions text[] NOT NULL,
     CONSTRAINT member_external_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text]))
+);
+
+CREATE TABLE public.mirroring_keys (
+    bucket_id uuid NOT NULL,
+    object_key text NOT NULL,
+    blocked boolean DEFAULT false NOT NULL,
+    task_id uuid,
+    revision bigint DEFAULT 0 NOT NULL,
+    external_id uuid,
+    external_revision bigint,
+    missing_until bigint DEFAULT 0 NOT NULL,
+    retry_after bigint DEFAULT 0 NOT NULL
 );
 
 CREATE TABLE public.mokyu_meta (
@@ -3071,6 +3091,9 @@ ALTER TABLE ONLY public.audit_events
 ALTER TABLE ONLY public.bucket_change_gates
     ADD CONSTRAINT bucket_change_gates_pkey PRIMARY KEY (bucket_id);
 
+ALTER TABLE ONLY public.bucket_mirroring
+    ADD CONSTRAINT bucket_mirroring_pkey PRIMARY KEY (bucket_id);
+
 ALTER TABLE ONLY public.bucket_tiering
     ADD CONSTRAINT bucket_tiering_pkey PRIMARY KEY (bucket_id);
 
@@ -3265,6 +3288,9 @@ ALTER TABLE ONLY public.member_external_grants
 
 ALTER TABLE ONLY public.member_bucket_grants
     ADD CONSTRAINT member_grants_pkey PRIMARY KEY (user_id, bucket_id);
+
+ALTER TABLE ONLY public.mirroring_keys
+    ADD CONSTRAINT mirroring_keys_pkey PRIMARY KEY (bucket_id, object_key);
 
 ALTER TABLE ONLY public.mokyu_meta
     ADD CONSTRAINT mokyu_meta_pkey PRIMARY KEY (singleton);
@@ -3757,6 +3783,8 @@ CREATE INDEX member_external_bucket ON public.member_external_grants USING btree
 
 CREATE INDEX member_external_membership ON public.member_external_grants USING btree (user_id, project_id);
 
+CREATE UNIQUE INDEX mirroring_keys_task_idx ON public.mirroring_keys USING btree (task_id);
+
 CREATE INDEX multipart_files_node ON public.multipart_files USING btree (node_id, id);
 
 CREATE INDEX multipart_files_reclaim ON public.multipart_files USING btree (storage_id, id) WHERE reclaim_pending;
@@ -4127,6 +4155,9 @@ ALTER TABLE ONLY public.api_tokens
 ALTER TABLE ONLY public.bucket_change_gates
     ADD CONSTRAINT bucket_change_gates_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.bucket_mirroring
+    ADD CONSTRAINT bucket_mirroring_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY public.bucket_tiering
     ADD CONSTRAINT bucket_tiering_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);
 
@@ -4336,6 +4367,12 @@ ALTER TABLE ONLY public.member_bucket_grants
 
 ALTER TABLE ONLY public.member_bucket_grants
     ADD CONSTRAINT member_grants_user_id_project_id_fkey FOREIGN KEY (user_id, project_id) REFERENCES public.project_members(user_id, project_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.mirroring_keys
+    ADD CONSTRAINT mirroring_keys_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.mirroring_keys
+    ADD CONSTRAINT mirroring_keys_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE SET NULL;
 
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);

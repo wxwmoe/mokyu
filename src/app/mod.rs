@@ -26,6 +26,7 @@ pub(crate) mod compression;
 pub(crate) mod credential_activity;
 pub(crate) mod extents;
 pub(crate) mod listing;
+pub(crate) mod mirroring;
 pub(crate) mod public_reads;
 pub(crate) mod publish;
 pub(crate) mod quota;
@@ -189,6 +190,8 @@ impl Active {
     }
 }
 pub struct App {
+    pub(crate) mirror_readers: mirroring::Readers,
+    pub(crate) mirroring: Arc<dyn crate::model::mirroring::MirroringStore>,
     pub(crate) journal: Arc<dyn crate::model::journal::JournalStore>,
     pub(crate) node_writes: Arc<dyn crate::model::cluster::NodeWrites>,
     pub(crate) node_reads: Arc<dyn crate::model::cluster::NodeReads>,
@@ -433,6 +436,8 @@ impl App {
             managed_keys: stores.managed_keys,
             storage_records: stores.storage_records,
             external_buckets: stores.external_buckets,
+            mirroring: stores.mirroring,
+            mirror_readers: Default::default(),
             replications: stores.replications,
             redundancy: stores.redundancy,
             image_styles: stores.image_styles,

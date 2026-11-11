@@ -340,19 +340,55 @@ pub(crate) async fn read(
         None
     };
     let mut cached_mapping = None;
-    let (mut stream, mut pin) = if let Some((stream, mapping)) = public_snapshot {
+    let initial = if let Some((stream, mapping)) = public_snapshot {
         cached_mapping = mapping;
-        (stream, None)
+        Ok((stream, None))
     } else if let Some((stream, mapping)) = candidate {
         cached_mapping = Some(mapping);
         #[cfg(feature = "fault-injection")]
         crate::faults::point("read-cache-snapshot").await;
-        (stream, None)
+        Ok((stream, None))
     } else if light {
-        (app.metadata(bucket, key).await?, None)
+        app.metadata(bucket, key).await.map(|stream| (stream, None))
     } else {
-        let (stream, pin) = app.current(bucket, key).await?;
-        (stream, Some(pin))
+        app.current(bucket, key)
+            .await
+            .map(|(stream, pin)| (stream, Some(pin)))
+    };
+    let (mut stream, mut pin) = match initial {
+        Ok(current) => current,
+        Err(error) if !head && crate::app::mirroring::missing(&error) => {
+            if let Some(mut read) = app
+                .mirror_read(
+                    bucket_info,
+                    key,
+                    request,
+                    true,
+                    light
+                        || checksum
+                        || request.contains_key(header::RANGE)
+                        || request.contains_key(header::IF_RANGE),
+                )
+                .await?
+            {
+                read.headers.extend(overrides.clone());
+                return Ok(read);
+            }
+            return crate::app::reads::scope(
+                None,
+                Box::pin(read(
+                    app,
+                    bucket_info,
+                    key,
+                    request,
+                    head,
+                    overrides,
+                    checksum,
+                )),
+            )
+            .await;
+        }
+        Err(error) => return Err(error),
     };
     let mut force_identity = policy.is_some_and(|profile| !profile.http_compression_enabled);
     loop {

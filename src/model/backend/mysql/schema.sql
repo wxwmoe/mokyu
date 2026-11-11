@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261108051001.
+-- Generated from the complete mysql migration chain through 20261111193000.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -76,6 +76,16 @@ CREATE TABLE `bucket_domains` (
   PRIMARY KEY (`host`),
   KEY `bucket_domains_bucket` (`bucket_id`),
   CONSTRAINT `bucket_domains_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `bucket_mirroring` (
+  `bucket_id` binary(16) NOT NULL,
+  `revision` bigint NOT NULL,
+  `enabled` tinyint(1) NOT NULL DEFAULT '0',
+  `config_encrypted` mediumblob NOT NULL,
+  PRIMARY KEY (`bucket_id`),
+  CONSTRAINT `bucket_mirroring_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `bucket_mirroring_chk_1` CHECK ((`revision` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `bucket_tiering` (
@@ -937,6 +947,22 @@ CREATE TABLE `member_external_grants` (
   CONSTRAINT `member_external_bucket` FOREIGN KEY (`bucket_id`, `project_id`) REFERENCES `external_buckets` (`id`, `project_id`) ON DELETE CASCADE,
   CONSTRAINT `member_external_member` FOREIGN KEY (`user_id`, `project_id`) REFERENCES `project_members` (`user_id`, `project_id`) ON DELETE CASCADE,
   CONSTRAINT `member_external_actions` CHECK ((`actions` <= 31))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `mirroring_keys` (
+  `bucket_id` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `blocked` tinyint(1) NOT NULL DEFAULT '0',
+  `task_id` binary(16) DEFAULT NULL,
+  `revision` bigint NOT NULL DEFAULT '0',
+  `external_id` binary(16) DEFAULT NULL,
+  `external_revision` bigint DEFAULT NULL,
+  `missing_until` bigint NOT NULL DEFAULT '0',
+  `retry_after` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`bucket_id`,`object_key`),
+  UNIQUE KEY `mirroring_keys_task_idx` (`task_id`),
+  CONSTRAINT `mirroring_keys_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `mirroring_keys_task` FOREIGN KEY (`task_id`) REFERENCES `tasks` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `mokyu_meta` (

@@ -75,6 +75,7 @@ pub(super) use cache::*;
 mod objects;
 pub(super) use objects::*;
 mod buckets;
+pub(super) mod mirroring;
 pub(super) use buckets::*;
 mod multipart;
 pub(super) use multipart::*;

@@ -15,6 +15,7 @@ pub(crate) mod compression_tests;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StreamPurpose {
     Object,
+    Mirror,
     Copy,
     Part,
     Internal,
@@ -26,7 +27,7 @@ impl StreamPurpose {
     }
 
     pub(crate) fn publishes(self) -> bool {
-        matches!(self, Self::Object | Self::Copy)
+        matches!(self, Self::Object | Self::Mirror | Self::Copy)
     }
 }
 

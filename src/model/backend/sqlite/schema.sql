@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261108051001.
+-- Generated from the complete sqlite migration chain through 20261111193000.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -53,6 +53,13 @@ CREATE TABLE bucket_domains (
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     CONSTRAINT bucket_domains_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE bucket_mirroring (
+    bucket_id BLOB NOT NULL PRIMARY KEY REFERENCES buckets(id) ON DELETE CASCADE,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    enabled INTEGER NOT NULL DEFAULT FALSE CHECK (enabled IN (0,1)),
+    config_encrypted BLOB NOT NULL
+);
 
 CREATE TABLE bucket_tiering (
     bucket_id BLOB NOT NULL PRIMARY KEY,
@@ -733,6 +740,19 @@ CREATE TABLE "member_external_grants" (
     FOREIGN KEY (user_id,project_id) REFERENCES project_members(user_id,project_id) ON DELETE CASCADE,
     FOREIGN KEY (bucket_id,project_id) REFERENCES external_buckets(id,project_id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE mirroring_keys (
+    bucket_id BLOB NOT NULL REFERENCES buckets(id) ON DELETE CASCADE,
+    object_key BLOB NOT NULL,
+    blocked INTEGER NOT NULL DEFAULT FALSE CHECK (blocked IN (0,1)),
+    task_id BLOB REFERENCES tasks(id) ON DELETE SET NULL,
+    revision INTEGER NOT NULL DEFAULT 0,
+    external_id BLOB,
+    external_revision INTEGER,
+    missing_until INTEGER NOT NULL DEFAULT 0,
+    retry_after INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_id, object_key)
+);
 
 CREATE TABLE mokyu_meta (
     id INTEGER PRIMARY KEY CHECK(id=1),
@@ -2144,6 +2164,8 @@ CREATE INDEX member_external_membership ON member_external_grants(user_id,projec
 CREATE INDEX member_grants_bucket ON member_bucket_grants(bucket_id,project_id);
 
 CREATE INDEX member_grants_member ON member_bucket_grants(user_id,project_id);
+
+CREATE UNIQUE INDEX mirroring_keys_task_idx ON mirroring_keys(task_id);
 
 CREATE INDEX multipart_files_node ON multipart_files(node_id,state,id);
 

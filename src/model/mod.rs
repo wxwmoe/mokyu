@@ -19,6 +19,7 @@ pub(crate) mod key_replacement;
 pub(crate) mod key_usage;
 pub(crate) mod maintenance;
 pub(crate) mod metrics;
+pub(crate) mod mirroring;
 pub(crate) mod multipart;
 pub(crate) mod node;
 pub(crate) mod node_chunk;
@@ -103,6 +104,7 @@ pub(crate) use stream::{
 pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord};
 
 pub(crate) struct Stores {
+    pub(crate) mirroring: Arc<dyn mirroring::MirroringStore>,
     pub(crate) journal: Arc<dyn journal::JournalStore>,
     pub(crate) integrity_rates: Arc<crate::storage::rate::IntegrityRates>,
     pub(crate) runtime: Arc<dyn runtime::RuntimeStore>,

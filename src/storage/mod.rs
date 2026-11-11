@@ -18,6 +18,7 @@ pub(crate) mod marker;
 mod memory;
 pub(crate) mod model;
 mod multipart;
+pub(crate) mod origin;
 pub(crate) mod pack_ranges;
 pub(crate) mod pack_writer;
 mod partial_map;

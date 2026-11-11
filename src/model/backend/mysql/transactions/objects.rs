@@ -73,6 +73,9 @@ pub(in super::super) async fn remove_object_reference(
     key: &str,
     old: Option<Id>,
 ) -> Result<()> {
+    queries::mirroring::block(bucket, key)
+        .execute(&mut *connection)
+        .await?;
     let token = Id::default();
     queries::remove_object(bucket, key, token)
         .execute(&mut *connection)

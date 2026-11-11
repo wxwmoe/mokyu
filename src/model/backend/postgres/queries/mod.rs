@@ -123,6 +123,7 @@ pub(super) use administration::*;
 mod credentials;
 pub(super) use credentials::*;
 mod buckets;
+pub(super) mod mirroring;
 pub(super) use buckets::*;
 mod multipart;
 pub(super) use multipart::*;

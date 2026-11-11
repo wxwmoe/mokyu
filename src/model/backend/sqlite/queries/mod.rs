@@ -110,6 +110,7 @@ pub(super) use publication::*;
 mod multipart;
 pub(super) use multipart::*;
 mod buckets;
+pub(super) mod mirroring;
 pub(super) use buckets::*;
 mod objects;
 pub(super) use objects::*;

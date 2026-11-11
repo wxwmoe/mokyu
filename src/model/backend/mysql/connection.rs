@@ -72,6 +72,7 @@ pub(crate) async fn connect(
         managed_keys: backend.clone(),
         storage_records: backend.clone(),
         external_buckets: backend.clone(),
+        mirroring: backend.clone(),
         replications: backend.clone(),
         redundancy: backend.clone(),
         image_styles: backend.clone(),

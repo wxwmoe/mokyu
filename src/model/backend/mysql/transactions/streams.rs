@@ -33,6 +33,7 @@ pub(in super::super) async fn install_replica(
     expected: Option<Id>,
     candidate: Id,
 ) -> Result<()> {
+    mirroring::publication(db, candidate).await?;
     let (old, token) = queries::lock_object_version(bucket, key)
         .fetch_one(&mut **db)
         .await?;
@@ -195,7 +196,12 @@ pub(in super::super) async fn create_stream_in(
             .fetch_one(&mut **tx)
             .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
-    if input.owner.is_none() || input.purpose == crate::model::StreamPurpose::Object {
+    if input.owner.is_none()
+        || matches!(
+            input.purpose,
+            crate::model::StreamPurpose::Object | crate::model::StreamPurpose::Mirror
+        )
+    {
         super::super::transactions::redundancy::accept_origin(
             tx,
             input.bucket,
@@ -232,6 +238,9 @@ pub(in super::super) async fn create_stream_in(
             true,
         )
         .await?;
+    }
+    if input.purpose == crate::model::StreamPurpose::Mirror {
+        mirroring::claim(tx, &input, id).await?;
     }
     if input.purpose == crate::model::StreamPurpose::Object {
         queries::claim_object(input.bucket, &input.key, id)

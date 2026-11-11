@@ -400,6 +400,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/mirroring": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["bucket_mirroring"];
+        put: operations["bucket_mirroring_save"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/mirroring/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bucket_mirroring_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/object": {
         parameters: {
             query?: never;
@@ -3175,6 +3207,89 @@ export interface components {
             task?: string | null;
             task_state?: string | null;
         };
+        MirroringConfig: {
+            /**
+             * Format: int32
+             * @default 10
+             */
+            connect_timeout_seconds: number;
+            /** @default false */
+            enabled: boolean;
+            /**
+             * Format: int32
+             * @default 30
+             */
+            header_timeout_seconds: number;
+            /**
+             * Format: int32
+             * @default 60
+             */
+            idle_timeout_seconds: number;
+            /**
+             * Format: int64
+             * @default null
+             */
+            max_object_size: number | null;
+            /**
+             * Format: int32
+             * @default 30
+             */
+            negative_ttl_seconds: number;
+            /** @default [] */
+            rules: components["schemas"]["MirroringRule"][];
+        };
+        MirroringPreview: {
+            enabled: boolean;
+            public_read: boolean;
+            /** Format: uuid */
+            rule_id?: string | null;
+            source?: string | null;
+            source_key?: string | null;
+        };
+        MirroringPreviewInput: {
+            config: components["schemas"]["MirroringConfig"];
+            key: string;
+        };
+        MirroringRule: {
+            add_prefix?: string;
+            backup?: components["schemas"]["MirroringSource"] | null;
+            /** Format: uuid */
+            id: string;
+            name: string;
+            prefix?: string;
+            public_read?: boolean;
+            source: components["schemas"]["MirroringSource"];
+            strip_prefix?: boolean;
+        };
+        MirroringSource: {
+            allow_http?: boolean;
+            allow_private?: boolean;
+            follow_redirects?: boolean;
+            header_names?: string[];
+            /** @description Omitted on reads. Omit on update to retain unchanged-source headers; an empty map clears them. */
+            headers?: {
+                [key: string]: string;
+            } | null;
+            /** @enum {string} */
+            type: "http";
+            url: string;
+        } | {
+            /** Format: uuid */
+            external_id: string;
+            prefix?: string;
+            /** @enum {string} */
+            type: "s3";
+        };
+        MirroringUpdate: {
+            config: components["schemas"]["MirroringConfig"];
+            /** Format: int64 */
+            revision: number;
+        };
+        MirroringView: {
+            config: components["schemas"]["MirroringConfig"];
+            /** Format: int64 */
+            revision: number;
+        };
         /** @enum {string} */
         Mode: "metadata" | "head" | "full";
         ModeInput: {
@@ -5170,6 +5285,77 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StyleImportResult"];
+                };
+            };
+        };
+    };
+    bucket_mirroring: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MirroringView"];
+                };
+            };
+        };
+    };
+    bucket_mirroring_save: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MirroringUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MirroringView"];
+                };
+            };
+        };
+    };
+    bucket_mirroring_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MirroringPreviewInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MirroringPreview"];
                 };
             };
         };

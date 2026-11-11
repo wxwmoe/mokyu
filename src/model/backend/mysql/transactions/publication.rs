@@ -54,6 +54,7 @@ pub(in super::super) async fn publish_in(
     if_none: Option<s3s::dto::ETagCondition>,
     completion: Option<(uuid::Uuid, String, serde_json::Value, Uuid)>,
 ) -> Result<bool> {
+    mirroring::publication(tx, id).await?;
     let authority = queries::write_authorization(id)
         .fetch_one(&mut **tx)
         .await?

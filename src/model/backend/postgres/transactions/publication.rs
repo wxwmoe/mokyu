@@ -61,6 +61,7 @@ pub(in super::super) async fn publish_in(
             .fetch_one(&mut **tx)
             .await?;
     authority.lock(tx).await?;
+    mirroring::publication(tx, id).await?;
     // Replacing the write token locks the object before its quota trigger references the old stream.
     let old = queries::lock_publish_object(id)
         .fetch_optional(&mut **tx)
@@ -345,6 +346,9 @@ pub(in super::super) async fn apply_object_change(
             .execute(&mut **tx)
             .await?;
     } else {
+        queries::mirroring::block(bucket, object_key)
+            .execute(&mut **tx)
+            .await?;
         queries::remove_object(bucket, object_key, Id::default())
             .execute(&mut **tx)
             .await?;

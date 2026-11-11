@@ -229,6 +229,9 @@ pub(super) async fn access_gate(
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Response {
+    if request.headers().contains_key("x-mokyu-origin-hop") {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let Some(path) = request
         .extensions()
         .get::<MatchedPath>()

@@ -357,6 +357,13 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
                     ),
                 )
                 .await
+        } else if task_type == "storage_migration" && detail["operation"] == "mirroring" {
+            app.mirror_batch(
+                execution,
+                bucket.context("mirroring bucket disappeared")?,
+                detail,
+            )
+            .await
         } else if task_type == "storage_migration" && detail["operation"] == "tiering" {
             app.tier_batch(execution).await
         } else if task_type == "storage_migration" && detail["operation"] == "replication" {

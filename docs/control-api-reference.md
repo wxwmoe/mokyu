@@ -258,6 +258,27 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 创建和预览使用 `target_bucket`、`target_external`、`target_prefix`、`mode`、`permissions`、`propagate_deletes`、`max_pending_keys`。默认模式为 `asynchronous`；同一部署内的独立后端也可选 `synchronous`，外部目标不接受此模式。每条关系最多保留的不同待处理键默认 4096，可选 1–1000000。权限选项与数据复制相同，缺省时内部目标继承、外部目标不传递。删除传播仅适用于内部目标。解除完成前目标命名空间仍由关系占用；解除不会清理已发布副本。
 
+## 镜像回源
+
+`GET /api/v1/buckets/{bucket}/mirroring` 返回 `{revision,config}`。`PUT` 接受相同结构，保存时核对修订，过期编辑返回 412；需要桶设置权限和近期认证。规则默认关闭，单容器的首次 GET 可流式返回并保存到目标桶，HEAD 和 LIST 不访问源站。
+
+| 配置 | 默认值和范围 |
+| --- | --- |
+| `enabled`、`rules` | `false`、空列表；最多 64 条，按顺序使用第一条匹配规则 |
+| `connect_timeout_seconds` | 10，范围 1–300 |
+| `header_timeout_seconds` | 30，范围 1–3600；也用于跟随请求等待填充 |
+| `idle_timeout_seconds` | 60，范围 1–3600；正文无进展超时 |
+| `negative_ttl_seconds` | 30，范围 0–3600；0 关闭源站 404 缓存 |
+| `max_object_size` | `null`；可配置正整数字节数，仍受接收上限和桶配额限制 |
+
+每条规则包含唯一 `id`、`name`、`prefix`、`strip_prefix`、`add_prefix`、`public_read`、`source` 和可空 `backup`。空前缀匹配全部；路径映射不改变目标键。`public_read` 默认 false，开启还需要桶 ACL 权限，允许匿名触发并将目标保存为公开对象。
+
+HTTP 源使用 `{type:"http",url,allow_http,allow_private,follow_redirects,headers}`；后三个布尔选项默认 false。私网访问需要管理员权限，环回、链路本地和云元数据地址始终禁止。重定向最多三次且只能同源。`headers` 为固定请求头映射，读取配置仅返回 `header_names`；更新时省略可保留相同规则 UUID 和 URL 的旧值，空映射表示清除，更换 URL 必须重新指定。秘密随部署凭据加密，不回显到任务或预览。
+
+S3 源使用 `{type:"s3",external_id}`，引用同项目内有读取授权且启用的外部存储桶。备用源只用于尚未输出正文时遇到的不存在、限流、超时或暂时不可用，认证失败不切换。现有对象不自动刷新，失败填充不发布半成品；启用回源时删除目标键会留下持久屏蔽。
+
+`POST /api/v1/buckets/{bucket}/mirroring/preview` 接受 `{key,config}`，返回 `enabled`、匹配的 `rule_id`、`source`、`source_key` 和 `public_read`。该操作只计算路径，不访问源站、不创建对象。
+
 ## 智能分层
 
 桶设置权限允许访问 `/api/v1/buckets/{bucket}/tiering`。热层是桶当前的内部 S3 后端，`policy.cold_storage` 指定另一个已启用、支持直接读取的内部 S3 后端。冷端须与热端及有关联的冗余副本位置独立。
