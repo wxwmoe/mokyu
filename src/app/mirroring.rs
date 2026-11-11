@@ -103,13 +103,13 @@ impl App {
             })
             .await?;
         self.work_queued();
-        let first = stream && task == proposed;
+        let mut first = stream && task == proposed;
         let wait = async {
             loop {
                 if first {
                     match receiver.try_recv() {
                         Ok(read) => return read.map(Some),
-                        Err(oneshot::error::TryRecvError::Closed) => {}
+                        Err(oneshot::error::TryRecvError::Closed) => first = false,
                         Err(oneshot::error::TryRecvError::Empty) => {}
                     }
                 }
@@ -163,7 +163,13 @@ impl App {
                     }
                     _ => {}
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::select! {
+                    read = &mut receiver, if first => match read {
+                        Ok(read) => return read.map(Some),
+                        Err(_) => first = false,
+                    },
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
             }
         };
         let mut read = tokio::time::timeout(
