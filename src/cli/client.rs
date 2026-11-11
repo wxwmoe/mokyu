@@ -26,6 +26,20 @@ pub async fn client(path: Option<&Path>, mut command: Command) -> Result<()> {
         return super::styles::execute(path, styles).await;
     }
     match &mut command {
+        Command::Bucket(Buckets::Mirroring {
+            command: Mirroring::Preview { file, document, .. },
+            ..
+        }) => {
+            if let Some(file) = file {
+                *document = Some(read_json(file, 64 * 1024, "mirroring configuration")?);
+            }
+        }
+        Command::Bucket(Buckets::Mirroring {
+            command: Mirroring::Set { file, document },
+            ..
+        }) => {
+            *document = Some(read_json(file, 64 * 1024, "mirroring configuration")?);
+        }
         Command::Storages(Storages::Recovery {
             command:
                 Recoveries::Probe {

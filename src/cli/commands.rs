@@ -171,6 +171,11 @@ pub enum Integrity {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Buckets {
     List,
+    Mirroring {
+        name: String,
+        #[command(subcommand)]
+        command: Mirroring,
+    },
     Journal {
         name: String,
         #[arg(long, requires = "revision")]
@@ -207,6 +212,48 @@ pub enum Buckets {
         confirm_bucket: Option<Uuid>,
         #[arg(skip)]
         confirmed: bool,
+    },
+}
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum Mirroring {
+    Show,
+    Set {
+        file: PathBuf,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Preview {
+        key: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(skip)]
+        document: Option<Value>,
+    },
+    Test {
+        key: String,
+        #[arg(long)]
+        backup: bool,
+    },
+    Blocks {
+        #[arg(long)]
+        after: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
+    Unblock {
+        key: String,
+    },
+    Status {
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
+    Pause {
+        task: Uuid,
+    },
+    Resume {
+        task: Uuid,
     },
 }
 #[derive(Subcommand, Serialize, Deserialize)]
@@ -695,6 +742,14 @@ impl Command {
             | Self::Status { .. }
             | Self::Audit { .. }
             | Self::Bucket(Buckets::List | Buckets::Journal { enabled: None, .. })
+            | Self::Bucket(Buckets::Mirroring {
+                command:
+                    Mirroring::Show
+                    | Mirroring::Preview { .. }
+                    | Mirroring::Status { .. }
+                    | Mirroring::Blocks { .. },
+                ..
+            })
             | Self::Bucket(Buckets::Tiering {
                 command:
                     Tiering::Show | Tiering::Preview { .. } | Tiering::Units(_) | Tiering::Usage(_),

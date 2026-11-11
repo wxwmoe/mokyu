@@ -889,6 +889,88 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let buckets: Vec<Bucket> = app.buckets.all().await?;
             Ok(serde_json::to_value(buckets)?)
         }
+        Command::Bucket(Buckets::Mirroring { name, command }) => {
+            use crate::cli::Mirroring;
+            let bucket = app.bucket(&name, true).await?.id;
+            principal
+                .require(app.authorization.as_ref(), bucket, Action::Settings)
+                .await?;
+            match command {
+                Mirroring::Show => Ok(serde_json::to_value(
+                    super::mirroring::view(app, principal, bucket).await?,
+                )?),
+                Mirroring::Set { document, .. } => {
+                    app.authorization.admin(principal).await?.finish().await?;
+                    let input = serde_json::from_value(
+                        document.context("missing mirroring configuration")?,
+                    )?;
+                    Ok(serde_json::to_value(
+                        super::mirroring::configure(app, principal, true, bucket, input).await?,
+                    )?)
+                }
+                Mirroring::Preview { key, document, .. } => {
+                    let config = match document {
+                        Some(value) => {
+                            serde_json::from_value::<crate::model::mirroring::Update>(value)?.config
+                        }
+                        None => super::mirroring::view(app, principal, bucket).await?.config,
+                    };
+                    Ok(serde_json::to_value(config.preview(&key)?)?)
+                }
+                Mirroring::Test { key, backup } => {
+                    app.authorization.admin(principal).await?.finish().await?;
+                    let view = super::mirroring::view(app, principal, bucket).await?;
+                    Ok(serde_json::to_value(
+                        super::mirroring::probe(
+                            app,
+                            principal,
+                            true,
+                            bucket,
+                            super::mirroring::ProbeInput {
+                                key,
+                                backup,
+                                revision: view.revision,
+                                config: view.config,
+                            },
+                        )
+                        .await?,
+                    )?)
+                }
+                Mirroring::Blocks { after, limit } => {
+                    ensure!(
+                        (1..=100).contains(&limit)
+                            && after.as_ref().is_none_or(|key| key.len() <= 1024),
+                        s3s::s3_error!(InvalidArgument)
+                    );
+                    Ok(serde_json::to_value(
+                        app.mirroring
+                            .blocks(principal, bucket, after.as_deref(), limit)
+                            .await?,
+                    )?)
+                }
+                Mirroring::Unblock { key } => {
+                    app.writable()?;
+                    app.mirroring.unblock(principal, bucket, &key).await?;
+                    Ok(json!({"unblocked":key}))
+                }
+                Mirroring::Status { token, limit } => Ok(serde_json::to_value(
+                    super::mirroring::status(app, principal, bucket, token, Some(limit)).await?,
+                )?),
+                Mirroring::Pause { task } | Mirroring::Resume { task } => {
+                    super::mirroring::change_task(
+                        app,
+                        principal,
+                        bucket,
+                        super::mirroring::TaskAction {
+                            task,
+                            resume: matches!(command, Mirroring::Resume { .. }),
+                        },
+                    )
+                    .await?;
+                    Ok(json!({"task_id":task}))
+                }
+            }
+        }
         Command::Bucket(Buckets::Journal {
             name,
             enabled,

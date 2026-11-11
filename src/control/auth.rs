@@ -159,6 +159,8 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/buckets/{bucket}/redundancy/{id}"
                 | "/api/v1/buckets/{bucket}/tiering"
                 | "/api/v1/buckets/{bucket}/tiering/usage"
+                | "/api/v1/buckets/{bucket}/mirroring/blocks"
+                | "/api/v1/buckets/{bucket}/mirroring/tasks"
                 | "/api/v1/buckets/{bucket}/image-processing/styles"
                 | "/api/v1/buckets/{bucket}/image-processing/styles/export"
                 | "/api/v1/external-buckets"
@@ -196,6 +198,10 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/buckets/{bucket}/redundancy/preview"
                 | "/api/v1/buckets/{bucket}/tiering/preview"
                 | "/api/v1/buckets/{bucket}/tiering/state"
+                | "/api/v1/buckets/{bucket}/mirroring/preview"
+                | "/api/v1/buckets/{bucket}/mirroring/test"
+                | "/api/v1/buckets/{bucket}/mirroring/unblock"
+                | "/api/v1/buckets/{bucket}/mirroring/tasks"
                 | "/api/v1/buckets/{bucket}/redundancy/{id}/command"
                 | "/api/v1/buckets/{bucket}/image-processing/preview"
                 | "/api/v1/buckets/{bucket}/image-processing/styles/import"
@@ -221,8 +227,34 @@ fn member_route(path: &str, method: &Method) -> bool {
                 "/api/v1/buckets/{bucket}/cors"
                     | "/api/v1/buckets/{bucket}/website"
                     | "/api/v1/buckets/{bucket}/settings"
+                    | "/api/v1/buckets/{bucket}/mirroring"
             )
     )
+}
+#[cfg(test)]
+mod tests {
+    use super::{Method, member_route};
+
+    #[test]
+    fn mirroring_routes_defer_to_bucket_permissions() {
+        for (method, path) in [
+            (Method::GET, "/mirroring"),
+            (Method::PUT, "/mirroring"),
+            (Method::GET, "/mirroring/blocks"),
+            (Method::GET, "/mirroring/tasks"),
+            (Method::POST, "/mirroring/preview"),
+            (Method::POST, "/mirroring/test"),
+            (Method::POST, "/mirroring/unblock"),
+            (Method::POST, "/mirroring/tasks"),
+        ] {
+            assert!(member_route(
+                &format!("/api/v1/buckets/{{bucket}}{path}"),
+                &method
+            ));
+        }
+        assert!(!member_route("/api/v1/tasks", &Method::GET));
+        assert!(!member_route("/api/v1/tasks/{id}/actions", &Method::POST));
+    }
 }
 pub(super) async fn access_gate(
     State(app): State<Arc<App>>,

@@ -28,7 +28,7 @@ pub(in super::super) fn assign(
 }
 
 pub(in super::super) fn enqueue(input: &crate::model::mirroring::Start) -> Statement<'static> {
-    sqlx::query("INSERT INTO tasks(id,task_type,bucket_id,state,detail) VALUES(?,'storage_migration',?,'queued',?)").bind(input.task).bind(input.bucket).bind(serde_json::json!({"operation":"mirroring","revision":input.revision,"rule_id":input.rule,"key":input.key,"storage_id":input.storage}))
+    sqlx::query("INSERT INTO tasks(id,task_type,bucket_id,state,detail) VALUES(?,'storage_migration',?,'queued',?)").bind(input.task).bind(input.bucket).bind(serde_json::json!({"operation":"mirroring","policy":"mirroring","revision":input.revision,"rule_id":input.rule,"key":input.key,"storage_id":input.storage}))
 }
 
 pub(in super::super) fn record(bucket: Uuid) -> Rows<'static, (i64, Option<Vec<u8>>)> {

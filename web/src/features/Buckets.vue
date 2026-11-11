@@ -13,6 +13,7 @@ import CreateBucket from '../components/CreateBucket.vue'
 import BucketLifecycle from '../components/BucketLifecycle.vue'
 import BucketRedundancy from '../components/BucketRedundancy.vue'
 import BucketTiering from '../components/BucketTiering.vue'
+import BucketMirroring from '../components/BucketMirroring.vue'
 import BucketImages from '../components/BucketImages.vue'
 import QuotaPanel from '../components/QuotaPanel.vue'
 import EmptyState from '../components/EmptyState.vue'
@@ -56,7 +57,8 @@ function reset() {
   baseline.value = JSON.stringify(draft.value)
 }
 const dirty = computed(() => !!draft.value && JSON.stringify(draft.value) !== baseline.value)
-const imagesDirty=ref(false)
+const imagesDirty=ref(false), mirroringDirty=ref(false)
+const mirroring = ref<InstanceType<typeof BucketMirroring>>()
 watch(id, () => { draft.value = undefined; baseline.value = '' })
 watch(settings.data, () => { if (!dirty.value) reset() }, { immediate: true })
 watch(id, () => { tab.value = 'connection' })
@@ -67,7 +69,7 @@ function lines(value: string) { return value.split('\n') }
 function clean(values: string[]) { return values.map(v => v.trim()).filter(Boolean) }
 function method(rule: Rule, value: string, checked: boolean) { rule.methods = checked ? [...rule.methods, value] : rule.methods.filter(m => m !== value) }
 function addRule(preset = false) { draft.value?.cors.push({ origins: preset ? ['*'] : [], methods: preset ? [...methods] : ['GET', 'HEAD'], headers: preset ? ['*'] : [], expose: preset ? ['*'] : [], max_age: preset ? 86400 : 300 }) }
-async function refresh() { if (!await canLeave()) return; baseline.value = JSON.stringify(draft.value); const value = await settings.refetch(); if (value.error) report(value.error); else reset() }
+async function refresh() { if (!await canLeave()) return; baseline.value = JSON.stringify(draft.value); const value = await settings.refetch(); if (value.error) report(value.error); else reset(); await mirroring.value?.refresh() }
 async function save() {
   if (!draft.value) return
   saving.value = true
@@ -78,10 +80,10 @@ const discardOpen = ref(false)
 let decide: ((value: boolean) => void) | undefined
 function discard(value: boolean) { decide?.(value); decide = undefined; discardOpen.value = false }
 watch(discardOpen, value => { if (!value) discard(false) })
-function canLeave() { return (!dirty.value&&!imagesDirty.value) || new Promise<boolean>(resolve => { decide?.(false); decide = resolve; discardOpen.value = true }) }
-async function changeTab(value:string|number) {if(String(value)!==tab.value&&imagesDirty.value&&!(await canLeave()))return;tab.value=String(value)}
+function canLeave() { return (!dirty.value&&!imagesDirty.value&&!mirroringDirty.value) || new Promise<boolean>(resolve => { decide?.(false); decide = resolve; discardOpen.value = true }) }
+async function changeTab(value:string|number) {if(String(value)!==tab.value&&(imagesDirty.value||mirroringDirty.value)&&!(await canLeave()))return;tab.value=String(value)}
 onBeforeRouteLeave(canLeave); onBeforeRouteUpdate(to => to.params.bucket === route.params.bucket || canLeave())
-function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value||imagesDirty.value) { event.preventDefault(); event.returnValue = '' } }
+function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value||imagesDirty.value||mirroringDirty.value) { event.preventDefault(); event.returnValue = '' } }
 window.addEventListener('beforeunload', beforeUnload)
 onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload); decide?.(false) })
 </script>
@@ -91,7 +93,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
   <template v-if="!id"><label class="search-field"><span class="sr-only">{{ t('findBucket') }}</span><input v-model="filter" :placeholder="t('findBucket')" type="search"></label><div class="bucket-grid"><RouterLink v-for="bucket in filtered" :key="bucket.id" class="bucket-card" :to="'/buckets/' + bucket.id"><img src="/assets/mokyu-pack.svg" alt="" width="64" height="64"><h2>{{ bucket.name }}</h2><span class="badge">{{ t(bucket.uploads_paused ? 'uploadsPaused' : bucket.status) }}</span><Settings2 class="bucket-arrow" :size="19" /></RouterLink></div><EmptyState v-if="!buckets.isPending.value && !bucketOptions.isPending.value && !bucketOptions.error.value && !filtered.length" :title="t(needsStorage ? 'noStores' : 'noBuckets')" :description="t(needsStorage ? 'noStoresHint' : 'bucketSettingsEmpty')"><RouterLink v-if="needsStorage" class="button primary" to="/storages"><HardDrive :size="16" />{{ t('createStore') }}</RouterLink></EmptyState></template>
   <template v-else-if="draft && settings.data.value"><nav class="breadcrumbs bucket-back"><RouterLink to="/buckets">{{ t('buckets') }}</RouterLink><span>/</span><span>{{ settings.data.value.bucket.name }}</span><span v-if="settings.data.value.bucket.status !== 'active'" class="badge">{{ t(settings.data.value.bucket.status) }}</span></nav>
     <QuotaPanel v-if="settings.data.value.bucket.actions.includes('storage.inspect')" scope="bucket" :id="id" />
-    <TabsRoot :model-value="tab" @update:model-value="changeTab" class="surface bucket-settings"><TabsList class="tabs-list" :aria-label="t('buckets')"><TabsTrigger class="tab-trigger" value="connection"><Globe :size="16" />{{ t('bucketConnection') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="cors"><ShieldCheck :size="16" />CORS</TabsTrigger><TabsTrigger class="tab-trigger" value="website"><Flower2 :size="16" />{{ t('bucketWebsite') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="redundancy"><HardDrive :size="16" />{{ t('redundancyTitle') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="tiering"><Layers :size="16" />{{ t('tierTitle') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="images"><Images :size="16" />{{ t('imageTitle') }}</TabsTrigger></TabsList>
+    <TabsRoot :model-value="tab" @update:model-value="changeTab" class="surface bucket-settings"><TabsList class="tabs-list" :aria-label="t('buckets')"><TabsTrigger class="tab-trigger" value="connection"><Globe :size="16" />{{ t('bucketConnection') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="cors"><ShieldCheck :size="16" />CORS</TabsTrigger><TabsTrigger class="tab-trigger" value="website"><Flower2 :size="16" />{{ t('bucketWebsite') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="redundancy"><HardDrive :size="16" />{{ t('redundancyTitle') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="tiering"><Layers :size="16" />{{ t('tierTitle') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="mirroring"><ArrowUpRight :size="16" />{{ t('mirrorTitle') }}</TabsTrigger><TabsTrigger class="tab-trigger" value="images"><Images :size="16" />{{ t('imageTitle') }}</TabsTrigger></TabsList>
       <fieldset v-if="['connection','cors','website'].includes(tab)" class="bucket-fields" :disabled="locked">
         <TabsContent value="connection"><header class="bucket-section-intro"><h2>{{ t('bucketConnection') }}</h2><p class="field-help">{{ t('bucketConnectionHint') }}</p></header><label class="field"><span>{{ t('bucketName') }}</span><div class="input-action"><input :value="settings.data.value.bucket.name" readonly><button type="button" @click="copy(settings.data.value.bucket.name)">{{ t('copy') }}</button></div></label><label class="field"><span>{{ t('publicBaseUrl') }}</span><input v-model="draft.public_base_url" type="url" placeholder="https://media.example.com/" :readonly="!admin" maxlength="2048"></label><p class="field-help">{{ t('publicBaseUrlHint') }}</p><label class="field"><span>{{ t('bucketDomains') }}</span><textarea v-if="admin" v-model="domains" rows="4" placeholder="media.example.com" /><textarea v-else :value="settings.data.value.domains.join('\n')" rows="3" readonly /></label><p class="field-help">{{ t('bucketDomainsHint') }}</p>
           <div v-if="draft.metadata_journal_enabled != null" class="bucket-journal">
@@ -111,10 +113,11 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
       </fieldset>
       <TabsContent value="redundancy"><BucketRedundancy :key="id" :bucket="settings.data.value.bucket" :buckets="buckets.data.value || []" /></TabsContent>
       <TabsContent value="tiering"><BucketTiering :key="id" :bucket="settings.data.value.bucket" /></TabsContent>
+      <TabsContent value="mirroring"><BucketMirroring ref="mirroring" :key="id" :bucket="settings.data.value.bucket" @dirty="mirroringDirty=$event" /></TabsContent>
       <TabsContent value="images"><BucketImages :key="id" :bucket="settings.data.value.bucket" @dirty="imagesDirty=$event"/></TabsContent>
-      <div v-if="!['redundancy','tiering','images'].includes(tab)" class="form-footer bucket-save"><span class="field-help">{{ t(dirty ? 'unsavedChanges' : 'bucketSavedHint') }}</span><button :disabled="locked || !dirty" @click="reset">{{ t('cancel') }}</button><button class="primary" :disabled="locked || !dirty" @click="save"><Save :size="16" />{{ t(saving ? 'saving' : 'save') }}</button></div>
+      <div v-if="!['redundancy','tiering','images','mirroring'].includes(tab)" class="form-footer bucket-save"><span class="field-help">{{ t(dirty ? 'unsavedChanges' : 'bucketSavedHint') }}</span><button :disabled="locked || !dirty" @click="reset">{{ t('cancel') }}</button><button class="primary" :disabled="locked || !dirty" @click="save"><Save :size="16" />{{ t(saving ? 'saving' : 'save') }}</button></div>
     </TabsRoot>
-    <BucketLifecycle v-if="admin" :bucket="settings.data.value.bucket" :dirty="dirty||imagesDirty" @changed="settings.refetch()" @removed="router.push('/buckets')" />
+    <BucketLifecycle v-if="admin" :bucket="settings.data.value.bucket" :dirty="dirty||imagesDirty||mirroringDirty" @changed="settings.refetch()" @removed="router.push('/buckets')" />
   </template>
   <div v-else-if="settings.isPending.value" class="skeleton-row" role="status"><span class="sr-only">{{ t('opening') }}</span></div>
   <UiDialog v-model:open="discardOpen" :title="t('unsavedChanges')" :description="t('bucketDiscardHint')"><template #footer><button @click="discard(false)">{{ t('keepEditing') }}</button><button class="danger-button" @click="discard(true)">{{ t('discard') }}</button></template></UiDialog>

@@ -260,7 +260,7 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 ## 镜像回源
 
-`GET /api/v1/buckets/{bucket}/mirroring` 返回 `{revision,config}`。`PUT` 接受相同结构，保存时核对修订，过期编辑返回 412；需要桶设置权限和近期认证。规则默认关闭，单容器的首次 GET 可流式返回并保存到目标桶，HEAD 和 LIST 不访问源站。
+`GET /api/v1/buckets/{bucket}/mirroring` 返回 `{revision,config}`，要求桶设置权限。`PUT` 接受相同结构，保存时核对修订，过期编辑返回 412；还需要近期认证。规则默认关闭，首次 GET 可流式返回并保存到目标桶，HEAD 和 LIST 不访问源站。读取、Range、删除和恢复边界见[镜像回源](bucket-mirroring.md)。
 
 | 配置 | 默认值和范围 |
 | --- | --- |
@@ -275,9 +275,13 @@ client_id 是调用方 UUID。成功回执与变更同事务提交；同身份�
 
 HTTP 源使用 `{type:"http",url,allow_http,allow_private,follow_redirects,headers}`；后三个布尔选项默认 false。私网访问需要管理员权限，环回、链路本地和云元数据地址始终禁止。重定向最多三次且只能同源。`headers` 为固定请求头映射，读取配置仅返回 `header_names`；更新时省略可保留相同规则 UUID 和 URL 的旧值，空映射表示清除，更换 URL 必须重新指定。秘密随部署凭据加密，不回显到任务或预览。
 
-S3 源使用 `{type:"s3",external_id}`，引用同项目内有读取授权且启用的外部存储桶。备用源只用于尚未输出正文时遇到的不存在、限流、超时或暂时不可用，认证失败不切换。现有对象不自动刷新，失败填充不发布半成品；启用回源时删除目标键会留下持久屏蔽。
+S3 源使用 `{type:"s3",external_id,prefix?}`，引用同项目内有读取授权且启用的外部存储桶。主、备用源各自的 `prefix` 默认空，按原样接在规则映射后的键名前，不补 `/`；不超过 1024 字节且不得包含 NUL，拼接后的键仍受 S3 长度限制。实际位置为外部连接目录（非空时加 `/`）+ 来源 `prefix` + 规则映射键。预览和探测返回的 `source_key` 包含来源前缀，相对于外部连接目录。备用源只用于尚未输出正文时遇到的不存在、限流、超时或暂时不可用，认证失败不切换。现有对象不自动刷新，失败填充不发布半成品；启用回源时删除目标键会留下持久屏蔽。
 
 `POST /api/v1/buckets/{bucket}/mirroring/preview` 接受 `{key,config}`，返回 `enabled`、匹配的 `rule_id`、`source`、`source_key` 和 `public_read`。该操作只计算路径，不访问源站、不创建对象。
+
+`POST /api/v1/buckets/{bucket}/mirroring/test` 接受 `{revision,config,key,backup:false}`，核验规则、权限和修订后，从单容器实例或 control 发送 HEAD。返回 `rule_id`、`backup`、脱敏的 `source`、`source_key`、可空 `size`、可空 `content_type` 和 `elapsed_ms`。不读取正文、不退回 GET、不创建目标对象；需要近期认证。`backup:true` 只探测匹配规则的备用源。
+
+`GET /api/v1/buckets/{bucket}/mirroring/tasks?limit=50&token=CURSOR` 返回 `{items,next_cursor}`，只包含该桶的镜像回源任务；`limit` 为 1–200。需要桶设置权限，不授予全局任务管理权限。`POST` 同一路径接受 `{task:UUID,resume:BOOL}`，`false` 暂停，`true` 继续，成功返回 204；需要近期认证，只接受该桶的回填任务。任务明细包含完整读取的 `source_bytes`、可空 `source_size`、`phase` 和 `published`，额外范围读取使用 `range_requests`、`range_bytes` 单独统计。
 
 `GET /api/v1/buckets/{bucket}/mirroring/blocks?after=KEY&limit=50` 返回 `{keys,next}`，按对象键分页，`limit` 为 1–100。`POST /api/v1/buckets/{bucket}/mirroring/unblock` 接受 `{key}`，成功返回 204。两者要求桶设置权限，解除屏蔽还要求近期认证；解除只允许新的填充，旧任务不会重新取得发布权。
 

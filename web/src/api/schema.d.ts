@@ -448,6 +448,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/mirroring/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["bucket_mirroring_tasks"];
+        put?: never;
+        post: operations["bucket_mirroring_task_action"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/mirroring/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["bucket_mirroring_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/mirroring/unblock": {
         parameters: {
             query?: never;
@@ -3286,6 +3318,25 @@ export interface components {
             config: components["schemas"]["MirroringConfig"];
             key: string;
         };
+        MirroringProbe: {
+            backup: boolean;
+            content_type?: string | null;
+            /** Format: int64 */
+            elapsed_ms: number;
+            /** Format: uuid */
+            rule_id: string;
+            /** Format: int64 */
+            size?: number | null;
+            source: string;
+            source_key: string;
+        };
+        MirroringProbeInput: {
+            backup?: boolean;
+            config: components["schemas"]["MirroringConfig"];
+            key: string;
+            /** Format: int64 */
+            revision: number;
+        };
         MirroringRule: {
             add_prefix?: string;
             backup?: components["schemas"]["MirroringSource"] | null;
@@ -3315,6 +3366,11 @@ export interface components {
             prefix?: string;
             /** @enum {string} */
             type: "s3";
+        };
+        MirroringTaskAction: {
+            resume: boolean;
+            /** Format: uuid */
+            task: string;
         };
         MirroringUpdate: {
             config: components["schemas"]["MirroringConfig"];
@@ -5419,6 +5475,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MirroringPreview"];
+                };
+            };
+        };
+    };
+    bucket_mirroring_tasks: {
+        parameters: {
+            query?: {
+                token?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobPage"];
+                };
+            };
+        };
+    };
+    bucket_mirroring_task_action: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MirroringTaskAction"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    bucket_mirroring_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MirroringProbeInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MirroringProbe"];
                 };
             };
         };

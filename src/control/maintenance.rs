@@ -543,6 +543,14 @@ pub(super) async fn jobs(
     Extension(actor): Extension<Identity>,
     Query(q): Query<JobQuery>,
 ) -> Result<Json<JobPage>, HttpError> {
+    Ok(Json(job_page(&app, &actor.principal, q).await?))
+}
+
+pub(super) async fn job_page(
+    app: &App,
+    principal: &crate::authorization::Principal,
+    q: JobQuery,
+) -> Result<JobPage> {
     let limit = q.limit.unwrap_or(50);
     if !(1..=200).contains(&limit)
         || q.state
@@ -567,7 +575,7 @@ pub(super) async fn jobs(
     let values = app
         .task_control
         .page(
-            &actor.principal,
+            principal,
             q,
             cursor.map(|value| (value.at, value.id)),
             limit + 1,
@@ -585,7 +593,7 @@ pub(super) async fn jobs(
         None
     };
     tasks.truncate(limit as usize);
-    Ok(Json(JobPage { tasks, next_token }))
+    Ok(JobPage { tasks, next_token })
 }
 #[utoipa::path(get,path="/api/v1/tasks/{id}",params(("id"=Uuid,Path)),responses((status=200,body=Job)))]
 pub(super) async fn task(
@@ -601,14 +609,22 @@ pub(super) async fn task(
     };
     let detail = &mut result.detail;
     let missing = |id: &str, uuid: &str| {
-        if detail[uuid].is_null() { Id::from_json(&detail[id]).ok().flatten() } else { None }
+        if detail[uuid].is_null() {
+            Id::from_json(&detail[id]).ok().flatten()
+        } else {
+            None
+        }
     };
     let first = missing("first", "first_uuid");
     let pack = missing(pack_id, pack_uuid);
     if first.is_some() || pack.is_some() {
         let (chunk, pack) = app.task_control.file_uuids(first, pack).await?;
-        if let Some(uuid) = chunk { detail["first_uuid"] = json!(uuid); }
-        if let Some(uuid) = pack { detail[pack_uuid] = json!(uuid); }
+        if let Some(uuid) = chunk {
+            detail["first_uuid"] = json!(uuid);
+        }
+        if let Some(uuid) = pack {
+            detail[pack_uuid] = json!(uuid);
+        }
     }
     Ok(Json(result))
 }

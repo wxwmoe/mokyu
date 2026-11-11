@@ -53,6 +53,7 @@ docker exec -it mokyu mokyu cli user create admin
 | [桶图片处理](docs/image-processing.md) | 样式表单、导入导出、自动格式、原图保护和 CDN |
 | [管理 API](docs/control-api-reference.md) | 方法、路径、认证、分页、并发条件和生成契约 |
 | [S3 兼容性](docs/s3-compatibility.md) | 已实现操作、校验、Range、ACL 和明确不支持项 |
+| [镜像回源](docs/bucket-mirroring.md) | 按需迁入、规则设置、读取边界和删除屏蔽 |
 | [数据库](docs/database-schema.md) | 表与字段清单、关键约束、状态和迁移规则 |
 | [存储格式](docs/storage-format.md) | CDC、AEAD/AAD、nonce、物理路径和恢复规则 |
 
