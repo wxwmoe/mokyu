@@ -53,7 +53,17 @@ pub(in super::super) fn task_progress<'q>(
     processed: i64,
     detail: Value,
 ) -> Statement<'q> {
-    sqlx::query(
+    if detail["operation"] == "mirroring" {
+        sqlx::query(
+        "UPDATE tasks SET cursor=$2,processed=processed+$3,detail=$4::jsonb||jsonb_build_object('range_bytes',COALESCE(detail->'range_bytes','0'::jsonb),'range_requests',COALESCE(detail->'range_requests','0'::jsonb)),updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$5 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp())",
+    )
+    .bind(id.id)
+    .bind(cursor)
+    .bind(processed)
+    .bind(detail)
+        .bind(id.token)
+    } else {
+        sqlx::query(
         "UPDATE tasks SET cursor=$2,processed=processed+$3,detail=$4,updated_at=now() WHERE id=$1 AND state='running' AND lease_token=$5 AND ((lease_node_id IS NULL AND lease_expires_at IS NULL) OR lease_expires_at>clock_timestamp())",
     )
     .bind(id.id)
@@ -61,6 +71,7 @@ pub(in super::super) fn task_progress<'q>(
     .bind(processed)
     .bind(detail)
         .bind(id.token)
+    }
 }
 
 pub(in super::super) fn gc_candidates(

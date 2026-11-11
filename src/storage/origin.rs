@@ -28,6 +28,10 @@ use std::{
 };
 use tower::Service;
 
+#[path = "origin_range.rs"]
+mod ranges;
+pub(crate) use ranges::{changed, observed, ranged, requested};
+
 pub(crate) fn retry_backup(error: &anyhow::Error) -> bool {
     error.downcast_ref::<s3s::S3Error>().is_some_and(|error| {
         matches!(
@@ -119,6 +123,7 @@ fn http(private: bool, timeout: u32) -> Result<HttpClient> {
         .with_provider_and_native_roots(rustls::crypto::aws_lc_rs::default_provider())?
         .https_or_http()
         .enable_http1()
+        .enable_http2()
         .wrap_connector(connector);
     let client = Client::builder(TokioExecutor::new())
         .pool_idle_timeout(Duration::from_secs(60))
@@ -166,6 +171,7 @@ pub(crate) struct Open {
     pub headers: HeaderMap,
     pub length: Option<u64>,
     pub body: BoxStream<'static, Result<Bytes>>,
+    pub bytes: Arc<std::sync::atomic::AtomicU64>,
 }
 
 pub(crate) async fn open(
@@ -174,7 +180,19 @@ pub(crate) async fn open(
     key: &str,
     snapshot: Option<&Snapshot>,
     method: Method,
+    extra: HeaderMap,
+) -> Result<Open> {
+    versioned(source, config, key, snapshot, method, extra, None).await
+}
+
+async fn versioned(
+    source: &Source,
+    config: &Config,
+    key: &str,
+    snapshot: Option<&Snapshot>,
+    method: Method,
     mut extra: HeaderMap,
+    version: Option<&str>,
 ) -> Result<Open> {
     source.validate()?;
     extra.insert("x-mokyu-origin-hop", "1".parse()?);
@@ -262,9 +280,12 @@ pub(crate) async fn open(
                 snapshot.external_id == *external_id,
                 "external origin identity differs"
             );
+            let query = version
+                .map(|value| vec![("versionId", value)])
+                .unwrap_or_default();
             let key = source.key(key)?;
             s3(snapshot, config)?
-                .bytes(method.clone(), Some(&key), &[], extra, Bytes::new())
+                .bytes(method.clone(), Some(&key), &query, extra, Bytes::new())
                 .await
                 .map_err(|_| s3s::s3_error!(ServiceUnavailable, "external origin request failed"))?
         }
@@ -294,6 +315,8 @@ fn opened(response: Response<Body>, config: &Config, head: bool) -> Result<Open>
         s3s::s3_error!(EntityTooLarge)
     );
     let idle = Duration::from_secs(config.idle_timeout_seconds.into());
+    let bytes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counts = bytes.clone();
     let mut source = response.into_body().into_data_stream();
     let body = async_stream::try_stream! {
         let mut received = 0_u64;
@@ -302,6 +325,7 @@ fn opened(response: Response<Body>, config: &Config, head: bool) -> Result<Open>
             let Some(bytes) = next else { break; };
             let bytes = bytes.map_err(|_| s3s::s3_error!(IncompleteBody, "origin body was interrupted"))?;
             received = received.checked_add(bytes.len() as u64).context("origin length overflow")?;
+            counts.store(received, std::sync::atomic::Ordering::Relaxed);
             if received > limit || length.is_some_and(|length| received > length) { Err(s3s::s3_error!(EntityTooLarge))?; }
             yield bytes;
         }
@@ -312,6 +336,7 @@ fn opened(response: Response<Body>, config: &Config, head: bool) -> Result<Open>
         headers,
         length,
         body,
+        bytes,
     })
 }
 

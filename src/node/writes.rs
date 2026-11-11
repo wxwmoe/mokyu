@@ -808,8 +808,10 @@ impl Writes {
                 }
                 files.append_request(&mut file, bytes).await?;
                 let mut piece = bytes;
-                while let Some(group) = pages.feed(&mut piece) {
-                    page_hashes.extend(group.hashes);
+                if size <= MAX_OBJECT as u64 {
+                    while let Some(group) = pages.feed(&mut piece) {
+                        page_hashes.extend(group.hashes);
+                    }
                 }
             }
         }
@@ -850,7 +852,9 @@ impl Writes {
         // Acquire local IO before reserving shared storage capacity.
         let io = Arc::new(self.reads.reader.acquire(&self.io, 1).await?);
         let started = Instant::now();
-        if let Some(group) = pages.finish() {
+        if size > MAX_OBJECT as u64 {
+            page_hashes.clear();
+        } else if let Some(group) = pages.finish() {
             page_hashes.extend(group.hashes);
         }
         let plan = node
@@ -910,29 +914,41 @@ impl Writes {
                     .context("S3 streaming upload missing")?;
                 let held: Vec<_> = operation.grants.iter().chain(&grants).cloned().collect();
                 operation
-                    .guard(
-                        node,
-                        &grants,
-                        upload.put(
-                            &crate::storage::raw::remote_path(source),
-                            size,
-                            &digest,
-                            || {
-                                file.as_ref()
-                                    .unwrap()
-                                    .replay()
-                                    .map_ok(|bytes| {
-                                        Bytes::from_owner(Upload {
-                                            bytes,
-                                            _memory: operation.request.memory.clone(),
-                                            _io: io.clone(),
-                                            _grants: held.clone(),
+                    .guard(node, &grants, async {
+                        if size > MAX_OBJECT as u64 {
+                            return self
+                                .raw_multipart(
+                                    operation,
+                                    file.as_ref().unwrap(),
+                                    source,
+                                    size,
+                                    io.clone(),
+                                    held.clone(),
+                                )
+                                .await;
+                        }
+                        upload
+                            .put(
+                                &crate::storage::raw::remote_path(source),
+                                size,
+                                &digest,
+                                || {
+                                    file.as_ref()
+                                        .unwrap()
+                                        .replay()
+                                        .map_ok(|bytes| {
+                                            Bytes::from_owner(Upload {
+                                                bytes,
+                                                _memory: operation.request.memory.clone(),
+                                                _io: io.clone(),
+                                                _grants: held.clone(),
+                                            })
                                         })
-                                    })
-                                    .boxed()
-                            },
-                        ),
-                    )
+                                        .boxed()
+                                },
+                            )
+                            .await
+                    })
                     .await?;
                 #[cfg(feature = "fault-injection")]
                 crate::faults::point("node-raw-uploaded").await;

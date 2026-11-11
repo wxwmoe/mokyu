@@ -5,7 +5,11 @@ pub(in super::super) fn task_progress(
     processed: i64,
     detail: Value,
 ) -> Statement<'_> {
-    sqlx::query("UPDATE tasks SET progress_cursor=?,processed=processed+?,detail=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND execution_token=? AND state='running'").bind(cursor).bind(processed).bind(detail).bind(task.id).bind(task.token)
+    if detail["operation"] == "mirroring" {
+        sqlx::query("UPDATE tasks SET progress_cursor=?,processed=processed+?,detail=JSON_SET(?,'$.range_bytes',COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.range_bytes')) AS SIGNED),0),'$.range_requests',COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.range_requests')) AS SIGNED),0)),updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND execution_token=? AND state='running'").bind(cursor).bind(processed).bind(detail).bind(task.id).bind(task.token)
+    } else {
+        sqlx::query("UPDATE tasks SET progress_cursor=?,processed=processed+?,detail=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND execution_token=? AND state='running'").bind(cursor).bind(processed).bind(detail).bind(task.id).bind(task.token)
+    }
 }
 pub(in super::super) fn physical_indexed(location: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM journal_protected_addresses h WHERE h.address=?) OR EXISTS(SELECT 1 FROM chunk_encodings u WHERE u.location_id=? AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=0 AND h.physical_id=u.location_id)) OR EXISTS(SELECT 1 FROM packs u WHERE u.location_id=? AND NOT EXISTS(SELECT 1 FROM tier_locations h WHERE h.unit=1 AND h.physical_id=u.location_id)) OR EXISTS(SELECT 1 FROM tier_locations WHERE address=?) OR EXISTS(SELECT 1 FROM tier_moves WHERE source_address=?) OR EXISTS(SELECT 1 FROM tier_moves WHERE target_address=?)").bind(location).bind(location).bind(location).bind(location).bind(location).bind(location)

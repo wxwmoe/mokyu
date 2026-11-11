@@ -315,3 +315,28 @@ pub(in super::super) async fn unblock(
     tx.commit().await?;
     Ok(())
 }
+
+pub(in super::super) async fn range(
+    backend: &Backend,
+    bucket: Uuid,
+    object: &str,
+    key: &crate::content::codec::Key,
+) -> Result<Option<crate::model::mirroring::Ranged>> {
+    let mut tx = backend.write.begin_with(queries::BEGIN_WRITE).await?;
+    backend.fence_control(&mut tx).await?;
+    let value = super::super::mirroring_transactions::range(&mut tx, bucket, object, key).await?;
+    tx.commit().await?;
+    Ok(value)
+}
+pub(in super::super) async fn range_result(
+    backend: &Backend,
+    task: crate::model::task::Execution,
+    bytes: u64,
+    conflict: bool,
+) -> Result<()> {
+    let mut tx = backend.write.begin_with(queries::BEGIN_WRITE).await?;
+    backend.fence_control(&mut tx).await?;
+    super::super::mirroring_transactions::range_result(&mut tx, task, bytes, conflict).await?;
+    tx.commit().await?;
+    Ok(())
+}

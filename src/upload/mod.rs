@@ -234,7 +234,7 @@ impl App {
         &self,
         stream: Id,
         storage: Uuid,
-        mut body: StreamingBlob,
+        body: StreamingBlob,
         headers: &HeaderMap,
         trailers: Option<TrailingHeaders>,
         length: Option<i64>,
@@ -243,13 +243,68 @@ impl App {
         raw_override: Option<i64>,
         cache_path: Option<(Uuid, &str)>,
     ) -> Result<(i64, String, Value, Option<crate::app::responses::Received>)> {
+        self.receive_bounded(
+            stream,
+            storage,
+            body,
+            headers,
+            trailers,
+            length,
+            algorithm,
+            upload,
+            raw_override,
+            cache_path,
+            5 * 1024_i64.pow(3),
+        )
+        .await
+    }
+
+    pub(crate) async fn receive_origin(
+        &self,
+        stream: Id,
+        storage: Uuid,
+        body: StreamingBlob,
+        headers: &HeaderMap,
+        length: Option<i64>,
+    ) -> Result<(i64, String, Value, Option<crate::app::responses::Received>)> {
+        self.receive_bounded(
+            stream,
+            storage,
+            body,
+            headers,
+            None,
+            length,
+            None,
+            None,
+            None,
+            None,
+            5 * 1024_i64.pow(4),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)] // Imports keep the ordinary quota and receive checks.
+    async fn receive_bounded(
+        &self,
+        stream: Id,
+        storage: Uuid,
+        mut body: StreamingBlob,
+        headers: &HeaderMap,
+        trailers: Option<TrailingHeaders>,
+        length: Option<i64>,
+        algorithm: Option<&str>,
+        upload: Option<(Uuid, i32)>,
+        raw_override: Option<i64>,
+        cache_path: Option<(Uuid, &str)>,
+        limit: i64,
+    ) -> Result<(i64, String, Value, Option<crate::app::responses::Received>)> {
         let mut check = Integrity::new(headers, algorithm)?;
         let declared = if let Some(v) = headers.get("x-amz-decoded-content-length") {
             Some(v.to_str()?.parse::<i64>()?)
         } else {
             length
         };
-        if declared.is_some_and(|n| !(0..=5 * 1024 * 1024 * 1024).contains(&n)) {
+        if declared.is_some_and(|n| !(0..=limit).contains(&n)) {
             return Err(s3_error!(EntityTooLarge).into());
         }
         let mut received = 0i64;
@@ -356,7 +411,7 @@ impl App {
             received = received
                 .checked_add(data.len() as i64)
                 .context("object size overflow")?;
-            if received > 5 * 1024 * 1024 * 1024 || declared.is_some_and(|n| received > n) {
+            if received > limit || declared.is_some_and(|n| received > n) {
                 return Err(s3_error!(EntityTooLarge).into());
             }
             if received > reserved {

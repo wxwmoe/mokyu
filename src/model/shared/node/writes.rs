@@ -403,6 +403,30 @@ pub(super) async fn permits(
 }
 #[async_trait::async_trait]
 impl NodeWrites for Backend {
+    async fn stage_raw_pages(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: crate::model::node_native::Pages,
+    ) -> Result<()> {
+        let mut tx = start(self, node, key, input.run).await?;
+        let row = lookup(&mut tx, node.node_id, input.operation).await?;
+        row.active(&mut tx, node, input.run).await?;
+        let raw = q::raw(node.node_id, input.operation)
+            .fetch_one(&mut *tx)
+            .await?;
+        ensure!(
+            row.owner_task_id.is_some()
+                && row.intent.access == "node-mirror"
+                && raw.size > write::MAX_PART_BYTES
+                && !raw.committed,
+            Error::NodeOperationConflict
+        );
+        input.group.validate_size(raw.size)?;
+        super::raw_pages::put(&mut tx, raw.source_id, &input.group).await?;
+        tx.commit().await?;
+        Ok(())
+    }
     async fn check_raw_files(
         &self,
         node: &NodeState,
@@ -1571,6 +1595,14 @@ impl NodeWrites for Backend {
         let row = lookup(&mut tx, node.node_id, input.operation).await?;
         row.owned(node, input.run)?;
         let size = input.input.size;
+        ensure!(
+            size <= write::MAX_PART_BYTES
+                || row.owner_task_id.is_some()
+                    && row.intent.access == "node-mirror"
+                    && row.intent.part.is_none()
+                    && !input.input.local,
+            s3s::s3_error!(EntityTooLarge)
+        );
         let existing = q::raw(node.node_id, input.operation)
             .fetch_optional(&mut *tx)
             .await?;
@@ -1684,7 +1716,9 @@ impl NodeWrites for Backend {
                 )
                 .await?;
             }
-            super::raw_pages::seal(&mut tx, id, size, &input.input.digest).await?;
+            if size <= write::MAX_PART_BYTES {
+                super::raw_pages::seal(&mut tx, id, size, &input.input.digest).await?;
+            }
             q::add_raw(
                 node.node_id,
                 input.operation,
@@ -1739,6 +1773,7 @@ impl NodeWrites for Backend {
         );
         if !raw.committed {
             let stream = row.active(&mut tx, node, input.run).await?;
+            super::raw_pages::seal(&mut tx, raw.source_id, raw.size, &raw.digest).await?;
             ensure!(
                 queries::raw_finish(stream, raw.source_id, raw.size, &raw.digest, true)
                     .execute(&mut *tx)

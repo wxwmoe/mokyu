@@ -468,6 +468,21 @@ pub(super) async fn protect_node_read(
 
 #[async_trait::async_trait]
 impl NodeReads for Backend {
+    async fn report_origin(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: crate::model::session::Run,
+        task: crate::model::task::Execution,
+        bytes: u64,
+        conflict: bool,
+    ) -> Result<()> {
+        let mut tx = q::begin(self).await?;
+        super::queries::node_requests::admit(self, &mut tx, node, key, run).await?;
+        super::mirroring_transactions::range_result(&mut tx, task, bytes, conflict).await?;
+        tx.commit().await?;
+        Ok(())
+    }
     async fn mirror_read(
         &self,
         state: &NodeState,
@@ -503,6 +518,7 @@ impl NodeReads for Backend {
                 s3s::s3_error!(AccessDenied)
             );
             Some(crate::model::mirroring::Start {
+                foreground: crate::model::mirroring::foreground(&input.headers),
                 bucket: bucket.id,
                 key: object,
                 revision,
@@ -518,15 +534,32 @@ impl NodeReads for Backend {
         tx.commit().await?;
         if let Some(start) = start {
             // Release object read locks before acquiring the fill's bucket/key locks.
-            if let Err(error) = super::transactions::mirroring::request(self, start).await {
-                if crate::model::error(&error) == Some(Error::OperationAborted)
-                    || error
-                        .downcast_ref::<s3s::S3Error>()
-                        .is_some_and(|error| error.code() == &s3s::S3ErrorCode::OperationAborted)
-                {
-                    return self.open_read(state, key, input).await;
+            let proposed = start.task;
+            let foreground = start.foreground;
+            let bucket = start.bucket;
+            let object = start.key.clone();
+            let task = match super::transactions::mirroring::request(self, start).await {
+                Ok(task) => task,
+                Err(error) => {
+                    if crate::model::error(&error) == Some(Error::OperationAborted)
+                        || error.downcast_ref::<s3s::S3Error>().is_some_and(|error| {
+                            error.code() == &s3s::S3ErrorCode::OperationAborted
+                        })
+                    {
+                        return self.open_read(state, key, input).await;
+                    }
+                    return Err(error);
                 }
-                return Err(error);
+            };
+            if foreground && task == proposed {
+                reply.origin_work = self.claim_mirror(state, key, input.run, task).await?;
+            }
+            if crate::storage::origin::requested(&input.headers) {
+                reply.origin_range =
+                    crate::model::mirroring::MirroringStore::range(self, bucket, &object, key)
+                        .await?
+                        .map(|plan| serde_json::to_vec(&plan))
+                        .transpose()?;
             }
             reply.outcome = read::Outcome::Pending;
         }

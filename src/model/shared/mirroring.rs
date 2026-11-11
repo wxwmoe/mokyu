@@ -7,6 +7,70 @@ use crate::{
     model::{Error, mirroring as mirror, task::Execution},
 };
 use anyhow::{Context, Result, ensure};
+
+pub(super) async fn range(
+    tx: &mut Tx<'_>,
+    bucket: uuid::Uuid,
+    object: &str,
+    key: &Key,
+) -> Result<Option<mirror::Ranged>> {
+    let Some((id, token)) = q::reader(bucket, object).fetch_optional(&mut **tx).await? else {
+        return Ok(None);
+    };
+    let task = Execution { id, token };
+    let assignment = assignment(tx, task, key).await?;
+    let row = queries::task_record(id).fetch_one(&mut **tx).await?;
+    let Some(value) = row.detail.get("origin").filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let observed: mirror::Observed = serde_json::from_value(value.clone())?;
+    observed.validate()?;
+    Ok(Some(mirror::Ranged {
+        task: id,
+        token,
+        assignment,
+        observed,
+    }))
+}
+
+pub(super) async fn range_result(
+    tx: &mut Tx<'_>,
+    task: Execution,
+    bytes: u64,
+    conflict: bool,
+) -> Result<()> {
+    ensure!(bytes <= 5 * 1024_u64.pow(4), Error::NodeOperationConflict);
+    q::range_result(task, bytes, conflict)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn progress(
+    tx: &mut Tx<'_>,
+    task: Execution,
+    bytes: u64,
+    publishing: bool,
+) -> Result<()> {
+    transactions::mirroring::guard(tx, task).await?;
+    let mut row = queries::task_record(task.id).fetch_one(&mut **tx).await?;
+    ensure!(
+        bytes <= 5 * 1024_u64.pow(4)
+            && row.detail["source_size"]
+                .as_u64()
+                .is_none_or(|size| bytes <= size),
+        Error::NodeOperationConflict
+    );
+    row.detail["source_bytes"] = bytes
+        .max(row.detail["source_bytes"].as_u64().unwrap_or(0))
+        .into();
+    row.detail["phase"] = if publishing { "publishing" } else { "reading" }.into();
+    queries::work_sweep::task_progress(task, "", 0, row.detail)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 pub(super) async fn assignment(
     tx: &mut Tx<'_>,
     task: Execution,

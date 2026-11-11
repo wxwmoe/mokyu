@@ -91,6 +91,7 @@ impl App {
         let task = self
             .mirroring
             .request(Start {
+                foreground: false,
                 bucket: bucket.id,
                 key: key.into(),
                 revision: view.revision,
@@ -113,6 +114,41 @@ impl App {
                     }
                 }
                 let state = self.task_execution.load(task).await?;
+                if state.state == "running"
+                    && origin::requested(request)
+                    && let Some(plan) = self
+                        .mirroring
+                        .range(bucket.id, key, &self.secrets.credential_key)
+                        .await?
+                {
+                    let network = self.storage.reads.acquire().await?;
+                    let memory = self.storage.pack_work(1024 * 1024).await?;
+                    let (sender, receiver) = oneshot::channel();
+                    let store = self.mirroring.clone();
+                    let owner = Execution {
+                        id: plan.task,
+                        token: plan.token,
+                    };
+                    tokio::spawn(async move {
+                        if let Ok((bytes, conflict)) = receiver.await {
+                            if let Err(error) = store.range_result(owner, bytes, conflict).await {
+                                tracing::warn!(error=%error,"origin range report failed");
+                            }
+                        }
+                    });
+                    let result = origin::ranged(&plan, request, sender).await;
+                    if result.as_ref().is_err_and(origin::changed) {
+                        self.mirroring.range_result(owner, 0, true).await?;
+                    }
+                    let mut read = result?;
+                    if let Some(mut body) = read.body.take() {
+                        read.body = Some(StreamingBlob::wrap(async_stream::stream! {
+                            let _resources = (network,memory);
+                            while let Some(bytes) = body.next().await { yield bytes.map_err(io::Error::other); }
+                        }));
+                    }
+                    return Ok(Some(read));
+                }
                 match state.state.as_str() {
                     "completed" => return Ok(None),
                     "failed" | "paused" | "cancelled" => {
@@ -262,6 +298,7 @@ impl App {
         let _target = self.storage.profile_permit(storage, "migration").await?;
         let work_memory = self.storage.pack_work(codec::MAX + 1024 * 1024).await?;
         let _network = self.storage.reads.acquire().await?;
+        let mut using_backup = false;
         let mut opened = self
             .open_origin(task, &rule.source, &view.config, &mapped, target.project_id)
             .await;
@@ -277,6 +314,7 @@ impl App {
                 })
         }) && let Some(backup) = &rule.backup
         {
+            using_backup = true;
             opened = self
                 .open_origin(task, backup, &view.config, &mapped, target.project_id)
                 .await;
@@ -287,6 +325,17 @@ impl App {
                 .await?;
         }
         let mut opened = opened?;
+        detail["source_size"] = serde_json::to_value(opened.length)?;
+        // The selected source and validators are bound before another request can read a range.
+        detail["origin"] = serde_json::to_value(origin::observed(
+            &opened,
+            if using_backup {
+                rule.backup.as_ref().unwrap()
+            } else {
+                &rule.source
+            },
+            using_backup,
+        ))?;
         let metadata = origin::metadata(&opened.headers)?;
         let integrity = origin::integrity(&opened.headers);
         let (stream, _pin) = self
@@ -360,9 +409,7 @@ impl App {
             body.map(|value: Result<bytes::Bytes>| value.map_err(io::Error::other)),
         ));
         let received = self
-            .receive(
-                stream, storage, body, &integrity, None, length, None, None, None, None,
-            )
+            .receive_origin(stream, storage, body, &integrity, length)
             .await;
         let (size, _, _, _) = match received {
             Ok(value) => value,

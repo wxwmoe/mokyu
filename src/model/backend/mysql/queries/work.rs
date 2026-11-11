@@ -11,6 +11,10 @@ pub(in super::super) fn offer(node: Uuid, operation: Uuid) -> Rows<'static, Offe
     sqlx::query_as("SELECT boot_id,fence,request_hash,task_id,token,plan,materials_encrypted,result_hash,CAST(GREATEST(0,TIMESTAMPDIFF(MICROSECOND,UTC_TIMESTAMP(6),expires_at) DIV 1000) AS SIGNED) AS remaining FROM node_work WHERE node_id=? AND operation_id=? FOR UPDATE").bind(node).bind(operation)
 }
 
+pub(in super::super) fn active(node: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_work WHERE node_id=? AND result_hash IS NULL AND expires_at>UTC_TIMESTAMP(6)").bind(node)
+}
+
 pub(in super::super) fn insert<'a>(
     node: Uuid,
     input: &Exchange,

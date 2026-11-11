@@ -450,6 +450,42 @@ pub(crate) struct Begin {
     pub source: Option<(Uuid, i64)>,
     pub metadata: serde_json::Value,
     pub size: Option<i64>,
+    pub observed: Option<Observed>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Observed {
+    pub backup: bool,
+    pub size: u64,
+    pub etag: Option<String>,
+    pub version: Option<String>,
+}
+
+impl Observed {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.size <= 5 * 1024_u64.pow(4)
+                && self
+                    .etag
+                    .as_deref()
+                    .is_none_or(crate::storage::external::objects::strong_etag)
+                && self.version.as_deref().is_none_or(|value| !value.is_empty()
+                    && value.len() <= 4096
+                    && value != "null"
+                    && !value.chars().any(char::is_control))
+                && (self.etag.is_some() || self.version.is_some()),
+            "invalid origin version"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Ranged {
+    pub task: Uuid,
+    pub token: Uuid,
+    pub assignment: Assignment,
+    pub observed: Observed,
 }
 
 impl Record {
@@ -470,6 +506,7 @@ impl Record {
 }
 
 pub(crate) struct Start {
+    pub foreground: bool,
     pub bucket: Uuid,
     pub key: String,
     pub revision: i64,
@@ -478,8 +515,43 @@ pub(crate) struct Start {
     pub storage: Uuid,
 }
 
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Lease {
+    pub operation: Uuid,
+    pub token: Uuid,
+    pub valid_for_ms: u64,
+    pub assignment: Assignment,
+}
+
+pub(crate) fn foreground(headers: &axum::http::HeaderMap) -> bool {
+    ![
+        "range",
+        "if-range",
+        "if-match",
+        "if-none-match",
+        "if-modified-since",
+        "if-unmodified-since",
+        "x-amz-checksum-mode",
+        "x-mokyu-image-source",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name))
+}
+
 #[async_trait]
 pub(crate) trait MirroringStore: Send + Sync {
+    async fn range(
+        &self,
+        bucket: Uuid,
+        object: &str,
+        key: &crate::content::codec::Key,
+    ) -> Result<Option<Ranged>>;
+    async fn range_result(
+        &self,
+        task: crate::model::task::Execution,
+        bytes: u64,
+        conflict: bool,
+    ) -> Result<()>;
     async fn get(&self, bucket: Uuid) -> Result<Record>;
     async fn save(
         &self,

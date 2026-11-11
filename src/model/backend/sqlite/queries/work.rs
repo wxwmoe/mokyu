@@ -11,6 +11,10 @@ pub(in super::super) fn offer(node: Uuid, operation: Uuid) -> Rows<'static, Offe
     sqlx::query_as("SELECT boot_id,fence,request_hash,task_id,token,plan,materials_encrypted,result_hash,max(0,(expires_at-CAST(unixepoch('subsec')*1000000 AS INTEGER))/1000) AS remaining FROM node_work WHERE node_id=? AND operation_id=?").bind(node).bind(operation)
 }
 
+pub(in super::super) fn active(node: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT count(*) FROM node_work WHERE node_id=? AND result_hash IS NULL AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)").bind(node)
+}
+
 pub(in super::super) fn insert<'a>(
     node: Uuid,
     input: &Exchange,

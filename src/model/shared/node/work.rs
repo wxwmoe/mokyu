@@ -74,15 +74,17 @@ pub(super) async fn checkpoint(
     run: Run,
     operation: Uuid,
 ) -> Result<(work::Plan, Execution)> {
-    ensure!(
-        matches!(node.role.as_str(), "worker" | "node"),
-        Error::NodeAuthentication
-    );
     let row = q::offer(node.node_id, operation)
         .fetch_optional(&mut **tx)
         .await?
         .ok_or(Error::NodeExpired)?;
     row.verify(run)?;
+    ensure!(
+        matches!(node.role.as_str(), "worker" | "node")
+            || node.role == "data"
+                && matches!(row.plan.as_deref(), Some(work::Plan::Mirror { .. })),
+        Error::NodeAuthentication
+    );
     ensure!(
         row.remaining > 0 && row.result_hash.is_none(),
         Error::NodeExpired
@@ -479,6 +481,25 @@ async fn settle(
 
 #[async_trait::async_trait]
 impl NodeWork for Backend {
+    async fn progress_mirror(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: Run,
+        operation: Uuid,
+        bytes: u64,
+        publishing: bool,
+    ) -> Result<()> {
+        let mut tx = super::node_writes::start(self, node, key, run).await?;
+        let (plan, task) = checkpoint(&mut tx, node, run, operation).await?;
+        ensure!(
+            matches!(plan, work::Plan::Mirror {task:id} if id == task.id),
+            Error::NodeOperationConflict
+        );
+        super::mirroring_transactions::progress(&mut tx, task, bytes, publishing).await?;
+        tx.commit().await?;
+        Ok(())
+    }
     async fn begin_mirror(
         &self,
         node: &NodeState,

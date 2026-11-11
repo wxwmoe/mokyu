@@ -33,6 +33,10 @@ pub(in super::super) fn enqueue(input: &crate::model::mirroring::Start) -> State
     sqlx::query("INSERT INTO tasks(id,task_type,bucket_id,state,detail) VALUES($1,'storage_migration',$2,'queued',$3)").bind(input.task).bind(input.bucket).bind(serde_json::json!({"operation":"mirroring","revision":input.revision,"rule_id":input.rule,"key":input.key,"storage_id":input.storage}))
 }
 
+pub(in super::super) fn claim_task(id: Uuid, node: Uuid, token: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,clock_timestamp()),lease_node_id=$2,lease_token=$3,lease_expires_at=clock_timestamp()+interval '60 seconds',updated_at=clock_timestamp() WHERE id=$1 AND state='queued' AND detail->>'operation'='mirroring'").bind(id).bind(node).bind(token)
+}
+
 pub(in super::super) fn record(bucket: Uuid) -> Rows<'static, (i64, Option<Vec<u8>>)> {
     sqlx::query_as("SELECT COALESCE(m.revision,0),m.config_encrypted FROM buckets b LEFT JOIN bucket_mirroring m ON m.bucket_id=b.id WHERE b.id=$1").bind(bucket)
 }
@@ -49,6 +53,22 @@ pub(in super::super) fn save(
 
 #[async_trait::async_trait]
 impl MirroringStore for Backend {
+    async fn range(
+        &self,
+        bucket: Uuid,
+        object: &str,
+        key: &crate::content::codec::Key,
+    ) -> Result<Option<crate::model::mirroring::Ranged>> {
+        super::super::transactions::mirroring::range(self, bucket, object, key).await
+    }
+    async fn range_result(
+        &self,
+        task: crate::model::task::Execution,
+        bytes: u64,
+        conflict: bool,
+    ) -> Result<()> {
+        super::super::transactions::mirroring::range_result(self, task, bytes, conflict).await
+    }
     async fn blocks(
         &self,
         principal: &Principal,
@@ -191,4 +211,15 @@ pub(in super::super) fn invalidate(bucket: Uuid) -> Statement<'static> {
 
 pub(in super::super) fn target(bucket: Uuid) -> Scalar<'static, Option<Uuid>> {
     sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=$1 FOR SHARE").bind(bucket)
+}
+
+pub(in super::super) fn reader(bucket: Uuid, object: &str) -> Rows<'_, (Uuid, Uuid)> {
+    sqlx::query_as("SELECT t.id,t.lease_token FROM mirroring_keys k JOIN tasks t ON t.id=k.task_id WHERE k.bucket_id=$1 AND k.object_key=$2 AND NOT k.blocked AND t.state='running' AND t.lease_token IS NOT NULL").bind(bucket).bind(object)
+}
+pub(in super::super) fn range_result(
+    task: crate::model::task::Execution,
+    bytes: u64,
+    conflict: bool,
+) -> Statement<'static> {
+    sqlx::query("UPDATE tasks SET detail=detail||jsonb_build_object('range_bytes',COALESCE((detail->>'range_bytes')::bigint,0)+$3,'range_requests',COALESCE((detail->>'range_requests')::bigint,0)+1),state=CASE WHEN $4 AND state='running' AND lease_token=$2 THEN 'failed' ELSE state END,error=CASE WHEN $4 AND state='running' AND lease_token=$2 THEN 'origin_version_changed' ELSE error END WHERE id=$1 AND detail->>'operation'='mirroring' AND (NOT $4 OR state='running' AND lease_token=$2)").bind(task.id).bind(task.token).bind(bytes as i64).bind(conflict)
 }

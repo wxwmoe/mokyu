@@ -1669,6 +1669,14 @@ pub(in super::super) async fn prepare_node_raw(
     let mut tx = backend.pool.begin().await?;
     backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    ensure!(
+        input.input.size <= write::MAX_PART_BYTES
+            || row.mirroring
+                && row.owner_task_id.is_some()
+                && row.upload_id.is_none()
+                && !input.input.local,
+        s3s::s3_error!(EntityTooLarge)
+    );
     if let Some(raw) = queries::node_raw_write(node.node_id, input.operation)
         .fetch_optional(&mut *tx)
         .await?
@@ -1796,7 +1804,9 @@ pub(in super::super) async fn prepare_node_raw(
         )
         .await?;
     }
-    super::super::raw_pages::seal(&mut tx, source.into(), size, &input.input.digest).await?;
+    if size <= write::MAX_PART_BYTES {
+        super::super::raw_pages::seal(&mut tx, source.into(), size, &input.input.digest).await?;
+    }
     queries::insert_node_raw_write(node.node_id, &input, &hash, source, committed)
         .execute(&mut *tx)
         .await?;
@@ -1822,6 +1832,32 @@ pub(in super::super) async fn prepare_node_raw(
     })
 }
 
+pub(in super::super) async fn stage_node_raw_pages(
+    backend: &super::super::Backend,
+    node: &NodeState,
+    key: &Key,
+    input: crate::model::node_native::Pages,
+) -> Result<()> {
+    let mut tx = backend.pool.begin().await?;
+    backend.fence_control(&mut tx).await?;
+    let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
+    require_node_write(&mut tx, &row).await?;
+    let raw = queries::node_raw_write(node.node_id, input.operation)
+        .fetch_one(&mut *tx)
+        .await?;
+    ensure!(
+        row.mirroring
+            && row.owner_task_id.is_some()
+            && raw.size > write::MAX_PART_BYTES
+            && !raw.committed,
+        Error::NodeOperationConflict
+    );
+    input.group.validate_size(raw.size)?;
+    super::super::raw_pages::put(&mut tx, raw.source_id.into(), &input.group).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 pub(in super::super) async fn commit_node_raw(
     backend: &super::super::Backend,
     node: &NodeState,
@@ -1844,6 +1880,7 @@ pub(in super::super) async fn commit_node_raw(
                 .await?;
         }
         let source = raw.source_id.into();
+        super::super::raw_pages::seal(&mut tx, source, raw.size, &raw.digest).await?;
         let local = queries::raw_source(source)
             .fetch_one(&mut *tx)
             .await?

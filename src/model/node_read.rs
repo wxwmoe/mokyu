@@ -362,6 +362,8 @@ pub(crate) struct Reply {
     pub(crate) representation: String,
     pub(crate) etag: String,
     pub(crate) body_reused: bool,
+    pub(crate) origin_work: Option<Vec<u8>>,
+    pub(crate) origin_range: Option<Vec<u8>>,
 }
 
 impl Reply {
@@ -411,6 +413,8 @@ impl Reply {
             representation: "identity".into(),
             etag: String::new(),
             body_reused: false,
+            origin_work: None,
+            origin_range: None,
         }
     }
 

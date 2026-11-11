@@ -1707,10 +1707,6 @@ async fn checkpoint_owner(
 ) -> Result<(work::Plan, Execution)> {
     authenticate_rpc_node(db, node, key, false).await?;
     require_node_run(db, node, run, true).await?;
-    ensure!(
-        matches!(node.role.as_str(), "worker" | "node"),
-        Error::NodeInactive
-    );
     let row = q::batch(node.node_id, operation)
         .fetch_optional(&mut **db)
         .await?
@@ -1721,6 +1717,11 @@ async fn checkpoint_owner(
         Error::NodeExpired
     );
     let plan = row.plan.context("work plan missing")?.0;
+    ensure!(
+        matches!(node.role.as_str(), "worker" | "node")
+            || node.role == "data" && matches!(&plan, work::Plan::Mirror { .. }),
+        Error::NodeInactive
+    );
     let mut tokens = vec![row.token, row.maintenance_token];
     tokens.extend_from_slice(plan.source_permits());
     ensure!(

@@ -18,12 +18,16 @@ pub(crate) struct Input {
 impl Input {
     pub(crate) fn validate(&self) -> Result<()> {
         ensure!(
-            (0..=5 * 1024 * 1024 * 1024).contains(&self.size),
+            (0..=5 * 1024_i64.pow(4)).contains(&self.size),
             "invalid raw size"
         );
         ensure!(
-            self.page_hashes.len()
-                == usize::try_from(crate::content::raw_pages::count(self.size)?)? * 32,
+            if self.size > super::node_write::MAX_PART_BYTES {
+                self.page_hashes.is_empty()
+            } else {
+                self.page_hashes.len()
+                    == usize::try_from(crate::content::raw_pages::count(self.size)?)? * 32
+            },
             "invalid raw page count"
         );
         Ok(())

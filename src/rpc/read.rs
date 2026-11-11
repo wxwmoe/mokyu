@@ -17,6 +17,7 @@ pub(crate) const HEADERS: &[&str] = &[
     "pragma",
     "x-amz-checksum-mode",
     "x-mokyu-origin-hop",
+    "x-mokyu-image-source",
 ];
 pub(crate) const OVERRIDES: &[&str] = &[
     "content-type",
@@ -205,7 +206,7 @@ pub(super) fn report(input: wire::ReadReportRequest) -> Result<read::Report, Sta
     })
 }
 
-fn headers(input: Vec<wire::ReadHeader>, overrides: bool) -> Result<HeaderMap, Status> {
+pub(crate) fn headers(input: Vec<wire::ReadHeader>, overrides: bool) -> Result<HeaderMap, Status> {
     if input.len() > 32
         || input
             .iter()
@@ -560,6 +561,8 @@ pub(crate) fn reply(input: read::Reply) -> wire::ReadReply {
         representation: input.representation,
         etag: input.etag,
         body_reused: input.body_reused,
+        origin_work_json: input.origin_work,
+        origin_range_json: input.origin_range,
     }
 }
 

@@ -75,6 +75,15 @@ pub(crate) trait NodeSessions: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeWork: Send + Sync {
+    async fn progress_mirror(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        operation: Uuid,
+        bytes: u64,
+        publishing: bool,
+    ) -> Result<()>;
     async fn begin_mirror(
         &self,
         node: &NodeState,
@@ -167,6 +176,15 @@ pub(crate) trait NodeRequests: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeReads: Send + Sync {
+    async fn report_origin(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        task: super::task::Execution,
+        bytes: u64,
+        conflict: bool,
+    ) -> Result<()>;
     async fn mirror_read(
         &self,
         node: &NodeState,
@@ -343,6 +361,12 @@ pub(crate) trait NativeParts: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeWrites: NativeParts + RemoteParts + Send + Sync {
+    async fn stage_raw_pages(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_native::Pages,
+    ) -> Result<()>;
     async fn check_raw_files(
         &self,
         node: &NodeState,

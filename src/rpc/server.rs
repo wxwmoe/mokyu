@@ -277,7 +277,15 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
             Status::resource_exhausted("control database is busy")
         }
         _ => {
-            tracing::warn!("node RPC database operation failed");
+            let database_code = error
+                .downcast_ref::<sqlx::Error>()
+                .and_then(sqlx::Error::as_database_error)
+                .and_then(|error| error.code());
+            let column = match error.downcast_ref::<sqlx::Error>() {
+                Some(sqlx::Error::ColumnDecode { index, .. }) => Some(index.as_str()),
+                _ => None,
+            };
+            tracing::warn!(?database_code, column, "node RPC database operation failed");
             Status::unavailable("control operation is unavailable")
         }
     };
@@ -338,6 +346,20 @@ impl NodeObjects for Service {
 
 #[tonic::async_trait]
 impl NodeWrites for Service {
+    async fn stage_raw_pages(
+        &self,
+        request: Request<wire::StageNativePagesRequest>,
+    ) -> Result<Response<wire::NativeFinishReply>, Status> {
+        let node = write_identity(&request)?;
+        let input = super::native::pages(request.into_inner())?;
+        bounded(self.app.node_writes.stage_raw_pages(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        Ok(Response::new(wire::NativeFinishReply {}))
+    }
     async fn check_raw_files(
         &self,
         request: Request<wire::LocalFilesRequest>,
@@ -674,6 +696,31 @@ impl Service {
 
 #[tonic::async_trait]
 impl NodeReads for Service {
+    async fn report_origin(
+        &self,
+        request: Request<wire::OriginReport>,
+    ) -> Result<Response<wire::OriginReported>, Status> {
+        let node = identity(&request)?;
+        if !matches!(node.role.as_str(), "data" | "node") {
+            return Err(Status::permission_denied(
+                "origin reports require a data node",
+            ));
+        }
+        let input = request.into_inner();
+        bounded(self.app.node_reads.report_origin(
+            &node,
+            &self.app.secrets.credential_key,
+            super::read::run(input.run)?,
+            crate::model::task::Execution {
+                id: super::uuid(&input.task_id)?,
+                token: super::uuid(&input.token)?,
+            },
+            input.bytes,
+            input.conflict,
+        ))
+        .await?;
+        Ok(Response::new(wire::OriginReported {}))
+    }
     async fn mirror_read(
         &self,
         request: Request<wire::ReadRequest>,
@@ -1423,6 +1470,23 @@ mod tests {
 
 #[tonic::async_trait]
 impl NodeWork for Service {
+    async fn progress_mirror(
+        &self,
+        request: Request<wire::MirrorProgress>,
+    ) -> Result<Response<wire::TransferCheckpointReply>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        bounded(self.app.node_work.progress_mirror(
+            &node,
+            &self.app.secrets.credential_key,
+            super::read::run(input.run)?,
+            super::uuid(&input.operation_id)?,
+            input.bytes,
+            input.publishing,
+        ))
+        .await?;
+        Ok(Response::new(wire::TransferCheckpointReply {}))
+    }
     async fn begin_mirror(
         &self,
         request: Request<wire::BeginMirrorRequest>,

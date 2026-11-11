@@ -20,6 +20,7 @@ async fn task(
     key: &str,
 ) -> Result<Execution> {
     let request = || Start {
+        foreground: false,
         bucket,
         storage,
         rule,
@@ -146,6 +147,46 @@ async fn mirroring_database_contract() -> Result<()> {
     stores.task_control.complete(good).await?;
     assert_eq!(stores.streams.current(bucket, "saved").await?.id, id);
 
+    let ranged = task(&stores, bucket, storage, rule, 1, "range-version").await?;
+    let old = stores
+        .streams
+        .create(stream(bucket, "range-version", Some(ranged)))
+        .await?;
+    let detail = stores.task_execution.load(ranged.id).await?.detail;
+    stores.mirroring.range_result(ranged, 1234, false).await?;
+    stores.task_control.progress(ranged, "", 0, detail).await?;
+    let recorded = stores.task_execution.load(ranged.id).await?;
+    assert_eq!(recorded.detail["range_bytes"], 1234);
+    assert_eq!(recorded.detail["range_requests"], 1);
+    stores
+        .mirroring
+        .range_result(
+            Execution {
+                id: ranged.id,
+                token: Uuid::new_v4(),
+            },
+            0,
+            true,
+        )
+        .await?;
+    assert_eq!(
+        stores.task_execution.load(ranged.id).await?.state,
+        "running"
+    );
+    stores.mirroring.range_result(ranged, 0, true).await?;
+    stores.mirroring.range_result(ranged, 0, true).await?;
+    let recorded = stores.task_execution.load(ranged.id).await?;
+    assert_eq!(recorded.state, "failed");
+    assert_eq!(
+        recorded.detail["range_requests"], 2,
+        "conflict reporting is idempotent"
+    );
+    stores.streams.finish(old, 0, "old", json!({})).await?;
+    assert!(
+        stores.publish.publish(old, None, None, None).await.is_err(),
+        "a changed origin cannot publish"
+    );
+
     let replaced = task(&stores, bucket, storage, rule, 1, "replace").await?;
     let old = stores
         .streams
@@ -183,6 +224,7 @@ async fn mirroring_database_contract() -> Result<()> {
         stores
             .mirroring
             .request(Start {
+                foreground: false,
                 bucket,
                 storage,
                 rule,
@@ -246,6 +288,7 @@ async fn mirroring_database_contract() -> Result<()> {
         stores
             .mirroring
             .request(Start {
+                foreground: false,
                 bucket,
                 storage,
                 rule,
@@ -267,6 +310,7 @@ async fn mirroring_database_contract() -> Result<()> {
         stores
             .mirroring
             .request(Start {
+                foreground: false,
                 bucket,
                 storage,
                 rule,

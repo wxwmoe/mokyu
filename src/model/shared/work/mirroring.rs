@@ -17,6 +17,91 @@ use uuid::Uuid;
 
 use super::mirroring_transactions::assignment;
 
+impl Backend {
+    pub(super) async fn claim_mirror(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: Run,
+        id: Uuid,
+    ) -> Result<Option<Vec<u8>>> {
+        let mut tx = queries::work::begin_media(self, true).await?;
+        ensure!(
+            super::node_registry::require_work(self, &mut tx, node, key, run).await?,
+            Error::NodeInactive
+        );
+        ensure!(
+            matches!(node.role.as_str(), "data" | "node"),
+            Error::NodeAuthentication
+        );
+        ensure!(
+            queries::work::writable().fetch_one(&mut *tx).await?,
+            Error::OperationAborted
+        );
+        ensure!(
+            queries::work::active(node.node_id)
+                .fetch_one(&mut *tx)
+                .await?
+                < 64,
+            Error::NodeWorkLimit
+        );
+        let record = queries::task_record(id).fetch_one(&mut *tx).await?;
+        if record.state != "queued" {
+            return Ok(None);
+        }
+        ensure!(
+            record.detail["operation"] == "mirroring",
+            Error::NodeOperationConflict
+        );
+        let token = Uuid::new_v4();
+        ensure!(
+            queries::claim_task(id, token)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            Error::OperationAborted
+        );
+        let task = Execution { id, token };
+        let Some((plan, secret)) = offer(&mut tx, task, key).await? else {
+            tx.commit().await?;
+            return Ok(None);
+        };
+        let input = work::Exchange {
+            run,
+            operation: id,
+            completion: None,
+            class: 2,
+            max_items: 1,
+            cached: vec![],
+        };
+        let encrypted = crate::content::codec::protect(&secret, key, token.as_bytes())?;
+        queries::work::insert(
+            node.node_id,
+            &input,
+            &input.hash()?,
+            Some(id),
+            token,
+            Some(&plan),
+            Some(&encrypted),
+        )
+        .execute(&mut *tx)
+        .await?;
+        queries::work::align_lanes(node.node_id, token)
+            .execute(&mut *tx)
+            .await?;
+        let lease = mirror::Lease {
+            operation: id,
+            token,
+            valid_for_ms: 90_000,
+            assignment: serde_json::from_slice(&secret)?,
+        };
+        let result = serde_json::to_vec(&lease)?;
+        tx.commit().await?;
+        Ok(Some(result))
+    }
+}
+
 pub(super) async fn offer(
     tx: &mut Tx<'_>,
     task: Execution,
@@ -81,6 +166,14 @@ pub(super) async fn begin(
                 .any(|s| matches!(s, mirror::Source::Http { .. })),
         Error::NodeOperationConflict
     );
+    if let Some(observed) = &input.observed {
+        observed.validate()?;
+        ensure!(
+            input.size == Some(observed.size as i64),
+            Error::NodeOperationConflict
+        );
+    }
+    let observed = input.observed;
     let selected = input.source;
     q::source(task.id, input.source).execute(&mut *tx).await?;
     transactions::mirroring::guard(&mut tx, task).await?;
@@ -102,7 +195,7 @@ pub(super) async fn begin(
         },
     };
     input.intent.validate()?;
-    let hash = crate::model::node_chunk::hash(&(&input.intent, selected))?;
+    let hash = crate::model::node_chunk::hash(&(&input.intent, selected, &observed))?;
     if let Some(previous) = ledger::owned(node.node_id, operation)
         .fetch_optional(&mut *tx)
         .await?
@@ -120,7 +213,13 @@ pub(super) async fn begin(
         ledger::count(node.node_id).fetch_one(&mut *tx).await? < write::MAX_ACTIVE,
         Error::NodeWriteLimit
     );
-    let row = queries::task_record(task.id).fetch_one(&mut *tx).await?;
+    let mut row = queries::task_record(task.id).fetch_one(&mut *tx).await?;
+    row.detail["source_size"] = serde_json::to_value(input.intent.size)?;
+    row.detail["origin"] = serde_json::to_value(&observed)?;
+    row.detail["phase"] = "reading".into();
+    queries::work_sweep::task_progress(task, "", 0, row.detail.clone())
+        .execute(&mut *tx)
+        .await?;
     let storage = serde_json::from_value(row.detail["storage_id"].clone())?;
     let target = queries::work::storage(storage).fetch_one(&mut *tx).await?;
     let mut profile = queries::storage_profile(storage)

@@ -316,6 +316,18 @@ impl crate::model::cluster::NodeSessions for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWork for Backend {
+    async fn progress_mirror(
+        &self,
+        node: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        operation: Uuid,
+        bytes: u64,
+        publishing: bool,
+    ) -> anyhow::Result<()> {
+        transactions::work::mirroring::progress(self, node, key, run, operation, bytes, publishing)
+            .await
+    }
     async fn begin_mirror(
         &self,
         node: &NodeState,
@@ -409,6 +421,14 @@ impl crate::model::cluster::StoragePermits for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWrites for Backend {
+    async fn stage_raw_pages(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        input: crate::model::node_native::Pages,
+    ) -> Result<()> {
+        transactions::stage_node_raw_pages(self, node, key, input).await
+    }
     async fn check_raw_files(
         &self,
         node: &NodeState,

@@ -320,6 +320,27 @@ impl Client {
         self.unary(input, "/mokyu.node.v1.NodeReads/MirrorRead")
             .await
     }
+    pub(crate) async fn stage_raw_pages(
+        &self,
+        input: wire::StageNativePagesRequest,
+    ) -> Result<wire::NativeFinishReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWrites/StageRawPages")
+            .await
+    }
+    pub(crate) async fn progress_mirror(
+        &self,
+        input: wire::MirrorProgress,
+    ) -> Result<wire::TransferCheckpointReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWork/ProgressMirror")
+            .await
+    }
+    pub(crate) async fn report_origin(
+        &self,
+        input: wire::OriginReport,
+    ) -> Result<wire::OriginReported, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeReads/ReportOrigin")
+            .await
+    }
     pub(crate) async fn exchange_work(
         &self,
         input: wire::WorkRequest,

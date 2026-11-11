@@ -49,6 +49,22 @@ pub(in super::super) fn save(
 
 #[async_trait::async_trait]
 impl MirroringStore for Backend {
+    async fn range(
+        &self,
+        bucket: Uuid,
+        object: &str,
+        key: &crate::content::codec::Key,
+    ) -> Result<Option<crate::model::mirroring::Ranged>> {
+        super::super::transactions::mirroring::range(self, bucket, object, key).await
+    }
+    async fn range_result(
+        &self,
+        task: crate::model::task::Execution,
+        bytes: u64,
+        conflict: bool,
+    ) -> Result<()> {
+        super::super::transactions::mirroring::range_result(self, task, bytes, conflict).await
+    }
     async fn blocks(
         &self,
         principal: &Principal,
@@ -191,4 +207,15 @@ pub(in super::super) fn invalidate(bucket: Uuid) -> Statement<'static> {
 
 pub(in super::super) fn target(bucket: Uuid) -> Scalar<'static, Option<Uuid>> {
     sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=?").bind(bucket)
+}
+
+pub(in super::super) fn reader(bucket: Uuid, object: &str) -> Rows<'_, (Uuid, Uuid)> {
+    sqlx::query_as("SELECT t.id,t.execution_token FROM mirroring_keys k JOIN tasks t ON t.id=k.task_id WHERE k.bucket_id=? AND k.object_key=? AND NOT k.blocked AND t.state='running' AND t.execution_token IS NOT NULL").bind(bucket).bind(object.as_bytes())
+}
+pub(in super::super) fn range_result(
+    task: crate::model::task::Execution,
+    bytes: u64,
+    conflict: bool,
+) -> Statement<'static> {
+    sqlx::query("UPDATE tasks SET detail=json_set(detail,'$.range_bytes',COALESCE(json_extract(detail,'$.range_bytes'),0)+?,'$.range_requests',COALESCE(json_extract(detail,'$.range_requests'),0)+1),error=CASE WHEN ? AND state='running' AND execution_token=? THEN 'origin_version_changed' ELSE error END,state=CASE WHEN ? AND state='running' AND execution_token=? THEN 'failed' ELSE state END WHERE id=? AND json_extract(detail,'$.operation')='mirroring' AND (NOT ? OR state='running' AND execution_token=?)").bind(bytes as i64).bind(conflict).bind(task.token).bind(conflict).bind(task.token).bind(task.id).bind(conflict).bind(task.token)
 }

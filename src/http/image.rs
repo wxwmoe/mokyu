@@ -47,9 +47,27 @@ pub(crate) async fn single(
     headers: HeaderMap,
     method: Method,
 ) -> Result<Option<Response>> {
-    let Some(prepared) = prepared else {
+    let Some(mut prepared) = prepared else {
         return Ok(None);
     };
+    if method == Method::GET
+        && prepared.snapshot.stream.is_none()
+        && prepared
+            .snapshot
+            .image
+            .as_ref()
+            .is_some_and(|image| image.rule.is_some() || image.settings.policy.protect_original)
+    {
+        let mut source_headers = headers.clone();
+        source_headers.insert("x-mokyu-image-source", "1".parse()?);
+        let key = &prepared.snapshot.image.as_ref().unwrap().key;
+        app.mirror_read(&prepared.snapshot.bucket, key, &source_headers, true, true)
+            .await?;
+        prepared = app
+            .prepare_read(&prepared.route, None, false)
+            .await?
+            .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+    }
     let Some(selection) = prepared
         .snapshot
         .image

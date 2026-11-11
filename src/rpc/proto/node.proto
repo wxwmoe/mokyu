@@ -55,6 +55,7 @@ service NodeWork {
   rpc CheckpointTransfer(TransferCheckpointRequest) returns (TransferCheckpointReply);
   rpc ReadMigration(ReadMigrationRequest) returns (ReadReply);
   rpc BeginMirror(BeginMirrorRequest) returns (WriteReply);
+  rpc ProgressMirror(MirrorProgress) returns (TransferCheckpointReply);
   rpc ReadTransfer(ReadTransferRequest) returns (ReadTransferReply);
 }
 
@@ -64,6 +65,13 @@ message BeginMirrorRequest {
   string operation_id = 3;
   bytes input_json = 4;
   repeated Cached cached = 5;
+}
+
+message MirrorProgress {
+  Run run = 1;
+  string operation_id = 2;
+  uint64 bytes = 3;
+  bool publishing = 4;
 }
 
 message RawPagesCheckpoint {
@@ -123,10 +131,20 @@ message WorkReply {
 service NodeReads {
   rpc OpenRead(ReadRequest) returns (ReadReply);
   rpc MirrorRead(ReadRequest) returns (ReadReply);
+  rpc ReportOrigin(OriginReport) returns (OriginReported);
   rpc RefreshReads(RefreshReadsRequest) returns (RefreshReadsReply);
   rpc ReadWindow(ReadWindowRequest) returns (ReadReply);
   rpc ReportRead(ReadReportRequest) returns (ReadReportReply);
 }
+
+message OriginReport {
+  Run run = 1;
+  string task_id = 2;
+  string token = 3;
+  uint64 bytes = 4;
+  bool conflict = 5;
+}
+message OriginReported {}
 
 // Anonymous metadata confirmation only; never allocates a body read lease.
 message RefreshReadsRequest {
@@ -155,6 +173,7 @@ service NodeWrites {
   rpc CommitChunks(CommitChunksRequest) returns (WriteBatchReply);
   rpc CopyReferences(CopyReferencesRequest) returns (WriteBatchReply);
   rpc PrepareRaw(PrepareRawRequest) returns (PreparedRaw);
+  rpc StageRawPages(StageNativePagesRequest) returns (NativeFinishReply);
   rpc PrepareLocalPart(PrepareLocalPartRequest) returns (WriteReply);
   rpc CommitRaw(CommitRawRequest) returns (PreparedRaw);
   rpc CheckRawFiles(LocalFilesRequest) returns (FilesReply);
@@ -906,4 +925,6 @@ message ReadReply {
   Cached image_policy = 16;
   Cached image_style = 17;
   string source_key = 18;
+  optional bytes origin_work_json = 19;
+  optional bytes origin_range_json = 20;
 }

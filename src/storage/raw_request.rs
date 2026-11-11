@@ -147,14 +147,25 @@ impl File {
     }
 
     pub(crate) fn replay(&self) -> futures_util::stream::BoxStream<'_, Result<bytes::Bytes>> {
+        self.replay_range(0..self.bytes)
+    }
+
+    pub(crate) fn replay_range(
+        &self,
+        span: std::ops::Range<u64>,
+    ) -> futures_util::stream::BoxStream<'_, Result<bytes::Bytes>> {
         use tokio::io::AsyncReadExt;
         Box::pin(async_stream::try_stream! {
+            if span.start > span.end || span.end > self.bytes {
+                Err(anyhow::anyhow!("raw replay range is invalid"))?;
+            }
             let mut file = tokio::fs::File::open(&self.path).await?;
-            loop {
-                let mut bytes = vec![0; 256 * 1024];
-                let count = file.read(&mut bytes).await?;
-                if count == 0 { break; }
-                bytes.truncate(count);
+            file.seek(std::io::SeekFrom::Start(span.start)).await?;
+            let mut left = span.end - span.start;
+            while left > 0 {
+                let mut bytes = vec![0; left.min(256 * 1024) as usize];
+                file.read_exact(&mut bytes).await?;
+                left -= bytes.len() as u64;
                 yield bytes::Bytes::from(bytes);
             }
         })

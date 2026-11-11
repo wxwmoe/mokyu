@@ -191,6 +191,7 @@ impl Gateway {
             .then(|| delivery::compression_work(&self.reads))
             .flatten();
         let mut headers = headers.clone();
+        headers.remove("x-mokyu-image-source");
         if wants_compression && memory.is_none() && accept.identity() {
             headers.insert(
                 hyper::header::ACCEPT_ENCODING,
@@ -302,6 +303,17 @@ impl Gateway {
                         && request.prepared.reply.bucket == bucket,
                     s3s::s3_error!(AccessDenied)
                 );
+                if request.prepared.reply.origin_work_json.is_some() {
+                    let mut read = self.writes.mirror_foreground(request.prepared).await?;
+                    read.headers.extend(overrides.clone());
+                    return Ok(read);
+                }
+                if request.prepared.reply.origin_range_json.is_some() {
+                    let headers = crate::rpc::read::headers(request.input.headers.clone(), false)?;
+                    let mut read = self.writes.mirror_range(request.prepared, &headers).await?;
+                    read.headers.extend(overrides.clone());
+                    return Ok(read);
+                }
                 if request.prepared.reply.outcome != wire::ReadOutcome::Pending as i32 {
                     break;
                 }
@@ -351,6 +363,34 @@ impl Gateway {
     ) -> Result<Response> {
         drop(request.compression.take());
         request.prepared.check()?;
+        if method == Method::GET
+            && request.prepared.reply.outcome == wire::ReadOutcome::NoSuchKey as i32
+        {
+            request.input.headers.push(wire::ReadHeader {
+                name: "x-mokyu-image-source".into(),
+                value: b"1".to_vec(),
+            });
+            let until = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let next = self.reads.mirror(request.input.clone()).await?;
+                ensure!(
+                    next.reply.credential == request.prepared.reply.credential
+                        && next.reply.bucket == request.prepared.reply.bucket
+                        && next.reply.image_policy == request.prepared.reply.image_policy
+                        && next.reply.image_style == request.prepared.reply.image_style,
+                    s3s::s3_error!(OperationAborted)
+                );
+                request.prepared = next;
+                if request.prepared.reply.outcome != wire::ReadOutcome::Pending as i32 {
+                    break;
+                }
+                ensure!(
+                    tokio::time::Instant::now() < until,
+                    s3s::s3_error!(SlowDown, "origin fill is still in progress")
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
         for at in crate::app::readiness::probes(request.deadline) {
             if request.prepared.reply.outcome != wire::ReadOutcome::Pending as i32 {
                 break;

@@ -40,7 +40,10 @@ pub(in super::super) async fn collision(
         if let Edit::Put { style } = edit
             && style.enabled
         {
-            query.push(" UNION ALL SELECT ").push_bind(&style.name);
+            query
+                .push(" UNION ALL SELECT CAST(")
+                .push_bind(&style.name)
+                .push(" AS CHAR CHARACTER SET ascii) COLLATE ascii_bin");
         }
     }
     query.push(") s ON (");

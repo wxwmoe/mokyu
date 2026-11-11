@@ -314,6 +314,11 @@ mod tests {
         };
         assert!(prepare_raw(input.clone()).is_ok());
         input.size = 5 * 1024 * 1024 * 1024 + 1;
+        assert!(prepare_raw(input.clone()).is_ok());
+        input.page_hashes = vec![0; 32];
+        assert!(prepare_raw(input.clone()).is_err());
+        input.page_hashes.clear();
+        input.size = 5 * 1024_u64.pow(4) + 1;
         assert!(prepare_raw(input.clone()).is_err());
         input.size = 0;
         input.content_hash.pop();
