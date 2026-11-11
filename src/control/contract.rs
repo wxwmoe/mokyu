@@ -180,6 +180,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
                 .routes(routes!(super::buckets::get, super::buckets::save))
                 .routes(routes!(super::mirroring::get, super::mirroring::save))
                 .routes(routes!(super::mirroring::preview))
+                .routes(routes!(super::mirroring::blocks, super::mirroring::unblock))
                 .layer(axum::extract::DefaultBodyLimit::max(128 * 1024)),
         )
         .routes(routes!(super::buckets::delete))
@@ -364,6 +365,8 @@ mod tests {
             ("/api/v1/buckets/{bucket}/mirroring", "get"),
             ("/api/v1/buckets/{bucket}/mirroring", "put"),
             ("/api/v1/buckets/{bucket}/mirroring/preview", "post"),
+            ("/api/v1/buckets/{bucket}/mirroring/blocks", "get"),
+            ("/api/v1/buckets/{bucket}/mirroring/unblock", "post"),
             ("/api/v1/packs", "get"),
             ("/api/v1/packs/{id}", "get"),
             ("/api/v1/cache/flush", "post"),

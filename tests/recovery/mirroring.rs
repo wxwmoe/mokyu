@@ -194,6 +194,42 @@ async fn mirroring_database_contract() -> Result<()> {
             .is_err()
     );
     stores.task_control.complete(removed).await?;
+    let blocks = stores
+        .mirroring
+        .blocks(&Principal::Local, bucket, None, 1)
+        .await?;
+    assert_eq!(blocks.keys, vec!["removed"]);
+    assert!(blocks.next.is_none());
+    stores
+        .mirroring
+        .unblock(&Principal::Local, bucket, "removed")
+        .await?;
+    assert!(
+        stores
+            .mirroring
+            .blocks(&Principal::Local, bucket, None, 10)
+            .await?
+            .keys
+            .is_empty()
+    );
+    let replacement = task(&stores, bucket, storage, rule, 1, "removed").await?;
+    assert_ne!(removed.id, replacement.id);
+    assert!(
+        stores.publish.publish(old, None, None, None).await.is_err(),
+        "unblocking cannot revive the old fill"
+    );
+    stores.task_control.complete(replacement).await?;
+    stores
+        .objects
+        .change(ObjectChange {
+            principal: Principal::Local,
+            bucket,
+            key: "removed".into(),
+            expected: None,
+            public: None,
+            if_match: None,
+        })
+        .await?;
 
     let stale = task(&stores, bucket, storage, rule, 1, "stale-rule").await?;
     let old = stores

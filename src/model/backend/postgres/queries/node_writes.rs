@@ -24,13 +24,14 @@ pub(in super::super) struct NodeWrite {
     pub checksum_algorithm: Option<String>,
     pub completion_upload: Option<Uuid>,
     pub owner_task_id: Option<Uuid>,
+    pub mirroring: bool,
     pub owner_lease_token: Option<Uuid>,
     pub state: String,
     pub valid_for_ms: i64,
 }
 
 pub(in super::super) fn node_write(node: Uuid, operation: Uuid) -> Rows<'static, NodeWrite> {
-    sqlx::query_as("SELECT w.*,s.bucket_id AS bucket_id,s.owner_task_id,s.owner_lease_token,CASE WHEN w.state='active' AND s.state='writing' AND ((w.upload_id IS NULL AND (w.completion_upload IS NULL OR EXISTS(SELECT 1 FROM uploads c WHERE c.id=w.completion_upload AND c.state='completing' AND c.completion_token=w.operation_id AND c.completion_expires_at>clock_timestamp())) AND (EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id) OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.lease_token=s.owner_lease_token AND t.lease_node_id=w.node_id AND t.state='running' AND t.lease_expires_at>clock_timestamp() AND (t.task_type='storage_migration' OR t.task_type='upload' AND t.detail->>'operation'='cdc')))) OR (w.upload_id IS NOT NULL AND EXISTS(SELECT 1 FROM parts a JOIN uploads u ON u.id=a.upload_id WHERE a.upload_id=w.upload_id AND a.part_number=w.part_number AND a.write_token=s.id AND u.state='active' AND u.remote_manifest_hash IS NULL))) THEN GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) ELSE 0 END AS valid_for_ms FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id LEFT JOIN streams s ON s.id=w.stream_id WHERE w.node_id=$1 AND w.operation_id=$2 FOR UPDATE OF w")
+    sqlx::query_as("SELECT w.*,s.bucket_id AS bucket_id,s.owner_task_id,s.owner_lease_token,EXISTS(SELECT 1 FROM tasks m WHERE m.id=s.owner_task_id AND m.detail->>'operation'='mirroring') AS mirroring,CASE WHEN w.state='active' AND s.state='writing' AND ((w.upload_id IS NULL AND (w.completion_upload IS NULL OR EXISTS(SELECT 1 FROM uploads c WHERE c.id=w.completion_upload AND c.state='completing' AND c.completion_token=w.operation_id AND c.completion_expires_at>clock_timestamp())) AND (EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.write_token=s.id) OR EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.lease_token=s.owner_lease_token AND t.lease_node_id=w.node_id AND t.state='running' AND t.lease_expires_at>clock_timestamp() AND (t.task_type='storage_migration' OR t.task_type='upload' AND t.detail->>'operation'='cdc')))) OR (w.upload_id IS NOT NULL AND EXISTS(SELECT 1 FROM parts a JOIN uploads u ON u.id=a.upload_id WHERE a.upload_id=w.upload_id AND a.part_number=w.part_number AND a.write_token=s.id AND u.state='active' AND u.remote_manifest_hash IS NULL))) THEN GREATEST(0,(extract(epoch FROM (l.expires_at-clock_timestamp()))*1000)::bigint) ELSE 0 END AS valid_for_ms FROM node_writes w LEFT JOIN stream_leases l ON l.id=w.lease_id LEFT JOIN streams s ON s.id=w.stream_id WHERE w.node_id=$1 AND w.operation_id=$2 FOR UPDATE OF w")
         .bind(node).bind(operation)
 }
 

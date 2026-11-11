@@ -316,6 +316,19 @@ impl crate::model::cluster::NodeSessions for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeWork for Backend {
+    async fn begin_mirror(
+        &self,
+        node: &NodeState,
+        key: &crate::content::codec::Key,
+        run: crate::model::session::Run,
+        work: Uuid,
+        operation: Uuid,
+        input: crate::model::mirroring::Begin,
+        cached: Vec<crate::model::node_read::Version>,
+    ) -> Result<crate::model::node_write::Reply> {
+        transactions::work::mirroring::begin(self, node, key, run, work, operation, input, cached)
+            .await
+    }
     async fn read_transfer(
         &self,
         node: &NodeState,

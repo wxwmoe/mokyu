@@ -26,7 +26,7 @@ pub(in super::super) fn assign(
     task: Uuid,
     revision: i64,
 ) -> Statement<'_> {
-    sqlx::query("UPDATE mirroring_keys SET task_id=$1,revision=$2,external_id=NULL,external_revision=NULL,missing_until=0 WHERE bucket_id=$3 AND object_key=$4").bind(task).bind(revision).bind(bucket).bind(key)
+    sqlx::query("UPDATE mirroring_keys SET task_id=$1,revision=$2,external_id=NULL,external_revision=NULL,missing_until=0,retry_after=0 WHERE bucket_id=$3 AND object_key=$4").bind(task).bind(revision).bind(bucket).bind(key)
 }
 
 pub(in super::super) fn enqueue(input: &crate::model::mirroring::Start) -> Statement<'static> {
@@ -42,12 +42,32 @@ pub(in super::super) fn save(
     revision: i64,
     enabled: bool,
     encrypted: &[u8],
+    authority: crate::model::mirroring::Authority,
 ) -> Statement<'_> {
-    sqlx::query("INSERT INTO bucket_mirroring(bucket_id,revision,enabled,config_encrypted) VALUES($1,$2,$3,$4) ON CONFLICT(bucket_id) DO UPDATE SET revision=excluded.revision,enabled=excluded.enabled,config_encrypted=excluded.config_encrypted").bind(bucket).bind(revision).bind(enabled).bind(encrypted)
+    sqlx::query("INSERT INTO bucket_mirroring(bucket_id,revision,enabled,config_encrypted,authority) VALUES($1,$2,$3,$4,$5) ON CONFLICT(bucket_id) DO UPDATE SET revision=excluded.revision,enabled=excluded.enabled,config_encrypted=excluded.config_encrypted,authority=excluded.authority").bind(bucket).bind(revision).bind(enabled).bind(encrypted).bind(sqlx::types::Json(authority))
 }
 
 #[async_trait::async_trait]
 impl MirroringStore for Backend {
+    async fn blocks(
+        &self,
+        principal: &Principal,
+        bucket: Uuid,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::model::mirroring::BlockPage> {
+        principal.require(self, bucket, Action::Settings).await?;
+        let limit = limit.clamp(1, 100);
+        let mut keys: Vec<String> = blocked(bucket, after, limit + 1)
+            .fetch_all(&self.pool)
+            .await?;
+        let next = (keys.len() > limit).then(|| keys[limit - 1].clone());
+        keys.truncate(limit);
+        Ok(crate::model::mirroring::BlockPage { keys, next })
+    }
+    async fn unblock(&self, principal: &Principal, bucket: Uuid, key: &str) -> Result<()> {
+        super::super::transactions::mirroring::unblock(self, principal, bucket, key).await
+    }
     async fn bind_source(
         &self,
         task: crate::model::task::Execution,
@@ -132,4 +152,43 @@ pub(in super::super) fn block(bucket: Uuid, key: &str) -> Statement<'_> {
 
 pub(in super::super) fn occupied(bucket: Uuid, key: &str) -> Scalar<'_, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM objects o LEFT JOIN streams s ON s.id=o.write_token LEFT JOIN mirroring_keys k ON k.bucket_id=o.bucket_id AND k.object_key=o.object_key WHERE o.bucket_id=$1 AND o.object_key=$2 AND (o.stream_id IS NOT NULL OR (s.state='writing' AND (s.owner_task_id IS NULL OR NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=s.owner_task_id AND t.detail->>'operation'='mirroring')))))").bind(bucket).bind(key)
+}
+
+pub(in super::super) fn authority(
+    bucket: Uuid,
+) -> Scalar<'static, Option<sqlx::types::Json<crate::model::mirroring::Authority>>> {
+    sqlx::query_scalar("SELECT authority FROM bucket_mirroring WHERE bucket_id=$1").bind(bucket)
+}
+pub(in super::super) fn saved_user(id: Uuid) -> Rows<'static, (String, i64)> {
+    sqlx::query_as("SELECT role,authorization_revision FROM web_users WHERE id=$1 AND enabled AND NOT must_change_password FOR SHARE").bind(id)
+}
+pub(in super::super) fn active(bucket: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT COUNT(*) FROM mirroring_keys k JOIN tasks t ON t.id=k.task_id WHERE k.bucket_id=$1 AND t.state IN ('queued','running','paused')").bind(bucket)
+}
+pub(in super::super) fn blocked(
+    bucket: Uuid,
+    after: Option<&str>,
+    limit: usize,
+) -> Scalar<'_, String> {
+    sqlx::query_scalar("SELECT object_key FROM mirroring_keys WHERE bucket_id=$1 AND blocked AND object_key>$2 ORDER BY object_key LIMIT $3").bind(bucket).bind(after.unwrap_or("")).bind(limit as i64)
+}
+pub(in super::super) fn erase(bucket: Uuid, key: &str) -> Statement<'_> {
+    sqlx::query("DELETE FROM mirroring_keys WHERE bucket_id=$1 AND object_key=$2")
+        .bind(bucket)
+        .bind(key)
+}
+pub(in super::super) fn expired(bucket: Uuid, now: i64) -> Scalar<'static, String> {
+    sqlx::query_scalar("SELECT object_key FROM mirroring_keys WHERE bucket_id=$1 AND NOT blocked AND missing_until<=$2 AND retry_after<=$3 AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=mirroring_keys.task_id AND t.state IN ('queued','running','paused')) ORDER BY object_key LIMIT 64").bind(bucket).bind(now).bind(now)
+}
+
+pub(in super::super) fn published(task: crate::model::task::Execution) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT w.next_offset FROM node_writes w JOIN streams s ON s.id=w.stream_id WHERE s.owner_task_id=$1 AND s.owner_lease_token=$2 AND w.state='published' LIMIT 1").bind(task.id).bind(task.token)
+}
+
+pub(in super::super) fn invalidate(bucket: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE tasks SET state='failed',error='origin_rule_changed',lease_token=NULL,updated_at=clock_timestamp() WHERE id IN (SELECT task_id FROM mirroring_keys WHERE bucket_id=$1) AND state IN ('queued','running','paused')").bind(bucket)
+}
+
+pub(in super::super) fn target(bucket: Uuid) -> Scalar<'static, Option<Uuid>> {
+    sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=$1 FOR SHARE").bind(bucket)
 }

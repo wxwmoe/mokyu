@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261111193000.
+-- Generated from the complete postgres migration chain through 20261111210000.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -881,6 +881,7 @@ CREATE TABLE public.bucket_mirroring (
     revision bigint NOT NULL,
     enabled boolean DEFAULT false NOT NULL,
     config_encrypted bytea NOT NULL,
+    authority jsonb,
     CONSTRAINT bucket_mirroring_revision_check CHECK ((revision > 0))
 );
 

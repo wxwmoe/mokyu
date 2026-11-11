@@ -566,10 +566,21 @@ impl Reads {
     pub(crate) async fn open(&self, input: wire::ReadRequest) -> Result<Prepared> {
         self.open_memory(input, None).await
     }
+    pub(crate) async fn mirror(&self, input: wire::ReadRequest) -> Result<Prepared> {
+        self.open_kind(input, None, true).await
+    }
     pub(crate) async fn open_memory(
+        &self,
+        input: wire::ReadRequest,
+        memory: Option<Arc<OwnedSemaphorePermit>>,
+    ) -> Result<Prepared> {
+        self.open_kind(input, memory, false).await
+    }
+    async fn open_kind(
         &self,
         mut input: wire::ReadRequest,
         memory: Option<Arc<OwnedSemaphorePermit>>,
+        mirror: bool,
     ) -> Result<Prepared> {
         let memory = if let Some(memory) = memory {
             memory
@@ -608,7 +619,11 @@ impl Reads {
         let started = Instant::now();
         let mut offer = self.node.resources.read_offer(&snapshot.lease);
         input.permits = offer.permits.take();
-        let mut reply = self.node.client.read(input).await?;
+        let mut reply = if mirror {
+            self.node.client.mirror_read(input).await?
+        } else {
+            self.node.client.read(input).await?
+        };
         let grants = self
             .node
             .resources

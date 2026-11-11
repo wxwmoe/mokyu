@@ -10,6 +10,8 @@ mod journal_restore;
 #[path = "../../shared/journal_snapshots.rs"]
 mod journal_snapshots;
 mod migration;
+#[path = "../../shared/mirroring.rs"]
+mod mirroring_transactions;
 #[path = "../../shared/node/native_parts.rs"]
 mod native_parts;
 #[path = "../../shared/node/files.rs"]
@@ -62,6 +64,8 @@ mod work_import;
 mod work_media;
 #[path = "../../shared/work/migration.rs"]
 mod work_migration;
+#[path = "../../shared/work/mirroring.rs"]
+mod work_mirroring;
 #[path = "../../shared/work/raw.rs"]
 mod work_raw;
 #[path = "../../shared/work/replication.rs"]

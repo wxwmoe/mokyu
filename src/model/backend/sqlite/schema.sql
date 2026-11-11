@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261111193000.
+-- Generated from the complete sqlite migration chain through 20261111210000.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -59,7 +59,7 @@ CREATE TABLE bucket_mirroring (
     revision INTEGER NOT NULL CHECK (revision > 0),
     enabled INTEGER NOT NULL DEFAULT FALSE CHECK (enabled IN (0,1)),
     config_encrypted BLOB NOT NULL
-);
+, authority TEXT);
 
 CREATE TABLE bucket_tiering (
     bucket_id BLOB NOT NULL PRIMARY KEY,

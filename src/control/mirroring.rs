@@ -9,10 +9,49 @@ use crate::{
 use anyhow::{Result, ensure};
 use axum::{
     Json,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
 };
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub(crate) struct BlockQuery {
+    after: Option<String>,
+    limit: Option<usize>,
+}
+
+#[utoipa::path(get, path="/api/v1/buckets/{bucket}/mirroring/blocks", operation_id="bucket_mirroring_blocks", params(("bucket"=Uuid, Path), BlockQuery), responses((status=200, body=crate::model::mirroring::BlockPage)))]
+pub(super) async fn blocks(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(bucket): Path<Uuid>,
+    Query(query): Query<BlockQuery>,
+) -> Result<Json<crate::model::mirroring::BlockPage>, HttpError> {
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=100).contains(&limit) || query.after.as_ref().is_some_and(|key| key.len() > 1024) {
+        return Err(s3s::s3_error!(InvalidArgument).into());
+    }
+    Ok(Json(
+        app.mirroring
+            .blocks(&actor.principal, bucket, query.after.as_deref(), limit)
+            .await?,
+    ))
+}
+
+#[utoipa::path(post, path="/api/v1/buckets/{bucket}/mirroring/unblock", operation_id="bucket_mirroring_unblock", params(("bucket"=Uuid, Path)), request_body=crate::model::mirroring::Unblock, responses((status=204)))]
+pub(super) async fn unblock(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(bucket): Path<Uuid>,
+    Json(input): Json<crate::model::mirroring::Unblock>,
+) -> Result<axum::http::StatusCode, HttpError> {
+    actor.recent(&app).await?;
+    app.writable()?;
+    app.mirroring
+        .unblock(&actor.principal, bucket, &input.key)
+        .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
 
 pub(crate) async fn view(app: &App, principal: &Principal, bucket: Uuid) -> Result<View> {
     principal

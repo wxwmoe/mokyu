@@ -195,6 +195,19 @@ impl Worker {
                 "work protection is missing"
             );
             let future = async {
+                if let work::Plan::Mirror { .. } = &plan {
+                    let assignment = serde_json::from_slice(
+                        reply
+                            .external_connection_json
+                            .as_deref()
+                            .context("origin assignment missing")?,
+                    )?;
+                    let outcome = self.writes.mirror(operation, &assignment).await?;
+                    return Ok(work::Completion {
+                        operation,
+                        outcomes: vec![outcome],
+                    });
+                }
                 if let work::Plan::ExternalTest(test) = &plan {
                     let connection = serde_json::from_slice(
                         reply
@@ -249,7 +262,9 @@ impl Worker {
                 let backend =
                     reads::backend(&materials, plan.storage().context("work storage missing")?)?;
                 let outcomes = match plan {
-                    work::Plan::ExternalTest(_) | work::Plan::ExternalTransfer(_) => unreachable!(),
+                    work::Plan::Mirror { .. }
+                    | work::Plan::ExternalTest(_)
+                    | work::Plan::ExternalTransfer(_) => unreachable!(),
                     work::Plan::UploadRaw { storage, items } => {
                         #[cfg(feature = "fault-injection")]
                         crate::faults::point("node-cache-before-upload").await;
@@ -503,7 +518,10 @@ impl Worker {
                                     crate::storage::raw::remote_path(item.location)
                                 }
                                 work::Physical::Staging { key } => {
-                                    ensure!(crate::storage::is_fragment_key(key), "invalid staging key");
+                                    ensure!(
+                                        crate::storage::is_fragment_key(key),
+                                        "invalid staging key"
+                                    );
                                     Path::parse(key)?
                                 }
                             };

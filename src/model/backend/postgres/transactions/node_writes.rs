@@ -690,6 +690,7 @@ pub(super) async fn require_node_write(
         .fetch_one(&mut **db)
         .await?;
     authority.lock(db).await?;
+    mirroring::publication(db, stream).await?;
     if let Some(source) = &row.copy_source {
         queries::node_copy_source(source)
             .fetch_optional(&mut **db)
@@ -839,7 +840,7 @@ pub(in super::super) async fn prepare_node_chunks(
     );
     let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
     // Lock quota before key material, matching write admission.
-    if row.completion_upload.is_none() && row.owner_task_id.is_none() {
+    if row.completion_upload.is_none() && (row.owner_task_id.is_none() || row.mirroring) {
         queries::reserve_quota(stream, end, false, row.upload_id, row.part_number)
             .fetch_one(&mut *tx)
             .await?;
@@ -1343,7 +1344,11 @@ pub(in super::super) async fn publish_node_write(
             == 1,
         Error::OperationAborted
     );
-    if row.owner_task_id.is_some() {
+    let mirror = queries::mirroring::origin_owner(stream)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+    if row.owner_task_id.is_some() && !mirror {
         work::seal_task_write(&mut tx, &row, &input).await?;
     } else if let (Some(upload), Some(number)) = (row.upload_id, row.part_number) {
         ensure!(
@@ -1719,7 +1724,7 @@ pub(in super::super) async fn prepare_node_raw(
         s3s::s3_error!(IncompleteBody)
     );
     let storage = row.storage_id.ok_or(Error::SourceUnavailable)?;
-    if row.owner_task_id.is_none() {
+    if row.owner_task_id.is_none() || row.mirroring {
         queries::reserve_quota(stream, size, false, row.upload_id, row.part_number)
             .fetch_one(&mut *tx)
             .await?;

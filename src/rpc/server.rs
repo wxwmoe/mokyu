@@ -243,6 +243,7 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
             match code {
                 s3s::S3ErrorCode::AccessDenied => Status::permission_denied("access denied"),
                 s3s::S3ErrorCode::NoSuchBucket => Status::not_found("bucket was not found"),
+                s3s::S3ErrorCode::NoSuchKey => Status::not_found("object was not found"),
                 s3s::S3ErrorCode::NoSuchUpload => Status::not_found("upload was not found"),
                 s3s::S3ErrorCode::SlowDown => {
                     Status::resource_exhausted("multipart admission is busy")
@@ -289,6 +290,7 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
             .and_then(|error| match error.code() {
                 s3s::S3ErrorCode::AccessDenied => Some("AccessDenied"),
                 s3s::S3ErrorCode::NoSuchBucket => Some("NoSuchBucket"),
+                s3s::S3ErrorCode::NoSuchKey => Some("NoSuchKey"),
                 s3s::S3ErrorCode::InvalidBucketState => Some("InvalidBucketState"),
                 s3s::S3ErrorCode::OperationAborted => Some("OperationAborted"),
                 s3s::S3ErrorCode::PreconditionFailed => Some("PreconditionFailed"),
@@ -672,6 +674,26 @@ impl Service {
 
 #[tonic::async_trait]
 impl NodeReads for Service {
+    async fn mirror_read(
+        &self,
+        request: Request<wire::ReadRequest>,
+    ) -> Result<Response<wire::ReadReply>, Status> {
+        let node = identity(&request)?;
+        if !matches!(node.role.as_str(), "data" | "node") {
+            return Err(Status::permission_denied(
+                "origin reads require a data node",
+            ));
+        }
+        let input = super::read::query(request.into_inner())?;
+        let reply = bounded(self.app.node_reads.mirror_read(
+            &node,
+            &self.app.secrets.credential_key,
+            input,
+        ))
+        .await?;
+        self.app.work_queued();
+        Ok(Response::new(super::read::reply(reply)))
+    }
     async fn report_read(
         &self,
         request: Request<wire::ReadReportRequest>,
@@ -1383,6 +1405,11 @@ mod tests {
                 tonic::Code::NotFound,
                 "NoSuchBucket",
             ),
+            (
+                s3s::s3_error!(NoSuchKey).into(),
+                tonic::Code::NotFound,
+                "NoSuchKey",
+            ),
         ] {
             let status = failure(error);
             assert_eq!(status.code(), code);
@@ -1396,6 +1423,31 @@ mod tests {
 
 #[tonic::async_trait]
 impl NodeWork for Service {
+    async fn begin_mirror(
+        &self,
+        request: Request<wire::BeginMirrorRequest>,
+    ) -> Result<Response<wire::WriteReply>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        if prost::Message::encoded_len(&input) > super::read::REQUEST_LIMIT {
+            return Err(Status::resource_exhausted(
+                "origin write request exceeds message budget",
+            ));
+        }
+        let value = serde_json::from_slice(&input.input_json)
+            .map_err(|_| Status::invalid_argument("invalid origin write"))?;
+        let value = bounded(self.app.node_work.begin_mirror(
+            &node,
+            &self.app.secrets.credential_key,
+            super::read::run(input.run)?,
+            super::uuid(&input.work_id)?,
+            super::uuid(&input.operation_id)?,
+            value,
+            super::read::cached(input.cached)?,
+        ))
+        .await?;
+        Ok(Response::new(super::write::reply(value)?))
+    }
     async fn checkpoint_raw_pages(
         &self,
         request: Request<wire::RawPagesCheckpoint>,

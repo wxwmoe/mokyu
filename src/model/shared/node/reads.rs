@@ -468,6 +468,70 @@ pub(super) async fn protect_node_read(
 
 #[async_trait::async_trait]
 impl NodeReads for Backend {
+    async fn mirror_read(
+        &self,
+        state: &NodeState,
+        key: &Key,
+        input: read::Query,
+    ) -> Result<read::Reply> {
+        let mut tx = q::begin(self).await?;
+        super::queries::node_requests::admit(self, &mut tx, state, key, input.run).await?;
+        ensure!(
+            !input.head && !input.headers.contains_key("x-mokyu-origin-hop"),
+            s3s::s3_error!(NoSuchKey)
+        );
+        let mut reply = open_in(&mut tx, state, key, input.clone(), false).await?;
+        let start = if reply.outcome == read::Outcome::NoSuchKey {
+            let bucket = super::queries::node_requests::node_read_bucket(&input.route)
+                .fetch_one(&mut *tx)
+                .await?;
+            let object = reply.source_key.clone();
+            let (revision, encrypted) = super::queries::mirroring::record(bucket.id)
+                .fetch_one(&mut *tx)
+                .await?;
+            let view = crate::model::mirroring::Record {
+                revision,
+                encrypted,
+            }
+            .open(bucket.id, key)?;
+            let rule = view
+                .config
+                .select(&object)
+                .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
+            ensure!(
+                input.access.is_some() || rule.public_read,
+                s3s::s3_error!(AccessDenied)
+            );
+            Some(crate::model::mirroring::Start {
+                bucket: bucket.id,
+                key: object,
+                revision,
+                rule: rule.id,
+                task: Uuid::now_v7(),
+                storage: bucket
+                    .storage_id
+                    .ok_or_else(|| s3s::s3_error!(InvalidBucketState))?,
+            })
+        } else {
+            None
+        };
+        tx.commit().await?;
+        if let Some(start) = start {
+            // Release object read locks before acquiring the fill's bucket/key locks.
+            if let Err(error) = super::transactions::mirroring::request(self, start).await {
+                if crate::model::error(&error) == Some(Error::OperationAborted)
+                    || error
+                        .downcast_ref::<s3s::S3Error>()
+                        .is_some_and(|error| error.code() == &s3s::S3ErrorCode::OperationAborted)
+                {
+                    return self.open_read(state, key, input).await;
+                }
+                return Err(error);
+            }
+            reply.outcome = read::Outcome::Pending;
+        }
+        Ok(reply)
+    }
     async fn open_read(
         &self,
         state: &NodeState,

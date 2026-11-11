@@ -380,9 +380,93 @@ impl Source {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Authority {
+    pub principal: Principal,
+    pub public: bool,
+    pub private: bool,
+    pub sources: Vec<Uuid>,
+}
+
+impl Authority {
+    pub(crate) fn new(principal: &Principal, config: &Config) -> Self {
+        let sources: Vec<_> = config
+            .rules
+            .iter()
+            .flat_map(|rule| std::iter::once(&rule.source).chain(rule.backup.iter()))
+            .collect();
+        Self {
+            principal: principal.clone(),
+            public: config.rules.iter().any(|rule| rule.public_read),
+            private: sources.iter().any(|source| {
+                matches!(
+                    source,
+                    Source::Http {
+                        allow_private: true,
+                        ..
+                    }
+                )
+            }),
+            sources: sources
+                .iter()
+                .filter_map(|source| match source {
+                    Source::S3 { external_id, .. } => Some(*external_id),
+                    _ => None,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct BlockPage {
+    pub keys: Vec<String>,
+    pub next: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Unblock {
+    pub key: String,
+}
+
 pub(crate) struct Record {
     pub revision: i64,
     pub encrypted: Option<Vec<u8>>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Assignment {
+    pub bucket: Uuid,
+    pub key: String,
+    pub config: Config,
+    pub rule: Rule,
+    pub connections: Vec<crate::model::external::Snapshot>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Begin {
+    pub source: Option<(Uuid, i64)>,
+    pub metadata: serde_json::Value,
+    pub size: Option<i64>,
+}
+
+impl Record {
+    pub(crate) fn open(self, bucket: Uuid, key: &crate::content::codec::Key) -> Result<View> {
+        let config = match self.encrypted {
+            Some(bytes) => serde_json::from_str(&crate::content::codec::unprotect(
+                &bytes,
+                key,
+                format!("bucket-mirroring-{bucket}-{}", self.revision).as_bytes(),
+            )?)?,
+            None => Config::default(),
+        };
+        Ok(View {
+            revision: self.revision,
+            config,
+        })
+    }
 }
 
 pub(crate) struct Start {
@@ -406,6 +490,14 @@ pub(crate) trait MirroringStore: Send + Sync {
         encrypted: Vec<u8>,
     ) -> Result<i64>;
     async fn request(&self, input: Start) -> Result<Uuid>;
+    async fn blocks(
+        &self,
+        principal: &Principal,
+        bucket: Uuid,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<BlockPage>;
+    async fn unblock(&self, principal: &Principal, bucket: Uuid, key: &str) -> Result<()>;
     async fn bind_source(
         &self,
         task: crate::model::task::Execution,

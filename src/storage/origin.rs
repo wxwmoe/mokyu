@@ -28,6 +28,18 @@ use std::{
 };
 use tower::Service;
 
+pub(crate) fn retry_backup(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<s3s::S3Error>().is_some_and(|error| {
+        matches!(
+            error.code(),
+            s3s::S3ErrorCode::NoSuchKey
+                | s3s::S3ErrorCode::ServiceUnavailable
+                | s3s::S3ErrorCode::SlowDown
+                | s3s::S3ErrorCode::RequestTimeout
+        )
+    })
+}
+
 type HttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector<Resolver>>, Body>;
 type HttpClients = HashMap<(bool, u32), HttpClient>;
 type S3Clients = HashMap<(uuid::Uuid, i64, u32, u32), Arc<super::external::Client>>;

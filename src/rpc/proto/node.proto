@@ -54,7 +54,16 @@ service NodeWork {
   rpc CheckpointRawPages(RawPagesCheckpoint) returns (TransferCheckpointReply);
   rpc CheckpointTransfer(TransferCheckpointRequest) returns (TransferCheckpointReply);
   rpc ReadMigration(ReadMigrationRequest) returns (ReadReply);
+  rpc BeginMirror(BeginMirrorRequest) returns (WriteReply);
   rpc ReadTransfer(ReadTransferRequest) returns (ReadTransferReply);
+}
+
+message BeginMirrorRequest {
+  Run run = 1;
+  string work_id = 2;
+  string operation_id = 3;
+  bytes input_json = 4;
+  repeated Cached cached = 5;
 }
 
 message RawPagesCheckpoint {
@@ -113,6 +122,7 @@ message WorkReply {
 
 service NodeReads {
   rpc OpenRead(ReadRequest) returns (ReadReply);
+  rpc MirrorRead(ReadRequest) returns (ReadReply);
   rpc RefreshReads(RefreshReadsRequest) returns (RefreshReadsReply);
   rpc ReadWindow(ReadWindowRequest) returns (ReadReply);
   rpc ReportRead(ReadReportRequest) returns (ReadReportReply);

@@ -75,6 +75,16 @@ pub(crate) trait NodeSessions: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeWork: Send + Sync {
+    async fn begin_mirror(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        work: Uuid,
+        operation: Uuid,
+        input: super::mirroring::Begin,
+        cached: Vec<super::node_read::Version>,
+    ) -> Result<super::node_write::Reply>;
     async fn read_transfer(
         &self,
         node: &NodeState,
@@ -157,6 +167,12 @@ pub(crate) trait NodeRequests: Send + Sync {
 
 #[async_trait]
 pub(crate) trait NodeReads: Send + Sync {
+    async fn mirror_read(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        input: super::node_read::Query,
+    ) -> Result<super::node_read::Reply>;
     async fn report_observations(
         &self,
         node: &NodeState,

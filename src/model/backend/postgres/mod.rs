@@ -10,6 +10,8 @@ mod journal_restore;
 #[path = "../../shared/journal_snapshots.rs"]
 mod journal_snapshots;
 mod migration;
+#[path = "../../shared/mirroring.rs"]
+mod mirroring_transactions;
 #[path = "../../shared/node/reads.rs"]
 mod node_reads;
 #[path = "../../shared/node/requests.rs"]

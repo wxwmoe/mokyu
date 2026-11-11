@@ -31,6 +31,8 @@ mod migration;
 mod export;
 #[path = "import.rs"]
 mod import;
+#[path = "mirroring.rs"]
+mod mirroring;
 
 const BATCH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OBJECT: i64 = 5 * 1024 * 1024 * 1024;

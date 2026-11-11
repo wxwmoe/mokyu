@@ -290,6 +290,28 @@ impl Gateway {
         overrides: &HeaderMap,
     ) -> Result<object::Read> {
         let head = request.input.method == wire::ReadMethod::Head as i32;
+        if !head && request.prepared.reply.outcome == wire::ReadOutcome::NoSuchKey as i32 {
+            let credential = request.prepared.reply.credential.clone();
+            let bucket = request.prepared.reply.bucket.clone();
+            let until = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                drop(request.prepared);
+                request.prepared = self.reads.mirror(request.input.clone()).await?;
+                ensure!(
+                    request.prepared.reply.credential == credential
+                        && request.prepared.reply.bucket == bucket,
+                    s3s::s3_error!(AccessDenied)
+                );
+                if request.prepared.reply.outcome != wire::ReadOutcome::Pending as i32 {
+                    break;
+                }
+                ensure!(
+                    tokio::time::Instant::now() < until,
+                    s3s::s3_error!(SlowDown, "origin fill is still in progress")
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
         if !head && request.prepared.reply.outcome == wire::ReadOutcome::Pending as i32 {
             let credential = request.prepared.reply.credential.clone();
             let bucket = request.prepared.reply.bucket.clone();

@@ -279,6 +279,10 @@ S3 源使用 `{type:"s3",external_id}`，引用同项目内有读取授权且启
 
 `POST /api/v1/buckets/{bucket}/mirroring/preview` 接受 `{key,config}`，返回 `enabled`、匹配的 `rule_id`、`source`、`source_key` 和 `public_read`。该操作只计算路径，不访问源站、不创建对象。
 
+`GET /api/v1/buckets/{bucket}/mirroring/blocks?after=KEY&limit=50` 返回 `{keys,next}`，按对象键分页，`limit` 为 1–100。`POST /api/v1/buckets/{bucket}/mirroring/unblock` 接受 `{key}`，成功返回 204。两者要求桶设置权限，解除屏蔽还要求近期认证；解除只允许新的填充，旧任务不会重新取得发布权。
+
+保存规则的授权在后台持续核验。退出登录不会停用规则，但维护者被停用、权限修订变化或源连接失效后不能继续填充，需由有权用户重新保存。规则修订、普通上传、复制、Multipart 完成和删除都会在发布时重新检查；回源不会覆盖其间新写入的对象。每桶最多保留 128 个活动填充，等待容量和失败退避返回可重试错误。
+
 ## 智能分层
 
 桶设置权限允许访问 `/api/v1/buckets/{bucket}/tiering`。热层是桶当前的内部 S3 后端，`policy.cold_storage` 指定另一个已启用、支持直接读取的内部 S3 后端。冷端须与热端及有关联的冗余副本位置独立。

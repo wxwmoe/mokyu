@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261111193000.
+-- Generated from the complete mysql migration chain through 20261111210000.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -83,6 +83,7 @@ CREATE TABLE `bucket_mirroring` (
   `revision` bigint NOT NULL,
   `enabled` tinyint(1) NOT NULL DEFAULT '0',
   `config_encrypted` mediumblob NOT NULL,
+  `authority` json DEFAULT NULL,
   PRIMARY KEY (`bucket_id`),
   CONSTRAINT `bucket_mirroring_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
   CONSTRAINT `bucket_mirroring_chk_1` CHECK ((`revision` > 0))

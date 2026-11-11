@@ -132,6 +132,9 @@ pub(crate) enum Plan {
         work: Box<super::tiering::Work>,
         source_permits: [Uuid; 2],
     },
+    Mirror {
+        task: Uuid,
+    },
     ExternalTest(super::external_test::Plan),
     ExternalTransfer(Box<super::replication::external::Plan>),
     Migrate {
@@ -249,7 +252,7 @@ impl Plan {
     }
     pub(crate) fn storage(&self) -> Option<Uuid> {
         match self {
-            Self::ExternalTest(_) | Self::ExternalTransfer(_) => None,
+            Self::Mirror { .. } | Self::ExternalTest(_) | Self::ExternalTransfer(_) => None,
             Self::ScanTransfer(value) => Some(value.source.storage_id),
             Self::ConvertRaw { storage, .. }
             | Self::Tier { storage, .. }
@@ -275,6 +278,10 @@ pub(crate) enum Outcome {
     Tier(Box<super::tiering::Outcome>),
     ExternalTest(super::external_test::Report),
     ExternalTransfer(super::replication::external::Outcome),
+    Mirrored {
+        size: Option<u64>,
+        missing: bool,
+    },
     Uploaded,
     Converted,
     Migrated,

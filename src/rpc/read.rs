@@ -16,6 +16,7 @@ pub(crate) const HEADERS: &[&str] = &[
     "cache-control",
     "pragma",
     "x-amz-checksum-mode",
+    "x-mokyu-origin-hop",
 ];
 pub(crate) const OVERRIDES: &[&str] = &[
     "content-type",

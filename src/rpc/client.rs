@@ -306,6 +306,20 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn begin_mirror(
+        &self,
+        input: wire::BeginMirrorRequest,
+    ) -> Result<wire::WriteReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeWork/BeginMirror")
+            .await
+    }
+    pub(crate) async fn mirror_read(
+        &self,
+        input: wire::ReadRequest,
+    ) -> Result<wire::ReadReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeReads/MirrorRead")
+            .await
+    }
     pub(crate) async fn exchange_work(
         &self,
         input: wire::WorkRequest,

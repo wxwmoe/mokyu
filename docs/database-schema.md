@@ -120,6 +120,7 @@ UUID、时间、整数分别使用各数据库既有原生类型。原始来源�
 | `bucket_mirroring.bucket_id` | 桶 UUID 主键，外键随桶删除 |
 | `revision`、`enabled` | BIGINT 正修订；boolean 默认 false |
 | `config_encrypted` | 非空二进制配置，密文认证绑定桶 UUID 与修订 |
+| `authority` | 可空 JSONB / JSON / TEXT，保存规则维护者及授权修订、公开读取和私网访问要求、外部来源身份；缺少授权记录的规则拒绝启动填充 |
 | `mirroring_keys.bucket_id`、`object_key` | 联合主键；对象键沿用各数据库的不透明键表示，桶外键级联删除 |
 | `blocked` | 非空 boolean，默认 false；删除屏蔽不按时间自动过期 |
 | `task_id` | 可空 UUID、唯一索引；任务外键删除时置空 |

@@ -26,6 +26,7 @@ pub(crate) mod migration;
 
 pub(crate) mod export;
 mod import;
+pub(crate) mod mirroring;
 
 mod write_packs;
 
@@ -225,6 +226,27 @@ async fn finish(
     let mut error = None;
     let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
+        work::Plan::Mirror { task: id } => {
+            let [work::Outcome::Mirrored { size, missing }] = completion.outcomes.as_slice() else {
+                anyhow::bail!(Error::NodeOperationConflict)
+            };
+            ensure!(id == task, Error::NodeOperationConflict);
+            let state = super::super::mirroring_transactions::finish(
+                db,
+                Execution {
+                    id: task,
+                    token: row.token,
+                },
+                *size,
+                *missing,
+                key,
+            )
+            .await?;
+            complete = state == "completed";
+            if !complete {
+                error = Some("origin_fill_failed");
+            }
+        }
         work::Plan::ExternalTransfer(plan) => {
             ensure!(
                 detail["operation"] == "replication" && detail["external"] == true,
@@ -1056,6 +1078,55 @@ pub(crate) async fn exchange(
                 q::task_lease(task, token).execute(&mut *tx).await?;
                 assigned = Some(task);
                 plan = Some(work::Plan::ExternalTest(assignment.plan));
+                break;
+            }
+            if policy == "storage_migration" && detail["operation"] == "mirroring" {
+                ensure!(
+                    matches!(node.role.as_str(), "worker" | "node"),
+                    Error::NodeOperationConflict
+                );
+                let execution = Execution { id: task, token };
+                let assignment =
+                    match super::super::mirroring_transactions::assignment(&mut tx, execution, key)
+                        .await
+                    {
+                        Ok(value) => value,
+                        Err(error)
+                            if error.downcast_ref::<s3s::S3Error>().is_some()
+                                || error.is::<Error>() =>
+                        {
+                            q::finish(task, token, 0, false, Some("origin_authorization_changed"))
+                                .execute(&mut *tx)
+                                .await?;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                let storage = serde_json::from_value(detail["storage_id"].clone())?;
+                let profile = queries::storage_profile(storage)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                ensure!(
+                    permits(
+                        &mut tx,
+                        node.node_id,
+                        token,
+                        maintenance,
+                        &profile,
+                        "migration",
+                        true
+                    )
+                    .await?,
+                    Error::NodeWriteBusy
+                );
+                encrypted = Some(codec::protect(
+                    &serde_json::to_vec(&assignment)?,
+                    key,
+                    token.as_bytes(),
+                )?);
+                q::task_lease(task, token).execute(&mut *tx).await?;
+                assigned = Some(task);
+                plan = Some(work::Plan::Mirror { task });
                 break;
             }
             let replication_step = if policy == "storage_migration"

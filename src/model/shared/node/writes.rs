@@ -220,6 +220,9 @@ impl Write {
             .fetch_one(&mut **tx)
             .await?;
         transactions::lock_permit(tx, &authority).await?;
+        if self.intent.access == "node-mirror" {
+            transactions::mirroring::publication(tx, stream).await?;
+        }
         Ok(stream)
     }
     pub(super) async fn reply(
@@ -822,7 +825,9 @@ impl NodeWrites for Backend {
                 < node_chunk::MAX_PENDING,
             Error::NodeWriteBusy
         );
-        if row.owner_task_id.is_none() && row.intent.completion.is_none() {
+        if (row.owner_task_id.is_none() || row.intent.access == "node-mirror")
+            && row.intent.completion.is_none()
+        {
             transactions::reserve_quota_in(
                 &mut tx,
                 stream,
@@ -1583,7 +1588,7 @@ impl NodeWrites for Backend {
                     && (row.owner_task_id.is_none()
                         || matches!(
                             row.intent.access.as_str(),
-                            "node-migration" | "node-replication"
+                            "node-migration" | "node-replication" | "node-mirror"
                         ) && !input.input.local)
                     && (row.intent.part.is_none() || row.profile.cdc_enabled && input.input.local)
                     && (!input.input.local || row.profile.upload_cache)
@@ -1606,7 +1611,7 @@ impl NodeWrites for Backend {
                 row.intent.size.is_none_or(|s| s == size),
                 s3s::s3_error!(IncompleteBody)
             );
-            if row.owner_task_id.is_none() {
+            if row.owner_task_id.is_none() || row.intent.access == "node-mirror" {
                 transactions::reserve_quota_in(
                     &mut tx,
                     stream,
@@ -1930,7 +1935,10 @@ impl NodeWrites for Backend {
             s3s::s3_error!(IncompleteBody)
         );
         let mut phase = "published";
-        if let Some(task) = row.owner_task_id {
+        if let Some(task) = row
+            .owner_task_id
+            .filter(|_| row.intent.access != "node-mirror")
+        {
             if row.intent.access == "node-replication" {
                 super::work_import::seal(&mut tx, &row, &input).await?;
             } else if row.intent.access == "node-migration" {

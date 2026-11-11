@@ -263,6 +263,16 @@ async fn finish(
     }
     let mut issue = None;
     let state = match (Some(plan), result.outcomes.as_slice()) {
+        (Some(work::Plan::Mirror { task: id }), [work::Outcome::Mirrored { size, missing }])
+            if id == task.id =>
+        {
+            let state =
+                super::mirroring_transactions::finish(tx, task, *size, *missing, key).await?;
+            if state == "failed" {
+                issue = Some("origin_fill_failed");
+            }
+            state
+        }
         (
             Some(work::Plan::Collect {
                 storage,
@@ -469,6 +479,18 @@ async fn settle(
 
 #[async_trait::async_trait]
 impl NodeWork for Backend {
+    async fn begin_mirror(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: Run,
+        work: Uuid,
+        operation: Uuid,
+        input: crate::model::mirroring::Begin,
+        cached: Vec<crate::model::node_read::Version>,
+    ) -> Result<crate::model::node_write::Reply> {
+        super::work_mirroring::begin(self, node, key, run, work, operation, input, cached).await
+    }
     async fn read_transfer(
         &self,
         node: &NodeState,
@@ -662,6 +684,7 @@ impl NodeWork for Backend {
                     .await?;
             }
             let prepared = match detail["operation"].as_str() {
+                Some("mirroring") => super::work_mirroring::offer(&mut tx, task, key).await?,
                 Some("cache") if detail.get("source_node").is_some() => {
                     super::node_files::offer(&mut tx, node, task, &detail, key).await?
                 }
