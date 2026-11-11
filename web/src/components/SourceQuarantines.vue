@@ -40,7 +40,7 @@ function preview(action: 'quarantine' | 'recheck', value: string) { input.value 
 
 <style scoped>
 .source-filters, .source-manual form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: end; margin: 18px 0; }
-.source-filters label, .source-manual label { display: grid; gap: 6px; min-width: 0; }
+.source-filters label, .source-manual label { display: grid; gap: 6px; min-width: 0; margin: 0; }
 .source-quarantines strong, .source-quarantines code { overflow-wrap: anywhere; }
 .source-quarantines .issue-list { margin: 16px 0; }
 .source-manual { padding-top: 18px; border-top: 1px solid var(--line-soft); }
