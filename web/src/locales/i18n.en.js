@@ -1522,4 +1522,6 @@ export default {
   replicationMove: "Move",
   replicationStatus: "Status",
   replicationOperation: "Operation",
+  configField_instance_data_limit: 'Data directory limit',
+  configHelp_instance_data_limit: 'Total disk budget for local storage, caches and temporary files under the data path.',
 }

@@ -36,6 +36,7 @@ listen_s3 = "0.0.0.0:9000"
 
 # Local directories
 data_path = "/data"
+#data_limit = "100GiB" # Total disk allocation below data_path, including local storage.
 min_free_space = "1GiB"
 
 # Upload and cache limits

@@ -48,7 +48,11 @@ impl super::Storage {
             }
             Err(error) => return Err(error.into()),
         };
-        self.local_space(target, size.saturating_sub(existing))
+        let mut space = self.local_space(target, size.saturating_sub(existing))?;
+        if let Some(space) = &mut space {
+            space.observe(vec![path.clone(), path.with_extension("part")])?;
+        }
+        Ok(space)
     }
 }
 
@@ -97,13 +101,16 @@ async fn verify_local<F, Fut>(
     size: u64,
     expected: &[u8],
     checkpoint: &F,
+    disk: Option<&Arc<super::Disk>>,
 ) -> Result<bool>
 where
     F: Fn(RawProgress) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let mut pages =
-        super::raw_manifest::Spool::new(path.parent().context("raw destination has no parent")?);
+    let mut pages = super::raw_manifest::Spool::new(
+        path.parent().context("raw destination has no parent")?,
+        disk.cloned(),
+    );
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -140,12 +147,13 @@ async fn verify_remote<F, Fut>(
     expected: &[u8],
     fill: &mut Option<super::raw_cache::Write>,
     checkpoint: &F,
+    disk: Option<&Arc<super::Disk>>,
 ) -> Result<bool>
 where
     F: Fn(RawProgress) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let mut pages = super::raw_manifest::Spool::new(scratch);
+    let mut pages = super::raw_manifest::Spool::new(scratch, disk.cloned());
     let head = match backend.head(key).await {
         Ok(value) => value,
         Err(object_store::Error::NotFound { .. }) => return Ok(false),
@@ -179,6 +187,7 @@ pub(crate) async fn copy<F, Fut>(
     digest: [u8; 16],
     input: &mut RawFile,
     fill: &mut Option<super::raw_cache::Write>,
+    disk: Option<&Arc<super::Disk>>,
     checkpoint: F,
 ) -> Result<Copied>
 where
@@ -201,7 +210,7 @@ where
     };
     match target {
         Target::Local(destination) => {
-            if !verify_local(&destination, size, &digest, &checkpoint).await? {
+            if !verify_local(&destination, size, &digest, &checkpoint, disk).await? {
                 let parent = destination
                     .parent()
                     .context("raw destination has no parent")?;
@@ -276,7 +285,7 @@ where
                 file.set_len(size).await?;
                 file.sync_all().await?;
                 drop(file);
-                verify_local(&partial, size, &digest, &checkpoint).await?;
+                verify_local(&partial, size, &digest, &checkpoint, disk).await?;
                 tokio::fs::rename(&partial, &destination).await?;
                 super::raw::sync_directory(parent).await?;
             }
@@ -296,6 +305,7 @@ where
                 &digest,
                 fill,
                 &checkpoint,
+                disk,
             )
             .await?
             {
@@ -430,6 +440,7 @@ where
                     &digest,
                     fill,
                     &checkpoint,
+                    disk,
                 )
                 .await?
                 {
@@ -537,6 +548,7 @@ mod tests {
             digest,
             &mut source,
             &mut None,
+            None,
             |progress| async move {
                 ensure!(
                     matches!(progress, RawProgress::Part { number: 1, .. }),
@@ -565,6 +577,7 @@ mod tests {
             digest,
             &mut source,
             &mut None,
+            None,
             |progress| async move {
                 ensure!(
                     matches!(
@@ -591,6 +604,7 @@ mod tests {
             digest,
             &mut source,
             &mut None,
+            None,
             |progress| async move {
                 ensure!(
                     matches!(

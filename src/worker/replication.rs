@@ -401,6 +401,7 @@ impl App {
             digest,
             input,
             &mut fill,
+            Some(&self.storage.disk),
             |progress| async move {
                 let _coord = self.coord.lock().await;
                 self.writable()?;

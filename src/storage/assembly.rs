@@ -199,12 +199,14 @@ pub(crate) async fn prepare(
     let checkpoint_path = destination.clone();
     let support = storage.reflink.clone();
     let pending = storage.disk.space_for(destination.parent().unwrap())?;
+    let disk = storage.disk.clone();
     let permit = storage.disk.io.clone().acquire_owned().await?;
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
     let copied = Arc::new(AtomicBool::new(false));
     let copy_done = copied.clone();
     let worker = tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        let _space = disk.reserve_space(destination.parent().unwrap(), floor, 0)?;
         let mut checkpoints = Checkpoints::new(sender);
         let (file, counts) = build_with(
             &destination,
@@ -212,6 +214,7 @@ pub(crate) async fn prepare(
             floor,
             &support,
             &pending,
+            Some(&disk),
             &mut |file, range, offset| checkpoints.push(file, range, offset),
         )?;
         copy_done.store(true, Ordering::Release);
@@ -268,6 +271,7 @@ fn build(
         floor,
         support,
         pending,
+        None,
         &mut |_, _, _| Ok(()),
     )
 }
@@ -278,6 +282,7 @@ fn build_with(
     floor: u64,
     support: &Mutex<HashMap<(u64, u64), bool>>,
     pending: &Arc<Mutex<u64>>,
+    disk: Option<&super::local::Disk>,
     copied: &mut dyn FnMut(&File, &Range, u64) -> Result<()>,
 ) -> Result<(File, Counts)> {
     ensure!(
@@ -340,6 +345,15 @@ fn build_with(
                 >= floor,
             "filesystem free-space floor reached"
         );
+        let mut reservation = disk
+            .filter(|disk| disk.data.is_some())
+            .map(|disk| {
+                disk.reserve_space(destination.parent().unwrap(), floor, range.length as u64)
+            })
+            .transpose()?;
+        if let Some(reservation) = &mut reservation {
+            reservation.observe(vec![destination.to_owned()])?;
+        }
         if clone_range(
             &source,
             &file,
@@ -358,14 +372,17 @@ fn build_with(
                 let count = remaining.min(buffer.len());
                 source.read_exact(&mut buffer[..count])?;
                 hash.update(&buffer[..count]);
-                let reservation = super::local::Space::claim(
-                    destination.parent().unwrap(),
-                    floor,
-                    count as u64,
-                    pending,
-                )?;
+                let _space = if reservation.is_none() {
+                    Some(super::local::Space::claim(
+                        destination.parent().unwrap(),
+                        floor,
+                        count as u64,
+                        pending,
+                    )?)
+                } else {
+                    None
+                };
                 file.write_all(&buffer[..count])?;
-                drop(reservation);
                 remaining -= count;
                 counts.copied += count as u64;
             }

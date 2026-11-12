@@ -739,6 +739,7 @@ impl App {
             &self.config.metrics.refresh_interval,
         )?);
         status["io"] = self.storage.statistics();
+        status["data_directory"] = self.storage.disk.snapshot();
         status["upload_cache"] = self.upload_cache_status().await?;
         status["process_memory"] = crate::status::stats::process_memory().await;
         status["gc_running"] = json!(self.gc_running.load(std::sync::atomic::Ordering::Relaxed));

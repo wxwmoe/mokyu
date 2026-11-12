@@ -26,6 +26,7 @@ mod tests {
         std::fs::create_dir(&root)?;
         let disk = Arc::new(Disk {
             root: root.clone(),
+            data: None,
             limits: [None, Some(8192), None],
             floor: 0,
             spaces: Mutex::default(),
@@ -86,6 +87,7 @@ mod tests {
         std::fs::create_dir(root.join("storage"))?;
         let disk = Arc::new(Disk {
             root: root.clone(),
+            data: None,
             limits: [Some(1024 * 1024), None, None],
             floor: 0,
             spaces: Mutex::default(),
@@ -144,6 +146,7 @@ pub(crate) struct Usage {
 }
 pub(crate) struct Disk {
     pub root: PathBuf,
+    pub(crate) data: Option<Arc<super::data_space::Budget>>,
     pub(crate) limits: [Option<u64>; 3],
     pub(crate) floor: u64,
     pub(crate) spaces: Mutex<HashMap<String, Weak<Mutex<u64>>>>,
@@ -169,6 +172,10 @@ pub(crate) struct Reservation {
     _space: Space,
 }
 impl Reservation {
+    pub(crate) fn observe(&mut self, paths: Vec<PathBuf>) -> Result<()> {
+        self._space.observe(paths)
+    }
+
     pub(crate) fn commit(mut self) {
         self.committed = true;
     }
@@ -177,12 +184,18 @@ impl Reservation {
         usage.used[self.area as usize] = usage.used[self.area as usize]
             .saturating_sub(self.bytes)
             .saturating_add(bytes);
+        if self._space.observed.is_none() {
+            self._space.written(bytes);
+        }
         self.committed = true;
     }
 }
 impl Drop for Reservation {
     fn drop(&mut self) {
         if !self.committed {
+            if self._space.observed.is_none() {
+                self._space.written(0);
+            }
             let mut u = self.disk.usage.lock().unwrap();
             u.used[self.area as usize] -= self.bytes;
         }
@@ -243,6 +256,8 @@ pub(crate) fn validate_storage_path(
 pub(crate) struct Space {
     pending: Arc<Mutex<u64>>,
     bytes: u64,
+    data: Option<super::data_space::Reservation>,
+    observed: Option<(Vec<PathBuf>, u64)>,
 }
 impl Space {
     pub(crate) fn claim(
@@ -272,16 +287,121 @@ impl Space {
         Ok(Self {
             pending: pending.clone(),
             bytes,
+            data: None,
+            observed: None,
         })
+    }
+
+    pub(crate) fn written(&mut self, bytes: u64) {
+        self.observed = None;
+        if let Some(data) = &mut self.data {
+            data.written(bytes);
+        }
+    }
+
+    pub(crate) fn observe(&mut self, paths: Vec<PathBuf>) -> Result<()> {
+        if let Some(data) = &mut self.data {
+            data.active(true);
+            let before = super::data_space::allocated_files(&paths)?;
+            data.written(self.bytes);
+            self.observed = Some((paths, before));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn defer(&mut self) {
+        self.written(0);
+        if let Some(data) = &mut self.data {
+            data.active(false);
+        }
+    }
+
+    pub(crate) fn materialized(&mut self) {
+        *self.pending.lock().unwrap() -= self.bytes;
+        self.bytes = 0;
     }
 }
 impl Drop for Space {
     fn drop(&mut self) {
+        if let Some((paths, before)) = &self.observed
+            && let Ok(after) = super::data_space::allocated_files(paths)
+            && let Some(data) = &mut self.data
+        {
+            data.written(after.saturating_sub(*before));
+        }
         *self.pending.lock().unwrap() -= self.bytes;
     }
 }
 
 impl Disk {
+    pub(crate) fn mutation(&self) -> Result<Option<super::data_space::Reservation>> {
+        self.data.as_ref().map(|data| data.reserve(0)).transpose()
+    }
+
+    // Only use for previously accounted files after their writers and readers are fenced.
+    pub(crate) async fn remove_committed(self: &Arc<Self>, path: PathBuf) -> std::io::Result<()> {
+        if self.data.is_none() {
+            return tokio::fs::remove_file(path).await;
+        }
+        let disk = self.clone();
+        tokio::spawn(async move {
+            let mut reservation = match &disk.data {
+                Some(data)
+                    if data
+                        .contains(path.parent().unwrap())
+                        .map_err(std::io::Error::other)? =>
+                {
+                    Some(data.reserve(0).map_err(std::io::Error::other)?)
+                }
+                _ => None,
+            };
+            let metadata = tokio::fs::symlink_metadata(&path).await?;
+            let mut released = allocated(&metadata);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.nlink() != 1 {
+                    released = 0;
+                }
+            }
+            tokio::fs::remove_file(path).await?;
+            if let Some(reservation) = &mut reservation {
+                reservation.released(released);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
+    pub(crate) fn snapshot(&self) -> serde_json::Value {
+        let data = self.data.as_ref().map(|data| data.snapshot());
+        serde_json::json!({
+            "limit": data.map(|value| value.0),
+            "used_bytes": data.map(|value| value.1),
+            "reserved_bytes": data.map(|value| value.2),
+            "available_bytes": fs2::available_space(&self.root).ok(),
+            "min_free_space": self.floor,
+        })
+    }
+
+    pub(crate) fn reserve_space(
+        &self,
+        path: &std::path::Path,
+        floor: u64,
+        bytes: u64,
+    ) -> Result<Space> {
+        let mut space = Space::claim(path, floor, bytes, &self.space_for(path)?)?;
+        if let Some(data) = &self.data
+            && data.contains(path)?
+        {
+            let mut reservation = data.reserve(space.bytes)?;
+            reservation.written(space.bytes);
+            space.data = Some(reservation);
+        }
+        Ok(space)
+    }
+
     pub(crate) async fn initialize(&self) -> Result<()> {
         for directory in [
             "cache/chunks",
@@ -429,12 +549,7 @@ impl Disk {
             !retained || self.limits[area as usize].is_none_or(|n| next <= n),
             "local storage quota exhausted"
         );
-        let space = Space::claim(
-            path,
-            self.floor,
-            if existing { 0 } else { bytes },
-            &self.space_for(path)?,
-        )?;
+        let space = self.reserve_space(path, self.floor, if existing { 0 } else { bytes })?;
         usage.used[area as usize] = next;
         Ok(Reservation {
             disk: self.clone(),
@@ -518,16 +633,16 @@ impl Disk {
         })
         .await?
     }
-    pub(crate) async fn remove_fragment(&self, id: Uuid) -> Result<()> {
+    pub(crate) async fn remove_fragment(self: &Arc<Self>, id: Uuid) -> Result<()> {
         self.remove_part(self.fragment_path(id)).await
     }
-    pub(crate) async fn remove_candidate(&self, id: Uuid) -> Result<()> {
+    pub(crate) async fn remove_candidate(self: &Arc<Self>, id: Uuid) -> Result<()> {
         self.remove_part(self.candidate_path(id)).await
     }
-    async fn remove_part(&self, path: PathBuf) -> Result<()> {
+    async fn remove_part(self: &Arc<Self>, path: PathBuf) -> Result<()> {
         match tokio::fs::metadata(&path).await {
             Ok(m) => {
-                tokio::fs::remove_file(path).await?;
+                self.remove_committed(path).await?;
                 self.release(Area::Multipart, allocated(&m));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

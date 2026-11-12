@@ -208,6 +208,7 @@ pub(crate) fn instance_config(config: &crate::config::Instance) -> Result<Value>
                 | "listen_web"
                 | "listen_s3"
                 | "data_path"
+                | "data_limit"
                 | "min_free_space"
                 | "multipart_limit"
                 | "cache_size"

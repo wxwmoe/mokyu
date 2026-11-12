@@ -138,6 +138,10 @@ impl File {
                     .ok_or_else(|| s3s::s3_error!(SlowDown, "raw request workspace is full"))?,
             );
         }
+        self.pending
+            .as_mut()
+            .unwrap()
+            .observe(vec![self.path.clone()])?;
         let file = self.file.as_mut().unwrap();
         file.write_all(data).await.map_err(receive_error)?;
         file.flush().await.map_err(receive_error)?;
@@ -237,6 +241,7 @@ impl File {
         id: Uuid,
         buffered: bool,
     ) -> Result<()> {
+        let _mutation = self.disk.mutation()?;
         let destination = CacheFile::PendingRaw.path(root, id);
         tokio::fs::create_dir_all(destination.parent().unwrap()).await?;
         let file = self.file.as_mut().unwrap();
@@ -285,6 +290,7 @@ impl File {
         policy: CachePolicy,
         check: impl Fn() -> Result<()> + Send + Sync,
     ) -> Result<()> {
+        let _mutation = self.disk.mutation()?;
         if self.published
             || self.retained
             || self.pending.is_some()
@@ -362,7 +368,7 @@ impl Drop for File {
         if self.published || self.retained {
             return;
         }
-        let file = self.file.take();
+        let mut file = self.file.take();
         let pending = self.pending.take();
         let paths = std::iter::once(self.path.clone())
             .chain(self.linked.take())
@@ -371,6 +377,9 @@ impl Drop for File {
         let bytes = self.bytes;
         // Keep every written or in-flight byte charged until cancellation cleanup finishes.
         tokio::spawn(async move {
+            if let Some(file) = &mut file {
+                let _ = file.flush().await;
+            }
             drop(file);
             let mut failed = false;
             for path in paths {

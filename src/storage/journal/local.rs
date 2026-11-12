@@ -29,7 +29,7 @@ pub(crate) struct Head {
     pub sealed: bool,
 }
 
-fn head_path(epoch: Uuid) -> String {
+pub(super) fn head_path(epoch: Uuid) -> String {
     format!("{ROOT}/frontiers/{}", epoch.simple())
 }
 

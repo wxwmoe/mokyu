@@ -47,6 +47,7 @@ impl NodeContext {
             "db_pool_size": 0, "db_pool_idle": 0, "active_grants": self.resources.active(),
             "pending_uploads": state.pending_uploads,
             "work": work, "cache": cache,
+            "data_directory": body.as_ref().map(|body| body.files.disk.snapshot()),
             "io": {"backend": backend, "cache_lookups": cache["lookups"],
                 "diagnostics": body.as_ref().map(|body| body.diagnostics.snapshot())},
             "response_cache": foreground.as_ref().map(|reads| reads.bodies.snapshot()),

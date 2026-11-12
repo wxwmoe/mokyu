@@ -105,6 +105,7 @@ impl Reader {
                 output_path,
                 None,
                 usize::try_from(upper)?,
+                None,
             )
             .await?;
             writer.put(Bytes::from_static(pack::frame::HEADER)).await?;

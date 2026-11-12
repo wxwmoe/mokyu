@@ -60,6 +60,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn data_limit_uses_the_same_validation_on_every_node_role() {
+        for role in ["data", "worker", "node"] {
+            let config = "[instance]\ncontrol_url='https://control.example'\n";
+            assert!(NodeConfig::parse(&format!("{config}data_limit='1GiB'\n"), role).is_ok());
+            for invalid in ["", "0B", "-1GiB", "1GB/s", "18446744073709551615TiB"] {
+                assert!(
+                    NodeConfig::parse(&format!("{config}data_limit='{invalid}'\n"), role).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn node_configuration_has_no_database_or_root_key() {
         let valid = "[instance]\ncontrol_url='https://control.example'\n";
         for role in ["data", "worker", "node"] {

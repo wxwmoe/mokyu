@@ -74,6 +74,16 @@ impl Cache {
             .transpose()?;
         let disk = Arc::new(Disk {
             root: instance.data_path.clone(),
+            data: instance
+                .data_limit
+                .as_deref()
+                .map(|limit| {
+                    crate::storage::data_space::Budget::open(
+                        &instance.data_path,
+                        crate::config::bytes(limit)?,
+                    )
+                })
+                .transpose()?,
             limits: [
                 instance
                     .multipart_limit
@@ -98,6 +108,9 @@ impl Cache {
             io: Arc::new(Semaphore::new(budget.cpu_jobs)),
             pending: Mutex::default(),
         });
+        if let Some(data) = &disk.data {
+            data.start();
+        }
         Ok(Arc::new(Self {
             root: instance.data_path.clone(),
             disk,

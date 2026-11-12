@@ -4,6 +4,7 @@
 
 ## Raw, chunks, cache and physical copies
 
+- `python -m tests.storage.data_limit`: owns an isolated service; set `MOKYU_TEST_BINARY`, an empty `MOKYU_TEST_ROOT` and `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`. Requires a fault-injection build and boto3. Checks directory admission across local backends, concurrent PUT/Copy, raw/chunks/packs/Multipart, independent filesystem floors, lower-limit restarts, GC, disconnected/interrupted writes and local journals/snapshots. To simulate zero filesystem availability, preload `tests/recovery/fsync.c`, set `MOKYU_TEST_FSYNC_ROOT=<root>/data/storage` and `MOKYU_TEST_SPACE_FAULT=<root>/space-fault`.
 - `storage/raw_objects.py`: raw PUT/HEAD/Range/conditions, multipart, Copy and switching to chunks. Set `MOKYU_TEST_STORAGE_TYPE=s3` for remote storage.
 - `storage/raw_lifecycle.py`: quarantine and recheck local raw corruption, multipart pending reuse, failed Complete, usage and reader/GC races.
 - `storage/raw_deduplication.py`: optional whole-file dedup on all four database products. Check concurrency, part boundaries, cross-bucket charging and exclusion of bad sources. Use the source-quarantine fixture; set `MOKYU_TEST_BACKEND` for remote raw.

@@ -60,7 +60,7 @@ impl Reader {
                             &mut file,
                             &raw,
                             Some(&mut cache),
-                            &self.files.disk.root,
+                            &self.files.disk,
                         )
                         .await?;
                         loop {

@@ -102,8 +102,16 @@ impl Reader {
                 .as_deref()
                 .context("S3 multipart backend missing")?,
         };
-        crate::storage::transfer::copy(destination, plan, digest, &mut file, &mut fill, checkpoint)
-            .await?;
+        crate::storage::transfer::copy(
+            destination,
+            plan,
+            digest,
+            &mut file,
+            &mut fill,
+            Some(&self.files.disk),
+            checkpoint,
+        )
+        .await?;
         let fills = fill
             .and_then(|fill| self.files.prepare_raw(fill, &plan.target))
             .into_iter()

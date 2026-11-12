@@ -18,7 +18,7 @@ pub(super) struct Body {
     source: Id,
     storage: Uuid,
     bytes: Bytes,
-    _space: Space,
+    space: Option<Space>,
 }
 
 impl Storage {
@@ -75,21 +75,23 @@ impl Storage {
             .as_ref()
             .and_then(|path| path.parent())
             .context("raw root is missing")?;
-        let space = Space::claim(
-            parent,
-            crate::config::bytes(
-                profile
-                    .min_free_space
-                    .as_deref()
-                    .context("local storage floor is missing")?,
-            )?,
-            size as u64,
-            &self.disk.space_for(parent)?,
-        )
-        .map_err(|_| {
-            crate::upload::cache::REJECTIONS.fetch_add(1, Ordering::Relaxed);
-            s3s::s3_error!(SlowDown, "local storage has insufficient free space")
-        })?;
+        let mut space = self
+            .disk
+            .reserve_space(
+                parent,
+                crate::config::bytes(
+                    profile
+                        .min_free_space
+                        .as_deref()
+                        .context("local storage floor is missing")?,
+                )?,
+                size as u64,
+            )
+            .map_err(|_| {
+                crate::upload::cache::REJECTIONS.fetch_add(1, Ordering::Relaxed);
+                s3s::s3_error!(SlowDown, "local storage has insufficient free space")
+            })?;
+        space.defer();
         self.buffered_writes.store(true, Ordering::Release);
         Ok(Some(Writer {
             buffer,
@@ -114,7 +116,7 @@ impl Storage {
                 source,
                 storage,
                 bytes,
-                _space: space,
+                space: Some(space),
             },
         );
     }
@@ -141,7 +143,22 @@ impl Storage {
             .map(|b| b.bytes.clone())
     }
 
-    pub(super) async fn persist_local_body(&self, source: &RawSource, data: Bytes) -> Result<()> {
+    pub(super) async fn persist_local_body(
+        self: &Arc<Self>,
+        source: &RawSource,
+        data: Bytes,
+    ) -> Result<()> {
+        let storage = self.clone();
+        let source = source.clone();
+        tokio::spawn(async move { storage.persist_body(&source, data).await }).await?
+    }
+
+    async fn persist_body(&self, source: &RawSource, data: Bytes) -> Result<()> {
+        let _persist = self.raw_cache_lock(source.location_id).lock_owned().await;
+        let _pin = {
+            let _gate = self.source_gate.read().await;
+            self.physical_pin(source.location_id)
+        };
         let target = self.store_backend(source.storage_id)?;
         self.verify_raw_target(&target).await?;
         let _global = self.writes.acquire().await?;
@@ -154,6 +171,12 @@ impl Storage {
         let parent = dest.parent().unwrap();
         raw::directory(root).await?;
         raw::directory(parent).await?;
+        let mut space = self
+            .local_memory
+            .lock()
+            .unwrap()
+            .get_mut(&source.location_id)
+            .and_then(|body| body.space.take());
         #[cfg(feature = "fault-injection")]
         crate::faults::point("local-memory-before-file").await;
         if tokio::fs::try_exists(&dest).await? {
@@ -166,6 +189,12 @@ impl Storage {
             raw::verify_file(&mut raw::RawFile::Local(file), source, None).await?;
         } else {
             let temp = dest.with_extension("part");
+            if space.is_none() {
+                space = self.local_space(&target, data.len() as u64)?;
+            }
+            if let Some(space) = &mut space {
+                space.observe(vec![temp.clone(), dest.clone()])?;
+            }
             // The immutable source lock serializes retries after a cancelled flush.
             match tokio::fs::remove_file(&temp).await {
                 Ok(()) => (),

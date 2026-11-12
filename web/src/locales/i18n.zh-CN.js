@@ -1522,4 +1522,6 @@ export default {
   replicationMove: "移动",
   replicationStatus: "状态",
   replicationOperation: "操作",
+  configField_instance_data_limit: '数据目录上限',
+  configHelp_instance_data_limit: '本机数据目录内正式存储、缓存与暂存文件共用的磁盘额度',
 }

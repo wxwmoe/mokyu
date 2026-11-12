@@ -194,7 +194,19 @@ impl Remote {
                 .context("invalid pending local frames")?;
             let guard = local.lock(true).await?;
             let target = space.store_backend(storage)?;
-            let reservation = space.local_space(&target, pending as u64 + 4096)?;
+            let physical = local.root.join(&path);
+            let active = physical.with_extension("part");
+            let existing =
+                super::super::data_space::allocated_files(&[physical.clone(), active.clone()])?;
+            let mut reservation =
+                space.local_space(&target, (size as u64).saturating_sub(existing) + 8192)?;
+            if let Some(reservation) = &mut reservation {
+                let head = local
+                    .root
+                    .join(super::local::head_path(self.journal.writer_epoch));
+                let temporary = head.parent().unwrap().join(".mokyu-journal.tmp");
+                reservation.observe(vec![physical, active, head, temporary])?;
+            }
             let (local, segment, key, journal) = (
                 local.clone(),
                 file.clone(),

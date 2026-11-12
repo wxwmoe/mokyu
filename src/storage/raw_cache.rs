@@ -49,10 +49,13 @@ impl Drop for Write {
             return;
         };
         let path = self.path.clone();
-        let file = self.file.take();
+        let mut file = self.file.take();
         let work = self.work.take();
         // Cancellation must retain the reservation until the temporary file is gone.
         tokio::spawn(async move {
+            if let Some(file) = &mut file {
+                let _ = file.flush().await;
+            }
             drop(file);
             if let Err(error) = tokio::fs::remove_file(&path).await
                 && error.kind() != std::io::ErrorKind::NotFound
@@ -315,9 +318,10 @@ impl Files<'_> {
             return Ok(None);
         }
         let path = CacheFile::Raw.path(self.root, id).with_extension("tmp");
-        let Some(ticket) = self.reserve(size, policy, false, &path).await? else {
+        let Some(mut ticket) = self.reserve(size, policy, false, &path).await? else {
             return Ok(None);
         };
+        ticket.observe(vec![path.clone(), CacheFile::Raw.path(self.root, id)])?;
         let mut write = Write {
             file: None,
             path,
@@ -395,6 +399,7 @@ mod tests {
         tokio::fs::create_dir_all(&root).await?;
         let disk = Arc::new(Disk {
             root: root.clone(),
+            data: None,
             limits: [None, Some(1024 * 1024), None],
             floor: 0,
             spaces: Mutex::default(),

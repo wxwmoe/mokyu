@@ -105,8 +105,14 @@ impl Target {
             };
             if etag.as_ref() == expected {
                 let target = self.storage.store_backend(self.id)?;
-                let space = self.storage.local_space(&target, size as u64)?;
+                let mut space = self.storage.local_space(&target, size as u64)?;
                 let physical = local.root.join(path);
+                if let Some(space) = &mut space {
+                    space.observe(vec![
+                        physical.clone(),
+                        physical.parent().unwrap().join(".mokyu-journal.tmp"),
+                    ])?;
+                }
                 let local = local.clone();
                 let _lock = tokio::task::spawn_blocking(move || {
                     let _space = space;

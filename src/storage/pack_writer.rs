@@ -11,6 +11,10 @@ struct Local {
     temporary: PathBuf,
     destination: PathBuf,
     file: tokio::fs::File,
+    disk: Arc<super::local::Disk>,
+    floor: u64,
+    _space: super::local::Space,
+    permit: Arc<super::StorePermit>,
 }
 impl Drop for Local {
     fn drop(&mut self) {
@@ -70,8 +74,10 @@ impl Writer {
         path: Path,
         root: Option<&FilePath>,
         upper: usize,
+        space: Option<(Arc<super::local::Disk>, u64, Arc<super::StorePermit>)>,
     ) -> Result<Self> {
         let destination = if let Some(root) = root {
+            let (disk, floor, permit) = space.context("local pack budget is missing")?;
             let packs = root.join("packs");
             let staging = packs.join(".writing");
             let destination = root.join(path.as_ref());
@@ -86,10 +92,15 @@ impl Writer {
                 .open(&temporary)?;
             file.try_lock()?;
             let file = tokio::fs::File::from_std(file);
+            let space = disk.reserve_space(root, floor, 0)?;
             Destination::Local(Local {
                 temporary,
                 destination,
                 file,
+                disk,
+                floor,
+                _space: space,
+                permit,
             })
         } else if upper <= SINGLE_PUT {
             Destination::Single(backend, path, Vec::new())
@@ -104,7 +115,29 @@ impl Writer {
 
     pub(crate) async fn put(&mut self, bytes: Bytes) -> Result<()> {
         match self.0.as_mut().context("pack writer already closed")? {
-            Destination::Local(local) => local.file.write_all(&bytes).await?,
+            Destination::Local(local) => {
+                let mut space = local.disk.reserve_space(
+                    local.temporary.parent().unwrap(),
+                    local.floor,
+                    bytes.len() as u64,
+                )?;
+                space.observe(vec![local.temporary.clone()])?;
+                if local.disk.data.is_none() {
+                    local.file.write_all(&bytes).await?;
+                    return Ok(());
+                }
+                let mut file = local.file.try_clone().await?;
+                let permit = local.permit.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let _space = space;
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("data-directory-write").await;
+                    file.write_all(&bytes).await?;
+                    file.flush().await
+                })
+                .await??;
+            }
             Destination::Single(_, _, parts) => parts.push(bytes),
             Destination::Multipart(upload) => {
                 upload.wait_for_capacity(1).await?;

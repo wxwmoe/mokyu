@@ -1,6 +1,6 @@
 use crate::content::raw_pages::{Builder, GROUP, Group, HASH};
 use anyhow::Result;
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
@@ -9,42 +9,80 @@ use tokio::{
 /// Keep unpublished hashes off the database until the full-source digest has been verified.
 pub(super) struct Spool<'a> {
     builder: Box<Builder>,
-    file: Option<File>,
+    scratch: Scratch,
     groups: i64,
     root: &'a Path,
+    disk: Option<Arc<super::Disk>>,
+}
+
+#[derive(Default)]
+struct Scratch {
+    file: Option<File>,
+    reservations: Vec<super::local::Space>,
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let Some(mut file) = self.file.take() else {
+            return;
+        };
+        let reservations = std::mem::take(&mut self.reservations);
+        tokio::spawn(async move {
+            let _ = file.flush().await;
+            drop(file);
+            drop(reservations);
+        });
+    }
 }
 
 impl<'a> Spool<'a> {
-    pub(super) fn new(root: &'a Path) -> Self {
+    pub(super) fn new(root: &'a Path, disk: Option<Arc<super::Disk>>) -> Self {
         Self {
             builder: Default::default(),
-            file: None,
+            scratch: Scratch::default(),
             groups: 0,
             root,
+            disk,
         }
     }
 
     pub(super) async fn feed(&mut self, mut bytes: &[u8]) -> Result<()> {
         while let Some(group) = self.builder.feed(&mut bytes) {
-            if self.file.is_none() {
+            let mut reservation = self
+                .disk
+                .as_ref()
+                .map(|disk| disk.reserve_space(self.root, disk.floor, group.hashes.len() as u64))
+                .transpose()?;
+            if let Some(reservation) = &mut reservation {
+                reservation.defer();
+            }
+            if self.scratch.file.is_none() {
                 let root = self.root.to_owned();
-                self.file = Some(File::from_std(
+                self.scratch.file = Some(File::from_std(
                     tokio::task::spawn_blocking(move || tempfile::tempfile_in(root)).await??,
                 ));
             }
-            self.file.as_mut().unwrap().write_all(&group.hashes).await?;
+            if let Some(reservation) = reservation {
+                self.scratch.reservations.push(reservation);
+            }
+            let file = self.scratch.file.as_mut().unwrap();
+            file.write_all(&group.hashes).await?;
+            if let Some(reservation) = self.scratch.reservations.last_mut() {
+                file.flush().await?;
+                reservation.materialized();
+            }
             self.groups += 1;
         }
         Ok(())
     }
 
     pub(super) async fn finish(mut self) -> Result<Verified> {
-        if let Some(file) = &mut self.file {
+        if let Some(file) = &mut self.scratch.file {
             file.flush().await?;
             file.rewind().await?;
         }
         Ok(Verified {
-            file: self.file,
+            scratch: self.scratch,
             tail: self.builder.finish(),
             groups: self.groups,
             next: 0,
@@ -53,7 +91,7 @@ impl<'a> Spool<'a> {
 }
 
 pub(crate) struct Verified {
-    file: Option<File>,
+    scratch: Scratch,
     tail: Option<Group>,
     groups: i64,
     next: i64,
@@ -65,7 +103,12 @@ impl Verified {
             return Ok(self.tail.take());
         }
         let mut hashes = vec![0; GROUP * HASH];
-        self.file.as_mut().unwrap().read_exact(&mut hashes).await?;
+        self.scratch
+            .file
+            .as_mut()
+            .unwrap()
+            .read_exact(&mut hashes)
+            .await?;
         let group = Group {
             index: self.next,
             hashes,

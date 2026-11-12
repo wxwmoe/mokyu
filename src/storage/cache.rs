@@ -52,10 +52,13 @@ impl CacheFile {
             Self::Raw | Self::PendingRaw => Self::Raw,
         }
     }
-    pub(crate) async fn remove(path: std::path::PathBuf) -> std::io::Result<()> {
+    pub(crate) async fn remove(
+        path: std::path::PathBuf,
+        disk: &Arc<super::Disk>,
+    ) -> std::io::Result<()> {
         if path.extension().is_some_and(|ext| ext == "part") {
             for ext in ["map", "map.tmp"] {
-                if let Err(error) = tokio::fs::remove_file(path.with_extension(ext)).await
+                if let Err(error) = disk.remove_committed(path.with_extension(ext)).await
                     && !matches!(
                         error.kind(),
                         std::io::ErrorKind::NotFound | std::io::ErrorKind::IsADirectory
@@ -65,7 +68,7 @@ impl CacheFile {
                 }
             }
         }
-        tokio::fs::remove_file(path).await
+        disk.remove_committed(path).await
     }
     pub(crate) fn path(self, root: &std::path::Path, id: Uuid) -> std::path::PathBuf {
         let root = root.join(if self.is_pending() {

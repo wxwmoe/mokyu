@@ -168,7 +168,7 @@ impl Files<'_> {
         drop(fifo);
         #[cfg(feature = "fault-injection")]
         crate::faults::point("cache-delete").await;
-        let result = CacheFile::remove(path).await;
+        let result = CacheFile::remove(path, self.disk).await;
         fifo = self.fifo.lock().await;
         match result {
             Ok(()) => {}
@@ -217,7 +217,7 @@ impl Files<'_> {
             drop(fifo);
             #[cfg(feature = "fault-injection")]
             crate::faults::point("cache-delete").await;
-            let result = CacheFile::remove(path).await;
+            let result = CacheFile::remove(path, self.disk).await;
             fifo = self.fifo.lock().await;
             match result {
                 Ok(()) => {}
@@ -263,22 +263,27 @@ impl Files<'_> {
         }
         check()?;
         let path = CacheFile::Chunk(compressed).path(self.root, id);
-        let Some(ticket) = self.reserve(size, policy, false, &path).await? else {
+        let Some(mut ticket) = self.reserve(size, policy, false, &path).await? else {
             return Ok(());
         };
         #[cfg(feature = "fault-injection")]
         crate::faults::point("cache-reserved").await;
         let tmp = path.with_extension(if compressed { "zst.tmp" } else { "raw.tmp" });
+        ticket.observe(vec![tmp.clone(), path.clone()])?;
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
+        let mut output = None;
         let result = async {
             tokio::time::timeout(std::time::Duration::from_millis(100), async {
-                let mut f = tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o644)
-                    .open(&tmp)
-                    .await?;
+                output = Some(
+                    tokio::fs::OpenOptions::new()
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .mode(0o644)
+                        .open(&tmp)
+                        .await?,
+                );
+                let f = output.as_mut().unwrap();
                 f.write_all(data).await?;
                 f.flush().await?;
                 Ok::<_, anyhow::Error>(())
@@ -294,6 +299,10 @@ impl Files<'_> {
         }
         .await;
         if let Err(e) = result {
+            if let Some(file) = &mut output {
+                let _ = file.flush().await;
+            }
+            drop(output);
             if tokio::fs::remove_file(&tmp).await.is_err()
                 && tokio::fs::try_exists(&tmp).await.unwrap_or(true)
             {
@@ -318,6 +327,7 @@ impl Files<'_> {
         owner: Option<&Arc<AtomicUsize>>,
         policy: CachePolicy,
     ) -> Result<bool> {
+        let _mutation = self.disk.mutation()?;
         let _write = self.cache_writes.lock().await;
         let mut fifo = self.fifo.lock().await;
         let Some(entry) = fifo.entries.get(&id) else {
@@ -368,7 +378,7 @@ impl Files<'_> {
         };
         if cached && let Some(path) = other_path {
             if Some(&path) != cache_path.as_ref() {
-                remove(&path).await?;
+                remove(&path, self.disk).await?;
             }
             if let Some(entry) = self.fifo.lock().await.forget(destination.unwrap()) {
                 self.disk.release(Area::Cache, entry.size);
@@ -376,7 +386,7 @@ impl Files<'_> {
         }
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pending-cache-linked").await;
-        remove(&source).await?;
+        remove(&source, self.disk).await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("pending-cache-unlinked").await;
         fifo = self.fifo.lock().await;
@@ -391,8 +401,8 @@ impl Files<'_> {
     }
 }
 
-async fn remove(path: &Path) -> Result<()> {
-    match CacheFile::remove(path.to_owned()).await {
+async fn remove(path: &Path, disk: &Arc<Disk>) -> Result<()> {
+    match CacheFile::remove(path.to_owned(), disk).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
@@ -452,6 +462,7 @@ mod tests {
     fn disk(root: &Path) -> Arc<Disk> {
         Arc::new(Disk {
             root: root.to_owned(),
+            data: None,
             limits: [None, Some(8192), None],
             floor: 0,
             spaces: Default::default(),
@@ -737,6 +748,7 @@ mod tests {
         tokio::fs::create_dir_all(&root).await?;
         let disk = Arc::new(Disk {
             root: root.clone(),
+            data: None,
             limits: [None, Some(8192), None],
             floor: 0,
             spaces: Default::default(),

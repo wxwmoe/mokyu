@@ -1522,4 +1522,6 @@ export default {
   replicationMove: "移動",
   replicationStatus: "状態",
   replicationOperation: "操作",
+  configField_instance_data_limit: 'データ領域の上限',
+  configHelp_instance_data_limit: 'データディレクトリ内の保存データ、キャッシュ、一時ファイルで共有するディスク容量',
 }

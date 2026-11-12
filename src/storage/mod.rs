@@ -6,6 +6,7 @@ use crate::{
 pub(crate) mod assembly;
 mod backlog;
 pub(crate) mod cache;
+pub(crate) mod data_space;
 pub(crate) mod diagnostics;
 pub(crate) mod external;
 pub(crate) mod external_test;
@@ -369,6 +370,12 @@ impl Storage {
         }
         let disk = Arc::new(Disk {
             root: c.instance.data_path.clone(),
+            data: c
+                .instance
+                .data_limit
+                .as_deref()
+                .map(|limit| data_space::Budget::open(&c.instance.data_path, config::bytes(limit)?))
+                .transpose()?,
             limits: [
                 c.instance
                     .multipart_limit
@@ -399,6 +406,9 @@ impl Storage {
             pending: Mutex::new(HashSet::new()),
         });
         disk.initialize().await?;
+        if let Some(data) = &disk.data {
+            data.start();
+        }
         let aging = Duration::from_secs(30);
         let defaults = (
             budget.storage_read_slots,
@@ -623,12 +633,41 @@ impl Storage {
                 .as_deref()
                 .context("local storage floor is missing")?,
         )?;
-        Ok(Some(local::Space::claim(
-            root,
-            floor,
-            bytes,
-            &self.disk.space_for(root)?,
-        )?))
+        Ok(Some(self.disk.reserve_space(root, floor, bytes)?))
+    }
+
+    async fn put_bytes(
+        &self,
+        target: &StoreBackend,
+        backend: Arc<dyn ObjectStore>,
+        path: Path,
+        bytes: Bytes,
+        permit: StorePermit,
+    ) -> Result<()> {
+        let mut space = self.local_space(target, bytes.len() as u64)?;
+        if let Some(space) = &mut space {
+            let root = target.raw_root.as_ref().and_then(|p| p.parent()).unwrap();
+            space.observe(vec![root.join(path.as_ref())])?;
+        }
+        let diagnostics = self.diagnostics.clone();
+        let write = async move {
+            let _permit = permit;
+            let _space = space;
+            #[cfg(feature = "fault-injection")]
+            if _space.is_some() {
+                crate::faults::point("data-directory-write").await;
+            }
+            backend
+                .put(&path, bytes.into())
+                .await
+                .inspect_err(|error| diagnostics.backend(error))?;
+            Ok::<_, anyhow::Error>(())
+        };
+        if target.is_local && self.disk.data.is_some() {
+            tokio::spawn(write).await?
+        } else {
+            write.await
+        }
     }
     fn local_cache(&self, storage_id: Option<Uuid>) -> Result<CachePolicy> {
         let target = self.store_backend(storage_id.context("source has no storage")?)?;
@@ -1462,7 +1501,7 @@ impl Storage {
             let removal = CacheRemoval::new(&e.pins);
             let path = e.file.path(&self.disk.root, id);
             drop(fifo);
-            let result = CacheFile::remove(path).await;
+            let result = CacheFile::remove(path, &self.disk).await;
             fifo = self.fifo.lock().await;
             match result {
                 Ok(()) => {}
@@ -1475,7 +1514,7 @@ impl Storage {
         }
         let path = self.pending_chunk_path(id, compressed);
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
-        let ticket = loop {
+        let mut ticket = loop {
             if fifo.entries.len() < policy.max_entries
                 && let Ok(ticket) =
                     self.disk
@@ -1493,7 +1532,7 @@ impl Storage {
             drop(fifo);
             #[cfg(feature = "fault-injection")]
             crate::faults::point("cache-delete").await;
-            let result = CacheFile::remove(path).await;
+            let result = CacheFile::remove(path, &self.disk).await;
             fifo = self.fifo.lock().await;
             match result {
                 Ok(()) => {}
@@ -1510,6 +1549,7 @@ impl Storage {
         };
         drop(fifo);
         let tmp = path.with_extension(if compressed { "zst.tmp" } else { "raw.tmp" });
+        ticket.observe(vec![tmp.clone(), path.clone()])?;
         tokio::fs::create_dir_all(path.parent().unwrap()).await?;
         let result = async {
             let mut f = tokio::fs::OpenOptions::new()
@@ -1758,7 +1798,6 @@ impl Storage {
         let size = encoded.len();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("storage-put-permitted").await;
-        let space = self.local_space(&target, size as u64)?;
         let backend = if buffered {
             self.physical.buffer_chunk(c, None).await?;
             self.buffered_writes.store(true, Ordering::Release);
@@ -1769,17 +1808,17 @@ impl Storage {
         } else {
             &target.backend
         };
-        let result = backend
-            .put(
-                &self.path_for(storage_id, c.address())?,
-                Bytes::from(encoded).into(),
+        let result = self
+            .put_bytes(
+                &target,
+                backend.clone(),
+                self.path_for(storage_id, c.address())?,
+                Bytes::from(encoded),
+                permit,
             )
-            .await
-            .inspect_err(|e| self.diagnostics.backend(e));
+            .await;
         operation.finish(result.is_err());
         result?;
-        drop(space);
-        drop(permit);
         self.operations[1].bytes(size as u64);
         self.backend_write_bytes
             .fetch_add(size as u64, Ordering::Relaxed);
@@ -2504,7 +2543,7 @@ impl Storage {
         let storage = pack.storage_id.context("pack has no store")?;
         self.ensure_storage_verified(storage).await?;
         let target = self.store_backend(storage)?;
-        let _write = target.writes.acquire().await?;
+        let _write = Arc::new(target.writes.acquire().await?);
         self.background_writable()?;
         let mut operation = self.operations[1].begin();
         self.backend_puts.fetch_add(1, Ordering::Relaxed);
@@ -2520,18 +2559,25 @@ impl Storage {
                 path,
                 target.raw_root.as_ref().and_then(|p| p.parent()),
                 upper,
+                Some((
+                    self.disk.clone(),
+                    target
+                        .profile
+                        .min_free_space
+                        .as_deref()
+                        .map(config::bytes)
+                        .transpose()?
+                        .unwrap_or(0),
+                    _write.clone(),
+                )),
             )
             .await?;
-            {
-                let _space = self.local_space(&target, frame::HEADER.len() as u64)?;
-                writer.put(Bytes::from_static(frame::HEADER)).await?;
-            }
+            writer.put(Bytes::from_static(frame::HEADER)).await?;
             let mut builder = frame::Builder::new();
             let mut entries = Vec::with_capacity(pack.member_count as usize);
             futures_util::pin_mut!(files);
             while let Some((chunk, file)) = files.try_next().await? {
-                let (position, body) = builder.append(&chunk, &file)?;
-                let _space = self.local_space(&target, body.len() as u64)?;
+                let (position, _) = builder.append(&chunk, &file)?;
                 entries.push((chunk.id, frame::Entry::new(&chunk, position)?));
                 writer.put(file.slice(codec::FILE_HEADER.len()..)).await?;
             }
@@ -2582,12 +2628,15 @@ impl Storage {
         let size = data.len() as u64;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("storage-put-permitted").await;
-        let _space = self.local_space(&target, size)?;
-        let result = target
-            .backend
-            .put(path, Bytes::from(data).into())
-            .await
-            .inspect_err(|e| self.diagnostics.backend(e));
+        let result = self
+            .put_bytes(
+                &target,
+                target.backend.clone(),
+                path.clone(),
+                Bytes::from(data),
+                _permit,
+            )
+            .await;
         operation.finish(result.is_err());
         result?;
         self.operations[1].bytes(size);
@@ -2601,11 +2650,21 @@ impl Storage {
         self.background_writable()?;
         let mut operation = self.operations[2].begin();
         self.backend_deletes.fetch_add(1, Ordering::Relaxed);
-        let result = match target.backend.delete(path).await {
-            Err(object_store::Error::NotFound { .. }) => Ok(()),
-            result => result,
-        }
-        .inspect_err(|e| self.diagnostics.backend(e));
+        let result = if target.is_local && self.disk.data.is_some() {
+            let root = target.raw_root.as_ref().and_then(|p| p.parent()).unwrap();
+            match self.disk.remove_committed(root.join(path.as_ref())).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error.into()),
+            }
+        } else {
+            match target.backend.delete(path).await {
+                Err(object_store::Error::NotFound { .. }) => Ok(()),
+                result => result
+                    .inspect_err(|e| self.diagnostics.backend(e))
+                    .map_err(anyhow::Error::from),
+            }
+        };
         operation.finish(result.is_err());
         result?;
         Ok(())

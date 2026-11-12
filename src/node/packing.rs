@@ -290,6 +290,7 @@ impl Reader {
                     crate::storage::location::Layout::S3.pack(pack.address()),
                     None,
                     upper,
+                    None,
                 )
                 .await?;
                 writer.put(Bytes::from_static(pack::frame::HEADER)).await?;

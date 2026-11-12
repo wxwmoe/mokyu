@@ -151,6 +151,9 @@ pub(crate) fn validate_runtime(instance: &Instance, runtime: &RuntimeSettings) -
         );
     }
     bytes(&instance.min_free_space)?;
+    if let Some(limit) = &instance.data_limit {
+        bytes(limit).context("invalid instance.data_limit")?;
+    }
     if let Some(name) = &instance.name {
         ensure!(
             (1..=128).contains(&name.trim().len())

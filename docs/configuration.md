@@ -67,6 +67,7 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `instance.listen_web` | `0.0.0.0:9001` | 公共读 Web 监听 |
 | `instance.listen_s3` | `0.0.0.0:9000` | S3 监听 |
 | `instance.data_path` | `/data` | 本节点目录，保存 pending、cache 和锁，群集角色另保存 node.json |
+| `instance.data_limit` | 不设总上限 | `data_path` 内的磁盘总额度，包含目录内 local 后端、缓存、暂存、日志和数据库；需重启 |
 | `instance.min_free_space` | `1GiB` | 本地文件写入后必须保留的空间 |
 | `instance.multipart_limit` | 自动 | 节点本地 Multipart 暂存上限，单容器和群集均适用 |
 | `instance.cache_size` | 自动 | cache 与 pending 的 chunks/raw 文件共用字节上限 |
@@ -86,6 +87,10 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 | `instance.compression_idle_timeout` | `30s` | 本节点压缩上下文空闲回收时间 |
 
 每个 HTTP 监听器都在各自端口接受 HTTP/1.1 与明文 HTTP/2（h2c prior knowledge），不使用 HTTP/1.1 Upgrade。TLS 由反向代理终止。每连接 HTTP/2 并发流限制为本机数据槽位数的 2–32 范围，首请求须在 15 秒内完成头部；签名路径和查询串保持原样。
+
+`data_limit` 对单容器、单主控和群集的每个本机目录分别生效，不替代 `cache_size` 等子配额。目录内正式本地载荷和未完成写入共享总额，文件系统留空要求仍独立生效；目录外的 local 后端只受其所在盘留空限制，远端对象和内存正文不计入已用磁盘。内存中等待落盘的本地正文预留未来落盘额度，发布同一文件或复用硬链接不会重复扣额。启动时按实际分配空间盘点，稀疏空洞不按表观长度计费，reflink 按独立文件为后续写入保留空间。
+
+受管载荷在写前领取额度，后台盘点核对删除、SQLite DB/WAL 和其他文件的变化，不在每次请求中扫描目录。后台只在扫描未与受管写入交错时更新基准，回收后的额度可能延后可用。`status` 的 `data_directory` 分别返回目录已用、受管预留和文件系统可用空间；未配置总额时不启用全目录盘点。SQLite 自主增长、外部进程和文件系统元数据并非写前拦截范围，需要所有进程都遵守硬上限时仍应配置文件系统 quota。降额到既有用量以下不会删除正式文件或 pending，新写等待释放空间。
 
 省略 `request_connections` 和三个 `storage_*_slots` 时，服务按 CPU、内存、文件描述符和连接池自动计算保守但偏宽的本机预算。它们只限制本机；storage profile 则限制每个 storage 的总并发，单容器使用进程内队列，群集由控制面在元数据库中维护共享许可，节点通过 RPC 取得并续租。profile 热更新保留正在执行和排队的操作；降低上限后等待现有操作排空，提高上限则放行等待者。显式修改 instance 预算需要重启。
 

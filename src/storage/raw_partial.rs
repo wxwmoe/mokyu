@@ -229,9 +229,14 @@ impl Partial {
         }
         let mut policy = self.policy;
         policy.max_entries = policy.max_entries.saturating_add(usize::from(old > 0));
-        let Some(ticket) = files.reserve(growth, policy, false, &path).await? else {
+        let Some(mut ticket) = files.reserve(growth, policy, false, &path).await? else {
             return Ok(());
         };
+        ticket.observe(vec![
+            path.clone(),
+            path.with_extension("map"),
+            path.with_extension("map.tmp"),
+        ])?;
         let mut file = tokio::fs::OpenOptions::new()
             .custom_flags(libc::O_NOFOLLOW)
             .create(true)
@@ -407,7 +412,7 @@ pub(crate) async fn restore_file(
             return Ok(true);
         }
     }
-    CacheFile::remove(path.to_owned()).await?;
+    CacheFile::remove(path.to_owned(), files.disk).await?;
     Ok(true)
 }
 

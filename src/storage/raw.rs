@@ -11,8 +11,8 @@ use object_store::{
 };
 use std::{
     path::{Path, PathBuf},
+    sync::Arc,
     sync::atomic::Ordering,
-    sync::{Arc, Mutex},
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
@@ -24,17 +24,18 @@ pub(crate) struct LocalWriter<'a> {
     file: tokio::fs::File,
     temporary: PathBuf,
     destination: PathBuf,
+    location: Uuid,
     size: u64,
     buffer: Vec<u8>,
     hash: Option<blake3::Hasher>,
-    pending: Arc<Mutex<u64>>,
     floor: u64,
     prepared: bool,
     retained: bool,
     buffered: bool,
+    _mutation: Option<super::data_space::Reservation>,
     _target: Arc<StoreBackend>,
-    _permit: StorePermit,
-    _global: resource_gate::Permit,
+    _permit: Arc<StorePermit>,
+    _global: Arc<resource_gate::Permit>,
 }
 
 pub(crate) async fn sync_directory(path: &Path) -> Result<()> {
@@ -89,14 +90,35 @@ impl LocalWriter<'_> {
         if self.buffer.is_empty() {
             return Ok(());
         }
-        let _space = super::local::Space::claim(
+        let mut space = self.storage.disk.reserve_space(
             self.destination.parent().unwrap(),
             self.floor,
             self.buffer.len() as u64,
-            &self.pending,
         )?;
-        self.file.write_all(&self.buffer).await?;
-        self.file.flush().await?;
+        space.observe(vec![self.temporary.clone()])?;
+        if self.storage.disk.data.is_none() {
+            self.file.write_all(&self.buffer).await?;
+            self.file.flush().await?;
+            self.buffer.clear();
+            return Ok(());
+        }
+        let mut file = self.file.try_clone().await?;
+        let buffer = std::mem::take(&mut self.buffer);
+        let ownership = (
+            self._permit.clone(),
+            self._global.clone(),
+            self.storage.physical_pin(self.location),
+        );
+        self.buffer = tokio::spawn(async move {
+            let _ownership = ownership;
+            let _space = space;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("data-directory-write").await;
+            file.write_all(&buffer).await?;
+            file.flush().await?;
+            Ok::<_, anyhow::Error>(buffer)
+        })
+        .await??;
         self.buffer.clear();
         Ok(())
     }
@@ -463,10 +485,10 @@ impl Storage {
             file,
             temporary,
             destination: destination.clone(),
+            location,
             size: 0,
             buffer: Vec::with_capacity(BUFFER),
             hash,
-            pending: self.disk.space_for(destination.parent().unwrap())?,
             floor: crate::config::bytes(
                 target
                     .profile
@@ -477,9 +499,10 @@ impl Storage {
             prepared: false,
             retained: false,
             buffered,
+            _mutation: self.disk.mutation()?,
             _target: target,
-            _permit: permit,
-            _global: global,
+            _permit: Arc::new(permit),
+            _global: Arc::new(global),
         };
         Ok(RawWriter::Local(writer))
     }
@@ -525,7 +548,7 @@ impl Storage {
         }
         let mut reader = self.raw_reader_uncached(source, false).await?;
         let _cpu = self.cpu.acquire().await?;
-        let mut pages = verify_manifest(&mut reader.file, source, None, &self.disk.root).await?;
+        let mut pages = verify_manifest(&mut reader.file, source, None, &self.disk).await?;
         drop(_cpu);
         while let Some(group) = pages.next().await? {
             self.raw_store.put_pages(source.id, &group).await?;
@@ -797,7 +820,7 @@ impl Storage {
         }
         let _permit = target.controls.acquire().await?;
         for file in [destination.clone(), destination.with_extension("part")] {
-            match tokio::fs::remove_file(file).await {
+            match self.disk.remove_committed(file).await {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.into()),
@@ -823,9 +846,9 @@ pub(crate) async fn verify_manifest(
     file: &mut RawFile,
     source: &RawSource,
     cache: Option<&mut Option<super::raw_cache::Write>>,
-    root: &Path,
+    disk: &Arc<super::Disk>,
 ) -> Result<super::raw_manifest::Verified> {
-    let mut spool = super::raw_manifest::Spool::new(root);
+    let mut spool = super::raw_manifest::Spool::new(&disk.root, Some(disk.clone()));
     verify(file, source, cache, Some(&mut spool)).await?;
     spool.finish().await
 }

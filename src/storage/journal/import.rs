@@ -114,7 +114,11 @@ impl Import<'_> {
         let digest = blake3::hash(&data);
         let size = data.len();
         let backend = self.app.storage.store_backend(self.target)?;
-        let _space = self.app.storage.local_space(&backend, size as u64)?;
+        let mut space = self.app.storage.local_space(&backend, size as u64)?;
+        if let Some(space) = &mut space {
+            let root = backend.raw_root.as_ref().and_then(|p| p.parent()).unwrap();
+            space.observe(vec![root.join(key)])?;
+        }
         let result = self
             .destination
             .put_opts(
@@ -172,11 +176,6 @@ impl Import<'_> {
         let writing = copy && !existed;
         let part_bytes = usize::try_from(size.div_ceil(9999).max(8 * 1024 * 1024))?;
         let backend = self.app.storage.store_backend(self.target)?;
-        let _space = if writing {
-            self.app.storage.local_space(&backend, size)?
-        } else {
-            None
-        };
         let local_paths = if copy && backend.is_local {
             let root = backend
                 .raw_root
@@ -200,6 +199,23 @@ impl Import<'_> {
         } else {
             None
         };
+        let mut space = if writing {
+            let existing = if let Some((temporary, _)) = &local_paths {
+                super::super::data_space::allocated_files(std::slice::from_ref(temporary))?
+            } else {
+                0
+            };
+            self.app
+                .storage
+                .local_space(&backend, size.saturating_sub(existing))?
+        } else {
+            None
+        };
+        if let Some(space) = &mut space
+            && let Some((temporary, destination)) = &local_paths
+        {
+            space.observe(vec![temporary.clone(), destination.clone()])?;
+        }
         let mut local = if let Some((temp, _)) = local_paths.as_ref().filter(|_| writing) {
             let mut options = tokio::fs::OpenOptions::new();
             options.write(true).create(true).truncate(false);
@@ -351,8 +367,10 @@ impl Import<'_> {
         to: &str,
     ) -> Result<()> {
         let expected = source.digest.as_deref().context("missing raw digest")?;
-        let mut pages =
-            crate::storage::raw_manifest::Spool::new(&self.app.config.instance.data_path);
+        let mut pages = crate::storage::raw_manifest::Spool::new(
+            &self.app.config.instance.data_path,
+            Some(self.app.storage.disk.clone()),
+        );
         self.copy_carrier(
             from,
             to,
