@@ -429,5 +429,5 @@ pub(in super::super) fn insert_storage_record(
     record: &BackendRecord,
     key: Option<Uuid>,
 ) -> Statement<'_> {
-    sqlx::query("INSERT INTO storages(id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,identity_marker,block_key_id,access_key_encrypted,secret_key_encrypted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(&record.identity_marker).bind(key).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted)
+    sqlx::query("INSERT INTO storages(id,name,type,cluster_id,path,endpoint_url,remote_bucket_name,region,prefix,identity_marker,block_key_id,access_key_encrypted,secret_key_encrypted,enabled) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(record.cluster_id).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(&record.identity_marker).bind(key).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled)
 }

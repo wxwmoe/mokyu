@@ -4,6 +4,8 @@ Mokyu 可部署一个主容器，或在 PostgreSQL 上部署多个平等的 cont
 
 ## 单主控群集
 
+没有桶、对象或 local/S3 后端的空部署，可以保持维护状态进入群集模式，先完成 [storage 登记与群集配置](storage-clusters.md)。原生后端目前仍等待共享读写与暂存验证，此时不能退出维护或承接业务。
+
 `single_control` 的英文名称是 **Single Control Cluster**。一个主容器运行 `mokyu`，负责管理、S3、公共读和元数据。PostgreSQL、MySQL、MariaDB 或 SQLite 均可作为元数据库。主容器以独占运行权访问它，远端 data、worker 和 node 使用现有的 `control_url`、gRPC 和共享 S3 存储。
 
 | 已接入的远端角色 | 接受数据流量 | 处理共享后台任务 |

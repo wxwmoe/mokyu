@@ -40,13 +40,8 @@ struct PreparedStorage {
 
 impl PreparedStorage {
     async fn insert(&self, tx: &mut Transaction<'_, Sqlite>) -> Result<()> {
-        if self.record.r#type == "local" {
-            let (_, mode) = queries::storage_deployment().fetch_one(&mut **tx).await?;
-            ensure!(
-                mode == "single",
-                s3s::s3_error!(InvalidArgument, "local storage requires single mode")
-            );
-        }
+        let (_, mode) = queries::storage_deployment().fetch_one(&mut **tx).await?;
+        self.record.validate_mode(&mode)?;
         validate_block_key(tx, self.key).await?;
         queries::insert_storage_record(&self.record, self.key)
             .execute(&mut **tx)
@@ -56,7 +51,7 @@ impl PreparedStorage {
             self.read,
             self.upload,
             self.control,
-            self.record.r#type == "s3",
+            self.record.r#type != "local",
         )
         .execute(&mut **tx)
         .await?;

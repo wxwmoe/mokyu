@@ -1,4 +1,4 @@
-use super::reads::{Prepared, Reads};
+use super::{Prepared, Reads};
 use crate::{
     content::checks::{RawCheck, SKIPPED},
     model::node_read::Source,
@@ -9,7 +9,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 
 impl Reads {
-    pub(super) fn check_chunk(
+    pub(in crate::node) fn check_chunk(
         self: &Arc<Self>,
         prepared: Arc<Prepared>,
         index: usize,
@@ -21,7 +21,7 @@ impl Reads {
             _ => return Ok(()),
         };
         let backend = prepared.backend(source.storage()?.context("source storage missing")?)?;
-        let cache_id = super::files::id(source).context("cache identity missing")?;
+        let cache_id = crate::node::files::id(source).context("cache identity missing")?;
         let priority = if self.reader.background {
             crate::storage::resource_gate::MAINTENANCE
         } else {
@@ -58,7 +58,7 @@ impl Reads {
         Ok(())
     }
 
-    pub(super) fn check_raw(
+    pub(in crate::node) fn check_raw(
         self: &Arc<Self>,
         prepared: Arc<Prepared>,
         index: usize,
@@ -109,7 +109,7 @@ impl Reads {
         }
     }
 
-    pub(super) async fn report_error(
+    pub(in crate::node) async fn report_error(
         &self,
         prepared: Arc<Prepared>,
         index: usize,

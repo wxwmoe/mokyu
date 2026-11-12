@@ -31,6 +31,7 @@ pub(crate) struct StorageInput {
     pub(crate) name: String,
     #[serde(rename = "type")]
     pub(crate) storage_type: String,
+    pub(crate) cluster_id: Option<Uuid>,
     pub(crate) path: Option<String>,
     pub(crate) endpoint: Option<String>,
     pub(crate) bucket: Option<String>,
@@ -105,8 +106,8 @@ pub(super) fn validate_name(value: &str) -> anyhow::Result<String> {
 
 fn validate_storage_type(value: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
-        matches!(value, "local" | "s3"),
-        "storage type is local or s3"
+        matches!(value, "local" | "s3" | "mokyu"),
+        "storage type is local, s3 or mokyu"
     );
     Ok(())
 }
@@ -157,6 +158,7 @@ pub(super) fn build_record(
     id: Uuid,
     name: String,
     storage_type: String,
+    cluster_id: Option<Uuid>,
     path: Option<String>,
     endpoint_value: Option<String>,
     bucket: Option<String>,
@@ -166,8 +168,24 @@ pub(super) fn build_record(
     secret_key: Option<String>,
     identity_marker: serde_json::Value,
 ) -> anyhow::Result<BackendRecord> {
+    anyhow::ensure!(
+        (storage_type == "mokyu") == cluster_id.is_some(),
+        "cluster_id is required only for mokyu storage"
+    );
     let (path, endpoint_url, remote_bucket_name, region, access, secret) =
-        if storage_type == "local" {
+        if storage_type == "mokyu" {
+            anyhow::ensure!(
+                path.is_none()
+                    && endpoint_value.is_none()
+                    && bucket.is_none()
+                    && region.is_none()
+                    && access_key.is_none()
+                    && secret_key.is_none()
+                    && prefix.is_empty(),
+                "mokyu storage uses a cluster without local or S3 connection settings"
+            );
+            (None, None, None, None, None, None)
+        } else if storage_type == "local" {
             anyhow::ensure!(
                 endpoint_value.is_none()
                     && bucket.is_none()
@@ -217,7 +235,9 @@ pub(super) fn build_record(
     Ok(BackendRecord {
         id,
         name,
+        enabled: storage_type != "mokyu",
         r#type: storage_type,
+        cluster_id,
         path,
         endpoint_url,
         remote_bucket_name,
@@ -226,7 +246,6 @@ pub(super) fn build_record(
         access_key_encrypted: access,
         secret_key_encrypted: secret,
         identity_marker,
-        enabled: true,
     })
 }
 
@@ -387,6 +406,10 @@ pub(crate) async fn create_installation_store(
         !(mode != "single" && input.storage_type == "local"),
         "local storages are unavailable in cluster mode"
     );
+    anyhow::ensure!(
+        mode != "single" || input.storage_type != "mokyu",
+        "mokyu storage requires single_control or cluster mode"
+    );
     let resume = marker.is_some()
         && app.config.instance.testing
         && app
@@ -412,6 +435,7 @@ pub(crate) async fn create_installation_store(
         id,
         name,
         input.storage_type,
+        input.cluster_id,
         input.path,
         input.endpoint,
         input.bucket,
@@ -453,7 +477,9 @@ pub(crate) async fn create_installation_store(
     profile_for_init
         .validate_budget(&app.config, &budget)
         .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}"))?;
-    if resume {
+    if record.r#type == "mokyu" {
+        // Keep the binding disabled until shared I/O and staging probes are available.
+    } else if resume {
         app.storage
             .verify_store_with_profile(record.clone(), &profile_for_init)
             .await?;
@@ -575,7 +601,27 @@ pub(crate) async fn update_record(
     validate_concurrency(upload_concurrency, "upload")?;
     validate_concurrency(control_concurrency, "control")?;
     let previous = changing_type.then(|| (&row).into());
-    let mut record = if storage_type == "local" {
+    let mut record = if storage_type == "mokyu" {
+        anyhow::ensure!(
+            row.r#type == "mokyu",
+            "create a cluster backend before migrating data to it"
+        );
+        build_record(
+            app,
+            row.id,
+            row.name.clone(),
+            storage_type,
+            row.cluster_id,
+            input.path,
+            input.endpoint,
+            input.bucket,
+            input.region,
+            prefix,
+            input.access_key,
+            input.secret_key,
+            row.identity_marker.clone(),
+        )?
+    } else if storage_type == "local" {
         anyhow::ensure!(
             input.endpoint.is_none()
                 && input.bucket.is_none()
@@ -589,6 +635,7 @@ pub(crate) async fn update_record(
             row.id,
             row.name.clone(),
             storage_type,
+            None,
             input.path.or(row.path),
             None,
             None,
@@ -629,6 +676,7 @@ pub(crate) async fn update_record(
             row.name.clone(),
             storage_type,
             None,
+            None,
             input.endpoint.or(row.endpoint_url),
             input.bucket.or(row.remote_bucket_name),
             input.region.or(row.region),
@@ -639,7 +687,13 @@ pub(crate) async fn update_record(
         )?
     };
     record.enabled = input.enabled.unwrap_or(row.enabled);
-    if let Some(previous) = previous {
+    if record.r#type == "mokyu" {
+        anyhow::ensure!(
+            !record.enabled,
+            "storage cluster is waiting for shared I/O and staging probes"
+        );
+        Ok(())
+    } else if let Some(previous) = previous {
         app.storage
             .verify_relocation(&previous, &record, &profile)
             .await

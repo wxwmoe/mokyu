@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261111210000.
+-- Generated from the complete sqlite migration chain through 20261113034820.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -1026,18 +1026,19 @@ CREATE TABLE node_writes (
     FOREIGN KEY (stream_id) REFERENCES streams(id) ON DELETE SET NULL
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE nodes (
-    id BLOB NOT NULL PRIMARY KEY CHECK (length(id)=16),
+CREATE TABLE "nodes" (
+    id BLOB NOT NULL PRIMARY KEY CHECK(length(id)=16),
     name TEXT NOT NULL UNIQUE,
-    role TEXT NOT NULL CHECK (role IN ('control','data','worker','node')),
-    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0,1)),
-    credential_generation INTEGER NOT NULL CHECK (credential_generation>0),
+    role TEXT NOT NULL CHECK(role IN ('control','data','worker','node','storage')),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    credential_generation INTEGER NOT NULL CHECK(credential_generation>0),
     credential_encrypted BLOB,
-    run_state TEXT CHECK (run_state IS NULL OR json_valid(run_state)),
-    report TEXT CHECK (report IS NULL OR json_valid(report)),
+    run_state TEXT CHECK(run_state IS NULL OR json_valid(run_state)),
+    report TEXT CHECK(report IS NULL OR json_valid(report)),
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    last_seen_at INTEGER
-, reported_at INTEGER) STRICT, WITHOUT ROWID;
+    last_seen_at INTEGER,
+    reported_at INTEGER
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE nonce_counters (
     block_key_id BLOB NOT NULL REFERENCES managed_keys(id),
@@ -1052,10 +1053,10 @@ CREATE TABLE nonce_observations (
     revision INTEGER NOT NULL CHECK(revision > 0)
 ) WITHOUT ROWID;
 
-CREATE TABLE notification_consumers (
+CREATE TABLE "notification_consumers" (
     node_id BLOB NOT NULL PRIMARY KEY,
     generation BLOB NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('control','data','worker','node')),
+    role TEXT NOT NULL CHECK (role IN ('control','data','worker','node','storage')),
     expires_at INTEGER NOT NULL,
     FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
@@ -1537,6 +1538,32 @@ CREATE TABLE staging_objects (
     FOREIGN KEY (storage_id) REFERENCES storages(id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE storage_cluster_history (
+    cluster_id BLOB NOT NULL REFERENCES storage_clusters(id),
+    revision INTEGER NOT NULL CHECK(revision>0),
+    manifest TEXT NOT NULL CHECK(json_valid(manifest)),
+    digest TEXT NOT NULL CHECK(length(digest)=64),
+    PRIMARY KEY(cluster_id,revision)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE storage_cluster_lock (id INTEGER PRIMARY KEY CHECK(id=1)) STRICT;
+
+CREATE TABLE storage_clusters (
+    id BLOB PRIMARY KEY CHECK(length(id)=16),
+    name TEXT NOT NULL UNIQUE CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
+    revision INTEGER NOT NULL CHECK(revision>0),
+    policy TEXT NOT NULL CHECK(json_valid(policy)),
+    manifest TEXT NOT NULL CHECK(json_valid(manifest))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE storage_devices (
+    media_id BLOB PRIMARY KEY CHECK(length(media_id)=16),
+    node_id BLOB NOT NULL UNIQUE REFERENCES nodes(id),
+    cluster_id BLOB REFERENCES storage_clusters(id),
+    observed_at INTEGER NOT NULL,
+    announcement TEXT NOT NULL CHECK(json_valid(announcement))
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE storage_gates (
     storage_id BLOB NOT NULL,
     direction TEXT NOT NULL,
@@ -1635,10 +1662,11 @@ CREATE TABLE storage_profiles (
     CONSTRAINT storage_profiles_migration CHECK (migration_concurrency IS NULL OR migration_concurrency>0)
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE storages (
+CREATE TABLE "storages" (
     id BLOB CHECK (id IS NULL OR length(id)=16) NOT NULL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
     type TEXT NOT NULL,
+    cluster_id BLOB REFERENCES storage_clusters(id) CHECK (cluster_id IS NULL OR length(cluster_id)=16),
     path TEXT,
     endpoint_url TEXT,
     remote_bucket_name TEXT,
@@ -1652,11 +1680,13 @@ CREATE TABLE storages (
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     updated_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
     CONSTRAINT storages_name CHECK (length(CAST(name AS BLOB)) BETWEEN 1 AND 128),
-    CONSTRAINT storages_type CHECK (type IN ('local','s3')),
+    CONSTRAINT storages_type CHECK (type IN ('local','s3','mokyu')),
     CONSTRAINT storages_connection CHECK (
-        (type='local' AND path IS NOT NULL AND endpoint_url IS NULL AND remote_bucket_name IS NULL AND region IS NULL AND access_key_encrypted IS NULL AND secret_key_encrypted IS NULL)
-        OR (type='s3' AND path IS NULL AND endpoint_url IS NOT NULL AND remote_bucket_name IS NOT NULL AND region IS NOT NULL AND access_key_encrypted IS NOT NULL AND secret_key_encrypted IS NOT NULL)
+        (type='local' AND cluster_id IS NULL AND path IS NOT NULL AND endpoint_url IS NULL AND remote_bucket_name IS NULL AND region IS NULL AND access_key_encrypted IS NULL AND secret_key_encrypted IS NULL)
+        OR (type='s3' AND cluster_id IS NULL AND path IS NULL AND endpoint_url IS NOT NULL AND remote_bucket_name IS NOT NULL AND region IS NOT NULL AND access_key_encrypted IS NOT NULL AND secret_key_encrypted IS NOT NULL)
+        OR (type='mokyu' AND cluster_id IS NOT NULL AND path IS NULL AND endpoint_url IS NULL AND remote_bucket_name IS NULL AND region IS NULL AND access_key_encrypted IS NULL AND secret_key_encrypted IS NULL AND prefix='')
     ),
+    CONSTRAINT storages_cluster_connection CHECK ((type='mokyu')=(cluster_id IS NOT NULL)),
     CONSTRAINT storages_key FOREIGN KEY (block_key_id) REFERENCES managed_keys(id)
 ) STRICT, WITHOUT ROWID;
 
@@ -2015,6 +2045,7 @@ INSERT INTO "maintenance_controls" ("policy", "paused", "last_scheduled_at", "up
 INSERT INTO "projects" ("id", "name", "description", "builtin", "allow_bucket_create", "created_at") VALUES (X'00000000000000000000000000000001', 'Default', '', 1, 0, CAST(unixepoch('subsec')*1000000 AS INTEGER));
 INSERT INTO "quota_scopes" ("scope", "scope_id", "used_bytes", "reserved_bytes", "inflight_bytes", "object_count", "bucket_count", "logical_bytes_limit", "inflight_bytes_limit", "bucket_count_limit") VALUES ('project', X'00000000000000000000000000000001', 0, 0, 0, 0, 0, NULL, NULL, NULL);
 INSERT INTO "redundancy_catalog" ("singleton") VALUES (1);
+INSERT INTO "storage_cluster_lock" ("id") VALUES (1);
 INSERT INTO "usage_summary" ("id", "requested_at", "as_of", "data") VALUES ('global', CAST(unixepoch('subsec')*1000000 AS INTEGER), NULL, NULL);
 
 CREATE INDEX api_tokens_user ON api_tokens(user_id);
@@ -2336,6 +2367,8 @@ CREATE INDEX staging_objects_age ON staging_objects(created_at);
 CREATE INDEX storage_permit_usage ON storage_permits(storage_id,direction,expires_at);
 
 CREATE INDEX storages_block_key ON storages(block_key_id);
+
+CREATE INDEX storages_cluster ON storages(cluster_id);
 
 CREATE INDEX streams_cleanup ON streams(state,touched_at,id);
 

@@ -4,8 +4,8 @@ use crate::{
     authorization::{Action, Principal},
     cli::{
         Buckets, Cache, Cleanup, Cluster, Command, ControlSettings, Credentials, Domains, Gc,
-        Integrity, Keys, Maintenance, Packs, Projects, RewriteCommand, Settings, Setup, StorageKey,
-        StorageProfiles, Storages, Tasks, Tiering, Users,
+        Integrity, Keys, Maintenance, Packs, Projects, RewriteCommand, Settings, Setup,
+        StorageClusters, StorageKey, StorageProfiles, Storages, Tasks, Tiering, Users,
     },
 };
 use anyhow::{Context, Result, ensure};
@@ -192,6 +192,88 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 );
             }
             Ok(status)
+        }
+        Command::StorageCluster(command) => {
+            use crate::model::storage_cluster as c;
+            app.authorization.admin(principal).await?.finish().await?;
+            let clusters = &app.storage_clusters;
+            Ok(match command {
+                StorageClusters::List => serde_json::to_value(clusters.overview().await?)?,
+                StorageClusters::Create { name, policy } => serde_json::to_value(
+                    clusters
+                        .create(
+                            principal,
+                            c::Create {
+                                name,
+                                policy: policy
+                                    .map(|s| serde_json::from_str(&s))
+                                    .transpose()?
+                                    .unwrap_or_default(),
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::Update {
+                    id,
+                    revision,
+                    name,
+                    policy,
+                } => serde_json::to_value(
+                    clusters
+                        .update(
+                            principal,
+                            id,
+                            c::Update {
+                                revision,
+                                name,
+                                policy: serde_json::from_str(&policy)?,
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::Members {
+                    id,
+                    revision,
+                    media,
+                } => serde_json::to_value(
+                    clusters
+                        .add_members(
+                            principal,
+                            id,
+                            c::Members {
+                                revision,
+                                media_ids: media,
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::Enable {
+                    id,
+                    revision,
+                    media,
+                } => serde_json::to_value(
+                    clusters
+                        .enable_groups(
+                            principal,
+                            id,
+                            c::Members {
+                                revision,
+                                media_ids: media,
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::State {
+                    id,
+                    media,
+                    revision,
+                    state,
+                } => serde_json::to_value(
+                    clusters
+                        .member_state(principal, id, media, c::MemberState { revision, state })
+                        .await?,
+                )?,
+            })
         }
         Command::Cluster(command) => match command {
             Cluster::Create { name, role } => Ok(serde_json::to_value(
@@ -472,6 +554,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 Storages::Create {
                     name,
                     r#type,
+                    cluster_id,
                     initialize,
                     key,
                     path,
@@ -499,6 +582,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                         profile: None,
                         name,
                         storage_type: r#type,
+                        cluster_id,
                         path: path.map(|value| value.to_string_lossy().into_owned()),
                         endpoint,
                         bucket,
@@ -818,6 +902,9 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             }
             if !enabled {
                 app.ensure_mode()?;
+                if app.shared_storage_only() && app.role == "single" {
+                    app.storage.shared_staging_ready().await?;
+                }
                 let pending = app.maintenance_store.destructive_sweep().await?;
                 ensure!(
                     !pending,

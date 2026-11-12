@@ -733,6 +733,11 @@ body { background: radial-gradient(ellipse at 85% 0%, color-mix(in srgb, var(--r
 .catalog-search input[type='search']:focus { border-color: transparent; box-shadow: none; outline: none; }
 .catalog-search .select-trigger:focus-visible { outline: none; }
 .store-type-field { min-width: 0; }
+.store-cluster-binding { display: grid; justify-items: start; gap: 6px; min-width: 0; }
+.store-cluster-binding > span { font-size: var(--label-size, 13px); font-weight: var(--ui-weight, 700); }
+.store-cluster-binding a { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; }
+.store-cluster-binding svg { flex: none; }
+.store-cluster-binding code { min-width: 0; overflow-wrap: anywhere; }
 .store-type-field .select-trigger { width: 100%; min-height: 43px; }
 .profile-fields .profile-toggle { display: grid; grid-template-columns: minmax(0, 1fr); align-content: start; gap: 6px; }
 .profile-toggle > span { color: var(--muted); font-size: var(--small-size, 12px); }

@@ -1,0 +1,26 @@
+# For `mokyu storage`. Provision on control with:
+# mokyu cli cluster create storage-1 storage
+# Save the returned identity as /data/node.json with mode 0600.
+# Storage has no database credentials or deployment key.
+[instance]
+control_url = "https://control.example.com"
+data_path = "/data"
+#region = "dc-1"
+# Required: uncomment and set an independently reachable HTTPS origin and group.
+#storage_url = "https://storage-1.example.com:9003"
+#storage_group = "server-1"
+#storage_purpose = "primary" # primary | backup
+#listen_storage = "0.0.0.0:9003"
+# Direct TLS is the default. Both files are required.
+#storage_tls_cert = "/config/storage-cert.pem"
+#storage_tls_key = "/config/storage-key.pem"
+# Alternatively, terminate TLS at a trusted proxy with HTTP/2 upstream:
+#storage_transport = "proxy"
+#listen_storage = "127.0.0.1:9003"
+# Keep the local status/CLI listener private.
+listen_control = "127.0.0.1:9002"
+#data_limit = "100GiB"
+min_free_space = "1GiB"
+stream_memory_budget = "256MiB"
+#request_connections = 128
+#cpu_jobs = 2

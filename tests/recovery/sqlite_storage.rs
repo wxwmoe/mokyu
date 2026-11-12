@@ -13,6 +13,7 @@ fn record(name: &str, deployment: Uuid) -> Record {
         id,
         name: name.into(),
         r#type: "local".into(),
+        cluster_id: None,
         path: Some(format!("/data/{id}")),
         endpoint_url: None,
         remote_bucket_name: None,
@@ -113,7 +114,7 @@ async fn sqlite_storage_contract() -> Result<()> {
         changed.min_storage_duration = invalid.into();
         assert!(changed.min_storage_seconds().is_err());
     }
-    assert!(!profile.cache_enabled && !profile.upload_cache && !profile.pack_enabled);
+    assert!(!profile.cache_enabled && !profile.upload_cache && profile.pack_enabled);
     assert!(!profile.compression_enabled);
     assert_eq!(profile.request_timeout, "30s");
 
@@ -155,7 +156,7 @@ async fn sqlite_storage_contract() -> Result<()> {
     assert!(creation.writer.finish().await.is_err());
     assert_eq!(backend.list().await?.len(), 1);
     let mut invalid_profile = profile.clone();
-    invalid_profile.pack_enabled = true;
+    invalid_profile.upload_cache = true;
     let error = backend
         .update("local".into(), invalid_profile.clone())
         .await
@@ -197,6 +198,11 @@ async fn sqlite_storage_contract() -> Result<()> {
         .prepare(&remote, None, None, None, None, None)
         .await?;
     creation.writer.finish().await?;
+    let node_record = super::queries::work::storage(remote.id)
+        .fetch_one(db)
+        .await?;
+    assert_eq!(node_record.id, remote.id);
+    assert!(node_record.cluster_id.is_none());
     let profile = backend.load(remote.id).await?;
     assert!(
         profile.cache_enabled

@@ -1,5 +1,7 @@
 //! MySQL statements and native row decoding.
 
+pub(super) mod storage_cluster;
+
 use super::{Backend, transactions};
 use crate::authorization::{Action, Principal};
 use crate::model::Id;

@@ -36,8 +36,17 @@ pub(in super::super) async fn task_view(
 
 pub(in super::super) async fn maintenance_mode(pool: &PgPool, enabled: bool) -> Result<()> {
     let mut tx = pool.begin().await?;
-    queries::storage_mode_lock().fetch_one(&mut *tx).await?;
+    let (_, mode) = queries::storage_mode_lock().fetch_one(&mut *tx).await?;
     if !enabled {
+        if mode != "single" {
+            let staging = queries::cluster_staging_id().fetch_one(&mut *tx).await?;
+            ensure!(
+                queries::cluster_staging_valid(staging)
+                    .fetch_one(&mut *tx)
+                    .await?,
+                "cluster mode requires an enabled shared staging backend"
+            );
+        }
         ensure!(
             !queries::work::sweep_pending().fetch_one(&mut *tx).await?,
             "pause or finish destructive sweep and wait for its active batch before disabling maintenance"

@@ -122,6 +122,16 @@ pub(in super::super) async fn cleanup_history(
 
 pub(in super::super) async fn maintenance_mode(pool: &MySqlPool, enabled: bool) -> Result<()> {
     let mut tx = pool.begin().await?;
+    let (_, mode) = queries::storage_mode_lock().fetch_one(&mut *tx).await?;
+    if !enabled && mode != "single" {
+        ensure!(
+            queries::active_staging()
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_some(),
+            "cluster mode requires an enabled shared staging backend"
+        );
+    }
     queries::set_maintenance_mode(enabled)
         .execute(&mut *tx)
         .await?;

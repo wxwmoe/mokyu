@@ -92,3 +92,37 @@ test('node states stay consistent across lists, details and configuration', asyn
   }
   expect(errors).toEqual([])
 })
+
+test('combined node roles match in counts, details and settings', async ({ page }) => {
+  const request = page.context().request, origin = process.env.MOKYU_TEST_WEB!
+  const password = readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8').trim()
+  const login = await request.post('/api/v1/auth/login', { headers: { Origin: origin }, data: { username: process.env.MOKYU_TEST_USERNAME || 'tester', password } })
+  expect(login.ok()).toBe(true)
+  const read = async (path: string) => (await request.get('/api/v1/' + path)).json()
+  const [session, status, overview, nodes] = await Promise.all(['auth/session', 'system/status', 'cluster/status', 'cluster/nodes'].map(read))
+  const id = nodes.items[0].id, nodePath = 'cluster/nodes/' + id
+  const [detail, config] = await Promise.all([read(nodePath + '/status'), read(nodePath + '/config')])
+  let mode = '', role = ''
+  await page.route('**/api/v1/auth/session', route => route.fulfill({ json: { ...session, locale: 'en' } }))
+  await page.route('**/api/v1/system/status', route => route.fulfill({ json: { ...status, deployment_mode: mode } }))
+  await page.route('**/api/v1/cluster/status', route => route.fulfill({ json: { ...overview, nodes: ['online', 'released'].map(contact => ({ ...overview.nodes[0], role, contact, count: 1 })) } }))
+  for (const [resource, response] of [['status', detail], ['config', config]] as const) {
+    await page.route('**/api/v1/' + nodePath + '/' + resource, route => route.fulfill({ json: { ...response, node: { ...response.node, role } } }))
+  }
+  const cases = [
+    { mode: 'single_control', role: 'control', counts: ['1', '1', '1', '0'], labels: ['Control', 'Data', 'Worker'] },
+    { mode: 'cluster', role: 'node', counts: ['0', '1', '1', '0'], labels: ['Data', 'Worker'] },
+    { mode: 'cluster', role: 'control', counts: ['1', '0', '0', '0'], labels: ['Control'] },
+  ]
+  const badges = page.locator('.node-detail-status > .badge:not(.node-state)')
+  for (const scenario of cases) {
+    mode = scenario.mode
+    role = scenario.role
+    await page.goto('/service?node=' + id)
+    await expect(page.locator('.cluster-role-counts strong')).toHaveText(scenario.counts)
+    await expect(badges).toHaveText(scenario.labels)
+    await page.getByRole('dialog').getByRole('link', { name: /configuration/i }).click()
+    await expect(page.locator('.node-config-context .technical-key')).toHaveText(id)
+    await expect(badges).toHaveText(scenario.labels)
+  }
+})

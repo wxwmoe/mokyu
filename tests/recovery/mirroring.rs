@@ -86,6 +86,7 @@ async fn mirroring_database_contract() -> Result<()> {
         id: storage,
         name: "origin-target".into(),
         r#type: "local".into(),
+        cluster_id: None,
         path: Some(format!("/tmp/{storage}")),
         endpoint_url: None,
         remote_bucket_name: None,

@@ -44,6 +44,7 @@ pub(crate) async fn connect(
         node_requests: backend.clone(),
         node_work: backend.clone(),
         node_sessions: backend.clone(),
+        storage_clusters: backend.clone(),
         node_inventory: backend.clone(),
         cluster: None,
         metrics: backend.clone(),

@@ -4,7 +4,7 @@ pub(in super::super) const MIGRATION_SETUP: &str =
     "SET synchronous_commit = on; SET lock_timeout = '30s'";
 
 pub(in super::super) fn enabled_storage(id: Uuid) -> Rows<'static, StorageRecord> {
-    sqlx::query_as("SELECT s.id,s.type AS store_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.access_key_encrypted AS access,s.secret_key_encrypted AS secret,s.identity_marker,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=$1 AND s.enabled")
+    sqlx::query_as("SELECT s.id,s.type AS store_type,s.cluster_id,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.access_key_encrypted AS access,s.secret_key_encrypted AS secret,s.identity_marker,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=$1 AND s.enabled")
         .bind(id)
 }
 
@@ -509,4 +509,22 @@ pub(in super::super) fn retire_hashes() -> Statement<'static> {
     sqlx::query(
         "UPDATE tasks SET state='completed',updated_at=clock_timestamp() WHERE state='queued' AND task_type='upload' AND detail->>'operation'='deduplicate' AND EXISTS(SELECT 1 FROM mokyu_meta WHERE deployment_mode='single_control' AND NOT remote_work)",
     )
+}
+
+pub(in super::super) fn empty_storage_bootstrap() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT 1 FROM storages WHERE type<>'mokyu') AND NOT EXISTS(SELECT 1 FROM buckets) AND NOT EXISTS(SELECT 1 FROM streams)",
+    )
+}
+
+pub(in super::super) fn has_storage_clusters() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM storage_clusters) OR EXISTS(SELECT 1 FROM storages WHERE type='mokyu')",
+    )
+}
+
+pub(in super::super) fn staging_bootstrap_candidate(
+    storage: Option<Uuid>,
+) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT maintenance AND NOT EXISTS(SELECT 1 FROM streams) AND NOT EXISTS(SELECT 1 FROM buckets) AND ($1::uuid IS NULL OR EXISTS(SELECT 1 FROM storages WHERE id=$1 AND type='mokyu')) FROM mokyu_meta").bind(storage)
 }

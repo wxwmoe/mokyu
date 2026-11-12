@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { TooltipProvider, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator } from 'reka-ui'
-import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive, Cloud, Copy } from 'lucide-vue-next'
+import { Heart, Sparkles, Images, Sun, Moon, Menu, LogOut, ChevronDown, Settings2, Users, FolderHeart, KeyRound, BookHeart, UploadCloud, HouseHeart, Package, Flower2, ListChecks, HeartPulse, HardDrive, Network, Cloud, Copy } from 'lucide-vue-next'
 import { session, signOut, savePreferences, refreshSession, resetSession, startAuthManager } from '../api/client'
 import { appearance, setTheme } from './theme'
 import { report, notices, manualCopy, copy } from './feedback'
@@ -16,7 +16,9 @@ import LocaleMenu from '../components/LocaleMenu.vue'
 import Avatar from '../components/Avatar.vue'
 import StatusBanner from '../components/StatusBanner.vue'
 import { t, locale } from './i18n'
+import { useDeployment } from './cluster'
 const router = useRouter(), route = useRoute(), navigation = ref(false)
+const { cluster } = useDeployment()
 const destinations = [
   { key: 'overview', icon: HouseHeart, group: 'workspace' }, { key: 'media', icon: Images, group: 'workspace' },
   { key: 'storage', icon: Package, group: 'workspace' }, { key: 'transfers', icon: UploadCloud, group: 'workspace' },
@@ -28,12 +30,13 @@ const destinations = [
   { key: 'projects', icon: FolderHeart, group: 'administration', projects: true },
   { key: 'credentials', icon: KeyRound, group: 'administration', admin: true },
   { key: 'storages', icon: HardDrive, group: 'administration', admin: true },
+  { key: 'storage-clusters', label: 'storageClusters', icon: Network, group: 'administration', admin: true, cluster: true },
   { key: 'tasks', icon: ListChecks, group: 'administration', admin: true },
   { key: 'audit', icon: BookHeart, group: 'administration' },
   { key: 'runtime-config', label: 'runtimeConfig', icon: Settings2, group: 'administration', admin: true },
   { key: 'service', icon: HeartPulse, group: 'administration', admin: true },
 ]
-const groups = computed(() => ['workspace', 'administration'].map(name => ({ name, entries: destinations.filter(item => (session.value?.role === 'admin' ? item.group === name : name === 'workspace' && !item.admin) && (!item.projects || session.value?.project_management)) })).filter(group => group.entries.length))
+const groups = computed(() => ['workspace', 'administration'].map(name => ({ name, entries: destinations.filter(item => (session.value?.role === 'admin' ? item.group === name : name === 'workspace' && !item.admin) && (!item.projects || session.value?.project_management) && (!item.cluster || cluster.value)) })).filter(group => group.entries.length))
 const current = computed(() => destinations.find(item => item.key === route.name) || { key: route.name === 'login' ? 'signIn' : route.name === 'storage-details' ? 'storages' : ['account', 'tokens'].includes(String(route.name)) ? String(route.name) : 'media', icon: route.name === 'account' ? Settings2 : route.name === 'storage-details' ? HardDrive : Images, group: route.name === 'storage-details' ? 'administration' : 'workspace' })
 async function logout() { try { await signOut(); await router.replace('/login') } catch (error) { report(error) } }
 function reload() { location.reload() }

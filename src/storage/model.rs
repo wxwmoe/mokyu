@@ -20,6 +20,7 @@ pub(crate) struct Record {
     pub id: Uuid,
     pub name: String,
     pub r#type: String,
+    pub cluster_id: Option<Uuid>,
     pub path: Option<String>,
     pub endpoint_url: Option<String>,
     pub remote_bucket_name: Option<String>,
@@ -32,6 +33,26 @@ pub(crate) struct Record {
 }
 
 pub(crate) use super::marker::create as identity_marker;
+
+impl Record {
+    pub(crate) fn validate_mode(&self, mode: &str) -> Result<()> {
+        ensure!(
+            self.r#type != "local" || mode == "single",
+            "local storage requires single mode"
+        );
+        if self.r#type == "mokyu" {
+            ensure!(
+                mode != "single" && self.cluster_id.is_some(),
+                "mokyu storage requires a cluster in single_control or cluster mode"
+            );
+            ensure!(
+                !self.enabled,
+                "storage cluster is waiting for shared I/O and staging probes"
+            );
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Options {
@@ -57,6 +78,7 @@ impl Options {
 pub(crate) struct Connection {
     pub id: Uuid,
     pub r#type: String,
+    pub cluster_id: Option<Uuid>,
     pub path: Option<String>,
     pub endpoint_url: Option<String>,
     pub remote_bucket_name: Option<String>,
@@ -95,6 +117,7 @@ impl Connection {
         Ok(Self {
             id: row.id,
             r#type: row.r#type.clone(),
+            cluster_id: row.cluster_id,
             path: row.path.clone(),
             endpoint_url: row.endpoint_url.clone(),
             remote_bucket_name: row.remote_bucket_name.clone(),

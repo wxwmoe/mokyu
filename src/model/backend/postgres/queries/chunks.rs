@@ -160,7 +160,7 @@ pub(in super::super) fn pin_chunks<'q>(ids: &'q [Id], owner: Id) -> Statement<'q
 
 pub(in super::super) fn enabled_storages() -> Rows<'static, StorageRecord> {
     sqlx::query_as(
-        "SELECT s.id,s.type AS store_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.access_key_encrypted AS access,s.secret_key_encrypted AS secret,s.identity_marker,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled ORDER BY s.created_at,s.id",
+        "SELECT s.id,s.type AS store_type,s.cluster_id,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.access_key_encrypted AS access,s.secret_key_encrypted AS secret,s.identity_marker,p.revision FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.enabled ORDER BY s.created_at,s.id",
     )
 }
 

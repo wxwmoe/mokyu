@@ -539,6 +539,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::storage::model::Rec
             id: row.try_get("id")?,
             name: row.try_get("name")?,
             r#type: row.try_get("type")?,
+            cluster_id: row.try_get("cluster_id")?,
             path: row.try_get("path")?,
             endpoint_url: row.try_get("endpoint_url")?,
             remote_bucket_name: row.try_get("remote_bucket_name")?,

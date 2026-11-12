@@ -14,7 +14,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
-#[path = "public.rs"]
+mod cache;
+mod checks;
 mod public;
 
 const UNIT: usize = 4096;
@@ -594,11 +595,11 @@ impl Reads {
             "read material claims must be pinned by the caller"
         );
         let declared = self.cache.snapshot();
-        let route = super::cache::route(&input);
+        let route = cache::route(&input);
         let candidate = self.candidate(&input);
         input.body = candidate
             .as_ref()
-            .and_then(|(_, entry)| super::cache::claim(entry));
+            .and_then(|(_, entry)| cache::claim(entry));
         input.run = Some(snapshot.lease.run.clone());
         if input.operation_id.is_empty() {
             input.operation_id = Uuid::new_v4().to_string();
@@ -880,7 +881,7 @@ impl Reads {
 }
 
 #[cfg(test)]
-#[path = "../../tests/rpc/materials.rs"]
+#[path = "../../../tests/rpc/materials.rs"]
 mod tests;
 
 pub(super) fn backend(held: &Held, id: Uuid) -> Result<Arc<super::body::Backend>> {

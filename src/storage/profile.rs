@@ -375,7 +375,7 @@ pub(crate) fn validate(profile: &StorageProfile, storage_type: &str) -> anyhow::
         ("local", Some(floor)) => {
             bytes(floor)?;
         }
-        ("s3", None) => {}
+        ("s3" | "mokyu", None) => {}
         _ => anyhow::bail!("min_free_space is required only for local storage"),
     }
     anyhow::ensure!(

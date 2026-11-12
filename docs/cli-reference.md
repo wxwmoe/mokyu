@@ -205,6 +205,10 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 
 ## 群集
 
+`cluster create NAME storage` 签发 storage 节点身份。`mokyu storage` 使用专用配置启动，仅提供本机 `cli status [--ready]`；其他管理命令发给 control。
+
+`storage-cluster list/create/update/members/enable/state` 管理原生存储群集。`storage create NAME mokyu --cluster-id UUID --init` 创建停用的群集后端绑定。成员修改和策略更新要求 `--revision`，用法及当前能力边界见[存储群集](storage-clusters.md)。
+
 | 命令 | 作用与返回 |
 | --- | --- |
 | `setup token` | 生成一次性 Web 首次管理员 setup token；只输出本次明文，保存哈希和一小时有效期 |

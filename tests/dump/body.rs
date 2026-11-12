@@ -24,6 +24,7 @@ async fn raw_ranges_are_bound_to_the_verified_source() -> Result<()> {
             connection: model::Connection {
                 id,
                 r#type: "local".into(),
+                cluster_id: None,
                 path: None,
                 region: None,
                 prefix: String::new(),

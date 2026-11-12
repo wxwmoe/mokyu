@@ -52,6 +52,7 @@ pub(crate) mod session;
 pub(crate) mod settings;
 pub(crate) mod source;
 pub(crate) mod storage;
+pub(crate) mod storage_cluster;
 mod stream;
 pub(crate) mod task;
 pub(crate) mod tiering;
@@ -104,6 +105,7 @@ pub(crate) use stream::{
 pub(crate) use task::{TaskClaim, TaskControlStore, TaskExecutionStore, TaskFinish, TaskRecord};
 
 pub(crate) struct Stores {
+    pub(crate) storage_clusters: Arc<dyn storage_cluster::StorageClusters>,
     pub(crate) mirroring: Arc<dyn mirroring::MirroringStore>,
     pub(crate) journal: Arc<dyn journal::JournalStore>,
     pub(crate) integrity_rates: Arc<crate::storage::rate::IntegrityRates>,

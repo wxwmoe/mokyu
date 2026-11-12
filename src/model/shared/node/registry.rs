@@ -323,7 +323,7 @@ impl NodeSessions for Backend {
             s3s::s3_error!(AccessDenied)
         );
         ensure!(
-            matches!(role, "data" | "worker" | "node"),
+            matches!(role, "data" | "worker" | "node" | "storage"),
             s3s::s3_error!(InvalidArgument)
         );
         valid_name(name)?;
@@ -378,6 +378,12 @@ impl NodeSessions for Backend {
             .await?
             .ok_or(Error::NodeInactive)?;
         ensure!(row.enabled && row.role != "control", Error::NodeInactive);
+        ensure!(
+            !super::queries::storage_cluster::member_node(row.id)
+                .fetch_one(&mut *tx)
+                .await?,
+            "remove storage membership before releasing its node identity"
+        );
         let (chunks, raw, parts, writes, reads) =
             q::pending_files(row.id).fetch_one(&mut *tx).await?;
         ensure!(

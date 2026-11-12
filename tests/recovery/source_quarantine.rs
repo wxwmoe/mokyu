@@ -78,6 +78,7 @@ async fn source_quarantine_contract() -> Result<()> {
                 id: storage,
                 name: "quarantine".into(),
                 r#type: "local".into(),
+                cluster_id: None,
                 path: Some("/data/quarantine".into()),
                 endpoint_url: None,
                 remote_bucket_name: None,

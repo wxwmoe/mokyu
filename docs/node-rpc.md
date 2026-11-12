@@ -10,11 +10,19 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 | --- | --- |
 | `x-mokyu-deployment-id` | 部署 UUID |
 | `x-mokyu-node-id` | 节点 UUID |
-| `x-mokyu-node-role` | `data`、`worker` 或 `node` |
+| `x-mokyu-node-role` | `data`、`worker`、`node` 或 `storage` |
 | `x-mokyu-credential-generation` | 正整数凭据代次 |
 | `authorization` | `Bearer <credential>` |
 
 拒绝重复身份字段；全部 metadata 键和值合计最多 4 KiB。Unary 响应最多 4 MiB，SyncNode 请求最多 1 KiB，读取请求最多 128 KiB，NodeSession 消息最多 64 KiB；在解码之前检查身份格式和独立并发额度，额度持续到响应结束或取消。开始请求的服务端期限为 15 秒。节点凭据不授予管理 API 权限。
+
+## storage 角色
+
+`storage` 同样使用节点身份 metadata，但只允许会话、SyncNode、ReportNode、CloseNode 和 `StorageControl/Announce`。control 在业务消息解码前拒绝它访问读取计划、密钥材料、上传和 worker 工作。storage 不持有部署 key，也不取得 data/worker 的业务权限。
+
+`StorageControl/Announce` 携带当前运行权和介质身份、地址、地区、存储分组、容量及已有清单。返回目标清单与一批历史；节点持久核对完整历史后才发布新 `cluster.json`。更换部署签发的身份时保留旧清单，正常入群不会隐式接管旧布局。
+
+storage 的专用 HTTPS/HTTP2 端点当前只提供 `StorageNode/Inspect`，使用该节点凭据并要求有效 control 会话，返回身份、已提交清单和容量。此诊断接口不提供对象数据；请求最多 1 KiB、响应最多 256 KiB，节点总计最多四个同时执行的检查。监听、原生 TLS 和代理模式见[存储群集](storage-clusters.md)。
 
 ## 方法
 

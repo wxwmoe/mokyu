@@ -112,8 +112,11 @@ pub(in super::super) async fn provision_node(
 ) -> Result<crate::cluster::NodeState> {
     check_node_name(name)?;
     ensure!(
-        role.is_none_or(|role| matches!(role, "data" | "worker" | "node")),
-        s3s::s3_error!(InvalidArgument, "node role must be data, worker or node")
+        role.is_none_or(|role| matches!(role, "data" | "worker" | "node" | "storage")),
+        s3s::s3_error!(
+            InvalidArgument,
+            "node role must be data, worker, node or storage"
+        )
     );
     let mut tx = backend.pool.begin().await?;
     backend.fence_control(&mut tx).await?;
@@ -145,7 +148,7 @@ pub(in super::super) async fn provision_node(
         let (id, role, _, generation) =
             existing.ok_or_else(|| s3s::s3_error!(NoSuchKey, "node not found"))?;
         ensure!(
-            matches!(role.as_str(), "data" | "worker" | "node"),
+            matches!(role.as_str(), "data" | "worker" | "node" | "storage"),
             s3s::s3_error!(
                 InvalidRequest,
                 "use local control recovery for control nodes"
@@ -188,7 +191,7 @@ pub(in super::super) async fn authenticate_rpc_node(
         .ok_or(crate::model::Error::NodeAuthentication)?;
     verify_node_identity(&row, state, &state.role, key)?;
     ensure!(
-        matches!(state.role.as_str(), "data" | "worker" | "node"),
+        matches!(state.role.as_str(), "data" | "worker" | "node" | "storage"),
         crate::model::Error::NodeAuthentication
     );
     ensure!(

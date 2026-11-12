@@ -91,11 +91,12 @@ impl StorageInitializer for StorageInitialization {
         profile: Option<StorageProfile>,
     ) -> Result<StorageProfile> {
         anyhow::ensure!(self.id.is_none(), "storage is already prepared");
+        record.validate_mode(&lock_mode(&mut self.tx).await?.1)?;
         validate_block_key(&mut self.tx, key).await?;
         queries::insert_storage_record(record, key)
             .execute(&mut *self.tx)
             .await?;
-        queries::insert_storage_profile(record.id, read, upload, control, record.r#type == "s3")
+        queries::insert_storage_profile(record.id, read, upload, control, record.r#type != "local")
             .execute(&mut *self.tx)
             .await?;
         if let Some(mut profile) = profile {

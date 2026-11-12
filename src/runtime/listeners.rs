@@ -104,7 +104,7 @@ pub(super) async fn serve_router(
     .await
 }
 
-pub(super) async fn serve_http(
+pub(crate) async fn serve_http(
     listener: TcpListener,
     router: axum::Router,
     connections: Arc<Semaphore>,

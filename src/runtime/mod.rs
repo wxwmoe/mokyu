@@ -1,8 +1,8 @@
 mod args;
-mod listeners;
+pub(crate) mod listeners;
 pub(crate) mod locks;
 mod node;
-mod roles;
+pub(crate) mod roles;
 mod shutdown;
 pub(crate) mod testing;
 
@@ -53,6 +53,7 @@ pub(crate) fn run() -> Result<()> {
         Some(Command::Worker { .. }) => Role::Worker,
         Some(Command::Data { .. }) => Role::Data,
         Some(Command::Node { .. }) => Role::Node,
+        Some(Command::Storage) => Role::Storage,
         _ => Role::Single,
     };
     let testing = matches!(args.command, Some(Command::Testing));
@@ -70,7 +71,7 @@ pub(crate) fn run() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .map_err(|_| anyhow::anyhow!("TLS provider initialization failed"))?;
-    if matches!(role, Role::Data | Role::Worker | Role::Node) {
+    if matches!(role, Role::Data | Role::Worker | Role::Node | Role::Storage) {
         anyhow::ensure!(
             !start_maintenance,
             "set deployment maintenance on control before starting nodes"
@@ -81,7 +82,13 @@ pub(crate) fn run() -> Result<()> {
             .max_blocking_threads((budget.cpu_jobs * 2).max(8))
             .enable_all()
             .build()?
-            .block_on(node::run(config, role));
+            .block_on(async {
+                if matches!(role, Role::Storage) {
+                    crate::node::storage::run(config, budget).await
+                } else {
+                    node::run(config, role).await
+                }
+            });
     }
     let (settings, installation) = if testing {
         anyhow::ensure!(

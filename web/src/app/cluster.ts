@@ -11,9 +11,15 @@ export function useDeployment(interval = 15_000) {
   const route = useRoute(), router = useRouter()
   const status = useQuery({ queryKey: ['service-status'], enabled: computed(() => session.value?.role === 'admin'), queryFn: ({ signal }) => api<components['schemas']['ServiceStatus']>('/api/v1/system/status', { signal }), refetchInterval: interval })
   watch([() => status.data.value?.deployment_mode, () => route.fullPath], ([mode]) => { if (mode === 'single' && (route.query.node || route.query.view)) void router.replace({ query: { ...route.query, node: undefined, view: undefined, configuration: undefined } }) }, { immediate: true })
-  const cluster = computed(() => session.value?.role === 'admin' && (status.data.value?.deployment_mode === 'cluster' || status.data.value?.deployment_mode === 'single_control'))
+  const singleControl = computed(() => status.data.value?.deployment_mode === 'single_control')
+  const cluster = computed(() => session.value?.role === 'admin' && (status.data.value?.deployment_mode === 'cluster' || singleControl.value))
   const overview = useQuery({ queryKey: ['cluster-status'], enabled: cluster, queryFn: ({ signal }) => api<ClusterOverview>('/api/v1/cluster/status', { signal }), refetchInterval: () => cluster.value ? interval : false })
-  return { status, cluster, overview }
+  function nodeRoles(role: string) {
+    if (role === 'node') return ['data', 'worker']
+    if (role === 'control' && singleControl.value) return ['control', 'data', 'worker']
+    return [role]
+  }
+  return { status, cluster, overview, singleControl, nodeRoles }
 }
 export function nodeTone(state: string) {
   if (['online', 'starting', 'equivalent', 'connecting'].includes(state)) return 'sky'

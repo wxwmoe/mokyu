@@ -28,6 +28,7 @@ ssl_mode = "prefer"
 deployment_key = "REPLACE_WITH_MOKYU_TOOL_KEYGEN_OUTPUT"
 # Control must set a unique name; the single container defaults to `single`.
 #name = "control-1"
+#region = "dc-1" # Instance topology; independent of S3 bucket regions.
 
 # Listeners
 listen_control = "0.0.0.0:9002"

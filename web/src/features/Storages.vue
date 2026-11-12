@@ -4,7 +4,7 @@ import EmptyState from '../components/EmptyState.vue'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowUpRight, ChevronRight, Cloud, Database, HardDrive, Pencil, Plus, RefreshCw, ShieldCheck } from 'lucide-vue-next'
+import { ArrowUpRight, ChevronRight, Cloud, Database, HardDrive, Network, Pencil, Plus, RefreshCw, ShieldCheck } from 'lucide-vue-next'
 import { ApiError, api, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { t, date } from '../app/i18n'
@@ -43,7 +43,7 @@ const form = ref<HTMLFormElement | null>(null)
 const draft = reactive({ name: '', type: 's3', path: '/data/storage', endpoint: '', bucket: '', region: '', prefix: '', access_key: '', secret_key: '', block_key_id: '', enabled: true, initialize: true })
 const canBufferInMemory = computed(() => draft.type === 'local' ? profileDraft.value?.cdc_enabled === false : Boolean(profileDraft.value?.upload_cache))
 const durabilityOptions = computed(() => (canBufferInMemory.value ? ['durable', 'buffered', 'volatile'] : ['durable', 'buffered']).map(value => ({ value, label: t('storeDurability_' + value) })))
-const types = computed(() => (single.value ? ['local', 's3'] : ['s3']).map(value => ({ value, label: t('storeType_' + value) })))
+const types = computed(() => (editing.value?.type === 'mokyu' ? ['mokyu'] : single.value ? ['local', 's3'] : ['s3']).map(value => ({ value, label: t('storeType_' + value) })))
 const keyOptions = computed(() => [{ value: '', label: t('storeNoEncryption') }, ...(keys.data.value || []).filter(row => row.purpose === 'block' && !row.recovery_read_only && !row.revoked_at).map(row => ({ value: row.id, label: `${row.name} · ${row.algorithm}` }))])
 const profileFields: ProfileField[] = [
   { key: 'connect_timeout', valueType: 'text' }, { key: 'request_timeout', valueType: 'text' }, { key: 'max_retries', valueType: 'number' }, { key: 'retry_timeout', valueType: 'text' }, { key: 'priority_aging', valueType: 'text' },
@@ -161,6 +161,7 @@ watch(open, value => {
 })
 function input() {
   const limits = { block_key_id: draft.block_key_id || null, prefix: draft.prefix.trim() }
+  if (draft.type === 'mokyu') return { type: 'mokyu', ...limits }
   if (draft.type === 'local') return { type: 'local', path: draft.path.trim() || '/data/storage', ...limits }
   return { type: 's3', endpoint: draft.endpoint.trim(), bucket: draft.bucket.trim(), region: draft.region.trim(), ...limits, ...(draft.access_key.trim() ? { access_key: draft.access_key.trim() } : {}), ...(draft.secret_key.trim() ? { secret_key: draft.secret_key.trim() } : {}) }
 }
@@ -232,11 +233,11 @@ async function toggle(row: Storage) {
   <div v-if="storages.isPending.value" class="skeleton-row" />
   <div v-else-if="storages.data.value?.length" class="store-grid">
     <article v-for="row in storages.data.value" :key="row.id" class="surface store-card">
-      <div class="section-heading"><h2><HardDrive v-if="row.type === 'local'" :size="19" /><Cloud v-else :size="19" />{{ row.name }}</h2><span class="badge" :class="{ muted: !row.enabled }">{{ t(row.enabled ? 'storeEnabled' : 'storeDisabled') }}</span></div>
+      <div class="section-heading"><h2><Cloud v-if="row.type === 's3'" :size="19" /><Network v-else-if="row.type === 'mokyu'" :size="19" /><HardDrive v-else :size="19" />{{ row.name }}</h2><span class="badge" :class="{ muted: !row.enabled }">{{ t(row.enabled ? 'storeEnabled' : 'storeDisabled') }}</span></div>
       <div class="store-type"><Database :size="16" />{{ t('storeType_' + row.type) }}</div>
-      <dl class="facts"><template v-if="row.type === 'local'"><dt>{{ t('storePath') }}</dt><dd><code>{{ row.path }}</code></dd></template><template v-else><dt>{{ t('storeEndpoint') }}</dt><dd><code>{{ row.endpoint }}</code></dd><dt>{{ t('storeBucket') }}</dt><dd>{{ row.bucket }}</dd><dt>{{ t('storeRegion') }}</dt><dd>{{ row.region }}</dd><dt>{{ t('storePrefix') }}</dt><dd>{{ row.prefix || '—' }}</dd></template><dt>{{ t('storeCurrentKey') }}</dt><dd><code>{{ row.block_key_id || t('storeNoEncryption') }}</code></dd><dt>{{ t('updatedAt') }}</dt><dd>{{ date(row.updated_at) }}</dd></dl>
-      <p class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('storeSecretsHint') }}</span></p>
-      <div class="actions"><RouterLink class="button" :to="'/storages/' + encodeURIComponent(row.name)"><ArrowUpRight :size="15" />{{ t('storeDetails') }}</RouterLink><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
+      <dl class="facts"><template v-if="row.type === 'local'"><dt>{{ t('storePath') }}</dt><dd><code>{{ row.path }}</code></dd></template><template v-else-if="row.type === 'mokyu'"><dt>{{ t('storageClusters') }}</dt><dd><RouterLink v-if="row.cluster_id" :to="{ path: '/storage-clusters', query: { cluster: row.cluster_id } }"><code>{{ row.cluster_id }}</code></RouterLink><span v-else>—</span></dd></template><template v-else><dt>{{ t('storeEndpoint') }}</dt><dd><code>{{ row.endpoint }}</code></dd><dt>{{ t('storeBucket') }}</dt><dd>{{ row.bucket }}</dd><dt>{{ t('storeRegion') }}</dt><dd>{{ row.region }}</dd><dt>{{ t('storePrefix') }}</dt><dd>{{ row.prefix || '—' }}</dd></template><dt>{{ t('storeCurrentKey') }}</dt><dd><code>{{ row.block_key_id || t('storeNoEncryption') }}</code></dd><dt>{{ t('updatedAt') }}</dt><dd>{{ date(row.updated_at) }}</dd></dl>
+      <p v-if="row.type !== 'mokyu'" class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('storeSecretsHint') }}</span></p>
+      <div class="actions"><RouterLink class="button" :to="'/storages/' + encodeURIComponent(row.name)"><ArrowUpRight :size="15" />{{ t('storeDetails') }}</RouterLink><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name || (!row.enabled && !row.capabilities.write)" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
     </article>
   </div>
   <EmptyState v-else :title="t('noStores')" :description="t('noStoresHint')" />
@@ -253,14 +254,19 @@ async function toggle(row: Storage) {
         <label class="store-type-field">{{ t('storeType') }}<UiSelect v-model="draft.type" :options="types" :label="t('storeType')" :disabled="busy" /></label>
         <p v-if="editing && editing.type !== draft.type" class="store-form-wide field-help">{{ t('storeRelocationHint') }}</p>
         <label v-if="draft.type === 'local'" class="store-form-wide">{{ t('storePath') }}<input v-model="draft.path" required maxlength="4096" placeholder="/data/storage" autocomplete="off" :disabled="busy"></label>
-        <template v-else>
+        <template v-else-if="draft.type === 's3'">
           <label>{{ t('storeEndpoint') }}<input v-model="draft.endpoint" required type="url" placeholder="https://s3.example.com" autocomplete="url" :disabled="busy"></label>
           <label>{{ t('storeBucket') }}<input v-model="draft.bucket" required placeholder="mokyu" autocomplete="off" :disabled="busy"></label>
           <label>{{ t('storeRegion') }}<input v-model="draft.region" required placeholder="us-east-1" autocomplete="off" :disabled="busy"></label>
           <label>{{ t('storeAccessKey') }}<input v-model="draft.access_key" autocomplete="off" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label>
           <label>{{ t('storeSecretKey') }}<input v-model="draft.secret_key" type="password" autocomplete="new-password" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label>
         </template>
-        <label class="store-form-wide">{{ t('storePrefix') }}<input v-model="draft.prefix" placeholder="mokyu/" autocomplete="off" :disabled="busy"></label>
+        <div v-if="draft.type === 'mokyu'" class="store-form-wide store-cluster-binding">
+          <span>{{ t('storageClusters') }}</span>
+          <RouterLink v-if="editing?.cluster_id" :to="{ path: '/storage-clusters', query: { cluster: editing.cluster_id } }"><Network :size="16" /><code>{{ editing.cluster_id }}</code><ArrowUpRight :size="15" /></RouterLink>
+          <span v-else>—</span>
+        </div>
+        <label v-else class="store-form-wide">{{ t('storePrefix') }}<input v-model="draft.prefix" placeholder="mokyu/" autocomplete="off" :disabled="busy"></label>
         <div class="store-form-wide section-heading"><div><h3>{{ t('storeChunkPolicy') }}</h3><p class="field-help">{{ t('storeChunkPolicyHint') }}</p></div></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled)" :label="t('profile_cdc_enabled')" :disabled="busy" @update:model-value="setProfileBoolean('cdc_enabled', $event)" /><p class="field-help">{{ t('storeCdcHint') }}</p></div>
         <div v-if="profileDraft" class="store-form-wide"><UiSwitch :model-value="Boolean(profileDraft.cdc_enabled || profileDraft.deduplication_enabled)" :label="t('profile_deduplication_enabled')" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setProfileBoolean('deduplication_enabled', $event)" /><p class="field-help">{{ t(profileDraft.cdc_enabled ? 'storeChunkDedupHint' : 'storeRawDedupHint') }}</p></div>
@@ -275,7 +281,7 @@ async function toggle(row: Storage) {
               <div v-for="field in group.fields.filter(field => field.key !== 'min_free_space' || draft.type === 'local')" :key="field.key" :data-profile-field="field.key" :class="field.valueType === 'boolean' ? 'profile-field profile-toggle' : 'profile-field'">
                 <label v-if="field.key === 'cors_cache_enabled'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="profileDraft.public_cache_validation === 'background' || Boolean(profileDraft.cors_cache_enabled)" :label="t(profileDraft.public_cache_validation === 'background' || profileDraft.cors_cache_enabled ? 'enabled' : 'disabled')" :disabled="busy || profileDraft.public_cache_validation === 'background'" @update:model-value="setProfileBoolean(field.key, $event)" /><small class="field-help">{{ t('profileHelp_cors_cache_enabled') }}</small></label>
                 <template v-else-if="field.valueType === 'boolean'"><span>{{ profileLabel(field.key) }}</span><UiSwitch :model-value="Boolean(profileDraft[field.key])" :aria-label="profileLabel(field.key)" :label="profileDisabled(field.key) ? t('storeOptionUnused') : t(Boolean(profileDraft[field.key]) ? 'enabled' : 'disabled')" :disabled="busy || profileDisabled(field.key)" @update:model-value="setProfileBoolean(field.key, $event)" /></template>
-                <label v-else-if="field.key === 'file_delivery'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.file_delivery)" :options="(draft.type === 'local' ? ['application', 'x_accel_redirect', 'x_sendfile'] : ['application', 'x_accel_redirect']).map(value => ({ value, label: t('storeDelivery_' + value) }))" :label="profileLabel(field.key)" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setDelivery" /><small class="field-help">{{ t('storeDeliveryHint') }}</small></label>
+                <label v-else-if="field.key === 'file_delivery'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.file_delivery)" :options="(draft.type === 'mokyu' ? ['application'] : draft.type === 'local' ? ['application', 'x_accel_redirect', 'x_sendfile'] : ['application', 'x_accel_redirect']).map(value => ({ value, label: t('storeDelivery_' + value) }))" :label="profileLabel(field.key)" :disabled="busy || Boolean(profileDraft.cdc_enabled)" @update:model-value="setDelivery" /><small class="field-help">{{ t('storeDeliveryHint') }}</small></label>
                 <label v-else-if="field.key === 'file_delivery_prefix'"><span>{{ profileLabel(field.key) }}</span><input :aria-label="profileLabel(field.key)" :value="profileDraft.file_delivery_prefix ?? ''" :placeholder="profileDraft.file_delivery === 'x_accel_redirect' ? '/_mokyu_raw/' : '/srv/mokyu/raw/'" :disabled="busy" @input="profileInput(field, $event)"><small class="field-help">{{ t('storeDeliveryPrefixHint') }}</small></label>
                 <label v-else-if="field.key === 'write_processing'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.write_processing)" :options="['inline', 'background'].map(value => ({ value, label: t('storeProcessing_' + value) }))" :label="profileLabel(field.key)" :disabled="busy" @update:model-value="profileDraft.write_processing = $event" /><small class="field-help">{{ t('storeProcessingHint') }}</small></label>
                 <label v-else-if="field.key === 'write_durability'"><span>{{ profileLabel(field.key) }}</span><UiSelect :model-value="String(profileDraft.write_durability ?? 'durable')" :options="durabilityOptions" :label="profileLabel(field.key)" :disabled="busy" aria-describedby="storage-durability-hint" @update:model-value="profileDraft.write_durability = $event" /><small id="storage-durability-hint" class="field-help">{{ t(profileDraft.write_durability === 'volatile' ? 'storeMemoryHint' : 'storeDurabilityHint') }}</small></label>
@@ -292,7 +298,7 @@ async function toggle(row: Storage) {
       </div>
       <p class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('managedKeysHint') }} <a href="/credentials?tab=managed" target="_blank" rel="noreferrer">{{ t('manageKeys') }}</a></span></p>
       <UiSwitch v-if="!editing" v-model="draft.initialize" class="store-form-switch" :label="t('initializeStore')" :disabled="busy" />
-      <UiSwitch v-if="editing" v-model="draft.enabled" class="store-form-switch" :label="t('storeEnabled')" :disabled="busy" />
+      <UiSwitch v-if="editing" v-model="draft.enabled" class="store-form-switch" :label="t('storeEnabled')" :disabled="busy || (!editing.enabled && !editing.capabilities.write)" />
       <p class="field-help">{{ t(draft.type === 'local' ? 'localStoreHint' : 's3StoreHint') }}</p>
       <div class="form-footer"><button type="button" :disabled="busy" @click="open = false">{{ t('cancel') }}</button><button class="primary" :disabled="busy">{{ t('save') }}</button></div>
     </form>

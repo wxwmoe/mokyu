@@ -123,6 +123,7 @@ async fn select_and_verify_a_gibibyte_checkpoint() {
         connection: model::Connection {
             id,
             r#type: "local".into(),
+            cluster_id: None,
             path: None,
             endpoint_url: None,
             remote_bucket_name: None,

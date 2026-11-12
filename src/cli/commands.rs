@@ -64,6 +64,8 @@ pub enum Command {
     #[command(subcommand)]
     Cluster(Cluster),
     #[command(subcommand)]
+    StorageCluster(StorageClusters),
+    #[command(subcommand)]
     Setup(Setup),
     #[command(subcommand)]
     Integrity(Integrity),
@@ -338,8 +340,10 @@ pub enum Storages {
     },
     Create {
         name: String,
-        #[arg(value_parser = ["local", "s3"])]
+        #[arg(value_parser = ["local", "s3", "mokyu"])]
         r#type: String,
+        #[arg(long)]
+        cluster_id: Option<Uuid>,
         #[arg(long = "init")]
         initialize: bool,
         #[arg(long)]
@@ -600,7 +604,7 @@ pub enum Cluster {
     Status,
     Create {
         name: String,
-        #[arg(value_parser = ["data", "worker", "node"])]
+        #[arg(value_parser = ["data", "worker", "node", "storage"])]
         role: String,
     },
     Rotate {
@@ -789,7 +793,8 @@ impl Command {
             | Self::Settings(Settings::Control(ControlSettings::Show) | Settings::Get { .. })
             | Self::Keys(Keys::List | Keys::Replacement { .. })
             | Self::Setup(Setup::Token)
-            | Self::Cluster(Cluster::Status | Cluster::Nodes { .. }) => None,
+            | Self::Cluster(Cluster::Status | Cluster::Nodes { .. })
+            | Self::StorageCluster(StorageClusters::List) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),
             Self::Token(_) => Some("token.change"),
@@ -805,6 +810,7 @@ impl Command {
             Self::Settings(_) => Some("runtime.settings"),
             Self::Keys(_) => Some("managed_key.change"),
             Self::Cluster(_) => Some("cluster.change"),
+            Self::StorageCluster(_) => Some("storage_cluster.change"),
             Self::Integrity(Integrity::Quarantine { .. }) => Some("source.quarantine"),
             Self::Integrity(Integrity::Recheck { .. }) => Some("source.recheck"),
             Self::Integrity(_) => Some("integrity.check"),
@@ -943,4 +949,45 @@ pub struct StyleExport {
     pub names: Vec<String>,
     #[arg(skip)]
     pub document: Option<Value>,
+}
+
+#[derive(Subcommand, Serialize, Deserialize)]
+pub enum StorageClusters {
+    List,
+    Create {
+        name: String,
+        #[arg(long)]
+        policy: Option<String>,
+    },
+    Update {
+        id: Uuid,
+        #[arg(long)]
+        revision: i64,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        policy: String,
+    },
+    Members {
+        id: Uuid,
+        #[arg(long)]
+        revision: i64,
+        #[arg(required=true, num_args=1..)]
+        media: Vec<Uuid>,
+    },
+    Enable {
+        id: Uuid,
+        #[arg(long)]
+        revision: i64,
+        #[arg(required=true, num_args=1..)]
+        media: Vec<Uuid>,
+    },
+    State {
+        id: Uuid,
+        media: Uuid,
+        #[arg(long)]
+        revision: i64,
+        #[arg(value_parser=["available","paused","spare"])]
+        state: String,
+    },
 }

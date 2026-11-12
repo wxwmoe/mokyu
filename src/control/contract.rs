@@ -86,6 +86,14 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::settings::save_section))
         .routes(routes!(super::settings::reset_section))
         .routes(routes!(super::storage::list, super::storage::create))
+        .routes(routes!(
+            super::storage_clusters::list,
+            super::storage_clusters::create
+        ))
+        .routes(routes!(super::storage_clusters::update))
+        .routes(routes!(super::storage_clusters::members))
+        .routes(routes!(super::storage_clusters::groups))
+        .routes(routes!(super::storage_clusters::state))
         .routes(routes!(super::external::list, super::external::create))
         .routes(routes!(super::replication::list))
         .merge(

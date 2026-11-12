@@ -64,7 +64,10 @@ impl NodeFilter {
         );
         ensure!((1..=200).contains(&self.limit), "node limit must be 1..200");
         for (value, allowed) in [
-            (&self.role, &["control", "data", "worker", "node"][..]),
+            (
+                &self.role,
+                &["control", "data", "worker", "node", "storage"][..],
+            ),
             (
                 &self.contact,
                 &["online", "unresponsive", "not_reported", "released"][..],
@@ -250,10 +253,26 @@ pub(crate) struct SavedReport {
 }
 
 pub(crate) fn applicable(role: &str, section: &str, mut value: Value) -> Value {
+    if role == "storage" && section != "instance" {
+        return json!({});
+    }
     if section == "web" && role != "control" {
         return json!({});
     }
     if let Some(fields) = value.as_object_mut() {
+        if section == "instance" && role != "storage" {
+            for field in [
+                "storage_url",
+                "storage_group",
+                "storage_purpose",
+                "listen_storage",
+                "storage_transport",
+                "storage_tls_cert",
+                "storage_tls_key",
+            ] {
+                fields.remove(field);
+            }
+        }
         if section == "io" && role != "control" {
             fields.remove("sqlite_synchronous");
         }
@@ -278,7 +297,7 @@ pub(crate) fn applicable(role: &str, section: &str, mut value: Value) -> Value {
 pub(crate) async fn desired(app: &crate::app::App) -> Result<Value> {
     let sections = app.runtime_settings.inspect().await?;
     let mut roles = serde_json::Map::new();
-    for role in ["control", "data", "worker", "node"] {
+    for role in ["control", "data", "worker", "node", "storage"] {
         let mut values = serde_json::Map::new();
         for (section, value, revision, _) in &sections {
             values.insert(

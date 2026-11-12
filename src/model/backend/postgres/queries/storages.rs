@@ -39,7 +39,7 @@ impl StorageRecordStore for Backend {
         )
     }
     async fn record(&self, name: &str) -> Result<Option<StorageRow>> {
-        Ok(sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE name=$1").bind(name).fetch_optional(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT id,name,type,cluster_id,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE name=$1").bind(name).fetch_optional(&self.pool).await?)
     }
     async fn creation(&self) -> Result<StorageCreation> {
         transactions::storage_creation(&self.pool).await
@@ -87,6 +87,10 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for StorageView {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
             storage_type: row.try_get("storage_type")?,
+            capabilities: crate::model::storage::StorageCapabilities::for_type(
+                row.try_get("storage_type")?,
+            ),
+            cluster_id: row.try_get("cluster_id")?,
             path: row.try_get("path")?,
             endpoint: row.try_get("endpoint")?,
             bucket: row.try_get("bucket")?,
@@ -110,6 +114,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for StorageRow {
             id: row.try_get("id")?,
             name: row.try_get("name")?,
             r#type: row.try_get("type")?,
+            cluster_id: row.try_get("cluster_id")?,
             path: row.try_get("path")?,
             endpoint_url: row.try_get("endpoint_url")?,
             remote_bucket_name: row.try_get("remote_bucket_name")?,
@@ -129,6 +134,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for StorageRecord {
         Ok(Self {
             id: row.try_get("id")?,
             store_type: row.try_get("store_type")?,
+            cluster_id: row.try_get("cluster_id")?,
             path: row.try_get("path")?,
             endpoint: row.try_get("endpoint")?,
             bucket: row.try_get("bucket")?,
@@ -322,12 +328,12 @@ pub(in super::super) fn relocate_raw_sources(id: Uuid, medium: &'static str) -> 
 pub(in super::super) fn storage_row_lock<'q>(
     name: &'q str,
 ) -> Rows<'q, crate::model::storage::StorageRow> {
-    sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE name=$1 FOR UPDATE").bind(name)
+    sqlx::query_as("SELECT id,name,type,cluster_id,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE name=$1 FOR UPDATE").bind(name)
 }
 
-const VIEW_ORDERED: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id ORDER BY s.name";
+const VIEW_ORDERED: &str = "SELECT s.id,s.name,s.type AS storage_type,s.cluster_id,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id ORDER BY s.name";
 
-const VIEW_BY_ID: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=$1";
+const VIEW_BY_ID: &str = "SELECT s.id,s.name,s.type AS storage_type,s.cluster_id,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=$1";
 
 pub(in super::super) fn storage_profile_target<'q>(
     name: &'q str,
@@ -339,7 +345,7 @@ pub(in super::super) fn insert_storage_record<'q>(
     record: &'q BackendRecord,
     key: Option<Uuid>,
 ) -> Statement<'q> {
-    sqlx::query("INSERT INTO storages(id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,identity_marker,block_key_id,access_key_encrypted,secret_key_encrypted) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(&record.identity_marker).bind(key).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted)
+    sqlx::query("INSERT INTO storages(id,name,type,cluster_id,path,endpoint_url,remote_bucket_name,region,prefix,identity_marker,block_key_id,access_key_encrypted,secret_key_encrypted,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)").bind(record.id).bind(&record.name).bind(&record.r#type).bind(record.cluster_id).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(&record.identity_marker).bind(key).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled)
 }
 
 pub(in super::super) fn insert_storage_profile(
@@ -360,7 +366,7 @@ pub(in super::super) fn update_storage_record<'q>(
     record: &'q BackendRecord,
     key: Option<Uuid>,
 ) -> Statement<'q> {
-    sqlx::query("UPDATE storages SET type=$2,path=$3,endpoint_url=$4,remote_bucket_name=$5,region=$6,prefix=$7,block_key_id=$8,access_key_encrypted=$9,secret_key_encrypted=$10,enabled=$11,updated_at=now() WHERE id=$1").bind(record.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(key).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled)
+    sqlx::query("UPDATE storages SET type=$2,path=$3,endpoint_url=$4,remote_bucket_name=$5,region=$6,prefix=$7,block_key_id=$8,access_key_encrypted=$9,secret_key_encrypted=$10,enabled=$11,cluster_id=$12,updated_at=now() WHERE id=$1").bind(record.id).bind(&record.r#type).bind(&record.path).bind(&record.endpoint_url).bind(&record.remote_bucket_name).bind(&record.region).bind(&record.prefix).bind(key).bind(&record.access_key_encrypted).bind(&record.secret_key_encrypted).bind(record.enabled).bind(record.cluster_id)
 }
 
 pub(in super::super) fn current_storage_key<'q>(
@@ -383,4 +389,4 @@ pub(in super::super) fn bump_storage_profile(id: Uuid) -> Statement<'static> {
     .bind(id)
 }
 
-const VIEW_BY_NAME: &str = "SELECT s.id,s.name,s.type AS storage_type,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.name=$1";
+const VIEW_BY_NAME: &str = "SELECT s.id,s.name,s.type AS storage_type,s.cluster_id,s.path,s.endpoint_url AS endpoint,s.remote_bucket_name AS bucket,s.region,s.prefix,s.block_key_id,p.revision AS profile_revision,p.read_concurrency,p.upload_concurrency,p.control_concurrency,s.enabled,s.created_at,s.updated_at FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.name=$1";

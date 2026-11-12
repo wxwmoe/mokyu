@@ -203,6 +203,14 @@ pub(crate) fn instance_config(config: &crate::config::Instance) -> Result<Value>
         matches!(
             key.as_str(),
             "name"
+                | "region"
+                | "storage_url"
+                | "storage_group"
+                | "storage_purpose"
+                | "listen_storage"
+                | "storage_transport"
+                | "storage_tls_cert"
+                | "storage_tls_key"
                 | "control_url"
                 | "listen_control"
                 | "listen_web"
@@ -236,7 +244,8 @@ fn config_fields(app: &App, runtime: Vec<(String, Value, i64, bool)>) -> Result<
     let d = &c.database;
     // Only current file sections and database-backed runtime sections are serialized. Secret-bearing fields use an allowlist.
     let mut sections = serde_json::Map::new();
-    let mut instance = instance_config(&c.instance)?;
+    let mut instance =
+        crate::model::node::applicable(&app.role, "instance", instance_config(&c.instance)?);
     instance["deployment_key"] = json!("[redacted]");
     sections.insert("instance".into(), instance);
     let database = if d.backend == crate::config::DatabaseType::Sqlite {

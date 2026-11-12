@@ -28,6 +28,7 @@ pub(crate) mod service;
 pub(crate) mod settings;
 pub(crate) mod storage;
 mod storage_catalog;
+mod storage_clusters;
 pub(crate) mod storage_policy;
 pub(crate) mod system;
 pub(crate) mod tasks;

@@ -121,6 +121,7 @@ async fn source_recovery_contract() -> Result<()> {
                 id: storage,
                 name: "recovery".into(),
                 r#type: "local".into(),
+                cluster_id: None,
                 path: Some("/data/recovery".into()),
                 endpoint_url: None,
                 remote_bucket_name: None,

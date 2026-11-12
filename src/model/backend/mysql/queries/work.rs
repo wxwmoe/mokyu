@@ -87,7 +87,7 @@ pub(in super::super) fn touch(
     }).bind(node).bind(run.boot).bind(run.fence).bind(token)
 }
 pub(in super::super) fn storage(id: Uuid) -> Rows<'static, crate::model::storage::StorageRow> {
-    sqlx::query_as("SELECT id,name,type,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE id=? AND enabled AND type='s3'").bind(id)
+    sqlx::query_as("SELECT id,name,type,cluster_id,path,endpoint_url,remote_bucket_name,region,prefix,access_key_encrypted,secret_key_encrypted,identity_marker,block_key_id,enabled FROM storages WHERE id=? AND enabled AND type='s3'").bind(id)
 }
 pub(in super::super) fn block_key(
     id: Uuid,

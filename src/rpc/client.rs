@@ -81,8 +81,11 @@ impl Client {
     pub(crate) fn new(url: &str, identity: NodeState) -> Result<Self> {
         identity.validate()?;
         ensure!(
-            matches!(identity.role.as_str(), "data" | "worker" | "node"),
-            "control_url requires a data, worker or node identity"
+            matches!(
+                identity.role.as_str(),
+                "data" | "worker" | "node" | "storage"
+            ),
+            "control_url requires an API node identity"
         );
         let origin = control_uri(url)?;
         let domain = origin
@@ -279,6 +282,14 @@ impl Client {
         input: wire::PrepareRequestInput,
     ) -> Result<wire::RequestReply, Status> {
         self.unary(input, "/mokyu.node.v1.NodeControl/PrepareRequest")
+            .await
+    }
+
+    pub(crate) async fn announce_storage(
+        &self,
+        input: wire::StorageAnnouncement,
+    ) -> Result<wire::StorageRegistration, Status> {
+        self.unary(input, "/mokyu.node.v1.StorageControl/Announce")
             .await
     }
 

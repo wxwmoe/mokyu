@@ -189,6 +189,7 @@ impl Installation {
                 profile: None,
                 name: "local".into(),
                 storage_type: "local".into(),
+                cluster_id: None,
                 path: Some(
                     root.join("storage")
                         .to_str()

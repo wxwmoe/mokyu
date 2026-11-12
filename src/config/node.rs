@@ -21,8 +21,8 @@ impl NodeConfig {
 
     pub(crate) fn parse(text: &str, role: &str) -> Result<Self> {
         ensure!(
-            matches!(role, "data" | "worker" | "node"),
-            "node configuration requires data, worker or node role"
+            matches!(role, "data" | "worker" | "node" | "storage"),
+            "node configuration requires data, worker, node or storage role"
         );
         let mut config: Self = toml::from_str(text).map_err(|_| {
             anyhow::anyhow!("invalid node configuration, unknown field or wrong type")
@@ -31,7 +31,7 @@ impl NodeConfig {
             config.instance.deployment_key.is_none()
                 && config.instance.database_connections.is_none()
                 && config.instance.database_read_connections.is_none(),
-            "data, worker and node must not configure deployment_key or database budgets"
+            "API nodes must not configure deployment_key or database budgets"
         );
         crate::rpc::client::control_uri(
             config
@@ -50,6 +50,7 @@ impl NodeConfig {
         if !config.configured_fields.contains("instance.listen_control") {
             config.instance.listen_control = "127.0.0.1:9002".into();
         }
+        super::storage::validate(&config.instance, role)?;
         super::limits::validate_runtime(&config.instance, &RuntimeSettings::default())?;
         Ok(config)
     }

@@ -266,7 +266,7 @@ impl Reads {
             .reusable(entry, |profiles| self.current_profiles(profiles))
             && self
                 .candidate(&request(&entry.route, false))
-                .and_then(|(_, body)| super::super::cache::claim(&body))
+                .and_then(|(_, body)| super::cache::claim(&body))
                 .is_some()
     }
 
@@ -331,7 +331,7 @@ impl Reads {
                             image_query: request.image_query.clone(),
                             body: candidate
                                 .as_ref()
-                                .and_then(|(_, entry)| super::super::cache::claim(entry)),
+                                .and_then(|(_, entry)| super::cache::claim(entry)),
                         };
                         if !selected.is_empty()
                             && prost::Message::encoded_len(&input)
@@ -417,7 +417,7 @@ impl Reads {
                                 std::time::Duration::from_secs(30),
                             ),
                             limits: (0, 0),
-                            route: super::super::cache::route(&request),
+                            route: super::cache::route(&request),
                             capture: None,
                             public_generation: confirmed,
                             started,
@@ -597,7 +597,7 @@ impl Reads {
             recovery: crate::storage::read_retry::Recovery::new(std::time::Duration::from_secs(30)),
             limits: (input.max_items, input.max_bytes),
             cached_body: candidate.map(|(_, body)| body),
-            route: super::super::cache::route(input),
+            route: super::cache::route(input),
             capture: None,
             public_generation: None,
             started: std::time::Instant::now(),

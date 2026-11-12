@@ -17,8 +17,7 @@ import RuntimeCoverage from '../components/RuntimeCoverage.vue'
 import TrendChart from '../components/TrendChart.vue'
 import { requestHistory, type Runtime } from '../app/insights'
 
-const { status, overview } = useDeployment(10_000)
-const singleControl = computed(() => status.data.value?.deployment_mode === 'single_control')
+const { status, overview, singleControl, nodeRoles } = useDeployment(10_000)
 const route = useRoute(), router = useRouter(), after = ref(''), role = ref(''), contact = ref(''), work = ref(''), name = ref('')
 const configuration = computed(() => typeof route.query.configuration === 'string' ? route.query.configuration : '')
 const section = computed(() => typeof route.query.section === 'string' ? route.query.section : '')
@@ -41,8 +40,11 @@ const total = computed(() => counts.value.filter(row => row.contact !== 'release
 const online = computed(() => counts.value.filter(row => row.contact === 'online').reduce((sum, row) => sum + Number(row.count), 0))
 const pending = computed(() => counts.value.filter(row => row.contact !== 'released' && row.configuration === 'restart_required').reduce((sum, row) => sum + Number(row.count), 0))
 const unknown = computed(() => counts.value.filter(row => row.contact !== 'released' && row.configuration === 'unknown').reduce((sum, row) => sum + Number(row.count), 0))
-const roles = computed(() => ['control', 'data', 'worker', 'node'].map(role => ({ role, count: counts.value.filter(row => row.role === role && row.contact !== 'released').reduce((sum, row) => sum + Number(row.count), 0) })))
-const roleOptions = computed(() => [{ value: '', label: t('clusterAllRoles') }, ...roles.value.map(row => ({ value: row.role, label: t('nodeRole_' + row.role) }))])
+const roles = computed(() => ['control', 'data', 'worker', 'storage'].map(role => ({
+  role,
+  count: counts.value.filter(row => row.contact !== 'released' && nodeRoles(row.role).includes(role)).reduce((sum, row) => sum + Number(row.count), 0),
+})))
+const roleOptions = computed(() => [{ value: '', label: t('clusterAllRoles') }, ...['control', 'data', 'worker', 'node', 'storage'].map(value => ({ value, label: t('nodeRole_' + value) }))])
 const contactOptions = computed(() => [{ value: '', label: t('clusterAllContacts') }, ...['online', 'unresponsive', 'not_reported', 'released'].map(value => ({ value, label: t('nodeState_' + value) }))])
 const workOptions = computed(() => [{ value: '', label: t('clusterAllWork') }, ...['normal', 'starting', 'maintenance', 'restricted', 'recovery', 'unknown'].map(value => ({ value, label: t('nodeState_' + value) }))])
 const available = computed(() => counts.value.filter(row => row.contact === 'online' && row.work === 'normal').reduce((sum, row) => sum + Number(row.count), 0))
@@ -61,7 +63,7 @@ function refresh() { void overview.refetch(); void nodes.refetch(); void runtime
   </section>
   <div class="service-metrics cluster-summary">
     <section class="surface service-metric sky"><Network :size="25" /><span>{{ t('clusterNodesOnline') }}</span><strong>{{ online }} / {{ total }}</strong><small>{{ t('clusterAvailable', { count: available }) }}</small><small>{{ t('clusterContactHint') }}</small></section>
-    <section class="surface service-metric lilac"><HeartPulse :size="25" /><span>{{ t('clusterRoles') }}</span><div class="cluster-role-counts"><span v-for="item in roles" :key="item.role">{{ t('nodeRole_' + item.role) }} <strong>{{ item.count }}</strong></span></div><small>{{ t(singleControl ? 'ownerPendingHint' : 'clusterWorkersHint') }}</small></section>
+    <section class="surface service-metric lilac"><HeartPulse :size="25" /><span>{{ t('clusterRoles') }}</span><div class="cluster-role-counts"><span v-for="{ role, count } in roles" :key="role">{{ t(role === 'storage' ? 'clusterRoleStorage' : 'nodeRole_' + role) }} <strong>{{ overview.data.value ? count : '—' }}</strong></span></div><small>{{ t('clusterRolesHint') }}</small></section>
     <section class="surface service-metric mint"><Settings2 :size="25" /><span>{{ t('clusterConfiguration') }}</span><strong>{{ !overview.data.value || !total ? t('nodeState_unknown') : pending ? t('clusterPending', { count: pending }) : unknown ? t('clusterUnknown', { count: unknown }) : t('clusterValuesApplied') }}</strong><RouterLink class="text-button" to="/runtime-config">{{ t('clusterDeploymentSettings') }}<ArrowUpRight :size="15" /></RouterLink></section>
   </div>
   <section class="surface cluster-board">
@@ -75,7 +77,7 @@ function refresh() { void overview.refetch(); void nodes.refetch(); void runtime
   <section class="surface cluster-runtime"><div class="section-heading"><h2>{{ t('requestsOverTime') }}</h2><span class="field-help">{{ t('clusterSampleWindow') }}</span></div><ErrorNotice v-if="runtime.error.value" :error="runtime.error.value" /><TrendChart :points="requestHistory(runtime.data.value)" :label="t('requestsPerSecond')" unit="rate" /></section>
   <RuntimeCoverage :runtime="runtime.data.value?.cluster" />
   <UiDialog v-model:open="open" drawer :title="detail.data.value?.node.name || t('clusterNode')" :description="t('clusterNodeDetailHint')">
-    <ErrorNotice v-if="detail.error.value" :error="detail.error.value" /><template v-if="detail.data.value"><div class="node-detail-status"><span class="badge">{{ t('nodeRole_' + detail.data.value.node.role) }}</span><span v-for="(state, index) in [detail.data.value.node.contact, detail.data.value.node.work, detail.data.value.node.configuration]" :key="index" class="badge node-state" :data-tone="nodeTone(state)">{{ t('nodeState_' + state) }}</span></div><p v-if="!detail.data.value.node.report_fresh" class="info-callout">{{ t('clusterReportStaleHint') }}</p>
+    <ErrorNotice v-if="detail.error.value" :error="detail.error.value" /><template v-if="detail.data.value"><div class="node-detail-status"><span v-for="role in nodeRoles(detail.data.value.node.role)" :key="role" class="badge">{{ t('nodeRole_' + role) }}</span><span v-for="(state, index) in [detail.data.value.node.contact, detail.data.value.node.work, detail.data.value.node.configuration]" :key="index" class="badge node-state" :data-tone="nodeTone(state)">{{ t('nodeState_' + state) }}</span></div><p v-if="!detail.data.value.node.report_fresh" class="info-callout">{{ t('clusterReportStaleHint') }}</p>
       <dl class="facts"><dt>{{ t('clusterNodeId') }}</dt><dd class="technical-key">{{ detail.data.value.node.id }}</dd><dt>{{ t('startedAt') }}</dt><dd>{{ detail.data.value.started_at ? date(detail.data.value.started_at) : '—' }}</dd><dt>{{ t('clusterLastReport') }}</dt><dd>{{ detail.data.value.node.sampled_at ? date(detail.data.value.node.sampled_at) : '—' }}</dd><dt>{{ t('clusterReceivedAt') }}</dt><dd>{{ detail.data.value.node.received_at ? date(detail.data.value.node.received_at) : '—' }}</dd><dt>{{ t('processMemory') }}</dt><dd>{{ snapshot?.process_memory?.rss_bytes == null ? '—' : bytes(snapshot.process_memory.rss_bytes) }}</dd><dt>{{ t('databasePool') }}</dt><dd>{{ snapshot?.db_pool_idle ?? '—' }} / {{ snapshot?.db_pool_size ?? '—' }}</dd></dl>
       <section v-if="connection" class="node-detail-section node-connection"><h3>{{ t('nodeConnection') }}</h3>
         <dl class="facts">

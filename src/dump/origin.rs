@@ -233,6 +233,7 @@ impl Backend {
         let mut c = model::Connection {
             id: Uuid::nil(),
             r#type: "local".into(),
+            cluster_id: None,
             path: None,
             endpoint_url: None,
             remote_bucket_name: None,

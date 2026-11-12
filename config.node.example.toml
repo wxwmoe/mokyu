@@ -4,6 +4,7 @@
 # Node names come from the provisioned identity.
 [instance]
 control_url = "https://control.example.com"
+#region = "dc-1" # Region of the instance performing storage I/O.
 listen_web = "0.0.0.0:9001"
 listen_s3 = "0.0.0.0:9000"
 data_path = "/data"

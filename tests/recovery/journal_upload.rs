@@ -41,6 +41,7 @@ async fn recover_three_parts_without_the_source_database() {
         connection: model::Connection {
             id: storage,
             r#type: "s3".into(),
+            cluster_id: None,
             path: None,
             endpoint_url: Some(env("MOKYU_TEST_RECOVERY_ENDPOINT")),
             remote_bucket_name: Some(env("MOKYU_TEST_RECOVERY_BUCKET")),

@@ -1,5 +1,7 @@
 //! SQLite statements and native row decoding.
 
+pub(super) mod storage_cluster;
+
 use crate::model::Id;
 use sqlx::{
     Sqlite,

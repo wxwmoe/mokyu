@@ -1,6 +1,26 @@
 syntax = "proto3";
 package mokyu.node.v1;
 
+service StorageControl {
+  rpc Announce(StorageAnnouncement) returns (StorageRegistration);
+}
+
+service StorageNode {
+  rpc Inspect(StorageInspect) returns (StorageInspection);
+}
+
+message StorageAnnouncement {
+  Run run = 1;
+  bytes announcement_json = 2;
+}
+
+message StorageRegistration {
+  bytes registration_json = 1;
+}
+
+message StorageInspect {}
+message StorageInspection { bytes identity_json = 1; }
+
 service NodeControl {
   rpc PrepareRequest(PrepareRequestInput) returns (RequestReply);
   rpc SyncNode(SyncRequest) returns (SyncReply);

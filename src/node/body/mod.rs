@@ -31,19 +31,14 @@ use tokio::{
 };
 use uuid::Uuid;
 
-#[path = "inspection.rs"]
 mod inspection;
 
-#[path = "encoding.rs"]
 mod encoding;
 
-#[path = "packing.rs"]
 mod packing;
 
-#[path = "transfer.rs"]
 mod transfer;
 
-#[path = "processing.rs"]
 mod processing;
 
 const UNIT: usize = 64 * 1024;
@@ -1031,7 +1026,7 @@ pub(super) fn stream(
 }
 
 #[cfg(test)]
-#[path = "../../tests/rpc/body.rs"]
+#[path = "../../../tests/rpc/body.rs"]
 mod tests;
 
 async fn read_bounded(

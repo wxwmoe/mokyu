@@ -187,10 +187,11 @@ async fn check_upload_stage(
             .and_then(Value::as_str)
             .and_then(|v| Uuid::parse_str(v).ok());
         ensure!(
-            queries::valid_stage(stage).fetch_one(&mut **tx).await?,
-            crate::model::runtime::ModeConflict(
-                "cluster mode requires an enabled S3 uploads.staging_storage_id"
-            )
+            queries::valid_stage(stage).fetch_one(&mut **tx).await?
+                || queries::staging_bootstrap_candidate(stage)
+                    .fetch_one(&mut **tx)
+                    .await?,
+            crate::model::runtime::ModeConflict("cluster mode requires shared staging storage")
         );
     }
     Ok(())

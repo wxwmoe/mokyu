@@ -31,8 +31,19 @@ pub(in super::super) async fn set_deployment_mode(
             .fetch_one(&mut *tx)
             .await?;
         ensure!(
-            valid_staging,
-            ModeConflict("cluster mode requires an enabled S3 uploads.staging_storage_id")
+            valid_staging
+                || queries::empty_storage_bootstrap()
+                    .fetch_one(&mut *tx)
+                    .await?,
+            ModeConflict(
+                "cluster mode requires shared staging storage or an empty maintenance deployment"
+            )
+        );
+    }
+    if mode == "single" {
+        ensure!(
+            !queries::has_storage_clusters().fetch_one(&mut *tx).await?,
+            ModeConflict("storage clusters require a clustered deployment")
         );
     }
     if mode == "single" || current == "cluster" && mode == "single_control" {
@@ -91,6 +102,12 @@ pub(in super::super) async fn release_node(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| anyhow::anyhow!("node not found or already released"))?;
+    ensure!(
+        !queries::storage_cluster::member_node(id)
+            .fetch_one(&mut *tx)
+            .await?,
+        "remove storage membership before releasing its node identity"
+    );
     if backend.control_epoch.is_some() {
         let (role, chunks, raw, parts, writes, reads) =
             queries::retirement(id).fetch_one(&mut *tx).await?;

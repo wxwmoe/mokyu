@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261111210000.
+-- Generated from the complete mysql migration chain through 20261113034820.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1311,8 +1311,8 @@ CREATE TABLE `nodes` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`),
   UNIQUE KEY `control_slot` (`control_slot`),
-  CONSTRAINT `nodes_chk_1` CHECK ((`role` in (_ascii'control',_ascii'data',_ascii'worker',_ascii'node'))),
-  CONSTRAINT `nodes_chk_2` CHECK ((`credential_generation` > 0))
+  CONSTRAINT `nodes_chk_2` CHECK ((`credential_generation` > 0)),
+  CONSTRAINT `nodes_role` CHECK ((`role` in (_utf8mb4'control',_utf8mb4'data',_utf8mb4'worker',_utf8mb4'node',_utf8mb4'storage')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `nonce_counters` (
@@ -1347,7 +1347,7 @@ CREATE TABLE `notification_consumers` (
   `expires_at` datetime(6) NOT NULL,
   PRIMARY KEY (`node_id`),
   CONSTRAINT `notification_consumers_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `notification_consumers_chk_1` CHECK ((`role` in (_utf8mb4'control',_utf8mb4'data',_utf8mb4'worker',_utf8mb4'node')))
+  CONSTRAINT `notification_consumers_role` CHECK ((`role` in (_utf8mb4'control',_utf8mb4'data',_utf8mb4'worker',_utf8mb4'node',_utf8mb4'storage')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `objects` (
@@ -1988,6 +1988,46 @@ CREATE TABLE `staging_objects` (
   CONSTRAINT `staging_objects_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `storage_cluster_history` (
+  `cluster_id` binary(16) NOT NULL,
+  `revision` bigint NOT NULL,
+  `manifest` json NOT NULL,
+  `digest` char(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  PRIMARY KEY (`cluster_id`,`revision`),
+  CONSTRAINT `storage_cluster_history_ibfk_1` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`),
+  CONSTRAINT `storage_cluster_history_revision` CHECK ((`revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_cluster_lock` (
+  `id` int NOT NULL,
+  PRIMARY KEY (`id`),
+  CONSTRAINT `storage_cluster_lock_singleton` CHECK ((`id` = 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_clusters` (
+  `id` binary(16) NOT NULL,
+  `name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `revision` bigint NOT NULL,
+  `policy` json NOT NULL,
+  `manifest` json NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `name` (`name`),
+  CONSTRAINT `storage_clusters_revision` CHECK ((`revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_devices` (
+  `media_id` binary(16) NOT NULL,
+  `node_id` binary(16) NOT NULL,
+  `cluster_id` binary(16) DEFAULT NULL,
+  `observed_at` bigint NOT NULL,
+  `announcement` json NOT NULL,
+  PRIMARY KEY (`media_id`),
+  UNIQUE KEY `node_id` (`node_id`),
+  KEY `cluster_id` (`cluster_id`),
+  CONSTRAINT `storage_devices_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`),
+  CONSTRAINT `storage_devices_ibfk_2` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `storage_gates` (
   `storage_id` binary(16) NOT NULL,
   `direction` varchar(12) COLLATE utf8mb4_bin NOT NULL,
@@ -2134,13 +2174,16 @@ CREATE TABLE `storages` (
   `block_key_id` binary(16) DEFAULT NULL,
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `cluster_id` binary(16) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`),
   KEY `storages_key` (`block_key_id`),
+  KEY `storages_cluster` (`cluster_id`),
+  CONSTRAINT `storages_cluster` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`),
   CONSTRAINT `storages_key` FOREIGN KEY (`block_key_id`) REFERENCES `managed_keys` (`id`),
-  CONSTRAINT `storages_connection` CHECK ((((`type` = _utf8mb4'local') and (`path` is not null) and (`endpoint_url` is null) and (`remote_bucket_name` is null) and (`region` is null) and (`access_key_encrypted` is null) and (`secret_key_encrypted` is null)) or ((`type` = _utf8mb4's3') and (`path` is null) and (`endpoint_url` is not null) and (`remote_bucket_name` is not null) and (`region` is not null) and (`access_key_encrypted` is not null) and (`secret_key_encrypted` is not null)))),
+  CONSTRAINT `storages_connection` CHECK ((((`type` = _utf8mb4'local') and (`cluster_id` is null) and (`path` is not null) and (`endpoint_url` is null) and (`remote_bucket_name` is null) and (`region` is null) and (`access_key_encrypted` is null) and (`secret_key_encrypted` is null)) or ((`type` = _utf8mb4's3') and (`cluster_id` is null) and (`path` is null) and (`endpoint_url` is not null) and (`remote_bucket_name` is not null) and (`region` is not null) and (`access_key_encrypted` is not null) and (`secret_key_encrypted` is not null)) or ((`type` = _utf8mb4'mokyu') and (`cluster_id` is not null) and (`path` is null) and (`endpoint_url` is null) and (`remote_bucket_name` is null) and (`region` is null) and (`access_key_encrypted` is null) and (`secret_key_encrypted` is null) and (`prefix` = _utf8mb4'')))),
   CONSTRAINT `storages_name` CHECK ((length(`name`) between 1 and 128)),
-  CONSTRAINT `storages_type` CHECK ((`type` in (_utf8mb4'local',_utf8mb4's3')))
+  CONSTRAINT `storages_type` CHECK ((`type` in (_ascii'local',_ascii's3',_ascii'mokyu')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
 
 CREATE TABLE `streams` (
@@ -2638,6 +2681,7 @@ INSERT INTO `notice_membership` (`id`) VALUES ('1');
 INSERT INTO `projects` (`id`, `name`, `description`, `builtin`, `allow_bucket_create`, `created_at`) VALUES (X'00000000000000000000000000000001', 'Default', '', '1', '0', CURRENT_TIMESTAMP(6));
 INSERT INTO `quota_scopes` (`scope`, `scope_id`, `used_bytes`, `reserved_bytes`, `inflight_bytes`, `object_count`, `bucket_count`, `logical_bytes_limit`, `inflight_bytes_limit`, `bucket_count_limit`) VALUES ('project', X'00000000000000000000000000000001', '0', '0', '0', '0', '0', NULL, NULL, NULL);
 INSERT INTO `redundancy_catalog` (`singleton`) VALUES ('1');
+INSERT INTO `storage_cluster_lock` (`id`) VALUES ('1');
 INSERT INTO `usage_summary` (`id`, `requested_at`, `as_of`, `data`) VALUES ('global', CURRENT_TIMESTAMP(6), NULL, NULL);
 
 SET foreign_key_checks=@mokyu_schema_foreign_keys;

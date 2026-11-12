@@ -1,4 +1,4 @@
-use super::reads::{Prepared, Reads};
+use super::{Prepared, Reads};
 use crate::{
     app::responses::{Builder, Entry, Key},
     http::{
@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use prost::Message;
 use std::sync::Arc;
 
-pub(super) fn route(input: &wire::ReadRequest) -> [u8; 32] {
+pub(in crate::node) fn route(input: &wire::ReadRequest) -> [u8; 32] {
     let bytes = input
         .route
         .as_ref()
@@ -22,7 +22,7 @@ pub(super) fn route(input: &wire::ReadRequest) -> [u8; 32] {
     *blake3::hash(&bytes).as_bytes()
 }
 
-pub(super) fn claim(entry: &Entry) -> Option<wire::CachedBody> {
+pub(in crate::node) fn claim(entry: &Entry) -> Option<wire::CachedBody> {
     let proof = entry.node_body()?;
     Some(wire::CachedBody {
         object: Some(crate::rpc::read::version(proof.object)),
@@ -39,7 +39,10 @@ pub(super) fn claim(entry: &Entry) -> Option<wire::CachedBody> {
 }
 
 impl Reads {
-    pub(super) fn candidate(&self, input: &wire::ReadRequest) -> Option<(Key, Arc<Entry>)> {
+    pub(in crate::node) fn candidate(
+        &self,
+        input: &wire::ReadRequest,
+    ) -> Option<(Key, Arc<Entry>)> {
         if input.method != wire::ReadMethod::Get as i32
             || input
                 .include
@@ -65,7 +68,7 @@ impl Reads {
             .or_else(|| self.bodies.node_candidate(route, "identity"))
     }
 
-    pub(super) fn cache_body(
+    pub(in crate::node) fn cache_body(
         &self,
         prepared: &Prepared,
         object: &read::Object,

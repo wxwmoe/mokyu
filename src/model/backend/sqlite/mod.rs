@@ -43,6 +43,8 @@ mod read_reports;
 mod replica_transactions;
 #[path = "../../shared/staging.rs"]
 mod staging;
+#[path = "../../shared/storage_cluster.rs"]
+mod storage_cluster;
 #[path = "../../shared/tier_access.rs"]
 mod tier_access;
 #[path = "../../shared/tier_moves.rs"]

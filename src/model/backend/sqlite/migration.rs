@@ -5,7 +5,7 @@ use sqlx::{Connection, SqliteConnection, migrate::Migrate};
 static MIGRATIONS: sqlx::migrate::Migrator =
     sqlx::migrate!("./src/model/backend/sqlite/migrations");
 const BASELINE_VERSION: i64 = 20261102022127;
-const SCHEMA_VERSION: i64 = 20261111210000;
+const SCHEMA_VERSION: i64 = 20261113034820;
 
 pub(super) async fn run(connection: &mut SqliteConnection) -> Result<()> {
     ensure!(
@@ -61,16 +61,38 @@ pub(super) async fn upgrade(
         );
     }
     if version < latest {
-        let mut tx = connection.begin_with(queries::BEGIN_WRITE).await?;
-        migrations
-            .run(&mut *tx)
-            .await
-            .context("apply database migrations")?;
-        ensure!(
-            queries::schema_version().fetch_one(&mut *tx).await? == latest,
-            "schema version does not match the migration history"
-        );
-        tx.commit().await?;
+        // Rebuilding a referenced table must not cascade deletes into existing data.
+        sqlx::query("PRAGMA foreign_keys=OFF")
+            .execute(&mut *connection)
+            .await?;
+        let result: Result<()> = async {
+            let mut tx = connection.begin_with(queries::BEGIN_WRITE).await?;
+            migrations
+                .run(&mut *tx)
+                .await
+                .context("apply database migrations")?;
+            ensure!(
+                queries::schema_version().fetch_one(&mut *tx).await? == latest,
+                "schema version does not match the migration history"
+            );
+            ensure!(
+                sqlx::query("PRAGMA foreign_key_check")
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .is_none(),
+                "migration violated a foreign key"
+            );
+            tx.commit().await?;
+            Ok(())
+        }
+        .await;
+        sqlx::query("PRAGMA foreign_keys=ON")
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("PRAGMA legacy_alter_table=OFF")
+            .execute(&mut *connection)
+            .await?;
+        result?;
     }
     Ok(())
 }

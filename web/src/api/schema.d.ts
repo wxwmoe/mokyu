@@ -1776,6 +1776,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storage-clusters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_clusters"];
+        put?: never;
+        post: operations["storage_cluster_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["storage_cluster_update"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_enable"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_members"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/members/{media}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["storage_cluster_member_state"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storage-profile-presets": {
         parameters: {
             query?: never;
@@ -4136,11 +4216,175 @@ export interface components {
             quality?: number | null;
             quality_mode: components["schemas"]["QualityMode"];
         };
+        StorageCapabilities: {
+            multipart: boolean;
+            range: boolean;
+            read: boolean;
+            shared_staging: boolean;
+            write: boolean;
+        };
+        /** @enum {string} */
+        StorageClusterAcknowledgement: "all" | "data_and_parity" | "data";
+        StorageClusterAnnouncement: {
+            capacity: components["schemas"]["StorageClusterCapacity"];
+            /** Format: int64 */
+            history_after: number;
+            manifest?: components["schemas"]["StorageClusterManifest"] | null;
+            media: components["schemas"]["StorageClusterMedia"];
+            pending_manifest?: components["schemas"]["StorageClusterManifest"] | null;
+            topology: components["schemas"]["StorageClusterTopology"];
+        };
+        StorageClusterCapacity: {
+            /** Format: int64 */
+            available_bytes: number;
+            /** Format: int64 */
+            limit?: number | null;
+            /** Format: int64 */
+            min_free_space: number;
+            /** Format: int64 */
+            reserved_bytes: number;
+            /** Format: int64 */
+            used_bytes: number;
+        };
+        StorageClusterCluster: {
+            /** Format: uuid */
+            id: string;
+            manifest: components["schemas"]["StorageClusterManifest"];
+            name: string;
+            policy: components["schemas"]["StorageClusterPolicy"];
+            /** Format: int64 */
+            revision: number;
+            state: string;
+        };
+        StorageClusterCreate: {
+            name: string;
+            policy?: components["schemas"]["StorageClusterPolicy"];
+        };
+        StorageClusterDevice: {
+            announcement: components["schemas"]["StorageClusterAnnouncement"];
+            /** Format: uuid */
+            cluster_id?: string | null;
+            /** Format: uuid */
+            media_id: string;
+            /** Format: uuid */
+            node_id: string;
+            /** Format: int64 */
+            observed_at: number;
+        };
+        StorageClusterGroup: {
+            /** Format: uuid */
+            id: string;
+            layout: components["schemas"]["StorageClusterLayout"];
+            members: string[];
+        };
+        StorageClusterLayout: {
+            /** Format: int32 */
+            data_shards: number;
+            /** Format: int32 */
+            extra_copies: number;
+            /** Format: int32 */
+            parity_shards: number;
+            /** Format: int32 */
+            stripe_bytes: number;
+        };
+        StorageClusterManifest: {
+            /** Format: uuid */
+            cluster_id: string;
+            /** Format: uuid */
+            deployment_id: string;
+            /** Format: int32 */
+            format_version: number;
+            groups: components["schemas"]["StorageClusterGroup"][];
+            members: components["schemas"]["StorageClusterMember"][];
+            previous?: string | null;
+            /** Format: int64 */
+            revision: number;
+            /** Format: int64 */
+            takeover_epoch: number;
+        };
+        StorageClusterMedia: {
+            /** Format: int32 */
+            format_version: number;
+            /** Format: uuid */
+            media_id: string;
+        };
+        StorageClusterMember: {
+            /** Format: uuid */
+            media_id: string;
+            /** Format: uuid */
+            node_id: string;
+            state: string;
+            topology: components["schemas"]["StorageClusterTopology"];
+        };
+        StorageClusterMemberState: {
+            /** Format: int64 */
+            revision: number;
+            state: string;
+        };
+        StorageClusterMembers: {
+            media_ids: string[];
+            /** Format: int64 */
+            revision: number;
+        };
+        StorageClusterOverview: {
+            clusters: components["schemas"]["StorageClusterCluster"][];
+            defaults: components["schemas"]["StorageClusterPolicy"];
+            devices: components["schemas"]["StorageClusterDevice"][];
+        };
+        StorageClusterPolicy: {
+            /** @default all */
+            acknowledgement: components["schemas"]["StorageClusterAcknowledgement"];
+            /**
+             * Format: int32
+             * @default 0
+             */
+            backup_copies: number;
+            /** @default same_region */
+            data_regions: string;
+            /** @default null */
+            degraded_acknowledgement: components["schemas"]["StorageClusterAcknowledgement"] | null;
+            /**
+             * @default {
+             *       "data_shards": 1,
+             *       "extra_copies": 1,
+             *       "parity_shards": 0,
+             *       "stripe_bytes": 1048576
+             *     }
+             */
+            layout: components["schemas"]["StorageClusterLayout"];
+            /** @default none */
+            node_priority: string;
+            /** @default spread */
+            parity_regions: string;
+            /** @default region_first */
+            placement_order: string;
+            /**
+             * Format: int32
+             * @default 4
+             */
+            read_parallelism: number;
+            /** @default different_region */
+            replica_regions: string;
+        };
+        StorageClusterTopology: {
+            purpose: string;
+            region?: string | null;
+            storage_group: string;
+            url: string;
+        };
+        StorageClusterUpdate: {
+            name: string;
+            policy: components["schemas"]["StorageClusterPolicy"];
+            /** Format: int64 */
+            revision: number;
+        };
         StorageInput: {
             access_key?: string | null;
             /** Format: uuid */
             block_key_id?: string | null;
             bucket?: string | null;
+            /** Format: uuid */
+            cluster_id?: string | null;
             /** Format: int32 */
             control_concurrency?: number | null;
             endpoint?: string | null;
@@ -4318,6 +4562,9 @@ export interface components {
             /** Format: uuid */
             block_key_id?: string | null;
             bucket?: string | null;
+            capabilities: components["schemas"]["StorageCapabilities"];
+            /** Format: uuid */
+            cluster_id?: string | null;
             /** Format: int32 */
             control_concurrency?: number | null;
             /** Format: date-time */
@@ -8021,6 +8268,149 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CredentialRotation"];
+                };
+            };
+        };
+    };
+    storage_clusters: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterOverview"];
+                };
+            };
+        };
+    };
+    storage_cluster_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterCreate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterCluster"];
+                };
+            };
+        };
+    };
+    storage_cluster_update: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterCluster"];
+                };
+            };
+        };
+    };
+    storage_cluster_enable: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterMembers"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterCluster"];
+                };
+            };
+        };
+    };
+    storage_cluster_members: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterMembers"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterCluster"];
+                };
+            };
+        };
+    };
+    storage_cluster_member_state: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                media: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterMemberState"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterCluster"];
                 };
             };
         };

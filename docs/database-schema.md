@@ -30,21 +30,34 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 | `key_replacements` | `id`、`actor`、`plan`、`result`、`expires_at` | 关联存储换 key 的预览和幂等结果；预览十分钟、完成结果七天，过期由现有清理流程分批回收；不保存密钥材料 |
 | `setup_tokens` | `token_hash`、`created_at`、`expires_at` | Web 首次管理员设置的一次性 token；CLI 初始化不依赖它 |
 | `web_users`、`sessions`、`api_tokens` | 用户、会话和个人 API token 字段 | Web 认证、CSRF、授权修订和会话撤销 |
-| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`credential_generation`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data/node 身份和状态；凭据代次为非空正 BIGINT，默认 1，轮换递增 |
+| `nodes` | `id`、`name`、`role`、`credential_encrypted`、`credential_generation`、`enabled`、`status`、`recovery_required`、`lease_expires_at` | control/worker/data/node/storage 身份和状态；凭据代次为非空正 BIGINT，默认 1，轮换递增 |
 | `node_boots` | `node_id`、`credential_generation`、`boot_id`、`created_at`、`retired_at` | `(node_id,boot_id)` 主键，节点级联外键；代次为非空正 BIGINT，两个 ID 为 UUID；创建时间默认数据库时钟，退役时间可空；每代最多 4096 个 boot，轮换后清理旧代历史 |
 | `node_sessions` | `node_id`、`credential_generation`、`boot_id`、`fence`、`epoch`、`connection_id`、`expires_at`、`sequence`、`draining` | 每节点一行，主键/级联节点外键及 `(node_id,boot_id)` 外键；ID 为 UUID，代次与 epoch 为正 BIGINT；sequence 非负默认 0，draining 默认 false；其余均非空且无默认值；到期时间为数据库时钟的 90 秒租约 |
 | `node_access` | `node_id`、`boot_id`、`sequence`、`request_hash`、`received_at`、`gap_since` | PostgreSQL 每节点一行，UUID 主键/级联节点外键；boot 为 UUID，sequence 为正 BIGINT，摘要为 32 字节 BYTEA，两个时间为 TIMESTAMPTZ；全部非空且无默认值；保存访问观测的去重回执及覆盖缺口，与统计更新原子提交 |
-| `notification_consumers` | `node_id`、`generation`、`role`、`expires_at` | PostgreSQL 每节点一个消费代次；UUID 节点主键/级联外键，代次为 UUID，角色为 control/data/worker/node，到期时间为 TIMESTAMPTZ；节点对应连接 ID，control 对应 boot |
+| `notification_consumers` | `node_id`、`generation`、`role`、`expires_at` | PostgreSQL 每节点一个消费代次；UUID 节点主键/级联外键，代次为 UUID，角色为 control/data/worker/node/storage，到期时间为 TIMESTAMPTZ；节点对应连接 ID，control 对应 boot |
 | `notifications` | `id`、`transaction_id`、`scope`、`resource_id`、`object_key`、`created_at` | PostgreSQL 事务内的重要缓存事件；UUID 主键，事务 ID 为 xid8；scope 为 object/bucket/storage，资源为 UUID，key 最多 1024 字节；事务、范围、资源和 key 联合唯一，同事务合并相同目标 |
 | `notification_targets` | `notification_id`、`node_id`、`generation`、`claim_token`、`claim_until`、`attempts`、`applied_at`、`retired_at` | PostgreSQL 事件、节点、代次复合主键；事件级联外键，UUID 领取令牌与 TIMESTAMPTZ 到期成对出现；应用与退役状态互斥，未完成目标有部分索引；领取过期可由其他 control 重试，完成事件分批回收 |
 
 单容器不创建 `nodes` 记录或 `node.json`。群集节点凭据只写入本节点 `node.json`。释放节点时会清除其凭据、回收任务 lease 并允许同名节点重新注册；部署密钥丢失或改变不能作为普通升级处理。
 
+## 存储群集
+
+群集控制记录与 storage 的物理文件分开。storage 不连接元数据库，使用 `media.json`、`cluster.json` 和不可变清单历史保存介质身份及已确认布局，见[存储群集](storage-clusters.md)。
+
+| 表 | 字段与类型 | 约束 |
+| --- | --- | --- |
+| `storage_cluster_lock` | `id` 整数 | 主键，仅允许 1；初始化一行，串行化管理目录修改，不用于正文 I/O |
+| `storage_clusters` | `id` UUID、`name` 文本、`revision` 正整数、`policy` JSON、`manifest` JSON | 均非空，无字段默认值；UUID 主键，名称唯一且应用限制 1–128 字节；策略和清单通过 CAS 一并保存 |
+| `storage_cluster_history` | `cluster_id` UUID、`revision` 正整数、`manifest` JSON、`digest` 64 字符十六进制摘要 | 均非空，无默认值；群集外键，`(cluster_id,revision)` 主键；追加后不可修改 |
+| `storage_devices` | `media_id` UUID、`node_id` UUID、可空 `cluster_id` UUID、`observed_at` 整数微秒时间、`announcement` JSON | 介质主键，节点唯一外键，群集外键；除群集外均非空且无默认值；未入群介质也保留登记与旧布局线索 |
+
+UUID、JSON 和整数分别使用各数据库的原生表示，SQLite 为受约束的 BLOB、TEXT 和 INTEGER。`storages.cluster_id` 为可空群集外键，原生 `mokyu` 后端必须绑定群集且不得带 local/S3 连接字段，其他类型必须为空。群集成员尚未完成排空时不能释放节点身份；本机数据不会随节点凭据轮换删除。
+
 ## storage、桶与对象
 
 | 表 | 关键字段 | 约束 |
 | --- | --- | --- |
-| `storages` | `id`、`name`、`type`、`path`、`endpoint_url`、`remote_bucket_name`、`region`、`prefix`、加密凭据、`identity_marker`、`block_key_id`、`enabled` | `type` 为 `local` 或 `s3`；保存连接信息时核对已有 `mokyu.json`，不会把空目标隐式初始化 |
+| `storages` | `id`、`name`、`type`、`path`、`endpoint_url`、`remote_bucket_name`、`region`、`prefix`、加密凭据、`identity_marker`、`block_key_id`、`enabled` | `type` 为 `local`、`s3` 或 `mokyu`；后者绑定群集，前两者保存连接信息时核对已有 `mokyu.json`，不会把空目标隐式初始化 |
 | `storage_profiles` | `storage_id`、`revision`、`cdc_enabled`、`deduplication_enabled`、`write_processing`、`write_durability`（非空，默认 durable，可选 buffered/volatile）、`write_flush_interval`（bigint/SQLite integer，秒，默认 0）、`write_backlog_max_age`（相同类型，秒，默认 300）、`background_scheduling`（非空文本，默认 balanced，可选 foreground）、`public_cache_validation`（非空文本，默认 strict，可选 background）、`cors_cache_enabled`（非空布尔，SQLite integer 0/1，默认 false）、`public_cache_refresh_interval` / `public_cache_max_age`（非空时长文本，默认 1s / 5s）、`read_source_validation`（strict/background，默认 strict）、`source_validation_max_age`（时长文本，默认 5s）、`read_integrity`（inline/background/off，默认 inline）、`http_compression_enabled`（布尔，默认 true）、`file_delivery`（非空文本，默认 application，或 x_accel_redirect/x_sendfile）、`file_delivery_prefix`（可空文本，代理模式必填，application 为 null）、`upload_cache_overflow`（fallback/reject）、连接/重试、cache、compression、pack、integrity、migration、并发和字节预算字段 | 每个 storage 一行类型化策略；storage 级读写/control/维护及完整性预算在群集内共享 |
 | `storage_permits` | `token`、`storage_id`、`direction`、`holder_id`、`acquired_at`、`expires_at` | 短租约，按 storage 和方向限制群集总并发 |
 | `buckets` | `id`、`name`、`project_id`、`storage_id`、设置和状态字段 | `storage_id` 创建时绑定且不可修改；同一 storage 内去重，跨 storage 不去重 |

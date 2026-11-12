@@ -319,12 +319,27 @@ S3 源使用 `{type:"s3",external_id,prefix?}`，引用同项目内有读取授�
 
 Web 发起者才能续传自己的上传；管理员可查看和终止其他上传。刷新后重新选择原文件，并核对已接收部分的完整校验和。完成仅表示对象已发布；remote_state 区分本地已保存与存储已就绪，上传缓存恢复要求见[备份材料](deployment-and-recovery.md#备份材料)。
 
+## 存储群集
+
+以下入口仅限 `single_control`、`cluster` 的管理员或 system Token；写入要求最近认证，Cookie 请求还需 CSRF。存储群集使用独立修订，冲突返回 `OperationAborted`，客户端应重新读取后核对，不能自动覆盖新设置。
+
+| 方法与路径 | 请求与响应 |
+| --- | --- |
+| `GET /api/v1/storage-clusters` | 返回 `{defaults,clusters,devices}`；包含策略、清单、人工状态、最近容量报告和待接管线索，不返回节点凭据 |
+| `POST /api/v1/storage-clusters` | `{name,policy?}` 创建群集，返回完整群集记录 |
+| `PUT /api/v1/storage-clusters/{id}` | `{revision,name,policy}` 更新名称与完整策略 |
+| `POST /api/v1/storage-clusters/{id}/members` | `{revision,media_ids}` 加入已登记介质；允许数量尚未满足布局，已有旧布局须另行核对 |
+| `POST /api/v1/storage-clusters/{id}/groups` | `{revision,media_ids}` 按完整组合启用；校验逐成员用途、运行权、容量及独立故障域 |
+| `PUT /api/v1/storage-clusters/{id}/members/{media}` | `{revision,state}` 设置 `available`、`paused` 或尚未分配的主存储 `spare` |
+
+当前群集状态依次为 `waiting_members`、`waiting_layout`、`waiting_probe`。启用组合不代表正文能力已验证；原生后端保持停用，不能用于桶。策略结构、默认值和配置限制见 OpenAPI 及[存储群集](storage-clusters.md)。
+
 ## 存储
 
 | 方法与路径 | 用途 |
 | --- | --- |
-| `GET /api/v1/storages` | 列出存储；返回 id、name、type、连接范围、prefix、block_key_id、三项并发上限、profile_revision、enabled、created_at、updated_at，不返回凭据 |
-| `POST /api/v1/storages` | 创建存储；请求包含 `{name,type,initialize,path?,endpoint?,bucket?,region?,prefix?,block_key_id?,access_key?,secret_key?,profile?}`，type 为 `local` 或 `s3`；`initialize` 必须明确为 `true`，profile 使用完整 typed storage profile |
+| `GET /api/v1/storages` | 列出存储；返回 id、name、type、连接范围、prefix、block_key_id、三项并发上限、profile_revision、cluster_id、capabilities、enabled、created_at、updated_at，不返回凭据 |
+| `POST /api/v1/storages` | 创建存储；请求包含 `{name,type,initialize,cluster_id?,path?,endpoint?,bucket?,region?,prefix?,block_key_id?,access_key?,secret_key?,profile?}`，type 为 `local`、`s3` 或绑定群集的 `mokyu`；`initialize` 必须明确为 `true`，profile 使用完整 typed storage profile |
 | `PUT /api/v1/storages/{name}` | 修改连接字段、prefix、block_key_id 或 enabled；name 和 id 不可修改；切换 type 需单容器维护状态并排空上传、任务及待写来源，核对目标 meta 后保存，成功后须重启；并发、压缩、区块包、缓存和维护预算通过 profile 保存 |
 | `POST /api/v1/storages/{name}/check` | 读取并核对已有 `mokyu.json`，无请求体 |
 | `GET /api/v1/storages/{name}/profile` | 读取该 storage 的 typed profile；CDC 联动开关、单容器 write_durability、合并等待 write_flush_interval、积压阈值 write_backlog_max_age、后台调度 background_scheduling、公开快照 public_cache_validation / public_cache_refresh_interval / public_cache_max_age、独立 CORS 后台缓存 cors_cache_enabled（公共读 background 时强制生效）、来源快照 read_source_validation / source_validation_max_age、额外摘要 read_integrity、连接超时、重试、压缩、pack、cache、integrity、配额与生命周期字段均在 profile 内 |
@@ -393,8 +408,8 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 | `GET /api/v1/cluster/status` | 读取 deployment mode、enabled 节点数和 local storage 数 |
 | `POST /api/v1/cluster/mode` | 在维护模式、工作已排空且独占运行权时切换 single/cluster，递增 mode revision；当前进程保持受限，必须重启 |
 | `GET /api/v1/cluster/nodes` | 列出节点名称、角色、启用状态和最近 heartbeat |
-| `POST /api/v1/cluster/nodes` | `{name,role}` 预创建 data/worker/node；同名节点拒绝，返回一次性完整 `node.json` |
-| `POST /api/v1/cluster/nodes/{name}/credentials` | `{confirm:true}` 轮换 data/worker/node 凭据；保留 UUID、递增代次、撤销旧会话与任务租约，返回新 `node.json` |
+| `POST /api/v1/cluster/nodes` | `{name,role}` 预创建 data/worker/node/storage；同名节点拒绝，返回一次性完整 `node.json` |
+| `POST /api/v1/cluster/nodes/{name}/credentials` | `{confirm:true}` 轮换 data/worker/node/storage 凭据；保留 UUID、递增代次、撤销旧会话与任务租约，返回新 `node.json` |
 | `POST /api/v1/cluster/nodes/{name}/release` | 释放节点、撤销凭据并重新排队其任务 |
 | `POST /api/v1/cluster/recover` | 使用 deployment key 确认恢复模式并释放待恢复节点；仅 control 可调用 |
 

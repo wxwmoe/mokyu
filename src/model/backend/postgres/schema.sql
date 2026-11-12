@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261111210000.
+-- Generated from the complete postgres migration chain through 20261113034820.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -1935,7 +1935,7 @@ CREATE TABLE public.nodes (
     credential_generation bigint DEFAULT 1 NOT NULL,
     CONSTRAINT nodes_credential_generation_check CHECK ((credential_generation > 0)),
     CONSTRAINT nodes_name_check CHECK (((octet_length(name) >= 1) AND (octet_length(name) <= 128))),
-    CONSTRAINT nodes_role_check CHECK ((role = ANY (ARRAY['control'::text, 'worker'::text, 'data'::text, 'node'::text])))
+    CONSTRAINT nodes_role_check CHECK ((role = ANY (ARRAY['control'::text, 'data'::text, 'worker'::text, 'node'::text, 'storage'::text])))
 );
 
 CREATE TABLE public.nonce_counters (
@@ -1958,7 +1958,7 @@ CREATE TABLE public.notification_consumers (
     generation uuid NOT NULL,
     role text NOT NULL,
     expires_at timestamp with time zone NOT NULL,
-    CONSTRAINT notification_consumers_role_check CHECK ((role = ANY (ARRAY['control'::text, 'data'::text, 'worker'::text, 'node'::text])))
+    CONSTRAINT notification_consumers_role_check CHECK ((role = ANY (ARRAY['control'::text, 'data'::text, 'worker'::text, 'node'::text, 'storage'::text])))
 );
 
 CREATE TABLE public.notification_targets (
@@ -2483,6 +2483,38 @@ CREATE TABLE public.staging_objects (
     CONSTRAINT staging_objects_bytes_check CHECK ((bytes > 0))
 );
 
+CREATE TABLE public.storage_cluster_history (
+    cluster_id uuid NOT NULL,
+    revision bigint NOT NULL,
+    manifest jsonb NOT NULL,
+    digest text NOT NULL,
+    CONSTRAINT storage_cluster_history_digest_check CHECK ((length(digest) = 64)),
+    CONSTRAINT storage_cluster_history_revision_check CHECK ((revision > 0))
+);
+
+CREATE TABLE public.storage_cluster_lock (
+    id integer NOT NULL,
+    CONSTRAINT storage_cluster_lock_id_check CHECK ((id = 1))
+);
+
+CREATE TABLE public.storage_clusters (
+    id uuid NOT NULL,
+    name text NOT NULL,
+    revision bigint NOT NULL,
+    policy jsonb NOT NULL,
+    manifest jsonb NOT NULL,
+    CONSTRAINT storage_clusters_name_check CHECK (((octet_length(name) >= 1) AND (octet_length(name) <= 128))),
+    CONSTRAINT storage_clusters_revision_check CHECK ((revision > 0))
+);
+
+CREATE TABLE public.storage_devices (
+    media_id uuid NOT NULL,
+    node_id uuid NOT NULL,
+    cluster_id uuid,
+    observed_at bigint NOT NULL,
+    announcement jsonb NOT NULL
+);
+
 CREATE TABLE public.storage_maintenance (
     storage_id uuid NOT NULL,
     policy text NOT NULL,
@@ -2632,9 +2664,10 @@ CREATE TABLE public.storages (
     upload_concurrency integer,
     control_concurrency integer,
     block_key_id uuid,
-    CONSTRAINT storage_targets_check CHECK ((((type = 'local'::text) AND (path IS NOT NULL) AND (endpoint_url IS NULL) AND (remote_bucket_name IS NULL) AND (region IS NULL) AND (access_key_encrypted IS NULL) AND (secret_key_encrypted IS NULL)) OR ((type = 's3'::text) AND (path IS NULL) AND (endpoint_url IS NOT NULL) AND (remote_bucket_name IS NOT NULL) AND (region IS NOT NULL) AND (access_key_encrypted IS NOT NULL) AND (secret_key_encrypted IS NOT NULL)))),
+    cluster_id uuid,
+    CONSTRAINT storage_targets_check CHECK ((((type = 'local'::text) AND (cluster_id IS NULL) AND (path IS NOT NULL) AND (endpoint_url IS NULL) AND (remote_bucket_name IS NULL) AND (region IS NULL) AND (access_key_encrypted IS NULL) AND (secret_key_encrypted IS NULL)) OR ((type = 's3'::text) AND (cluster_id IS NULL) AND (path IS NULL) AND (endpoint_url IS NOT NULL) AND (remote_bucket_name IS NOT NULL) AND (region IS NOT NULL) AND (access_key_encrypted IS NOT NULL) AND (secret_key_encrypted IS NOT NULL)) OR ((type = 'mokyu'::text) AND (cluster_id IS NOT NULL) AND (path IS NULL) AND (endpoint_url IS NULL) AND (remote_bucket_name IS NULL) AND (region IS NULL) AND (access_key_encrypted IS NULL) AND (secret_key_encrypted IS NULL) AND (prefix = ''::text)))),
     CONSTRAINT storage_targets_name_check CHECK (((octet_length(name) >= 1) AND (octet_length(name) <= 128))),
-    CONSTRAINT storage_targets_type_check CHECK ((type = ANY (ARRAY['local'::text, 's3'::text]))),
+    CONSTRAINT storage_targets_type_check CHECK ((type = ANY (ARRAY['local'::text, 's3'::text, 'mokyu'::text]))),
     CONSTRAINT stores_control_concurrency_check CHECK (((control_concurrency IS NULL) OR (control_concurrency > 0))),
     CONSTRAINT stores_current_block_key CHECK (((block_key_id IS NULL) OR (block_key_id <> '00000000-0000-0000-0000-000000000000'::uuid))),
     CONSTRAINT stores_read_concurrency_check CHECK (((read_concurrency IS NULL) OR (read_concurrency > 0))),
@@ -3078,6 +3111,7 @@ INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "u
 INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('requests', '{"s3_domain": null, "s3_region": "us-east-1", "s3_chunk_limit": "8MiB", "read_idle_timeout": "120s", "upload_idle_timeout": "120s"}', '1', now(), NULL);
 INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('uploads', '{"sweep_interval": "5m", "max_active_uploads": null, "staging_storage_id": null, "client_idle_timeout": "120s", "staging_bytes_limit": null}', '2', now(), NULL);
 INSERT INTO "runtime_settings" ("section", "value", "revision", "updated_at", "updated_by_user_id") VALUES ('web', '{"origin": "http://localhost:9002", "secure_cookie": true, "session_lifetime": "12h", "gravatar_base_url": "https://www.gravatar.com/avatar/"}', '1', now(), NULL);
+INSERT INTO "storage_cluster_lock" ("id") VALUES ('1');
 INSERT INTO "usage_summary" ("id", "bucket_ids", "requested_at", "as_of", "data") VALUES ('global', NULL, now(), NULL, NULL);
 
 ALTER TABLE ONLY public.api_tokens
@@ -3545,6 +3579,24 @@ ALTER TABLE ONLY public.sessions
 ALTER TABLE ONLY public.staging_objects
     ADD CONSTRAINT staging_objects_pkey PRIMARY KEY (storage_id, object_key);
 
+ALTER TABLE ONLY public.storage_cluster_history
+    ADD CONSTRAINT storage_cluster_history_pkey PRIMARY KEY (cluster_id, revision);
+
+ALTER TABLE ONLY public.storage_cluster_lock
+    ADD CONSTRAINT storage_cluster_lock_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.storage_clusters
+    ADD CONSTRAINT storage_clusters_name_key UNIQUE (name);
+
+ALTER TABLE ONLY public.storage_clusters
+    ADD CONSTRAINT storage_clusters_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.storage_devices
+    ADD CONSTRAINT storage_devices_node_id_key UNIQUE (node_id);
+
+ALTER TABLE ONLY public.storage_devices
+    ADD CONSTRAINT storage_devices_pkey PRIMARY KEY (media_id);
+
 ALTER TABLE ONLY public.usage_history
     ADD CONSTRAINT storage_history_pkey PRIMARY KEY (scope_id, snapshot_at);
 
@@ -3947,6 +3999,8 @@ CREATE INDEX sessions_user ON public.sessions USING btree (user_id, created_at D
 CREATE INDEX staging_objects_created ON public.staging_objects USING btree (created_at, storage_id);
 
 CREATE INDEX storage_permits_active ON public.storage_permits USING btree (storage_id, direction, expires_at);
+
+CREATE INDEX storages_cluster ON public.storages USING btree (cluster_id);
 
 CREATE INDEX stream_lease_expiry ON public.stream_leases USING btree (expires_at);
 
@@ -4684,6 +4738,15 @@ ALTER TABLE ONLY public.sessions
 ALTER TABLE ONLY public.staging_objects
     ADD CONSTRAINT staging_objects_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.storage_cluster_history
+    ADD CONSTRAINT storage_cluster_history_cluster_id_fkey FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);
+
+ALTER TABLE ONLY public.storage_devices
+    ADD CONSTRAINT storage_devices_cluster_id_fkey FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);
+
+ALTER TABLE ONLY public.storage_devices
+    ADD CONSTRAINT storage_devices_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
+
 ALTER TABLE ONLY public.usage_history
     ADD CONSTRAINT storage_history_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.usage_summary(id) ON DELETE CASCADE;
 
@@ -4695,6 +4758,9 @@ ALTER TABLE ONLY public.storage_profiles
 
 ALTER TABLE ONLY public.storage_rate_state
     ADD CONSTRAINT storage_rate_state_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.storages
+    ADD CONSTRAINT storages_cluster_id_fkey FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);
 
 ALTER TABLE ONLY public.storage_permits
     ADD CONSTRAINT store_permits_store_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE CASCADE;

@@ -5,6 +5,7 @@ pub(crate) mod limits;
 pub(crate) mod node;
 pub(crate) mod runtime;
 mod settings;
+pub(crate) mod storage;
 
 pub use file::FileConfig;
 pub use limits::{Budget, bytes, cache_bytes, seconds};
@@ -34,6 +35,7 @@ impl std::ops::Deref for Config {
 
 impl Config {
     pub fn validate_role(&self, role: &str) -> anyhow::Result<()> {
+        storage::validate(&self.instance, role)?;
         anyhow::ensure!(
             matches!(role, "single" | "control"),
             "data and worker use node configuration"

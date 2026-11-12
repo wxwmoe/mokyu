@@ -15,6 +15,7 @@ use wire::{
     node_sessions_server::{NodeSessions, NodeSessionsServer},
     node_work_server::{NodeWork, NodeWorkServer},
     node_writes_server::{NodeWrites, NodeWritesServer},
+    storage_control_server::{StorageControl, StorageControlServer},
 };
 
 #[derive(Clone)]
@@ -81,9 +82,14 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
-        NodeWorkServer::new(service)
+        NodeWorkServer::new(service.clone())
             .max_decoding_message_size(model::node_pack::RESULT_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
+    )
+    .add_service(
+        StorageControlServer::new(service)
+            .max_decoding_message_size(512 * 1024)
+            .max_encoding_message_size(512 * 1024),
     )
     .into_axum_router()
     .layer(axum::middleware::from_fn(
@@ -101,6 +107,12 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
                     Ok(node) => node,
                     Err(status) => return status.into_http::<axum::body::Body>(),
                 };
+                if node.role == "storage" && !storage_method(request.uri().path()) {
+                    return Status::permission_denied(
+                        "storage cannot use data or worker operations",
+                    )
+                    .into_http::<axum::body::Body>();
+                }
                 request.extensions_mut().insert(node);
                 let permit = match limits.try_acquire_owned() {
                     Ok(permit) => permit,
@@ -175,12 +187,55 @@ fn identity<T>(request: &Request<T>) -> Result<NodeState, Status> {
     };
     node.validate()
         .map_err(|_| Status::unauthenticated("invalid node identity"))?;
-    if !matches!(node.role.as_str(), "data" | "worker" | "node") {
+    if !matches!(node.role.as_str(), "data" | "worker" | "node" | "storage") {
         return Err(Status::permission_denied(
-            "this protocol requires a data, worker or node identity",
+            "this protocol requires an API node identity",
         ));
     }
     Ok(node)
+}
+
+fn storage_method(path: &str) -> bool {
+    matches!(
+        path,
+        "/mokyu.node.v1.NodeSessions/NodeSession"
+            | "/mokyu.node.v1.NodeControl/SyncNode"
+            | "/mokyu.node.v1.NodeControl/ReportNode"
+            | "/mokyu.node.v1.NodeControl/CloseNode"
+            | "/mokyu.node.v1.StorageControl/Announce"
+    )
+}
+
+#[tonic::async_trait]
+impl StorageControl for Service {
+    async fn announce(
+        &self,
+        request: Request<wire::StorageAnnouncement>,
+    ) -> Result<Response<wire::StorageRegistration>, Status> {
+        let node = identity(&request)?;
+        if node.role != "storage" {
+            return Err(Status::permission_denied("storage identity is required"));
+        }
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let announcement: model::storage_cluster::Announcement =
+            serde_json::from_slice(&input.announcement_json)
+                .map_err(|_| Status::invalid_argument("invalid storage announcement"))?;
+        announcement
+            .validate()
+            .map_err(|error| Status::invalid_argument(error.to_string()))?;
+        let registration = bounded(self.app.storage_clusters.announce(
+            &node,
+            &self.app.secrets.credential_key,
+            run,
+            announcement,
+        ))
+        .await?;
+        Ok(Response::new(wire::StorageRegistration {
+            registration_json: serde_json::to_vec(&registration)
+                .map_err(|_| Status::internal("encode storage registration"))?,
+        }))
+    }
 }
 
 pub(super) fn failure(error: anyhow::Error) -> Status {

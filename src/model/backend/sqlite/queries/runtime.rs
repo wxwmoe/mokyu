@@ -256,3 +256,21 @@ impl RuntimeStore for Backend {
         }
     }
 }
+
+pub(in super::super) fn empty_storage_bootstrap() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT NOT EXISTS(SELECT 1 FROM storages WHERE type<>'mokyu') AND NOT EXISTS(SELECT 1 FROM buckets) AND NOT EXISTS(SELECT 1 FROM streams)",
+    )
+}
+
+pub(in super::super) fn has_storage_clusters() -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM storage_clusters) OR EXISTS(SELECT 1 FROM storages WHERE type='mokyu')",
+    )
+}
+
+pub(in super::super) fn staging_bootstrap_candidate(
+    storage: Option<Uuid>,
+) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT maintenance AND NOT EXISTS(SELECT 1 FROM streams) AND NOT EXISTS(SELECT 1 FROM buckets) AND (? IS NULL OR EXISTS(SELECT 1 FROM storages WHERE id=? AND type='mokyu')) FROM mokyu_meta").bind(storage).bind(storage)
+}

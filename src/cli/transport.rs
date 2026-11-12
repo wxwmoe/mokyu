@@ -56,7 +56,13 @@ pub(super) fn cli_target(explicit: Option<&Path>) -> Result<CliTarget> {
     let local: Local =
         toml::from_str(&text).map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?;
     let instance = if local.instance.control_url.is_some() {
-        crate::config::node::NodeConfig::parse(&text, "data")?.instance
+        let role = if local.instance.storage_url.is_some() || local.instance.storage_group.is_some()
+        {
+            "storage"
+        } else {
+            "data"
+        };
+        crate::config::node::NodeConfig::parse(&text, role)?.instance
     } else if toml::from_str::<toml::Table>(&text)?.contains_key("database") {
         toml::from_str::<crate::config::FileConfig>(&text)
             .map_err(|_| anyhow::anyhow!("invalid TOML configuration"))?

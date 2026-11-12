@@ -132,6 +132,8 @@ pub(super) enum Command {
         #[arg(long)]
         maintenance: bool,
     },
+    /// Run a storage member without a database or deployment key.
+    Storage,
     /// Run an offline tool without accessing service state.
     #[command(name = "tool")]
     Tool {

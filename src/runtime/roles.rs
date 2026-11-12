@@ -19,6 +19,7 @@ pub(super) enum Role {
     Worker,
     Data,
     Node,
+    Storage,
 }
 impl Role {
     pub(super) fn title(self) -> &'static str {
@@ -28,6 +29,7 @@ impl Role {
             Self::Worker => "worker",
             Self::Data => "data",
             Self::Node => "node",
+            Self::Storage => "storage",
         }
     }
     pub(super) fn uses_storage(self) -> bool {
@@ -48,7 +50,7 @@ pub(super) async fn run_role(app: Arc<app::App>, role: Role) -> Result<()> {
     match role {
         Role::Single => run_single(app).await,
         Role::Control => run_control(app).await,
-        Role::Worker | Role::Data | Role::Node => {
+        Role::Worker | Role::Data | Role::Node | Role::Storage => {
             anyhow::bail!("node roles require the API runtime")
         }
     }
@@ -181,7 +183,7 @@ async fn run_single_mismatch(app: Arc<app::App>) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
     tokio::select! {_=term.recv()=>{},_=tokio::signal::ctrl_c()=>{}}

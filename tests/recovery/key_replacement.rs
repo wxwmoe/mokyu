@@ -38,6 +38,7 @@ async fn storage(
         id,
         name: name.into(),
         r#type: if remote { "s3" } else { "local" }.into(),
+        cluster_id: None,
         path: (!remote).then(|| format!("/data/{id}")),
         endpoint_url: remote.then(|| "http://127.0.0.1:9000".into()),
         remote_bucket_name: remote.then(|| "fixture".into()),

@@ -334,6 +334,37 @@ impl Drop for Space {
 }
 
 impl Disk {
+    pub(crate) fn storage_member(
+        instance: &crate::config::Instance,
+        budget: &crate::config::Budget,
+    ) -> Result<Arc<Self>> {
+        let data = super::data_space::Budget::open(
+            &instance.data_path,
+            instance
+                .data_limit
+                .as_deref()
+                .map(crate::config::bytes)
+                .transpose()?
+                .unwrap_or(u64::MAX),
+        )?;
+        data.start();
+        Ok(Arc::new(Self {
+            root: instance.data_path.clone(),
+            data: Some(data),
+            limits: [None; 3],
+            floor: crate::config::bytes(&instance.min_free_space)?,
+            spaces: Mutex::default(),
+            upload_limit: None,
+            usage: Mutex::new(Usage {
+                used: [0; 3],
+                upload: 0,
+                upload_by_storage: HashMap::new(),
+            }),
+            io: Arc::new(Semaphore::new(budget.cpu_jobs)),
+            pending: Mutex::default(),
+        }))
+    }
+
     pub(crate) fn mutation(&self) -> Result<Option<super::data_space::Reservation>> {
         self.data.as_ref().map(|data| data.reserve(0)).transpose()
     }

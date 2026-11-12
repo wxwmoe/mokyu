@@ -15,23 +15,15 @@ use tokio::{
 };
 use uuid::Uuid;
 
-#[path = "completion.rs"]
 mod completion;
-#[path = "native.rs"]
 mod native;
 
-#[path = "cached.rs"]
 mod cached;
-#[path = "conversion.rs"]
 mod conversion;
-#[path = "migration.rs"]
 mod migration;
 
-#[path = "export.rs"]
 mod export;
-#[path = "import.rs"]
 mod import;
-#[path = "mirroring.rs"]
 mod mirroring;
 
 const BATCH_BYTES: usize = 8 * 1024 * 1024;

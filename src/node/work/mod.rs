@@ -6,7 +6,6 @@ use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-#[path = "sweep.rs"]
 mod sweep;
 
 pub(crate) struct Worker {

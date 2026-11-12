@@ -56,6 +56,10 @@ SQLite 的运行设置 `io.sqlite_synchronous` 可选 `full`（默认）、`norm
 
 ## instance
 
+所有角色可选 `instance.region`，用于实例拓扑，独立于 S3 桶地区。省略时不声明地区，修改后重启生效。
+
+storage 专用配置见 [存储群集](storage-clusters.md#注册-storage)：`storage_url` 和 `storage_group` 必填，`storage_purpose` 默认为 `primary`；`listen_storage` 默认为 `0.0.0.0:9003`，`storage_transport` 默认为 `tls` 并要求 `storage_tls_cert/storage_tls_key`。`proxy` 模式仅允许显式内网/回环监听，不接受原生证书参数。其他角色填写这些专用键会按键名报错。storage 不接受数据库配置或部署 key。
+
 字段按“身份、监听、本机目录、上传缓存、连接池和资源预算”排列。control 的 `instance.name` 是注册名；data/worker/node 的名称来自预创建身份；单容器省略时使用 `single`。
 
 | 字段 | 默认值 | 说明 |

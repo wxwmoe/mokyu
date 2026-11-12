@@ -9,6 +9,7 @@ use uuid::Uuid;
 pub(crate) struct StorageRecord {
     pub(crate) id: Uuid,
     pub(crate) store_type: String,
+    pub(crate) cluster_id: Option<Uuid>,
     pub(crate) path: Option<String>,
     pub(crate) endpoint: Option<String>,
     pub(crate) bucket: Option<String>,
@@ -26,6 +27,7 @@ impl From<StorageRecord> for BackendRecord {
             id: row.id,
             name: String::new(),
             r#type: row.store_type,
+            cluster_id: row.cluster_id,
             path: row.path,
             endpoint_url: row.endpoint,
             remote_bucket_name: row.bucket,
@@ -57,11 +59,35 @@ pub(crate) trait StorageRecordStore: Send + Sync {
 }
 
 #[derive(Serialize, ToSchema)]
+pub(crate) struct StorageCapabilities {
+    pub read: bool,
+    pub write: bool,
+    pub range: bool,
+    pub multipart: bool,
+    pub shared_staging: bool,
+}
+
+impl StorageCapabilities {
+    pub(crate) fn for_type(kind: &str) -> Self {
+        let available = matches!(kind, "local" | "s3");
+        Self {
+            read: available,
+            write: available,
+            range: available,
+            multipart: available,
+            shared_staging: kind == "s3",
+        }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
 pub(crate) struct StorageView {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     #[serde(rename = "type")]
     pub(crate) storage_type: String,
+    pub(crate) cluster_id: Option<Uuid>,
+    pub(crate) capabilities: StorageCapabilities,
     pub(crate) path: Option<String>,
     pub(crate) endpoint: Option<String>,
     pub(crate) bucket: Option<String>,
@@ -82,6 +108,7 @@ pub(crate) struct StorageRow {
     pub(crate) id: Uuid,
     pub(crate) name: String,
     pub(crate) r#type: String,
+    pub(crate) cluster_id: Option<Uuid>,
     pub(crate) path: Option<String>,
     pub(crate) endpoint_url: Option<String>,
     pub(crate) remote_bucket_name: Option<String>,
@@ -136,6 +163,7 @@ impl From<&StorageRow> for crate::storage::model::Record {
             id: row.id,
             name: row.name.clone(),
             r#type: row.r#type.clone(),
+            cluster_id: row.cluster_id,
             path: row.path.clone(),
             endpoint_url: row.endpoint_url.clone(),
             remote_bucket_name: row.remote_bucket_name.clone(),
