@@ -101,7 +101,7 @@ async function command(action: components['schemas']['ReplicationCommand']) {
         <RouterLink v-if="operation === 'move' && session?.role === 'admin' && sourceResource && !sourceResource.external" :to="'/buckets/' + sourceResource.id">{{ t('replicationTransferProject') }}</RouterLink>
         <label v-if="scope === 'prefix'">{{ t('replicationPrefix') }}<input v-model="prefix" autocomplete="off" /></label>
         <label v-if="scope === 'objects'">{{ t('replicationKeys') }}<textarea v-model="keys" rows="5" required spellcheck="false" /><small>{{ t('replicationKeysHint') }}</small></label>
-        <label>{{ t('replicationDestination') }}<input v-model="destination" :disabled="scope === 'objects' && paths.length === 1 && !!rename" autocomplete="off" /></label>
+        <label>{{ t('replicationDestination') }}<input v-model="destination" :aria-label="t('replicationDestination')" :disabled="scope === 'objects' && paths.length === 1 && !!rename" autocomplete="off" /><small>{{ t('keyPrefixHint') }}</small></label>
         <label v-if="scope === 'objects' && paths.length === 1">{{ t('replicationRename') }}<input v-model="rename" autocomplete="off" /></label>
         <div class="form-grid"><label>{{ t('replicationConflict') }}<UiSelect v-model="conflict" :options="conflicts" :label="t('replicationConflict')" /></label><label>{{ t('replicationPermissions') }}<UiSelect v-model="permissions" :options="permissionOptions" :label="t('replicationPermissions')" /></label></div>
         <small v-if="permissions === 'ignore'">{{ t('replicationIgnoreHint') }}</small>

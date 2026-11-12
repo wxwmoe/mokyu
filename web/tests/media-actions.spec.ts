@@ -42,7 +42,11 @@ test('page selection, ACL, copy response loss, rename and metadata editing', asy
     await page.locator('.selection-bar').getByRole('button', { name: en.mediaActions }).click()
     await page.getByRole('menuitem', { name: en.mediaAction_copy, exact: true }).click()
     dialog = page.getByRole('dialog', { name: en.mediaAction_copy, exact: true })
-    await dialog.getByRole('textbox', { name: en.targetFolder, exact: true }).fill(prefix + 'copies/')
+    for (const value of ['', 'copies/', 'copy-', 'a//../']) {
+      await dialog.getByRole('textbox', { name: en.targetFolder, exact: true }).fill(value)
+      await expect(dialog.locator('.action-object').first().locator('div > span')).toHaveText(value + 'a.txt')
+    }
+    await dialog.getByRole('textbox', { name: en.targetFolder, exact: true }).fill(prefix + 'copies-')
     let lose = true
     const ids: string[][] = []
     await page.route('**/api/v1/media/actions', async route => {
@@ -56,8 +60,9 @@ test('page selection, ACL, copy response loss, rename and metadata editing', asy
     await expect(dialog).toContainText(en.actionDoneHint)
     expect(ids.length).toBe(2); expect(ids[0]).toEqual(ids[1])
     await page.unroute('**/api/v1/media/actions')
-    const copies = (await listing()).filter((item: any) => item.object_key.startsWith(prefix + 'copies/'))
+    const copies = (await listing()).filter((item: any) => item.object_key.startsWith(prefix + 'copies-'))
     expect(copies.length).toBe(3); expect(copies.every((item: any) => !item.public_read)).toBe(true)
+    expect(copies.map((item: any) => item.object_key).sort()).toEqual(['a.txt', 'b.txt', 'c.txt'].map(name => prefix + 'copies-' + name))
     await page.screenshot({ path: '/results/step13-action-results.png', fullPage: true })
     await dialog.getByRole('button', { name: en.close, exact: true }).last().click()
     await page.getByRole('button', { name: 'a.txt', exact: true }).click()

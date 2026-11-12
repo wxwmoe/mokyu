@@ -99,7 +99,7 @@ function destination(link: Link) {
           <button v-if="external.hasNextPage.value" type="button" :disabled="external.isFetchingNextPage.value" @click="external.fetchNextPage()">{{ t('nextPage') }}</button>
           <label class="field"><span>{{ t('redundancyMode') }}</span><UiSelect v-model="mode" :options="modes" :disabled="busy || !!checked" :label="t('redundancyMode')"/></label>
           <p v-if="mode==='synchronous'" class="field-help">{{ t('redundancySyncHint') }}</p>
-          <label class="field">{{ t('redundancyPrefix') }}<input v-model="prefix" maxlength="1024"></label>
+          <label class="field">{{ t('redundancyPrefix') }}<input v-model="prefix" :aria-label="t('redundancyPrefix')" maxlength="1024"><small class="field-help">{{ t('keyPrefixHint') }}</small></label>
           <label class="field"><span>{{ t('replicationPermissions') }}</span><UiSelect v-model="acl" :options="permissionOptions" :disabled="busy || !!checked" :label="t('replicationPermissions')"/></label>
           <label class="field">{{ t('redundancyQueueLimit') }}<input v-model.number="maxPending" type="number" min="1" max="1000000" step="1" required></label>
           <UiCheckbox v-model="deletes" :disabled="busy || !!checked || !canDelete" :label="t('redundancyPropagateDeletes')"/>
