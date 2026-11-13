@@ -50,8 +50,15 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 | `storage_clusters` | `id` UUID、`name` 文本、`revision` 正整数、`policy` JSON、`manifest` JSON | 均非空，无字段默认值；UUID 主键，名称唯一且应用限制 1–128 字节；策略和清单通过 CAS 一并保存 |
 | `storage_cluster_history` | `cluster_id` UUID、`revision` 正整数、`manifest` JSON、`digest` 64 字符十六进制摘要 | 均非空，无默认值；群集外键，`(cluster_id,revision)` 主键；追加后不可修改 |
 | `storage_devices` | `media_id` UUID、`node_id` UUID、可空 `cluster_id` UUID、`observed_at` 整数微秒时间、`announcement` JSON | 介质主键，节点唯一外键，群集外键；除群集外均非空且无默认值；未入群介质也保留登记与旧布局线索 |
+| `storage_payloads` | `operation`、`namespace_id`、`payload_id`、`cluster_id` 为 UUID；`revision` 正整数；`intent` JSON；`state` 文本默认 prepared；`write_until`、`protected_until` 为微秒整数，默认 0 | 全部非空；操作主键，命名空间/载荷/修订联合唯一，群集外键；状态为 prepared/published/retired；保护水位非负 |
+| `storage_fragments` | `id`、`operation`、`media_id` 为 UUID；`sequence`、`copy_index`、`shard_index`、`file_bytes` 为整数；`header` 二进制；`required` 布尔；`root`、`commitment` 可空二进制；`deleted` 布尔默认 false | 除两种摘要外全部非空；分片主键、操作外键和操作/序号/套号/片号唯一；头恰为 320 字节；两个摘要同时为空或各 32 字节；文件至少 432 字节；按介质/操作及操作/删除状态/分片建立索引 |
+| `storage_recovery_catalogs` | `id`、`namespace_id` 为 UUID，`anchor` 为历史群集清单 JSON | 全部非空，无默认值；恢复目录 UUID 主键，固定恢复命名空间及受信起点 |
+| `storage_recovery_cursors` | `catalog`、`media` 为 UUID，`scope` 文本，`revision` 正整数，`cursor_value` JSON，`batch_hash` 32 字节二进制 | 全部非空，无默认值；目录/介质/扫描范围联合主键，目录外键级联删除；游标与同批记录在一个事务提交 |
+| `storage_recovery_entries` | `catalog`、`owner_id`、`id` 为 UUID；`category`、`position`、`encoded_bytes` 为整数；`content_hash` 为 32 字节摘要，`content` 为 JSON | 全部非空，无默认值；目录/类别/记录/位置联合主键；类别 0–6，位置非负，单项至多 8 MiB；目录外键级联删除，按目录/类别/所属载荷/记录/位置建立索引 |
 
 UUID、JSON 和整数分别使用各数据库的原生表示，SQLite 为受约束的 BLOB、TEXT 和 INTEGER。`storages.cluster_id` 为可空群集外键，原生 `mokyu` 后端必须绑定群集且不得带 local/S3 连接字段，其他类型必须为空。群集成员尚未完成排空时不能释放节点身份；本机数据不会随节点凭据轮换删除。
+
+物理映射按载荷操作锁定，批次最多 256 个目标；不会把管理目录锁用于正文流式 I/O。写入计划先持久保存，回执只证明分片完整，载荷发布另有事务边界。读写保护到期前不能物理回收，退役操作仍保留身份以拒绝迟到重放。文件字段见[原生分片格式](storage-fragments.md)。
 
 ## storage、桶与对象
 

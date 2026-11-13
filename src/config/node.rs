@@ -15,7 +15,11 @@ impl NodeConfig {
     pub(crate) fn load(path: &Path, role: &str) -> Result<(Self, Budget)> {
         let text = std::fs::read_to_string(path).context("cannot read configuration")?;
         let config = Self::parse(&text, role)?;
-        let budget = Budget::for_runtime(&config.instance, &RuntimeSettings::default(), &[])?;
+        let budget = if role == "storage" {
+            Budget::for_storage(&config.instance)?
+        } else {
+            Budget::for_runtime(&config.instance, &RuntimeSettings::default(), &[])?
+        };
         Ok((config, budget))
     }
 

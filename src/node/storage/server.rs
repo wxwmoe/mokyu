@@ -1,4 +1,8 @@
-use super::Node;
+use super::{
+    Node, fragments,
+    transfer::{self, Authorization, Cancel},
+};
+use crate::model::storage_transfer::{Action, SignedReceipt};
 use crate::rpc::wire::{
     self,
     storage_node_server::{StorageNode, StorageNodeServer},
@@ -13,7 +17,7 @@ use std::{
 use tokio::{
     io::{AsyncRead, AsyncWrite, ReadBuf},
     net::{TcpListener, TcpStream},
-    sync::{OwnedSemaphorePermit, Semaphore, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch},
 };
 use tonic::{
     Request, Response, Status,
@@ -59,11 +63,135 @@ impl AsyncWrite for Connection {
 
 struct Service {
     node: Arc<Node>,
-    requests: Semaphore,
+    requests: Arc<Semaphore>,
+    reads: Arc<Semaphore>,
+    writes: Arc<Semaphore>,
 }
 
 #[tonic::async_trait]
 impl StorageNode for Service {
+    async fn write(
+        &self,
+        request: Request<tonic::Streaming<wire::StorageInput>>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let permit = self
+            .writes
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("storage write capacity is full"))?;
+        let mut input = request.into_inner();
+        let auth = transfer::first(self.node.clone(), &mut input, permit)
+            .await
+            .map_err(transfer::error)?;
+        let _cancel = Cancel(auth.clone());
+        let grant = auth.value();
+        let Action::Write { header } = grant.action else {
+            return Err(Status::permission_denied("a write grant is required"));
+        };
+        let (sender, receiver) = mpsc::channel(2);
+        let (receipt, ()) = tokio::try_join!(
+            fragments::write(&self.node.files, header, receiver, auth.checking()),
+            transfer::feed(input, auth.clone(), sender)
+        )
+        .map_err(transfer::error)?;
+        let result = SignedReceipt::seal(grant.id, receipt, &self.node.client.identity.credential)
+            .map_err(transfer::error)?;
+        result_json(&result)
+    }
+
+    type ReadStream = transfer::Output;
+    async fn read(
+        &self,
+        request: Request<tonic::Streaming<wire::StorageInput>>,
+    ) -> Result<Response<Self::ReadStream>, Status> {
+        let permit = self
+            .reads
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("storage read capacity is full"))?;
+        let mut input = request.into_inner();
+        let auth = transfer::first(self.node.clone(), &mut input, permit)
+            .await
+            .map_err(transfer::error)?;
+        transfer::read(self.node.clone(), input, auth)
+            .await
+            .map(Response::new)
+            .map_err(transfer::error)
+    }
+
+    async fn state(
+        &self,
+        request: Request<wire::StorageRequest>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let auth = self.authorize(request.into_inner())?;
+        let _cancel = Cancel(auth.clone());
+        let Action::Stat { header } = auth.value().action else {
+            return Err(Status::permission_denied("a state grant is required"));
+        };
+        let result = fragments::inspect(&self.node.files, header, auth.checking())
+            .await
+            .map_err(transfer::error)?;
+        result_json(&result)
+    }
+
+    async fn remove(
+        &self,
+        request: Request<wire::StorageRequest>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let auth = self.authorize(request.into_inner())?;
+        let _cancel = Cancel(auth.clone());
+        let Action::Remove { receipt } = auth.value().action else {
+            return Err(Status::permission_denied("a remove grant is required"));
+        };
+        let removed = fragments::remove(&self.node.files, receipt, auth.checking())
+            .await
+            .map_err(transfer::error)?;
+        result_json(&serde_json::json!({ "removed": removed }))
+    }
+
+    async fn publish(
+        &self,
+        request: Request<wire::StorageRequest>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let auth = self.authorize(request.into_inner())?;
+        let _cancel = Cancel(auth.clone());
+        let Action::Publish { proof } = auth.value().action else {
+            return Err(Status::permission_denied("a publication grant is required"));
+        };
+        let manifest = self
+            .node
+            .files
+            .manifest
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| Status::failed_precondition("storage membership is missing"))?;
+        let link = super::recovery::commit(&self.node.files, proof, manifest, auth.checking())
+            .await
+            .map_err(transfer::error)?;
+        result_json(&link)
+    }
+
+    type InventoryStream = transfer::Output;
+    async fn inventory(
+        &self,
+        request: Request<tonic::Streaming<wire::StorageInput>>,
+    ) -> Result<Response<Self::InventoryStream>, Status> {
+        let permit = self
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("storage control capacity is full"))?;
+        let mut input = request.into_inner();
+        let auth = transfer::first(self.node.clone(), &mut input, permit)
+            .await
+            .map_err(transfer::error)?;
+        transfer::inventory(self.node.clone(), input, auth)
+            .await
+            .map(Response::new)
+            .map_err(transfer::error)
+    }
+
     async fn inspect(
         &self,
         request: Request<wire::StorageInspect>,
@@ -100,6 +228,23 @@ impl StorageNode for Service {
     }
 }
 
+fn result_json(value: &impl serde::Serialize) -> Result<Response<wire::StorageResult>, Status> {
+    let result_json =
+        serde_json::to_vec(value).map_err(|_| Status::internal("encode storage result"))?;
+    Ok(Response::new(wire::StorageResult { result_json }))
+}
+
+impl Service {
+    fn authorize(&self, request: wire::StorageRequest) -> Result<Arc<Authorization>, Status> {
+        let permit = self
+            .requests
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| Status::resource_exhausted("storage control capacity is full"))?;
+        Authorization::open(self.node.clone(), &request.grant_json, permit).map_err(transfer::error)
+    }
+}
+
 pub(super) async fn serve(node: Arc<Node>, mut stopping: watch::Receiver<bool>) -> Result<()> {
     let instance = &node.config.instance;
     let listener = TcpListener::bind(instance.listen_storage.as_deref().unwrap_or("0.0.0.0:9003"))
@@ -117,9 +262,10 @@ pub(super) async fn serve(node: Arc<Node>, mut stopping: watch::Receiver<bool>) 
         }
     };
     let mut server = Server::builder()
-        .concurrency_limit_per_connection(16)
-        .max_concurrent_streams(16)
-        .timeout(Duration::from_secs(15));
+        .concurrency_limit_per_connection(crate::model::storage_transfer::STREAMS_PER_CONNECTION)
+        .max_concurrent_streams(crate::model::storage_transfer::STREAMS_PER_CONNECTION as u32)
+        .http2_keepalive_interval(Some(Duration::from_secs(20)))
+        .http2_keepalive_timeout(Some(Duration::from_secs(10)));
     if instance.storage_transport.as_deref().unwrap_or("tls") == "tls" {
         let cert = crate::storage::local::read_bounded(
             instance.storage_tls_cert.as_ref().unwrap(),
@@ -137,11 +283,13 @@ pub(super) async fn serve(node: Arc<Node>, mut stopping: watch::Receiver<bool>) 
     server
         .add_service(
             StorageNodeServer::new(Service {
+                requests: Arc::new(Semaphore::new(node.budget.storage_control_slots)),
+                reads: Arc::new(Semaphore::new(node.budget.storage_read_slots)),
+                writes: Arc::new(Semaphore::new(node.budget.storage_upload_slots)),
                 node,
-                requests: Semaphore::new(4),
             })
-            .max_decoding_message_size(1024)
-            .max_encoding_message_size(256 * 1024),
+            .max_decoding_message_size(crate::model::storage_transfer::GRANT_LIMIT)
+            .max_encoding_message_size(1024 * 1024),
         )
         .serve_with_incoming_shutdown(incoming, async move {
             if !*stopping.borrow_and_update() {

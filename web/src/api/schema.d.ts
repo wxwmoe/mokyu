@@ -4235,6 +4235,7 @@ export interface components {
             topology: components["schemas"]["StorageClusterTopology"];
         };
         StorageClusterCapacity: {
+            accounting_ready?: boolean;
             /** Format: int64 */
             available_bytes: number;
             /** Format: int64 */
@@ -4297,6 +4298,9 @@ export interface components {
             groups: components["schemas"]["StorageClusterGroup"][];
             members: components["schemas"]["StorageClusterMember"][];
             previous?: string | null;
+            publication_key: number[];
+            /** Format: uuid */
+            record_id: string;
             /** Format: int64 */
             revision: number;
             /** Format: int64 */

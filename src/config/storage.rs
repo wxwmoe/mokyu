@@ -1,4 +1,4 @@
-use super::Instance;
+use super::{Budget, Instance, limits::Environment};
 use anyhow::{Context, Result, ensure};
 use std::net::{IpAddr, SocketAddr};
 
@@ -114,9 +114,122 @@ pub(crate) fn validate(instance: &Instance, role: &str) -> Result<()> {
     Ok(())
 }
 
+impl Budget {
+    pub(crate) fn for_storage(instance: &Instance) -> Result<Self> {
+        let (environment, cpus, memory) = Self::environment();
+        Self::storage(instance, environment, cpus, memory)
+    }
+
+    fn storage(
+        instance: &Instance,
+        environment: Environment,
+        cpus: usize,
+        memory: u64,
+    ) -> Result<Self> {
+        let inflight = instance
+            .stream_memory_budget
+            .as_deref()
+            .map(super::limits::bytes)
+            .transpose()?
+            .unwrap_or(memory / 4);
+        ensure!(
+            inflight <= memory / 2,
+            "storage stream_memory_budget must leave half of memory for runtime and OS"
+        );
+        let connection_bytes = (crate::model::storage_transfer::GRANT_LIMIT
+            * crate::model::storage_transfer::STREAMS_PER_CONNECTION)
+            as u64;
+        let connections = instance
+            .request_connections
+            .unwrap_or((inflight / (connection_bytes * 2)).clamp(2, 32) as usize);
+        let wire_bytes = (connections as u64)
+            .checked_mul(connection_bytes)
+            .context("storage connection budget overflow")?;
+        // Each active operation has room for its checksum tree and bounded wire/file buffers.
+        let slot_bytes = 2 * 1024 * 1024;
+        let slots = (inflight.saturating_sub(wire_bytes) / slot_bytes) as usize;
+        ensure!(
+            slots >= 3 && connections > 0,
+            "storage stream_memory_budget must cover connections and read, write and control slots"
+        );
+        let reads = instance
+            .storage_read_slots
+            .unwrap_or((cpus * 2).min(slots / 3).max(1));
+        let writes = instance
+            .storage_upload_slots
+            .unwrap_or((cpus * 2).min(slots / 3).max(1));
+        let controls = instance
+            .storage_control_slots
+            .unwrap_or(cpus.min(8).min(slots / 3).max(1));
+        let cpu_jobs = instance.cpu_jobs.unwrap_or(cpus.min(slots));
+        ensure!(
+            [reads, writes, controls, cpu_jobs]
+                .into_iter()
+                .all(|v| v > 0)
+                && cpu_jobs <= slots
+                && reads
+                    .checked_add(writes)
+                    .and_then(|v| v.checked_add(controls))
+                    .is_some_and(|v| v <= slots),
+            "storage resource budgets exceed stream_memory_budget"
+        );
+        Ok(Self {
+            environment,
+            available_cpus: cpus,
+            memory_bytes: memory,
+            cpu_jobs,
+            data_slots: slots,
+            slot_bytes,
+            compression_workspace: 0,
+            upload_concurrency: writes,
+            read_concurrency: reads,
+            storage_concurrency: reads,
+            storage_read_slots: reads,
+            storage_upload_slots: writes,
+            storage_control_slots: controls,
+            request_connections: connections,
+            database_connections: 0,
+            database_read_connections: 0,
+            cache_entries: 0,
+            pack_memory_units: 0,
+            response_cache_bytes: 0,
+            write_memory_bytes: 0,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn storage_budget_covers_streams_without_data_codec_buffers() -> Result<()> {
+        let mut instance = Instance {
+            stream_memory_budget: Some("128MiB".into()),
+            request_connections: Some(16),
+            storage_read_slots: Some(2),
+            storage_upload_slots: Some(2),
+            storage_control_slots: Some(2),
+            cpu_jobs: Some(2),
+            ..Default::default()
+        };
+        let budget = Budget::storage(&instance, Environment::default(), 2, 256 << 20)?;
+        assert_eq!(
+            (budget.pack_memory_units, budget.compression_workspace),
+            (0, 0)
+        );
+        assert_eq!(
+            budget.storage_read_slots + budget.storage_upload_slots + budget.storage_control_slots,
+            6
+        );
+        instance.request_connections = Some(usize::MAX);
+        assert!(Budget::storage(&instance, Environment::default(), 2, 256 << 20).is_err());
+        instance.request_connections = Some(16);
+        instance.storage_read_slots = Some(64);
+        assert!(Budget::storage(&instance, Environment::default(), 2, 256 << 20).is_err());
+        assert!(Budget::storage(&Instance::default(), Environment::default(), 2, 64 << 20).is_ok());
+        Ok(())
+    }
 
     #[test]
     fn topology_and_transport_are_role_scoped() {

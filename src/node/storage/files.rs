@@ -15,9 +15,10 @@ pub(super) struct Files {
     pub media: Media,
     pub manifest: RwLock<Option<Manifest>>,
     pub pending: RwLock<Option<Manifest>>,
-    pub history_after: std::sync::Mutex<i64>,
+    pub history: std::sync::Mutex<Option<Manifest>>,
+    pub mutations: Arc<tokio::sync::RwLock<()>>,
     limit: Option<u64>,
-    lock: Arc<std::fs::File>,
+    pub(super) lock: Arc<std::fs::File>,
 }
 
 async fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
@@ -32,7 +33,7 @@ async fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 fn history_path(root: &Path, manifest: &Manifest) -> PathBuf {
     root.join("cluster/history")
         .join(manifest.cluster_id.simple().to_string())
-        .join(manifest.revision.to_string())
+        .join(format!("{}.json", manifest.record_id.simple()))
 }
 
 async fn verify_history(root: &Path, manifest: &Manifest) -> Result<()> {
@@ -136,13 +137,14 @@ impl Files {
         {
             anyhow::bail!("cluster.json is missing; retain history and recover the committed head");
         }
-        let history_after = manifest.as_ref().map_or(0, |manifest| manifest.revision);
+        let history = std::sync::Mutex::new(manifest.clone());
         Ok(Self {
             disk: Disk::storage_member(instance, budget)?,
             media,
             manifest: RwLock::new(manifest),
             pending: RwLock::new(receiving),
-            history_after: std::sync::Mutex::new(history_after),
+            history,
+            mutations: Arc::new(tokio::sync::RwLock::new(())),
             limit: instance
                 .data_limit
                 .as_deref()
@@ -153,13 +155,15 @@ impl Files {
     }
 
     pub fn capacity(&self) -> Result<Capacity> {
-        let (_, used_bytes, reserved_bytes) = self
+        let measurement = self
             .disk
             .data
             .as_ref()
             .context("storage accounting is missing")?
-            .snapshot();
+            .measurement();
+        let (used_bytes, reserved_bytes) = measurement.unwrap_or_default();
         Ok(Capacity {
+            accounting_ready: measurement.is_some(),
             limit: self.limit,
             used_bytes,
             reserved_bytes,
@@ -204,20 +208,8 @@ impl Files {
                 *self.pending.write().unwrap() = Some(candidate.clone());
             }
         }
-        let mut previous = self.manifest.read().unwrap().clone();
-        let mut after = *self.history_after.lock().unwrap();
-        if after > previous.as_ref().map_or(0, |m| m.revision) {
-            if let Some(first) = reply.history.first() {
-                let path = history_path(
-                    &self.disk.root,
-                    &Manifest {
-                        revision: after,
-                        ..first.clone()
-                    },
-                );
-                previous = Some(read(&path).await?);
-            }
-        }
+        let mut previous = self.history.lock().unwrap().clone();
+        let mut after = previous.as_ref().map_or(0, |record| record.revision);
         for record in &reply.history {
             record.validate()?;
             ensure!(
@@ -227,6 +219,7 @@ impl Files {
             if let Some(old) = &previous {
                 ensure!(
                     old.cluster_id == record.cluster_id
+                        && old.record_id != record.record_id
                         && record.previous.as_deref() == Some(old.digest()?.as_str()),
                     "cluster history chain is incomplete"
                 );
@@ -247,7 +240,7 @@ impl Files {
                 self.publish(path, serde_json::to_vec(record)?).await?;
             }
             after = record.revision;
-            *self.history_after.lock().unwrap() = after;
+            *self.history.lock().unwrap() = Some(record.clone());
             previous = Some(record.clone());
         }
         if let Some(manifest) = reply.manifest {
@@ -268,8 +261,13 @@ impl Files {
             if self.manifest.read().unwrap().as_ref() != Some(&manifest) {
                 let disk = self.disk.clone();
                 let guard = self.lock.clone();
+                let mutation = self
+                    .mutations
+                    .clone()
+                    .try_read_owned()
+                    .context("storage is frozen for inventory")?;
                 tokio::task::spawn_blocking(move || -> Result<()> {
-                    let _guard = guard;
+                    let (_guard, _mutation) = (guard, mutation);
                     let head = disk.root.join("cluster.json");
                     let pending = temporary(&head);
                     let mut space = disk.reserve_space(&disk.root, disk.floor, 0)?;
@@ -289,8 +287,13 @@ impl Files {
     async fn publish(&self, path: PathBuf, bytes: Vec<u8>) -> Result<()> {
         let disk = self.disk.clone();
         let guard = self.lock.clone();
+        let mutation = self
+            .mutations
+            .clone()
+            .try_read_owned()
+            .context("storage is frozen for inventory")?;
         tokio::task::spawn_blocking(move || {
-            let _guard = guard;
+            let (_guard, _mutation) = (guard, mutation);
             let mut space = disk.reserve_space(&disk.root, disk.floor, bytes.len() as u64)?;
             space.observe(vec![path.clone(), temporary(&path)])?;
             write_record(&path, &bytes)
@@ -349,11 +352,14 @@ mod tests {
             Budget::for_runtime(&instance, &crate::config::RuntimeSettings::default(), &[])?;
         let lock = Arc::new(crate::runtime::lock_directory(directory.path())?);
         let files = Files::open(&instance, &budget, lock.clone()).await?;
+        files.disk.data.as_ref().unwrap().reconcile()?;
         let media = files.media.media_id;
         let initial = Manifest {
+            record_id: Uuid::now_v7(),
             format_version: FORMAT,
             cluster_id: Uuid::now_v7(),
             deployment_id: Uuid::now_v7(),
+            publication_key: [1; 32],
             takeover_epoch: 1,
             revision: 1,
             previous: None,
@@ -361,6 +367,7 @@ mod tests {
             groups: vec![],
         };
         let mut head = Manifest {
+            record_id: Uuid::now_v7(),
             revision: 2,
             previous: Some(initial.digest()?),
             ..initial.clone()
@@ -388,6 +395,7 @@ mod tests {
         assert!(files.manifest.read().unwrap().is_none());
         drop(files);
         let restarted = Files::open(&instance, &budget, lock.clone()).await?;
+        restarted.disk.data.as_ref().unwrap().reconcile()?;
         assert_eq!(restarted.media.media_id, media);
         assert_eq!(*restarted.pending.read().unwrap(), Some(head.clone()));
         restarted

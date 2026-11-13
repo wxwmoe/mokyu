@@ -71,6 +71,7 @@ async fn save(tx: &mut q::Tx<'_>, mut value: Cluster) -> Result<Cluster> {
         .checked_add(1)
         .context("cluster revision exhausted")?;
     value.manifest.revision = value.revision;
+    value.manifest.record_id = Uuid::now_v7();
     value.manifest.previous = Some(previous);
     value.manifest.validate()?;
     let hash = value.manifest.digest()?;
@@ -119,7 +120,7 @@ impl StorageClusters for Backend {
         Ok(result)
     }
 
-    async fn create(&self, principal: &Principal, input: Create) -> Result<Cluster> {
+    async fn create(&self, principal: &Principal, key: &Key, input: Create) -> Result<Cluster> {
         crate::config::storage::label(&input.name, "cluster name")?;
         input.policy.validate()?;
         let mut tx = q::begin(self).await?;
@@ -137,9 +138,11 @@ impl StorageClusters for Backend {
             policy: input.policy,
             state: "waiting_members".into(),
             manifest: Manifest {
+                record_id: Uuid::now_v7(),
                 format_version: FORMAT,
                 cluster_id: id,
                 deployment_id: deployment,
+                publication_key: crate::model::storage_recovery::public_key(key, id)?,
                 takeover_epoch: 1,
                 revision: 1,
                 previous: None,

@@ -1,5 +1,9 @@
 #[path = "../../shared/storage_cluster.rs"]
 mod storage_cluster;
+#[path = "../../shared/storage_payload.rs"]
+mod storage_payload;
+#[path = "../../shared/storage_recovery.rs"]
+mod storage_recovery;
 pub(crate) const USER_LOCK: i64 = 734922709851002;
 
 mod connection;
@@ -211,6 +215,7 @@ fn stores(backend: Arc<Backend>) -> crate::model::Stores {
         node_work: backend.clone(),
         node_sessions: backend.clone(),
         storage_clusters: backend.clone(),
+        storage_payloads: backend.clone(),
         node_inventory: backend.clone(),
         cluster: Some(backend.clone()),
         metrics: backend.clone(),

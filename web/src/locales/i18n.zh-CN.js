@@ -28,6 +28,7 @@ export default {
   sc_primary: "主存储",
   sc_backup: "备份存储",
   scAvailable: "可写空间",
+  scMeasuring: "正在核对磁盘用量",
   scObserved: "上次上报",
   scMemberState: "成员状态",
   scMedia: "介质 UUID",

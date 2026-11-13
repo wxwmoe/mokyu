@@ -203,6 +203,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     clusters
                         .create(
                             principal,
+                            &app.secrets.credential_key,
                             c::Create {
                                 name,
                                 policy: policy

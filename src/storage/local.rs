@@ -338,7 +338,7 @@ impl Disk {
         instance: &crate::config::Instance,
         budget: &crate::config::Budget,
     ) -> Result<Arc<Self>> {
-        let data = super::data_space::Budget::open(
+        let data = super::data_space::Budget::deferred(
             &instance.data_path,
             instance
                 .data_limit

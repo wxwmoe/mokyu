@@ -32,7 +32,9 @@ pub(super) async fn create(
 ) -> Result<Json<Cluster>, HttpError> {
     actor.recent(&app).await?;
     Ok(Json(
-        app.storage_clusters.create(&actor.principal, input).await?,
+        app.storage_clusters
+            .create(&actor.principal, &app.secrets.credential_key, input)
+            .await?,
     ))
 }
 

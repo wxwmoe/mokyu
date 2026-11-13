@@ -1,6 +1,8 @@
 //! MySQL statements and native row decoding.
 
 pub(super) mod storage_cluster;
+pub(super) mod storage_payload;
+pub(super) mod storage_recovery;
 
 use super::{Backend, transactions};
 use crate::authorization::{Action, Principal};

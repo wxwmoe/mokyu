@@ -1,6 +1,8 @@
 //! PostgreSQL statements, row decoding, and nontransactional operations.
 
 pub(super) mod storage_cluster;
+pub(super) mod storage_payload;
+pub(super) mod storage_recovery;
 
 use super::{Backend, connection, normalize_error, transactions};
 use crate::app::{Bucket, Extent};

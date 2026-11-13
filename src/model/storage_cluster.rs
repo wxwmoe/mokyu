@@ -177,6 +177,8 @@ impl Topology {
 #[serde(deny_unknown_fields)]
 #[schema(as = StorageClusterCapacity)]
 pub(crate) struct Capacity {
+    #[serde(default)]
+    pub accounting_ready: bool,
     pub limit: Option<u64>,
     pub used_bytes: u64,
     pub reserved_bytes: u64,
@@ -186,6 +188,9 @@ pub(crate) struct Capacity {
 
 impl Capacity {
     pub fn writable(&self) -> u64 {
+        if !self.accounting_ready {
+            return 0;
+        }
         self.limit
             .map_or(u64::MAX, |limit| {
                 limit
@@ -224,8 +229,10 @@ pub(crate) struct Group {
 #[schema(as = StorageClusterManifest)]
 pub(crate) struct Manifest {
     pub format_version: u32,
+    pub record_id: Uuid,
     pub cluster_id: Uuid,
     pub deployment_id: Uuid,
+    pub publication_key: [u8; 32],
     pub takeover_epoch: u64,
     pub revision: i64,
     pub previous: Option<String>,
@@ -237,8 +244,10 @@ impl Manifest {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.format_version == FORMAT
+                && !self.record_id.is_nil()
                 && !self.cluster_id.is_nil()
                 && !self.deployment_id.is_nil()
+                && self.publication_key != [0; 32]
                 && self.takeover_epoch > 0
                 && self.revision > 0
                 && self.members.len() <= MEMBER_LIMIT,
@@ -415,7 +424,7 @@ pub(crate) struct Overview {
 #[async_trait::async_trait]
 pub(crate) trait StorageClusters: Send + Sync {
     async fn overview(&self) -> Result<Overview>;
-    async fn create(&self, principal: &Principal, input: Create) -> Result<Cluster>;
+    async fn create(&self, principal: &Principal, key: &Key, input: Create) -> Result<Cluster>;
     async fn update(&self, principal: &Principal, id: Uuid, input: Update) -> Result<Cluster>;
     async fn add_members(&self, principal: &Principal, id: Uuid, input: Members)
     -> Result<Cluster>;
@@ -462,9 +471,11 @@ mod tests {
             })
             .collect();
         let mut manifest = Manifest {
+            record_id: Uuid::now_v7(),
             format_version: FORMAT,
             cluster_id: Uuid::new_v4(),
             deployment_id: Uuid::new_v4(),
+            publication_key: [1; 32],
             takeover_epoch: 1,
             revision: 1,
             previous: None,

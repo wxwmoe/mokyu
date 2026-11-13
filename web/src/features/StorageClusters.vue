@@ -85,7 +85,7 @@ function observed(id: string) { return catalog.data.value?.devices.find(row => r
 function grouped(id: string) { return current.value?.manifest.groups.some(group => group.members.includes(id)) }
 function available(id: string) {
   const capacity = observed(id)?.announcement.capacity
-  return capacity ? Math.min(Math.max(0, capacity.available_bytes - capacity.min_free_space), capacity.limit == null ? Infinity : Math.max(0, capacity.limit - capacity.used_bytes - capacity.reserved_bytes)) : null
+  return capacity?.accounting_ready ? Math.min(Math.max(0, capacity.available_bytes - capacity.min_free_space - capacity.reserved_bytes), capacity.limit == null ? Infinity : Math.max(0, capacity.limit - capacity.used_bytes - capacity.reserved_bytes)) : null
 }
 </script>
 
@@ -112,7 +112,7 @@ function available(id: string) {
         <article v-for="member in current.manifest.members" :key="member.media_id" class="sc-member">
           <div class="sc-heading"><strong>{{ member.topology.storage_group }}</strong><span class="badge node-state" :data-tone="member.state === 'paused' ? 'lilac' : grouped(member.media_id) ? 'sky' : 'cream'">{{ t('sc_' + (member.state === 'available' && !grouped(member.media_id) ? 'unassigned' : member.state)) }}</span></div>
           <p class="sc-address">{{ member.topology.url }}</p>
-          <dl class="sc-facts"><div><dt>{{ t('scRegion') }}</dt><dd>{{ member.topology.region || t('scUnset') }}</dd></div><div><dt>{{ t('scPurpose') }}</dt><dd>{{ t('sc_' + member.topology.purpose) }}</dd></div><div><dt>{{ t('scAvailable') }}</dt><dd>{{ available(member.media_id) == null ? '—' : bytes(available(member.media_id)!) }}</dd></div></dl>
+          <dl class="sc-facts"><div><dt>{{ t('scRegion') }}</dt><dd>{{ member.topology.region || t('scUnset') }}</dd></div><div><dt>{{ t('scPurpose') }}</dt><dd>{{ t('sc_' + member.topology.purpose) }}</dd></div><div><dt>{{ t('scAvailable') }}</dt><dd>{{ observed(member.media_id)?.announcement.capacity.accounting_ready === false ? t('scMeasuring') : available(member.media_id) == null ? '—' : bytes(available(member.media_id)!) }}</dd></div></dl>
           <div class="sc-member-footer"><small class="muted">{{ t('scObserved') }} · {{ observed(member.media_id) ? date(new Date(observed(member.media_id)!.observed_at / 1000).toISOString()) : '—' }}</small><UiSelect :model-value="member.state" :options="choices(grouped(member.media_id) || member.topology.purpose === 'backup' ? ['available', 'paused'] : ['available', 'paused', 'spare'])" :label="t('scMemberState')" :disabled="busy" @update:model-value="value => memberState(member.media_id, value)" /></div>
           <details><summary>{{ t('technicalDetails') }}</summary><dl class="sc-identifiers"><dt>{{ t('scMedia') }}</dt><dd>{{ member.media_id }}</dd><dt>{{ t('scNode') }}</dt><dd>{{ member.node_id }}</dd></dl></details>
         </article>

@@ -3,6 +3,7 @@ pub(crate) mod batch;
 pub(crate) mod history;
 pub(crate) mod import;
 pub(crate) mod local;
+pub(crate) mod recovery;
 pub(crate) mod remote;
 pub(crate) mod replay;
 pub(crate) mod snapshot;

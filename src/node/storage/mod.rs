@@ -1,5 +1,12 @@
 mod files;
+mod fragments;
+mod inventory;
+mod recovery;
 mod server;
+mod transfer;
+
+#[cfg(test)]
+pub(crate) mod recovery_tests;
 
 use crate::{
     config::{Budget, node::NodeConfig},
@@ -101,7 +108,13 @@ impl Node {
             },
             manifest: self.files.manifest.read().unwrap().clone(),
             pending_manifest: self.files.pending.read().unwrap().clone(),
-            history_after: *self.files.history_after.lock().unwrap(),
+            history_after: self
+                .files
+                .history
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(0, |record| record.revision),
         };
         let reply = self
             .client

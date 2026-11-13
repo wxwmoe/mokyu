@@ -292,11 +292,7 @@ impl Config {
 }
 
 impl Budget {
-    pub(crate) fn for_runtime(
-        instance: &Instance,
-        runtime: &RuntimeSettings,
-        profiles: &[crate::storage::profile::StorageProfile],
-    ) -> Result<Self> {
+    pub(super) fn environment() -> (Environment, usize, u64) {
         let mut environment = Environment {
             available_cpus: std::thread::available_parallelism().ok().map(usize::from),
             ..Environment::default()
@@ -372,6 +368,15 @@ impl Budget {
         if environment.available_cpus.is_some() {
             environment.available_cpus = Some(cpus);
         }
+        (environment, cpus, memory)
+    }
+
+    pub(crate) fn for_runtime(
+        instance: &Instance,
+        runtime: &RuntimeSettings,
+        profiles: &[crate::storage::profile::StorageProfile],
+    ) -> Result<Self> {
+        let (environment, cpus, memory) = Self::environment();
         let inflight = instance
             .stream_memory_budget
             .as_deref()

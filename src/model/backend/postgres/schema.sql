@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261113034820.
+-- Generated from the complete postgres migration chain through 20261113065937.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2515,10 +2515,46 @@ CREATE TABLE public.storage_devices (
     announcement jsonb NOT NULL
 );
 
+CREATE TABLE public.storage_fragments (
+    id uuid NOT NULL,
+    operation uuid NOT NULL,
+    media_id uuid NOT NULL,
+    sequence bigint NOT NULL,
+    copy_index integer NOT NULL,
+    shard_index integer NOT NULL,
+    header bytea NOT NULL,
+    file_bytes bigint NOT NULL,
+    required boolean NOT NULL,
+    root bytea,
+    commitment bytea,
+    deleted boolean DEFAULT false NOT NULL,
+    CONSTRAINT storage_fragment_copy CHECK (((copy_index >= 0) AND (copy_index <= 255))),
+    CONSTRAINT storage_fragment_header CHECK ((octet_length(header) = 320)),
+    CONSTRAINT storage_fragment_receipt CHECK ((((root IS NULL) AND (commitment IS NULL)) OR ((root IS NOT NULL) AND (commitment IS NOT NULL) AND (octet_length(root) = 32) AND (octet_length(commitment) = 32)))),
+    CONSTRAINT storage_fragment_sequence CHECK (((sequence >= 0) AND (sequence <= '4294967295'::bigint))),
+    CONSTRAINT storage_fragment_shard CHECK (((shard_index >= 0) AND (shard_index <= 255))),
+    CONSTRAINT storage_fragment_size CHECK ((file_bytes >= 432))
+);
+
 CREATE TABLE public.storage_maintenance (
     storage_id uuid NOT NULL,
     policy text NOT NULL,
     last_scheduled_at timestamp with time zone NOT NULL
+);
+
+CREATE TABLE public.storage_payloads (
+    operation uuid NOT NULL,
+    namespace_id uuid NOT NULL,
+    payload_id uuid NOT NULL,
+    revision bigint NOT NULL,
+    cluster_id uuid NOT NULL,
+    intent jsonb NOT NULL,
+    state text DEFAULT 'prepared'::text NOT NULL,
+    write_until bigint DEFAULT 0 NOT NULL,
+    protected_until bigint DEFAULT 0 NOT NULL,
+    CONSTRAINT storage_payload_protection CHECK ((protected_until >= 0)),
+    CONSTRAINT storage_payload_revision CHECK ((revision > 0)),
+    CONSTRAINT storage_payload_state CHECK ((state = ANY (ARRAY['prepared'::text, 'published'::text, 'retired'::text])))
 );
 
 CREATE TABLE public.storage_permits (
@@ -2642,6 +2678,38 @@ CREATE TABLE public.storage_rate_state (
     updated_at timestamp with time zone DEFAULT now() NOT NULL,
     CONSTRAINT storage_rate_state_metric_check CHECK ((metric = ANY (ARRAY['integrity_rps'::text, 'integrity_bandwidth'::text]))),
     CONSTRAINT storage_rate_state_tokens_check CHECK ((tokens >= (0)::numeric))
+);
+
+CREATE TABLE public.storage_recovery_catalogs (
+    id uuid NOT NULL,
+    namespace_id uuid NOT NULL,
+    anchor jsonb NOT NULL
+);
+
+CREATE TABLE public.storage_recovery_cursors (
+    catalog uuid NOT NULL,
+    media uuid NOT NULL,
+    scope text NOT NULL,
+    revision bigint NOT NULL,
+    cursor_value jsonb NOT NULL,
+    batch_hash bytea NOT NULL,
+    CONSTRAINT storage_recovery_cursor_hash CHECK ((octet_length(batch_hash) = 32)),
+    CONSTRAINT storage_recovery_cursor_revision CHECK ((revision > 0))
+);
+
+CREATE TABLE public.storage_recovery_entries (
+    catalog uuid NOT NULL,
+    category smallint NOT NULL,
+    owner_id uuid NOT NULL,
+    id uuid NOT NULL,
+    "position" bigint NOT NULL,
+    content_hash bytea NOT NULL,
+    encoded_bytes integer NOT NULL,
+    content jsonb NOT NULL,
+    CONSTRAINT storage_recovery_entry_category CHECK (((category >= 0) AND (category <= 6))),
+    CONSTRAINT storage_recovery_entry_hash CHECK ((octet_length(content_hash) = 32)),
+    CONSTRAINT storage_recovery_entry_position CHECK (("position" >= 0)),
+    CONSTRAINT storage_recovery_entry_size CHECK (((encoded_bytes >= 1) AND (encoded_bytes <= 8388608)))
 );
 
 CREATE TABLE public.storages (
@@ -3597,6 +3665,12 @@ ALTER TABLE ONLY public.storage_devices
 ALTER TABLE ONLY public.storage_devices
     ADD CONSTRAINT storage_devices_pkey PRIMARY KEY (media_id);
 
+ALTER TABLE ONLY public.storage_fragments
+    ADD CONSTRAINT storage_fragment_slot UNIQUE (operation, sequence, copy_index, shard_index);
+
+ALTER TABLE ONLY public.storage_fragments
+    ADD CONSTRAINT storage_fragments_pkey PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.usage_history
     ADD CONSTRAINT storage_history_pkey PRIMARY KEY (scope_id, snapshot_at);
 
@@ -3606,11 +3680,26 @@ ALTER TABLE ONLY public.usage_summary
 ALTER TABLE ONLY public.storage_maintenance
     ADD CONSTRAINT storage_maintenance_pkey PRIMARY KEY (storage_id, policy);
 
+ALTER TABLE ONLY public.storage_payloads
+    ADD CONSTRAINT storage_payload_identity UNIQUE (namespace_id, payload_id, revision);
+
+ALTER TABLE ONLY public.storage_payloads
+    ADD CONSTRAINT storage_payloads_pkey PRIMARY KEY (operation);
+
 ALTER TABLE ONLY public.storage_profiles
     ADD CONSTRAINT storage_profiles_pkey PRIMARY KEY (storage_id);
 
 ALTER TABLE ONLY public.storage_rate_state
     ADD CONSTRAINT storage_rate_state_pkey PRIMARY KEY (storage_id, metric);
+
+ALTER TABLE ONLY public.storage_recovery_catalogs
+    ADD CONSTRAINT storage_recovery_catalogs_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.storage_recovery_cursors
+    ADD CONSTRAINT storage_recovery_cursor_id PRIMARY KEY (catalog, media, scope);
+
+ALTER TABLE ONLY public.storage_recovery_entries
+    ADD CONSTRAINT storage_recovery_entry_id PRIMARY KEY (catalog, category, id, "position");
 
 ALTER TABLE ONLY public.storages
     ADD CONSTRAINT storage_targets_name_key UNIQUE (name);
@@ -3998,7 +4087,13 @@ CREATE INDEX sessions_user ON public.sessions USING btree (user_id, created_at D
 
 CREATE INDEX staging_objects_created ON public.staging_objects USING btree (created_at, storage_id);
 
+CREATE INDEX storage_fragment_media ON public.storage_fragments USING btree (media_id, operation);
+
+CREATE INDEX storage_fragment_reclaim ON public.storage_fragments USING btree (operation, deleted, id);
+
 CREATE INDEX storage_permits_active ON public.storage_permits USING btree (storage_id, direction, expires_at);
+
+CREATE INDEX storage_recovery_entry_owner ON public.storage_recovery_entries USING btree (catalog, category, owner_id, id, "position");
 
 CREATE INDEX storages_cluster ON public.storages USING btree (cluster_id);
 
@@ -4747,17 +4842,29 @@ ALTER TABLE ONLY public.storage_devices
 ALTER TABLE ONLY public.storage_devices
     ADD CONSTRAINT storage_devices_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
 
+ALTER TABLE ONLY public.storage_fragments
+    ADD CONSTRAINT storage_fragment_operation FOREIGN KEY (operation) REFERENCES public.storage_payloads(operation);
+
 ALTER TABLE ONLY public.usage_history
     ADD CONSTRAINT storage_history_scope_id_fkey FOREIGN KEY (scope_id) REFERENCES public.usage_summary(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.storage_maintenance
     ADD CONSTRAINT storage_maintenance_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.storage_payloads
+    ADD CONSTRAINT storage_payload_cluster FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);
+
 ALTER TABLE ONLY public.storage_profiles
     ADD CONSTRAINT storage_profiles_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.storage_rate_state
     ADD CONSTRAINT storage_rate_state_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.storage_recovery_cursors
+    ADD CONSTRAINT storage_recovery_cursor_catalog FOREIGN KEY (catalog) REFERENCES public.storage_recovery_catalogs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.storage_recovery_entries
+    ADD CONSTRAINT storage_recovery_entry_catalog FOREIGN KEY (catalog) REFERENCES public.storage_recovery_catalogs(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.storages
     ADD CONSTRAINT storages_cluster_id_fkey FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);

@@ -7,6 +7,12 @@ service StorageControl {
 
 service StorageNode {
   rpc Inspect(StorageInspect) returns (StorageInspection);
+  rpc Write(stream StorageInput) returns (StorageResult);
+  rpc Read(stream StorageInput) returns (stream StorageOutput);
+  rpc State(StorageRequest) returns (StorageResult);
+  rpc Remove(StorageRequest) returns (StorageResult);
+  rpc Publish(StorageRequest) returns (StorageResult);
+  rpc Inventory(stream StorageInput) returns (stream StorageOutput);
 }
 
 message StorageAnnouncement {
@@ -20,6 +26,19 @@ message StorageRegistration {
 
 message StorageInspect {}
 message StorageInspection { bytes identity_json = 1; }
+
+message StorageRequest { bytes grant_json = 1; }
+message StorageInput {
+  bytes grant_json = 1;
+  bytes data = 2;
+  bool complete = 3;
+}
+message StorageResult { bytes result_json = 1; }
+message StorageOutput {
+  bytes data = 1;
+  bytes page_json = 2;
+  bool complete = 3;
+}
 
 service NodeControl {
   rpc PrepareRequest(PrepareRequestInput) returns (RequestReply);

@@ -28,6 +28,7 @@ export default {
   sc_primary: "主ストレージ",
   sc_backup: "バックアップ",
   scAvailable: "書き込み可能容量",
+  scMeasuring: "ディスク使用量を確認中",
   scObserved: "最終報告",
   scMemberState: "メンバーの状態",
   scMedia: "メディア UUID",

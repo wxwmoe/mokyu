@@ -27,11 +27,13 @@ mokyu cli cluster create storage-1 storage
 
 `storage_url` 是其他节点能独立访问的 HTTPS origin，不含用户名、密码、路径、查询或片段。每次重启重新宣告配置。默认专用监听为 `0.0.0.0:9003`，使用原生 TLS；证书和私钥由 `storage_tls_cert`、`storage_tls_key` 提供。客户端使用系统信任根，私有 CA 需安装到信任库，或通过运行环境的 `SSL_CERT_FILE` 提供。
 
-`storage_transport = "proxy"` 时不配置原生证书，`listen_storage` 必须显式绑定回环或内网 IP。代理对外仍提供 HTTPS，并以 HTTP/2 连接 storage。不能将代理模式的明文监听暴露到公网。证书和拓扑配置的修改均在重启后生效。本机 `mokyu cli status` 使用独立的 `listen_control`，不通过对外 TLS 端口。
+`storage_transport = "proxy"` 时不配置原生证书，`listen_storage` 必须显式绑定回环或内网 IP。代理对外仍提供 HTTPS，并以 HTTP/2 连接 storage。Nginx 使用 `grpc_pass`，同时设置 `client_max_body_size 0`，由 storage 的授权范围和配额限制流式载荷。不能将代理模式的明文监听暴露到公网。证书和拓扑配置的修改均在重启后生效。本机 `mokyu cli status` 使用独立的 `listen_control`，不通过对外 TLS 端口。
 
 `instance.region` 可省略，适用于所有角色，与 S3 桶地区独立。`storage_group` 必填，表示部署者确认的独立故障域；不同地区使用相同组名仍算同一组。`storage_purpose` 默认为 `primary`，也可配置 `backup`。已入群成员改变用途或存储分组需要先完成迁移，不能仅靠修改配置改变已有布局。
 
 `data_limit` 限制整个 data 目录，`min_free_space` 保留目标文件系统空间。额度包含身份、群集历史、正文和临时文件；两者同时设置时共同约束可写空间。
+
+storage 按分片协议计算内存额度，不预留 data 的压缩、区块包和响应缓存。`stream_memory_budget` 同时约束连接与读、写、控制操作，最多使用容器有效内存的一半；`cpu_jobs` 限制实际文件 I/O 和校验。等待网络收发时释放磁盘额度，传输本身仍受各自的 `storage_read_slots`、`storage_upload_slots` 和 `storage_control_slots` 限制。超出有效内存的显式配置会在启动时拒绝。
 
 ## 创建群集和后端绑定
 
@@ -53,7 +55,9 @@ Mokyu 后端仅绑定群集 UUID，不绑定某个 storage 地址。管理 API �
 
 ## 身份和恢复边界
 
-每个介质有稳定的 `media.json` UUID。已发布群集清单为 `cluster.json`，不可变历史放在 `cluster/history/<群集 UUID>/<修订>`。同步先持久保存 `cluster.json.part`，逐批核对并保存历史后再原子发布清单；中断重启后继续同步。缺失或损坏的身份和清单不会被当成空盘重新初始化。
+每个介质有稳定的 `media.json` UUID。已发布群集清单为 `cluster.json`，不可变历史放在 `cluster/history/<群集 UUID>/<记录 UUID>.json`。记录包含修订、记录 UUID 和前序摘要。同步先持久保存 `cluster.json.part`，逐批核对并保存历史后再原子发布清单；中断重启后继续同步。缺失或损坏的身份和清单不会被当成空盘重新初始化。
+
+control 的物理映射与 storage 文件字段分别见[数据库结构](database-schema.md#存储群集)和[原生分片格式](storage-fragments.md)。
 
 更换新部署签发的 `node.json` 后，storage 可以向新 control 登记，无需原部署 key。现存清单和历史保留并标为待核对，不会自动覆盖，也不能直接加入新的布局。完整接管和业务恢复尚未开放。一个目录只能有一个进程持有运行锁，control 也限制同一身份的有效会话与介质绑定。
 

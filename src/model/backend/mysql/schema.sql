@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261113034820.
+-- Generated from the complete mysql migration chain through 20261113065937.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -2028,6 +2028,32 @@ CREATE TABLE `storage_devices` (
   CONSTRAINT `storage_devices_ibfk_2` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `storage_fragments` (
+  `id` binary(16) NOT NULL,
+  `operation` binary(16) NOT NULL,
+  `media_id` binary(16) NOT NULL,
+  `sequence` bigint NOT NULL,
+  `copy_index` int NOT NULL,
+  `shard_index` int NOT NULL,
+  `header` blob NOT NULL,
+  `file_bytes` bigint NOT NULL,
+  `required` tinyint(1) NOT NULL,
+  `root` blob,
+  `commitment` blob,
+  `deleted` tinyint(1) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `storage_fragment_slot` (`operation`,`sequence`,`copy_index`,`shard_index`),
+  KEY `storage_fragment_media` (`media_id`,`operation`),
+  KEY `storage_fragment_reclaim` (`operation`,`deleted`,`id`),
+  CONSTRAINT `storage_fragment_operation` FOREIGN KEY (`operation`) REFERENCES `storage_payloads` (`operation`),
+  CONSTRAINT `storage_fragment_copy` CHECK ((`copy_index` between 0 and 255)),
+  CONSTRAINT `storage_fragment_header` CHECK ((length(`header`) = 320)),
+  CONSTRAINT `storage_fragment_receipt` CHECK ((((`root` is null) and (`commitment` is null)) or ((`root` is not null) and (`commitment` is not null) and (length(`root`) = 32) and (length(`commitment`) = 32)))),
+  CONSTRAINT `storage_fragment_sequence` CHECK ((`sequence` between 0 and 4294967295)),
+  CONSTRAINT `storage_fragment_shard` CHECK ((`shard_index` between 0 and 255)),
+  CONSTRAINT `storage_fragment_size` CHECK ((`file_bytes` >= 432))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `storage_gates` (
   `storage_id` binary(16) NOT NULL,
   `direction` varchar(12) COLLATE utf8mb4_bin NOT NULL,
@@ -2041,6 +2067,25 @@ CREATE TABLE `storage_maintenance` (
   `last_scheduled_at` datetime(6) NOT NULL,
   PRIMARY KEY (`storage_id`,`policy`),
   CONSTRAINT `storage_maintenance_storage_fk` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_payloads` (
+  `operation` binary(16) NOT NULL,
+  `namespace_id` binary(16) NOT NULL,
+  `payload_id` binary(16) NOT NULL,
+  `revision` bigint NOT NULL,
+  `cluster_id` binary(16) NOT NULL,
+  `intent` json NOT NULL,
+  `state` varchar(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'prepared',
+  `write_until` bigint NOT NULL DEFAULT '0',
+  `protected_until` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`operation`),
+  UNIQUE KEY `storage_payload_identity` (`namespace_id`,`payload_id`,`revision`),
+  KEY `storage_payload_cluster` (`cluster_id`),
+  CONSTRAINT `storage_payload_cluster` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`),
+  CONSTRAINT `storage_payload_protection` CHECK ((`protected_until` >= 0)),
+  CONSTRAINT `storage_payload_revision` CHECK ((`revision` > 0)),
+  CONSTRAINT `storage_payload_state` CHECK ((`state` in (_utf8mb4'prepared',_utf8mb4'published',_utf8mb4'retired')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storage_permits` (
@@ -2157,6 +2202,44 @@ CREATE TABLE `storage_profiles` (
   CONSTRAINT `storage_upload_overflow_check` CHECK ((`upload_cache_overflow` in (_ascii'fallback',_ascii'reject'))),
   CONSTRAINT `storage_write_durability` CHECK ((`write_durability` in (_ascii'durable',_ascii'buffered',_ascii'volatile')))
 ) ENGINE=InnoDB DEFAULT CHARSET=ascii COLLATE=ascii_bin;
+
+CREATE TABLE `storage_recovery_catalogs` (
+  `id` binary(16) NOT NULL,
+  `namespace_id` binary(16) NOT NULL,
+  `anchor` json NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_recovery_cursors` (
+  `catalog` binary(16) NOT NULL,
+  `media` binary(16) NOT NULL,
+  `scope` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `revision` bigint NOT NULL,
+  `cursor_value` json NOT NULL,
+  `batch_hash` binary(32) NOT NULL,
+  PRIMARY KEY (`catalog`,`media`,`scope`),
+  CONSTRAINT `storage_recovery_cursor_catalog` FOREIGN KEY (`catalog`) REFERENCES `storage_recovery_catalogs` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `storage_recovery_cursor_hash` CHECK ((length(`batch_hash`) = 32)),
+  CONSTRAINT `storage_recovery_cursor_revision` CHECK ((`revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_recovery_entries` (
+  `catalog` binary(16) NOT NULL,
+  `category` smallint NOT NULL,
+  `owner_id` binary(16) NOT NULL,
+  `id` binary(16) NOT NULL,
+  `position` bigint NOT NULL,
+  `content_hash` binary(32) NOT NULL,
+  `encoded_bytes` int NOT NULL,
+  `content` json NOT NULL,
+  PRIMARY KEY (`catalog`,`category`,`id`,`position`),
+  KEY `storage_recovery_entry_owner` (`catalog`,`category`,`owner_id`,`id`,`position`),
+  CONSTRAINT `storage_recovery_entry_catalog` FOREIGN KEY (`catalog`) REFERENCES `storage_recovery_catalogs` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `storage_recovery_entry_category` CHECK ((`category` between 0 and 6)),
+  CONSTRAINT `storage_recovery_entry_hash` CHECK ((length(`content_hash`) = 32)),
+  CONSTRAINT `storage_recovery_entry_position` CHECK ((`position` >= 0)),
+  CONSTRAINT `storage_recovery_entry_size` CHECK ((`encoded_bytes` between 1 and 8388608))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storages` (
   `id` binary(16) NOT NULL,

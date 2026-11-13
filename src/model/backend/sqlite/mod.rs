@@ -45,6 +45,10 @@ mod replica_transactions;
 mod staging;
 #[path = "../../shared/storage_cluster.rs"]
 mod storage_cluster;
+#[path = "../../shared/storage_payload.rs"]
+mod storage_payload;
+#[path = "../../shared/storage_recovery.rs"]
+mod storage_recovery;
 #[path = "../../shared/tier_access.rs"]
 mod tier_access;
 #[path = "../../shared/tier_moves.rs"]

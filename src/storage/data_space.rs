@@ -6,6 +6,7 @@ use std::{
 
 #[derive(Default)]
 struct Usage {
+    ready: bool,
     used: u64,
     reserved: u64,
     revision: u64,
@@ -34,10 +35,28 @@ impl Budget {
             root,
             limit,
             usage: Mutex::new(Usage {
+                ready: true,
                 used,
                 ..Usage::default()
             }),
         }))
+    }
+
+    pub(crate) fn deferred(root: &Path, limit: u64) -> Result<Arc<Self>> {
+        Ok(Arc::new(Self {
+            root: root.canonicalize()?,
+            limit,
+            usage: Mutex::default(),
+        }))
+    }
+
+    pub(crate) fn ready(&self) -> bool {
+        self.usage.lock().unwrap().ready
+    }
+
+    pub(crate) fn measurement(&self) -> Option<(u64, u64)> {
+        let usage = self.usage.lock().unwrap();
+        usage.ready.then_some((usage.used, usage.reserved))
     }
 
     pub(crate) fn contains(&self, path: &Path) -> Result<bool> {
@@ -46,6 +65,10 @@ impl Budget {
 
     pub(crate) fn reserve(self: &Arc<Self>, bytes: u64) -> Result<Reservation> {
         let mut usage = self.usage.lock().unwrap();
+        ensure!(
+            usage.ready,
+            s3s::s3_error!(SlowDown, "data directory usage is still being measured")
+        );
         let reserved = usage
             .reserved
             .checked_add(bytes)
@@ -88,13 +111,25 @@ impl Budget {
         // A rename can move a file behind the walker; only reclaim from a stable walk.
         if usage.active == 0 && usage.revision == started {
             usage.used = observed;
+            usage.ready = true;
         }
         Ok(())
     }
 
     pub(crate) fn start(self: &Arc<Self>) {
         let budget = Arc::downgrade(self);
+        let immediate = !self.ready();
         tokio::spawn(async move {
+            if immediate {
+                if let Some(budget) = budget.upgrade() {
+                    if !matches!(
+                        tokio::task::spawn_blocking(move || budget.reconcile()).await,
+                        Ok(Ok(()))
+                    ) {
+                        tracing::warn!("initial data directory usage measurement failed");
+                    }
+                }
+            }
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 let Some(budget) = budget.upgrade() else {
@@ -214,6 +249,27 @@ fn allocated_tree(root: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deferred_accounting_never_treats_unknown_space_as_empty() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(directory.path().join("existing"), [5; 8192])?;
+        let initial = allocated_tree(directory.path())?;
+        let budget = Budget::deferred(directory.path(), initial)?;
+        assert!(!budget.ready());
+        assert!(budget.reserve(1).is_err());
+        assert!(budget.reserve(0).is_err());
+        assert_eq!(
+            std::fs::read(directory.path().join("existing"))?.len(),
+            8192
+        );
+        budget.reconcile()?;
+        assert!(budget.ready());
+        assert_eq!(budget.snapshot().1, initial);
+        assert!(budget.reserve(1).is_err());
+        assert!(budget.reserve(0).is_ok());
+        Ok(())
+    }
 
     #[test]
     fn refresh_does_not_count_inflight_writes_twice() -> Result<()> {

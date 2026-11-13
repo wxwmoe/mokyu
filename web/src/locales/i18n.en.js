@@ -28,6 +28,7 @@ export default {
   sc_primary: "Primary storage",
   sc_backup: "Backup storage",
   scAvailable: "Writable space",
+  scMeasuring: "Measuring disk usage",
   scObserved: "Last reported",
   scMemberState: "Member state",
   scMedia: "Media UUID",
