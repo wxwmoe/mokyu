@@ -117,7 +117,7 @@ pub(crate) struct NodeContext {
     pub(crate) budget: OnceLock<Budget>,
     body: Mutex<Option<body::Limits>>,
     uploads: Mutex<Option<writes::Limits>>,
-    pub(crate) client: Client,
+    pub(crate) client: Arc<Client>,
     pub(crate) resources: Arc<resources::Resources>,
     pub(crate) observations: observations::Reports,
     pub(crate) access: Arc<crate::status::access::Access>,
@@ -155,6 +155,7 @@ impl NodeContext {
                 .context("control_url is required")?,
             identity,
         )?;
+        let client = Arc::new(client);
         Ok(Arc::new(Self {
             config,
             budget: OnceLock::new(),

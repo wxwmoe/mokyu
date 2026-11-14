@@ -20,6 +20,7 @@ pub(super) async fn check(
         sources.push(cached(backend, node, key, run, index, 3).await?);
     }
     let request = |completion| work::Exchange {
+        protected: vec![],
         run,
         operation: Uuid::now_v7(),
         completion,
@@ -303,6 +304,7 @@ async fn check_owner(
                 node,
                 key,
                 work::Exchange {
+                    protected: vec![],
                     run: *run,
                     operation: Uuid::now_v7(),
                     completion: None,

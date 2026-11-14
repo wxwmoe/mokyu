@@ -56,12 +56,23 @@ impl Sink for Memory {
 }
 
 type Body = Pin<Box<dyn Stream<Item = io::Result<bytes::Bytes>> + Send>>;
-struct Frames {
+pub(crate) struct Frames {
     reader: StreamReader<Body, bytes::Bytes>,
-    remaining: u64,
+    pub(crate) remaining: u64,
     digest: blake3::Hasher,
 }
 impl Frames {
+    pub(crate) fn new(body: Body, size: u64) -> Result<Self> {
+        ensure!(
+            size > 0 && size <= u64::from(crate::model::journal::policy::MAX_LIMIT),
+            "invalid recovery file length"
+        );
+        Ok(Self {
+            reader: StreamReader::new(body),
+            remaining: size,
+            digest: blake3::Hasher::new(),
+        })
+    }
     async fn open(store: &dyn ObjectStore, path: &str, prefix: Option<u64>) -> Result<Self> {
         let options = GetOptions {
             range: prefix.map(|size| (0..size).into()),
@@ -76,40 +87,66 @@ impl Frames {
             "invalid recovery file length for {path}"
         );
         let body: Body = Box::pin(file.into_stream().map_err(io::Error::other));
-        Ok(Self {
-            reader: StreamReader::new(body),
-            remaining: size,
-            digest: blake3::Hasher::new(),
-        })
+        Self::new(body, size)
     }
     async fn next(&mut self, f: &Format<'_>, path: &str) -> Result<(FrameType, Frame)> {
+        let (ty, encoded) = self.encoded().await?;
+        ensure!(
+            matches!(
+                ty,
+                FrameType::Changes
+                    | FrameType::Seal
+                    | FrameType::Snapshot
+                    | FrameType::PartCommit
+                    | FrameType::Mappings
+            ),
+            "unexpected frame type in {path}"
+        );
+        Ok((ty, f.decode(ty, path, &encoded)?))
+    }
+
+    pub(crate) async fn encoded(&mut self) -> Result<(FrameType, Vec<u8>)> {
         ensure!(
             self.remaining >= super::HEADER as u64,
             "truncated journal header"
         );
-        let mut header = [0; super::HEADER];
-        self.reader.read_exact(&mut header).await?;
-        let ty = match header[8] {
-            1 => FrameType::Changes,
-            2 => FrameType::Seal,
-            3 => FrameType::Snapshot,
-            8 => FrameType::PartCommit,
-            _ => anyhow::bail!("unexpected frame type in {path}"),
-        };
-        let count = u32::from_be_bytes(header[30..34].try_into()?) as usize;
-        let size = Format::overhead(header[9] & 2 != 0) + count;
+        let mut magic = [0; 8];
+        self.reader.read_exact(&mut magic).await?;
+        let native = &magic == super::recovery::MAGIC;
         ensure!(
-            count <= super::FRAME_LIMIT && size as u64 <= self.remaining,
+            native || &magic == super::MAGIC,
+            "unsupported recovery file"
+        );
+        let head_size = if native {
+            super::recovery::HEADER
+        } else {
+            super::HEADER
+        };
+        ensure!(
+            self.remaining >= head_size as u64,
+            "truncated metadata header"
+        );
+        let mut header = vec![0; head_size];
+        header[..8].copy_from_slice(&magic);
+        self.reader.read_exact(&mut header[8..]).await?;
+        let ty = FrameType::read(&header)?;
+        let size = if native {
+            super::recovery::frame_size(&header)?
+        } else {
+            let count = u32::from_be_bytes(header[30..34].try_into()?) as usize;
+            ensure!(count <= super::FRAME_LIMIT, "invalid journal frame length");
+            Format::overhead(header[9] & 2 != 0) + count
+        };
+        ensure!(
+            size as u64 <= self.remaining,
             "invalid journal frame length"
         );
         let mut encoded = vec![0; size];
-        encoded[..super::HEADER].copy_from_slice(&header);
-        self.reader
-            .read_exact(&mut encoded[super::HEADER..])
-            .await?;
+        encoded[..head_size].copy_from_slice(&header);
+        self.reader.read_exact(&mut encoded[head_size..]).await?;
         self.remaining -= size as u64;
         self.digest.update(&encoded);
-        Ok((ty, f.decode(ty, path, &encoded)?))
+        Ok((ty, encoded))
     }
 }
 
@@ -129,6 +166,17 @@ pub(super) async fn page(
     let (mut sequence, mut prior) = (0u64, [0; 32]);
     while frames.remaining > 0 {
         let (ty, frame) = frames.next(f, &path).await?;
+        if ty == FrameType::Mappings {
+            ensure!(
+                sequence.checked_add(1) == Some(frame.sequence.first)
+                    && frame.sequence.previous == prior
+                    && frame.bytes.is_empty(),
+                "invalid snapshot mapping boundary"
+            );
+            sequence = frame.sequence.last;
+            prior = frame.digest;
+            continue;
+        }
         ensure!(
             ty == FrameType::Snapshot
                 && sequence.checked_add(1) == Some(frame.sequence.first)
@@ -178,6 +226,14 @@ impl Segment<'_> {
             );
             prior = frame.digest;
             match ty {
+                FrameType::Mappings => {
+                    ensure!(
+                        sequence.checked_add(1) == Some(frame.sequence.first)
+                            && frame.bytes.is_empty(),
+                        "invalid journal mapping boundary"
+                    );
+                    sequence = frame.sequence.last;
+                }
                 FrameType::Changes => {
                     ensure!(
                         sequence.checked_add(1) == Some(frame.sequence.first),
@@ -212,3 +268,7 @@ impl Segment<'_> {
         Ok((sequence, prior, *frames.digest.finalize().as_bytes()))
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/storage/native_journal.rs"]
+mod native_tests;

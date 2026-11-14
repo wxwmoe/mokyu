@@ -9,6 +9,7 @@ pub(super) fn exchange(input: wire::WorkRequest) -> Result<work::Exchange, Statu
         return Err(invalid());
     }
     let value = work::Exchange {
+        protected: vec![],
         run: read::run(input.run)?,
         operation: super::uuid(&input.operation_id)?,
         completion: input

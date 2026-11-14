@@ -208,7 +208,7 @@ pub(in super::super) fn splice_locks(
 
 pub(in super::super) fn allocated_source(stream: Id, chunk: &Chunk) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT l.encoding_id FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.chunk_id=c.id WHERE c.state='uploading' AND l.state='uploading' AND l.quarantined_at IS NULL AND l.owner_task IS NULL AND c.id=",
+        "SELECT COALESCE(s.type='mokyu',FALSE) FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.chunk_id=c.id LEFT JOIN storages s ON s.id=l.storage_id WHERE c.state='uploading' AND l.state='uploading' AND l.quarantined_at IS NULL AND l.owner_task IS NULL AND c.id=",
     );
     query
         .push_bind(chunk.id)

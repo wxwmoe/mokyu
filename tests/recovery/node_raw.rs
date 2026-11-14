@@ -549,6 +549,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
     assert_eq!(state.1, 0);
     use model::node_work as work;
     let request = |run, completion| work::Exchange {
+        protected: vec![],
         run,
         operation: Uuid::now_v7(),
         completion,

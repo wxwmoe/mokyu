@@ -8,7 +8,7 @@ static MIGRATIONS: sqlx::migrate::Migrator = {
     migrator
 };
 const BASELINE_VERSION: i64 = 20261102022127;
-const SCHEMA_VERSION: i64 = 20261113065937;
+const SCHEMA_VERSION: i64 = 20261114065416;
 
 pub(super) async fn run(owner: &mut PgConnection) -> Result<()> {
     sqlx::raw_sql(queries::MIGRATION_SETUP)

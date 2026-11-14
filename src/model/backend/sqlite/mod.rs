@@ -43,12 +43,20 @@ mod read_reports;
 mod replica_transactions;
 #[path = "../../shared/staging.rs"]
 mod staging;
+#[path = "../../shared/storage_capacity.rs"]
+mod storage_capacity;
 #[path = "../../shared/storage_cluster.rs"]
 mod storage_cluster;
+#[path = "../../shared/storage_journal.rs"]
+mod storage_journal;
+#[path = "../../shared/storage_native.rs"]
+mod storage_native;
 #[path = "../../shared/storage_payload.rs"]
 mod storage_payload;
 #[path = "../../shared/storage_recovery.rs"]
 mod storage_recovery;
+#[path = "../../shared/storage_repair.rs"]
+mod storage_repair;
 #[path = "../../shared/tier_access.rs"]
 mod tier_access;
 #[path = "../../shared/tier_moves.rs"]

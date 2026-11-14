@@ -21,16 +21,7 @@ pub(super) enum Input {
     Complete,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
-pub(super) enum State {
-    Missing,
-    Pending {
-        bytes: u64,
-        complete: Option<Receipt>,
-    },
-    Complete(Receipt),
-}
+pub(super) use crate::model::storage_transfer::FragmentState as State;
 
 pub(super) fn temporary(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
@@ -98,15 +89,16 @@ pub(super) fn inspect_file(file: &mut File) -> Result<Receipt> {
     file.seek(SeekFrom::Start(0))?;
     let mut bytes = [0; HEADER_SIZE];
     file.read_exact(&mut bytes)?;
-    let header = Header::decode(&bytes)?;
+    let header = Header::decode(&bytes).context(crate::content::codec::IntegrityError::Metadata)?;
     ensure!(
         file.metadata()?.len() == header.file_bytes(),
-        "fragment is incomplete"
+        crate::content::codec::IntegrityError::Length
     );
     file.seek(SeekFrom::End(-(FOOTER_SIZE as i64)))?;
     let mut footer = [0; FOOTER_SIZE];
     file.read_exact(&mut footer)?;
-    let root = fragment::verify_footer(&header, &footer, None)?;
+    let root = fragment::verify_footer(&header, &footer, None)
+        .context(crate::content::codec::IntegrityError::Metadata)?;
     let receipt = Receipt {
         commitment: fragment::commitment(&header, &root)?,
         header,
@@ -167,7 +159,8 @@ fn unit(
         ))?;
         file.read_exact(&mut proof.hashes[level])?;
     }
-    fragment::verify_unit(header, index, &bytes, &proof.hashes, &receipt.root)?;
+    fragment::verify_unit(header, index, &bytes, &proof.hashes, &receipt.root)
+        .context(crate::content::codec::IntegrityError::Hash)?;
     proof.nodes = nodes;
     Ok(bytes)
 }
@@ -192,7 +185,7 @@ fn validate_file(
     }
     ensure!(
         hash.finalize().as_bytes() == &receipt.header.digest,
-        "fragment body checksum differs"
+        crate::content::codec::IntegrityError::Hash
     );
     Ok(())
 }
@@ -527,7 +520,7 @@ pub(super) async fn read(
             let mut file = open(&destination, false)?;
             ensure!(
                 inspect_file(&mut file)? == receipt,
-                "fragment differs from its trusted receipt"
+                crate::content::codec::IntegrityError::Metadata
             );
             drop(permit);
             if length == 0 {
@@ -560,7 +553,21 @@ pub(super) async fn read(
 
 pub(super) async fn remove(files: &Files, receipt: Receipt, check: Check) -> Result<bool> {
     receipt.validate()?;
-    let destination = path(files, &receipt.header)?;
+    erase(files, receipt.header.clone(), Some(receipt), check).await
+}
+
+pub(super) async fn discard(files: &Files, header: Header, check: Check) -> Result<bool> {
+    header.validate()?;
+    erase(files, header, None, check).await
+}
+
+async fn erase(
+    files: &Files,
+    header: Header,
+    receipt: Option<Receipt>,
+    check: Check,
+) -> Result<bool> {
+    let destination = path(files, &header)?;
     let disk = files.disk.clone();
     let lock = files.lock.clone();
     let permit = checked(disk.io.clone().acquire_owned(), &check).await??;
@@ -571,43 +578,59 @@ pub(super) async fn remove(files: &Files, receipt: Receipt, check: Check) -> Res
         .context("storage is frozen for inventory")?;
     tokio::task::spawn_blocking(move || {
         let (_lock, _permit, _mutation_scope) = (lock, permit, mutation);
-        let _mutation = exclusive(&disk, &receipt.header)?;
+        let _mutation = exclusive(&disk, &header)?;
         check()?;
         check_directories(&disk.root, &destination)?;
-        let mut file = match open(&destination, false) {
-            Ok(file) => file,
-            Err(error)
-                if error
-                    .downcast_ref::<std::io::Error>()
-                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        let mut removed = false;
+        for (target, pending) in [
+            (destination.clone(), false),
+            (temporary(&destination), true),
+        ] {
+            let mut file = match open(&target, false) {
+                Ok(file) => file,
+                Err(error)
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let actual = inspect_file(&mut file);
+            if pending && actual.is_err() {
+                let mut planned = header.clone();
+                planned.digest = [0; 32];
+                inspect_partial(&mut file, &planned)?;
+            } else {
+                let actual = actual?;
+                same_plan(&header, &actual.header)?;
+                ensure!(
+                    receipt.as_ref().is_none_or(|receipt| *receipt == actual),
+                    "refusing to delete another fragment"
+                );
+            }
+            let mut accounting = disk.mutation()?;
+            let mut released = local::allocated(&file.metadata()?);
+            #[cfg(unix)]
             {
-                return Ok(false);
+                use std::os::unix::fs::MetadataExt;
+                if file.metadata()?.nlink() != 1 {
+                    released = 0;
+                }
             }
-            Err(error) => return Err(error),
-        };
-        ensure!(
-            inspect_file(&mut file)? == receipt,
-            "refusing to delete another fragment"
-        );
-        let mut accounting = disk.mutation()?;
-        let mut released = local::allocated(&file.metadata()?);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if file.metadata()?.nlink() != 1 {
-                released = 0;
+            check()?;
+            std::fs::remove_file(&target)?;
+            File::open(target.parent().unwrap())?.sync_all()?;
+            drop(file);
+            #[cfg(feature = "fault-injection")]
+            crate::faults::blocking("storage-fragment-removed");
+            if let Some(accounting) = &mut accounting {
+                accounting.released(released);
             }
+            removed = true;
         }
-        check()?;
-        std::fs::remove_file(&destination)?;
-        File::open(destination.parent().unwrap())?.sync_all()?;
-        drop(file);
-        #[cfg(feature = "fault-injection")]
-        crate::faults::blocking("storage-fragment-removed");
-        if let Some(accounting) = &mut accounting {
-            accounting.released(released);
-        }
-        Ok(true)
+        Ok(removed)
     })
     .await?
 }
@@ -652,6 +675,7 @@ pub(super) mod tests {
             operation: Uuid::now_v7(),
             layout_revision: 1,
             revision: 1,
+            generation: 0,
             takeover_epoch: 1,
             offset: 0,
             length: bytes,
@@ -697,6 +721,48 @@ pub(super) mod tests {
             output.extend_from_slice(&part?);
         }
         Ok(output)
+    }
+
+    #[tokio::test]
+    async fn discarded_plans_remove_partial_and_unacknowledged_files() -> Result<()> {
+        let (_directory, _instance, _budget, files) = fixture("8MiB").await?;
+        let data = Bytes::from(vec![37; UNIT + 19]);
+        let planned = header(&files, data.len() as u64);
+        let destination = path(&files, &planned)?;
+        assert!(
+            write(
+                &files,
+                planned.clone(),
+                input(data.slice(..UNIT), false),
+                allowed()
+            )
+            .await
+            .is_err()
+        );
+        assert!(temporary(&destination).exists());
+        let denied: Check = Arc::new(|| anyhow::bail!("expired cleanup grant"));
+        assert!(discard(&files, planned.clone(), denied).await.is_err());
+        assert!(temporary(&destination).exists());
+        let mut wrong = planned.clone();
+        wrong.namespace = Uuid::now_v7();
+        assert!(discard(&files, wrong, allowed()).await.is_err());
+        assert!(discard(&files, planned.clone(), allowed()).await?);
+        assert!(!temporary(&destination).exists());
+        assert!(!discard(&files, planned.clone(), allowed()).await?);
+        let receipt = write(
+            &files,
+            planned.clone(),
+            input(data.clone(), true),
+            allowed(),
+        )
+        .await?;
+        assert!(discard(&files, planned.clone(), allowed()).await?);
+        assert!(!destination.exists());
+        write(&files, planned.clone(), input(data, true), allowed()).await?;
+        std::fs::rename(&destination, temporary(&destination))?;
+        assert!(remove(&files, receipt, allowed()).await?);
+        assert!(!temporary(&destination).exists());
+        Ok(())
     }
 
     #[tokio::test]
@@ -749,11 +815,18 @@ pub(super) mod tests {
         let signed = crate::model::storage_transfer::SignedReceipt::seal(
             grant,
             receipt.clone(),
+            crate::model::storage_cluster::Accounting {
+                boot: Uuid::now_v7(),
+                revision: 1,
+            },
             "storage-secret",
         )?;
         signed.verify(grant, "storage-secret")?;
         assert!(signed.verify(grant, "another-storage-secret").is_err());
         assert!(signed.verify(Uuid::now_v7(), "storage-secret").is_err());
+        let mut wrong = signed.clone();
+        wrong.accounting.revision += 1;
+        assert!(wrong.verify(grant, "storage-secret").is_err());
         assert_eq!(
             write(
                 &files,

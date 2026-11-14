@@ -11,6 +11,51 @@ use axum::{
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[utoipa::path(post, operation_id="storage_cluster_repair", path="/api/v1/storage-clusters/{id}/fragments/{fragment}/repair", params(("id"=Uuid,Path),("fragment"=Uuid,Path)), responses((status=200,body=super::maintenance::TaskStarted)))]
+pub(super) async fn repair(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path((id, fragment)): Path<(Uuid, Uuid)>,
+) -> Result<Json<super::maintenance::TaskStarted>, HttpError> {
+    actor.recent(&app).await?;
+    Ok(Json(super::maintenance::TaskStarted {
+        task_id: app
+            .native_storage
+            .request_repair(&actor.principal, id, fragment)
+            .await?,
+    }))
+}
+
+#[utoipa::path(get, operation_id="storage_cluster_recovery_sources", path="/api/v1/storage-clusters/{id}/recovery-sources", params(("id"=Uuid,Path), super::recovery::native::Query), responses((status=200,body=super::recovery::native::Page)))]
+pub(super) async fn sources(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(query): axum::extract::Query<super::recovery::native::Query>,
+) -> Result<Json<super::recovery::native::Page>, HttpError> {
+    Ok(Json(
+        super::recovery::native::list(&app, &actor.principal, id, query).await?,
+    ))
+}
+
+#[utoipa::path(post, operation_id="storage_cluster_takeover", path="/api/v1/storage-clusters/takeover", request_body=crate::model::storage_cluster::Takeover, responses((status=200,body=Cluster)))]
+pub(super) async fn takeover(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Json(input): Json<crate::model::storage_cluster::Takeover>,
+) -> Result<Json<Cluster>, HttpError> {
+    actor.recent(&app).await?;
+    Ok(Json(
+        crate::storage::native::recovery::takeover(
+            app.storage_clusters.as_ref(),
+            &actor.principal,
+            &app.secrets.credential_key,
+            input,
+        )
+        .await?,
+    ))
+}
+
 #[utoipa::path(get, operation_id="storage_clusters", path="/api/v1/storage-clusters", responses((status=200,body=Overview)))]
 pub(super) async fn list(
     State(app): State<Arc<App>>,

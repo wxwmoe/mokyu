@@ -100,14 +100,23 @@ impl Reader {
                 self.diagnostics.clone(),
             );
             futures_util::pin_mut!(files);
-            let mut writer = pack_writer::Writer::new(
-                backend.store.backend.clone(),
-                output_path,
-                None,
-                usize::try_from(upper)?,
-                None,
-            )
-            .await?;
+            let mut writer = if let Some(native) = &backend.store.native {
+                pack_writer::Writer::stream(
+                    native.clone(),
+                    output_path,
+                    expected,
+                    Some(backend.io.write.clone()),
+                )
+            } else {
+                pack_writer::Writer::new(
+                    backend.store.backend.clone(),
+                    output_path,
+                    None,
+                    usize::try_from(upper)?,
+                    None,
+                )
+                .await?
+            };
             writer.put(Bytes::from_static(pack::frame::HEADER)).await?;
             let mut builder = pack::frame::Builder::new();
             for (before, after) in members.iter().zip(replacements) {

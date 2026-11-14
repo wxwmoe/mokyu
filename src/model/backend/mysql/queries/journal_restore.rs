@@ -266,7 +266,7 @@ pub(in super::super) fn insert_raw<'a>(
     digest: Option<&'a [u8]>,
     profile: Uuid,
 ) -> Statement<'a> {
-    sqlx::query("INSERT INTO raw_sources(location_id,storage_id,size,digest,profile_revision,medium,state) SELECT ?,?,?,?,p.revision,CASE WHEN s.type='local' THEN 'local' ELSE 'shared_s3' END,'ready' FROM storage_profiles p JOIN storages s ON s.id=p.storage_id WHERE p.storage_id=?").bind(uid).bind(storage).bind(size).bind(digest).bind(profile)
+    sqlx::query("INSERT INTO raw_sources(location_id,storage_id,size,digest,profile_revision,medium,state) SELECT ?,?,?,?,p.revision,CASE WHEN s.type='local' THEN 'local' ELSE 'shared' END,'ready' FROM storage_profiles p JOIN storages s ON s.id=p.storage_id WHERE p.storage_id=?").bind(uid).bind(storage).bind(size).bind(digest).bind(profile)
 }
 
 pub(in super::super) fn insert_fragment<'a>(
@@ -482,4 +482,11 @@ pub(in super::super) fn recent() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
         "SELECT id FROM journal_recoveries WHERE state NOT IN ('preview','locked','cancelled') ORDER BY updated_at DESC LIMIT 20",
     )
+}
+pub(in super::super) fn native_pending(storage: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT j.id FROM journal_restore_scopes p JOIN journal_recoveries j ON j.id=p.job JOIN storages s ON s.id=p.storage_id WHERE p.storage_id=? AND s.type='mokyu' AND j.source_storage=j.target_storage AND j.state<>'completed'").bind(storage)
+}
+
+pub(in super::super) fn native_read_only(bucket: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id JOIN journal_restore_scopes p ON p.storage_id=s.id JOIN journal_recoveries j ON j.id=p.job WHERE b.id=? AND s.type='mokyu' AND j.source_storage=j.target_storage AND j.state<>'completed')").bind(bucket)
 }

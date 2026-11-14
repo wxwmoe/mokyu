@@ -209,19 +209,23 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 
 `storage-cluster list/create/update/members/enable/state` 管理原生存储群集。`storage create NAME mokyu --cluster-id UUID --init` 创建停用的群集后端绑定。成员修改和策略更新要求 `--revision`，用法及当前能力边界见[存储群集](storage-clusters.md)。
 
+`storage-cluster repair CLUSTER_UUID FRAGMENT_UUID` 创建或续接指定分片的核验与修复任务，返回 `task_id`。健康片保持原样；确认丢失或损坏后，从有效主副本写入新片，验证完整回执后切换映射。网络或权限错误不会被当作损坏，不从备份来源读取。可通过 `task` 命令查看进度。
+
+`storage-cluster takeover NAME MEDIA_UUID...` 核对所选介质的原群集清单与历史后接管，不要求 storage 提供部署 key。`storage-cluster sources CLUSTER_UUID MEDIA_UUID [--after UUID]` 分页列出介质上可识别的恢复命名空间，返回 `entries` 和 `next`。业务目录恢复仍须核对完整发布证据，通过后端恢复入口解锁和导入，见[存储群集](storage-clusters.md#身份和恢复边界)。
+
 | 命令 | 作用与返回 |
 | --- | --- |
 | `setup token` | 生成一次性 Web 首次管理员 setup token；只输出本次明文，保存哈希和一小时有效期 |
 | `cluster status` | 返回模式和修订、已登记远端数、就绪 data/worker 数、共享任务归属及存储状态 |
 | `cluster mode single/single_control/cluster` | 在维护模式且工作已排空时切换数据库部署模式，随后必须重启；准备步骤见[模式切换](cluster-deployment.md#模式切换和恢复) |
 | `cluster nodes` | 列出节点 id、名称、角色、启用状态和最近 heartbeat |
-| `cluster create NAME data/worker/node` | 在群集模式预创建节点；仅本次返回完整 `node.json`，同名节点拒绝重复创建 |
+| `cluster create NAME data/worker/node/storage` | 在群集模式预创建节点；仅本次返回完整 `node.json`，同名节点拒绝重复创建 |
 | `cluster rotate NAME --confirm` | 保留节点 UUID，递增凭据代次并返回新 `node.json`；旧凭据与会话立即失效，原任务租约被撤销 |
 | `cluster release NAME --confirm` | 安全释放节点身份并重新调度共享任务，唯一副本和受保护读取须先排空 |
 
 单容器和单主控主容器的 CLI 使用部署密钥认证。多控制节点群集的 control 通过 PostgreSQL 注册并保存自己的 `node.json`；data/worker/node 由 `cluster create` 预创建，将返回的 JSON 安全写入目标节点的 `instance.data_path/node.json`，再通过 `control_url` 连接。节点文件丢失时先恢复备份；data/worker/node 可用 `cluster rotate` 保留 UUID 并更换凭据，control 的恢复步骤见[群集部署](cluster-deployment.md#节点身份与恢复)。data/worker/node 本机 CLI 仅支持 `status`，其他管理命令在单容器/control 执行。
 
-创建与轮换只支持 data/worker/node，在 control 执行。将返回 JSON 保存为对应节点的 `instance.data_path/node.json`，限制为仅节点用户可读写；不要复制给其他节点。文件包含 `format=1`、`deployment_id`、`node_id`、`role`、`credential_generation` 和 `credential`；凭据不会在后续列表中返回。文件损坏、旧格式、未知字段或超过 4 KiB 时拒绝加载，需恢复正确文件或由管理员轮换凭据。
+创建与轮换支持 data/worker/node/storage，在 control 执行。将返回 JSON 保存为对应节点的 `instance.data_path/node.json`，限制为仅节点用户可读写；不要复制给其他节点。文件包含 `format=1`、`deployment_id`、`node_id`、`role`、`credential_generation` 和 `credential`；凭据不会在后续列表中返回。文件损坏、旧格式、未知字段或超过 4 KiB 时拒绝加载，需恢复正确文件或由管理员轮换凭据。
 
 ## 后台任务
 

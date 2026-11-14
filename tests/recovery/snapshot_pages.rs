@@ -74,6 +74,7 @@ async fn select_and_verify_a_gibibyte_checkpoint() {
             DEFAULT_LIMIT as usize,
             Some(bucket),
             Some(bucket),
+            None,
         )
         .unwrap();
         for (p, data) in parts {

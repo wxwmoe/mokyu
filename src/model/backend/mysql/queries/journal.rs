@@ -18,11 +18,11 @@ pub(in super::super) fn lock_mode(bucket: Uuid) -> Scalar<'static, i64> {
 }
 
 pub(in super::super) fn enabled(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT g.journal_mode=1 FROM bucket_change_gates g JOIN buckets b ON b.id=g.bucket_id JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3')").bind(bucket)
+    sqlx::query_scalar("SELECT g.journal_mode=1 FROM bucket_change_gates g JOIN buckets b ON b.id=g.bucket_id JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3','mokyu')").bind(bucket)
 }
 
 pub(in super::super) fn supported(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3'))").bind(bucket)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3','mokyu'))").bind(bucket)
 }
 
 pub(in super::super) fn create(bucket: Uuid) -> Statement<'static> {
@@ -71,7 +71,7 @@ pub(in super::super) fn scanned(bucket: Uuid, count: i64) -> Statement<'static> 
 }
 
 pub(in super::super) fn ensure_store(storage: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO journal_stores(policy,storage_id) SELECT ?,id FROM storages WHERE id=? AND type IN ('local','s3') ON DUPLICATE KEY UPDATE storage_id=journal_stores.storage_id").bind(sqlx::types::Json(Policy::default())).bind(storage)
+    sqlx::query("INSERT INTO journal_stores(policy,storage_id) SELECT ?,id FROM storages WHERE id=? AND type IN ('local','s3','mokyu') ON DUPLICATE KEY UPDATE storage_id=journal_stores.storage_id").bind(sqlx::types::Json(Policy::default())).bind(storage)
 }
 
 pub(in super::super) fn claim(storage: Uuid, token: Uuid) -> Statement<'static> {
@@ -290,11 +290,18 @@ impl JournalStore for Backend {
     }
 
     async fn sources(&self) -> Result<Vec<Uuid>> {
-        Ok(sqlx::query_scalar("SELECT storage_id FROM journal_buckets WHERE last_seq>published_seq UNION SELECT storage_id FROM journal_stores WHERE flush_requested OR allocated_seq>emitted_seq OR EXISTS(SELECT 1 FROM journal_files f WHERE f.storage_id=journal_stores.storage_id AND f.state='sealed') OR open_file IS NOT NULL AND EXISTS(SELECT 1 FROM storages s WHERE s.id=journal_stores.storage_id AND s.type='s3') ORDER BY storage_id").fetch_all(&self.pool).await?)
+        Ok(sqlx::query_scalar("SELECT storage_id FROM journal_buckets WHERE last_seq>published_seq UNION SELECT namespace_id FROM storage_journal_sources WHERE allocated_revision<revision UNION SELECT storage_id FROM journal_stores WHERE flush_requested OR allocated_seq>emitted_seq OR EXISTS(SELECT 1 FROM journal_files f WHERE f.storage_id=journal_stores.storage_id AND f.state='sealed') OR open_file IS NOT NULL AND EXISTS(SELECT 1 FROM storages s WHERE s.id=journal_stores.storage_id AND s.type='s3') ORDER BY storage_id").fetch_all(&self.pool).await?)
     }
 
     async fn claim(&self, storage: Uuid, token: Uuid) -> Result<Option<Ledger>> {
         let mut tx = self.pool.begin().await?;
+        if super::journal_restore::native_pending(storage)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some()
+        {
+            return Ok(None);
+        }
         ensure_store(storage).execute(&mut *tx).await?;
         let changed = claim(storage, token)
             .execute(&mut *tx)
@@ -490,7 +497,7 @@ impl JournalStore for Backend {
 
     async fn journal_status(&self, storage: Uuid) -> Result<Status> {
         let supported: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type IN ('local','s3'))",
+            "SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type IN ('local','s3','mokyu'))",
         )
         .bind(storage)
         .fetch_one(&self.pool)
@@ -535,8 +542,12 @@ impl JournalStore for Backend {
         let mut tx = transactions::admin_transaction(&self.pool, principal).await?;
         ensure_store(storage).execute(&mut *tx).await?;
         let state = ledger(storage).fetch_one(&mut *tx).await?;
+        let native = super::storage_journal::identity(storage)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
         policy
-            .validate(state.local)
+            .validate(state.local || native)
             .map_err(|e| s3s::s3_error!(InvalidArgument, "{e}"))?;
         let changed = sqlx::query("UPDATE journal_stores SET policy=CASE WHEN open_file IS NULL AND allocated_seq=emitted_seq AND NOT EXISTS(SELECT 1 FROM journal_files f WHERE f.storage_id=journal_stores.storage_id AND f.state='sealed') THEN ? ELSE policy END,pending_policy=CASE WHEN open_file IS NULL AND allocated_seq=emitted_seq AND NOT EXISTS(SELECT 1 FROM journal_files f WHERE f.storage_id=journal_stores.storage_id AND f.state='sealed') THEN NULL ELSE ? END,flush_requested=CASE WHEN open_file IS NOT NULL OR allocated_seq>emitted_seq THEN TRUE ELSE flush_requested END,revision=revision+1 WHERE storage_id=? AND revision=?")
             .bind(sqlx::types::Json(policy)).bind(sqlx::types::Json(policy)).bind(storage).bind(revision).execute(&mut *tx).await?.rows_affected();

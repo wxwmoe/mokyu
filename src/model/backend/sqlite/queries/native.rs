@@ -237,7 +237,11 @@ pub(in super::super) fn prune_pins() -> Statement<'static> {
     )
 }
 pub(in super::super) fn rebind(source: Id, stream: Id) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET owner_stream=? WHERE id=? AND state='writing' AND medium='shared_s3'").bind(stream).bind(source)
+    sqlx::query(
+        "UPDATE raw_sources SET owner_stream=? WHERE id=? AND state='writing' AND medium='shared'",
+    )
+    .bind(stream)
+    .bind(source)
 }
 
 pub(in super::super) fn unknown_file(id: Uuid) -> Scalar<'static, bool> {

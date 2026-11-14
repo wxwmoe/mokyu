@@ -11,6 +11,65 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 #[tokio::test]
+#[ignore = "requires an initialized isolated PostgreSQL database"]
+async fn postgres_terminal_tasks_release_execution_leases() -> Result<()> {
+    assert_eq!(
+        std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
+        "isolated-only"
+    );
+    let url = std::fs::read_to_string(std::env::var("MOKYU_TEST_DATABASE_URL_FILE")?)?;
+    let pool = PgPool::connect(url.trim()).await?;
+    let mut tx = pool.begin().await?;
+    let node = Uuid::now_v7();
+    sqlx::query("INSERT INTO nodes(id,name,role) VALUES($1,$2,'worker')")
+        .bind(node)
+        .bind(node.to_string())
+        .execute(&mut *tx)
+        .await?;
+    for state in ["running", "completed", "failed"] {
+        for expired in [false, true] {
+            let task = Uuid::now_v7();
+            let token = Uuid::new_v4();
+            sqlx::query("INSERT INTO tasks(id,task_type,state,lease_node_id,lease_token,lease_expires_at) VALUES($1,'pack',$2,$3,$4,now()+$5*interval '1 second')")
+                .bind(task).bind(state).bind(node).bind(token).bind(if expired { -60i32 } else { 60i32 })
+                .execute(&mut *tx).await?;
+            if expired {
+                assert!(
+                    super::queries::lock_stale_tasks()
+                        .fetch_all(&mut *tx)
+                        .await?
+                        .contains(&task)
+                );
+                super::queries::requeue_stale_tasks(&[task])
+                    .execute(&mut *tx)
+                    .await?;
+            } else {
+                assert_eq!(
+                    super::queries::requeue_owned_task(task, Uuid::new_v4())
+                        .execute(&mut *tx)
+                        .await?
+                        .rows_affected(),
+                    0
+                );
+                assert_eq!(
+                    super::queries::requeue_owned_task(task, token)
+                        .execute(&mut *tx)
+                        .await?
+                        .rows_affected(),
+                    1
+                );
+            }
+            let (actual, released): (String, bool) = sqlx::query_as("SELECT state,lease_node_id IS NULL AND lease_token IS NULL AND lease_expires_at IS NULL FROM tasks WHERE id=$1")
+                .bind(task).fetch_one(&mut *tx).await?;
+            assert_eq!(actual, if state == "running" { "queued" } else { state });
+            assert!(released);
+        }
+    }
+    tx.rollback().await?;
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "requires MOKYU_TEST_DATABASE_URL_FILE pointing to a new isolated PostgreSQL database"]
 async fn postgres_task_execution_fences_stale_work() -> Result<()> {
     assert_eq!(

@@ -57,14 +57,23 @@ pub(in super::super) async fn complete_chunk_write_in(
     chunk: &Chunk,
 ) -> Result<()> {
     writing_stream(tx, stream).await?;
-    ensure!(
-        queries::allocated_source(stream, chunk)
-            .build_query_scalar::<i64>()
-            .fetch_optional(&mut **tx)
-            .await?
-            .is_some(),
-        crate::model::Error::OperationAborted
-    );
+    let native = queries::allocated_source(stream, chunk)
+        .build_query_scalar::<bool>()
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(crate::model::Error::OperationAborted)?;
+    if native {
+        super::super::storage_native::publish_carrier(
+            tx,
+            chunk
+                .storage_id
+                .context("native chunk storage is missing")?,
+            &crate::storage::location::Layout::S3.chunk(chunk.address()),
+            chunk.address(),
+            chunk.file_size()? as u64,
+        )
+        .await?;
+    }
     ensure!(
         queries::complete_chunk(chunk)
             .execute(&mut **tx)

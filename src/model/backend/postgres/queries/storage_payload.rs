@@ -9,6 +9,34 @@ use anyhow::Result;
 use sqlx::types::Json;
 use uuid::Uuid;
 
+pub(in super::super) fn collect_candidates(namespace: Uuid, now: i64) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT p.operation FROM storage_payloads p WHERE p.namespace_id=$1 AND p.collect_after<=$2 AND p.intent->>'area'='blocks' AND ((p.state='retired' AND p.protected_until<=$3 AND p.write_until<=$4 AND NOT EXISTS(SELECT 1 FROM storage_journal_sources j WHERE j.operation=p.operation) AND (EXISTS(SELECT 1 FROM storage_fragments f WHERE f.operation=p.operation AND NOT f.deleted) OR EXISTS(SELECT 1 FROM storage_repairs r WHERE r.operation=p.operation AND ((r.state='installed' AND NOT r.original_removed) OR (r.state='writing' AND NOT r.candidate_removed))))) OR (p.state='published' AND EXISTS(SELECT 1 FROM storage_repairs r WHERE r.operation=p.operation AND r.state='installed' AND NOT r.original_removed AND r.protected_until<=$5))) ORDER BY p.collect_after,p.operation LIMIT 64")
+        .bind(namespace).bind(now).bind(now).bind(now).bind(now)
+}
+
+pub(in super::super) fn claim_collection(
+    operation: Uuid,
+    now: i64,
+    until: i64,
+) -> Statement<'static> {
+    sqlx::query(
+        "UPDATE storage_payloads SET collect_after=$1 WHERE operation=$2 AND collect_after<=$3",
+    )
+    .bind(until)
+    .bind(operation)
+    .bind(now)
+}
+
+pub(in super::super) fn missing_sequence(operation: Uuid) -> Scalar<'static, Option<i64>> {
+    sqlx::query_scalar("SELECT MIN(sequence) FROM storage_fragments WHERE operation=$1 AND root IS NULL AND NOT deleted").bind(operation)
+}
+
+pub(in super::super) fn enqueue_fill(operation: Uuid, namespace: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO tasks(id,task_type,state,detail,created_by_label,source) VALUES($1,'storage_migration','queued',$2,'Scheduler','system') ON CONFLICT DO NOTHING")
+        .bind(operation)
+        .bind(Json(serde_json::json!({"operation":"native","storage_id":namespace})))
+}
+
 pub(in super::super) type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub(in super::super) type PayloadRow = (Json<Intent>, String, i64, i64);
 pub(in super::super) type FragmentRow = (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>, bool);
@@ -63,6 +91,11 @@ pub(in super::super) fn receipt(value: &Receipt, bytes: Vec<u8>) -> Statement<'s
         .bind(bytes).bind(value.root.to_vec()).bind(value.commitment.to_vec()).bind(value.header.fragment).bind(value.header.operation)
 }
 
+pub(in super::super) fn slot(header: &Header) -> Rows<'static, FragmentRow> {
+    sqlx::query_as("SELECT header,root,commitment,deleted FROM storage_fragments WHERE operation=$1 AND sequence=$2 AND copy_index=$3 AND shard_index=$4 FOR UPDATE")
+        .bind(header.operation).bind(i64::from(header.sequence)).bind(i32::from(header.copy)).bind(i32::from(header.shard))
+}
+
 pub(in super::super) fn receipt_peer(header: &Header) -> Rows<'static, FragmentRow> {
     sqlx::query_as("SELECT header,root,commitment,deleted FROM storage_fragments WHERE operation=$1 AND sequence=$2 AND shard_index=$3 AND root IS NOT NULL AND NOT deleted ORDER BY copy_index LIMIT 1 FOR SHARE")
         .bind(header.operation).bind(i64::from(header.sequence)).bind(i32::from(header.shard))
@@ -98,7 +131,7 @@ pub(in super::super) fn retire(operation: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn garbage(operation: Uuid, after: Uuid) -> Rows<'static, FragmentRow> {
-    sqlx::query_as("SELECT header,root,commitment,deleted FROM storage_fragments WHERE operation=$1 AND id>$2 AND NOT deleted ORDER BY id LIMIT 256").bind(operation).bind(after)
+    sqlx::query_as("SELECT header,root,commitment,deleted FROM storage_fragments WHERE operation=$1 AND id>$2 AND NOT deleted ORDER BY id LIMIT 128").bind(operation).bind(after)
 }
 
 pub(in super::super) fn removed(operation: Uuid, id: Uuid) -> Statement<'static> {

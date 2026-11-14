@@ -79,7 +79,7 @@ pub(crate) async fn prepare(
             app.storage.check_delivery_directory(&row.source).await?;
             row.source.address()
         }
-        "shared_s3"
+        "shared"
             if profile.file_delivery == "x_accel_redirect"
                 && profile.cache_enabled
                 && app.storage.file_cache().delivery_raw(&row.source).await? =>
@@ -97,7 +97,7 @@ pub(crate) async fn prepare(
         );
     }
     handoff(&profile, address, headers)?;
-    if row.source.medium == "shared_s3" {
+    if row.source.medium == "shared" {
         app.storage.access.demand(
             &mut Default::default(),
             crate::model::tiering::Source::Raw(row.source.location_id),

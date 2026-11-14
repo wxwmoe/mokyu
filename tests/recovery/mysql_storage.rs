@@ -277,6 +277,22 @@ async fn mysql_storage_contract() -> Result<()> {
         "succeeded"
     );
 
+    let stale = backend.edit("remote").await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        backend.update("remote".into(), stale.profile.clone()),
+    )
+    .await??;
+    assert!(matches!(
+        crate::model::error(
+            &stale
+                .update
+                .finish(&remote, None, &stale.profile)
+                .await
+                .unwrap_err()
+        ),
+        Some(crate::model::Error::StorageProfileConflict)
+    ));
     let edit = backend.edit("remote").await?;
     assert_eq!(edit.mode, "single");
     let mut disabled = remote.clone();

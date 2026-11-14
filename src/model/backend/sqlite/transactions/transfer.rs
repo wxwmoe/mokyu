@@ -687,11 +687,7 @@ pub(in super::super) async fn prepare_raw(
                 == 1,
             Error::OperationAborted
         );
-        let medium = if medium == "local" {
-            "local"
-        } else {
-            "shared_s3"
-        };
+        let medium = if medium == "local" { "local" } else { "shared" };
         let location = uuid::Uuid::now_v7();
         let id: Id = base::raw_insert(
             location,
@@ -828,7 +824,7 @@ pub(in super::super) async fn raw_progress(
         }
         RawProgress::Started { upload } => {
             ensure!(
-                plan.target.medium == "shared_s3" && !plan.parts.is_empty(),
+                plan.target.medium == "shared" && !plan.parts.is_empty(),
                 Error::OperationAborted
             );
             if let Some(current) = unit.upload_id {

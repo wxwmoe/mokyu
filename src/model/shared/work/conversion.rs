@@ -76,7 +76,7 @@ pub(super) async fn offer(
             .await?
             == Some(Some(node.node_id));
     ensure!(
-        (local || !source.pending_upload && source.medium == "shared_s3")
+        (local || !source.pending_upload && source.medium == "shared")
             && original.size == source.size
             && original.payload_type == "raw"
             && job.target_key_id == job.encoding.block_key_id,

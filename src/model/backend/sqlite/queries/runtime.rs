@@ -171,7 +171,7 @@ pub(in super::super) fn local_storages() -> Scalar<'static, bool> {
 
 pub(in super::super) fn active_staging() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
-        "SELECT s.id FROM storages s JOIN runtime_settings r ON r.section='uploads' WHERE s.enabled AND s.type='s3' AND lower(hex(s.id))=replace(lower(json_extract(r.value,'$.staging_storage_id')),'-','') LIMIT 1",
+        "SELECT s.id FROM storages s JOIN runtime_settings r ON r.section='uploads' WHERE s.enabled AND s.type IN ('s3','mokyu') AND lower(hex(s.id))=replace(lower(json_extract(r.value,'$.staging_storage_id')),'-','') LIMIT 1",
     )
 }
 
@@ -194,8 +194,10 @@ pub(in super::super) fn configured_stage() -> Scalar<'static, Option<Uuid>> {
 }
 
 pub(in super::super) fn valid_stage(id: Option<Uuid>) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type='s3' AND enabled)")
-        .bind(id)
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type IN ('s3','mokyu') AND enabled)",
+    )
+    .bind(id)
 }
 
 #[async_trait::async_trait]

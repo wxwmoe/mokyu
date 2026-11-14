@@ -297,7 +297,7 @@ fn snapshot_pages_bind_their_identity_and_order() -> Result<()> {
             })
         })
         .collect();
-    let pages = encode_pages(&format, Uuid::new_v4(), 0, &rows, 4096, None, None)?;
+    let pages = encode_pages(&format, Uuid::new_v4(), 0, &rows, 4096, None, None, None)?;
     assert!(pages.len() > 1);
     let mut decoder = Decoder::default();
     let mut seen = 0;
@@ -433,5 +433,180 @@ fn multipart_small_tail_waits_for_its_own_deadline() -> Result<()> {
     ledger.now_us += 1;
     let after = publication::allocate(&ledger, Some(file), Vec::new(), Vec::new(), &format)?;
     assert_eq!(after.files[0].state, "sealed");
+    Ok(())
+}
+#[test]
+fn native_allocation_binds_physical_frames_without_s3_waiting() -> Result<()> {
+    use crate::{
+        content::fragment::Area,
+        model::{
+            storage_cluster::{Acknowledgement, Layout},
+            storage_payload::Intent,
+            storage_recovery::{self, CatalogEntry, Part, Physical},
+        },
+    };
+    let key = crate::content::codec::Key::new("aes-256-gcm", [31; 32])?;
+    for encrypted in [false, true] {
+        let format = Format {
+            storage: Uuid::new_v4(),
+            journal: Uuid::new_v4(),
+            epoch: Uuid::new_v4(),
+            key: &key,
+            encrypted,
+        };
+        let mut state = ledger(Policy {
+            mode: WriteMode::Multipart,
+            segment_bytes: 4096,
+            ..Default::default()
+        });
+        state.storage_id = format.storage;
+        let bucket = Uuid::new_v4();
+        let mut random = vec![0; 11000];
+        blake3::Hasher::new()
+            .update(b"mixed native journal")
+            .finalize_xof()
+            .fill(&mut random);
+        let (input, _) = publication::unpack(
+            &format,
+            vec![
+                draft(&format, event(bucket, 1, Operation::Start, json!({})))?,
+                draft(
+                    &format,
+                    event(
+                        bucket,
+                        2,
+                        Operation::Put,
+                        json!({"sample": STANDARD.encode(random)}),
+                    ),
+                )?,
+                draft(&format, event(bucket, 3, Operation::Ready, json!({})))?,
+            ],
+        )?;
+        let cluster = Uuid::new_v4();
+        let group = Uuid::new_v4();
+        let carrier = Intent {
+            operation: Uuid::new_v4(),
+            namespace: format.storage,
+            payload: Uuid::new_v4(),
+            revision: 1,
+            cluster,
+            layout_revision: 1,
+            takeover_epoch: 1,
+            group,
+            layout: Layout {
+                data_shards: 128,
+                ..Default::default()
+            },
+            members: (0..256).map(|_| Uuid::new_v4()).collect(),
+            area: Area::Blocks,
+            total: 8192,
+            acknowledgement: Acknowledgement::All,
+        };
+        let physical = vec![
+            Physical::Payload {
+                sequence: 1,
+                intent: carrier.clone(),
+                path: "objects/sample".into(),
+            },
+            Physical::State {
+                sequence: 2,
+                operation: carrier.operation,
+                published: true,
+            },
+        ];
+        let expected = serde_json::to_value(&physical)?;
+        let plan = publication::allocate_native(&state, input, physical, vec![], &format)?;
+        assert!(plan.files.len() > 1);
+        assert!(plan.open.is_none());
+        assert_eq!(plan.pages.len(), 3);
+        let mut decoders = storage_recovery::verify::Decoders::default();
+        let mut mappings = Vec::new();
+        let mut catalog = Catalog::default();
+        let mut business = Decoder::default();
+        let mut ordered = Catalog::default();
+        let (mut first, mut previous) = (1, [0; 32]);
+        for file in &plan.files {
+            assert_eq!((file.mode.as_str(), file.state.as_str()), ("put", "sealed"));
+            let bytes: Vec<_> = plan
+                .frames
+                .iter()
+                .filter(|(id, _, _)| *id == file.id)
+                .flat_map(|(_, _, frame)| frame.iter().copied())
+                .collect();
+            assert!(bytes.len() <= 4096);
+            assert_eq!(file.byte_count as usize, bytes.len());
+            let part = Part {
+                intent: Intent {
+                    operation: Uuid::new_v4(),
+                    payload: file.id,
+                    layout: Layout::default(),
+                    members: vec![],
+                    area: Area::Recovery,
+                    total: bytes.len() as u64,
+                    ..carrier.clone()
+                },
+                path: file.path()?,
+                digest: *blake3::hash(&bytes).as_bytes(),
+            };
+            part.visit(&bytes, |frame| {
+                if frame.envelope.kind == FrameType::Mappings {
+                    assert!(!frame.encrypted);
+                }
+                if frame.envelope.kind == FrameType::Changes {
+                    assert_eq!(frame.encrypted, encrypted);
+                }
+                assert!(frame.open(&format)?.consumed <= 4096);
+                Ok(())
+            })?;
+            storage_recovery::verify::visit(
+                &part,
+                &bytes,
+                2,
+                Some(&format),
+                &mut decoders,
+                |entry| {
+                    match entry {
+                        CatalogEntry::Physical(_, record) => mappings.push(record),
+                        CatalogEntry::Business { record, .. } => catalog.stage(record, &format)?,
+                        _ => panic!("unexpected recovery entry"),
+                    }
+                    Ok(())
+                },
+            )?;
+            let (last, digest) = stage_segment(
+                &format,
+                &file.path()?,
+                &bytes,
+                first,
+                previous,
+                &mut business,
+                |record| ordered.stage(record, &format),
+            )?;
+            first = last + 1;
+            previous = digest;
+        }
+        assert!(decoders.complete() && business.complete());
+        assert_eq!(serde_json::to_value(mappings)?, expected);
+        catalog.apply()?;
+        ordered.apply()?;
+        assert_eq!(catalog.buckets[&bucket].objects.len(), 1);
+        assert_eq!(catalog.buckets[&bucket].sequence, 3);
+        assert_eq!(ordered.buckets[&bucket].objects.len(), 1);
+        assert_eq!(ordered.buckets[&bucket].sequence, 3);
+        let only_physical = publication::allocate_native(
+            &state,
+            vec![],
+            vec![Physical::State {
+                sequence: 3,
+                operation: carrier.operation,
+                published: false,
+            }],
+            vec![],
+            &format,
+        )?;
+        assert_eq!(only_physical.files.len(), 1);
+        assert!(only_physical.members.is_empty() && only_physical.pages.is_empty());
+        assert_eq!(only_physical.files[0].state, "sealed");
+    }
     Ok(())
 }

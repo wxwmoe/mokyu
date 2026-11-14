@@ -90,7 +90,7 @@ pub(super) async fn offer(
                 current.source.medium.as_str(),
                 current.source.pending_upload
             ),
-            ("local", true) | ("shared_s3", false)
+            ("local", true) | ("shared", false)
         ),
         Error::SourceUnavailable
     );

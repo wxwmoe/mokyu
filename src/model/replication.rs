@@ -497,7 +497,7 @@ pub(crate) fn matches_scan_source(
     {
         let mut persisted = captured.clone();
         persisted.pending_upload = false;
-        if matches!(captured.medium.as_str(), "local" | "memory") && current.medium == "shared_s3" {
+        if matches!(captured.medium.as_str(), "local" | "memory") && current.medium == "shared" {
             persisted.medium.clone_from(&current.medium);
         }
         return same_source(&persisted, current);
@@ -527,7 +527,7 @@ mod tests {
             quarantine_code: None,
         };
         let mut stored = RawSource {
-            medium: "shared_s3".into(),
+            medium: "shared".into(),
             pending_upload: false,
             revision: 3,
             ..pending.clone()

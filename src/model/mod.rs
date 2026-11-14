@@ -53,8 +53,10 @@ pub(crate) mod settings;
 pub(crate) mod source;
 pub(crate) mod storage;
 pub(crate) mod storage_cluster;
+pub(crate) mod storage_native;
 pub(crate) mod storage_payload;
 pub(crate) mod storage_recovery;
+pub(crate) mod storage_repair;
 pub(crate) mod storage_transfer;
 mod stream;
 pub(crate) mod task;
@@ -89,6 +91,11 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<Error> {
     source
         .downcast_ref::<Error>()
         .copied()
+        .or_else(|| {
+            source
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<Error>().copied())
+        })
         .or_else(|| postgres::error(source))
         .or_else(|| backend::mysql::error(source))
         .or_else(|| backend::sqlite::error(source))

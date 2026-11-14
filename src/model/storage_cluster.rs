@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub(crate) mod placement;
+
 pub(crate) const FORMAT: u32 = 1;
 pub(crate) const MEMBER_LIMIT: usize = 256;
 
@@ -83,7 +85,7 @@ impl Default for Policy {
             data_regions: "same_region".into(),
             parity_regions: "spread".into(),
             replica_regions: "different_region".into(),
-            node_priority: "none".into(),
+            node_priority: "idle".into(),
             placement_order: "region_first".into(),
             backup_copies: 0,
         }
@@ -121,7 +123,7 @@ impl Policy {
             (
                 "placement_order",
                 &self.placement_order,
-                &["region_first", "node_first"][..],
+                &["simple", "region_first", "node_first"][..],
             ),
         ] {
             ensure!(allowed.contains(&value.as_str()), "invalid {field}");
@@ -179,11 +181,31 @@ impl Topology {
 pub(crate) struct Capacity {
     #[serde(default)]
     pub accounting_ready: bool,
+    #[serde(default)]
+    pub accounting: Option<Accounting>,
     pub limit: Option<u64>,
     pub used_bytes: u64,
     pub reserved_bytes: u64,
     pub available_bytes: u64,
     pub min_free_space: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = StorageClusterAccounting)]
+pub(crate) struct Accounting {
+    pub boot: Uuid,
+    pub revision: u64,
+}
+
+impl Accounting {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            !self.boot.is_nil() && self.revision < i64::MAX as u64,
+            "invalid storage accounting stamp"
+        );
+        Ok(())
+    }
 }
 
 impl Capacity {
@@ -241,6 +263,23 @@ pub(crate) struct Manifest {
 }
 
 impl Manifest {
+    pub fn follows(&self, previous: &Self) -> Result<()> {
+        self.validate()?;
+        previous.validate()?;
+        ensure!(
+            self.cluster_id == previous.cluster_id
+                && self.record_id != previous.record_id
+                && previous.revision.checked_add(1) == Some(self.revision)
+                && self.previous.as_deref() == Some(previous.digest()?.as_str())
+                && (self.takeover_epoch == previous.takeover_epoch
+                    && self.deployment_id == previous.deployment_id
+                    && self.publication_key == previous.publication_key
+                    || previous.takeover_epoch.checked_add(1) == Some(self.takeover_epoch)),
+            "cluster history changed authority or has a gap"
+        );
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.format_version == FORMAT
@@ -328,9 +367,20 @@ pub(crate) struct Announcement {
     pub media: Media,
     pub topology: Topology,
     pub capacity: Capacity,
+    #[serde(default)]
+    pub load: Option<WriteLoad>,
     pub manifest: Option<Manifest>,
     pub pending_manifest: Option<Manifest>,
     pub history_after: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = StorageClusterWriteLoad)]
+pub(crate) struct WriteLoad {
+    pub slots: u32,
+    pub admitting: u32,
+    pub active: Vec<Uuid>,
 }
 
 impl Announcement {
@@ -338,6 +388,17 @@ impl Announcement {
         ensure!(self.history_after >= 0, "invalid history cursor");
         self.media.validate()?;
         self.topology.validate()?;
+        if let Some(stamp) = self.capacity.accounting {
+            stamp.validate()?;
+        }
+        if let Some(load) = &self.load {
+            ensure!(
+                load.slots > 0
+                    && load.active.len() <= load.slots as usize
+                    && load.admitting <= load.slots - load.active.len() as u32,
+                "invalid storage write load"
+            );
+        }
         for manifest in self.manifest.iter().chain(self.pending_manifest.iter()) {
             manifest.validate()?;
             ensure!(
@@ -366,6 +427,15 @@ pub(crate) struct Device {
     pub cluster_id: Option<Uuid>,
     pub observed_at: i64,
     pub announcement: Announcement,
+}
+
+// Credentials remain on control; wire plans contain only destination grants.
+pub(crate) struct Target {
+    pub device: Device,
+    pub run: Option<super::session::Run>,
+    pub expires: i64,
+    pub credential: Option<Vec<u8>>,
+    pub generation: i64,
 }
 
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
@@ -414,6 +484,14 @@ pub(crate) struct MemberState {
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = StorageClusterTakeover)]
+pub(crate) struct Takeover {
+    pub name: String,
+    pub media_ids: Vec<Uuid>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
 #[schema(as = StorageClusterOverview)]
 pub(crate) struct Overview {
     pub defaults: Policy,
@@ -422,8 +500,20 @@ pub(crate) struct Overview {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait StorageClusters: Send + Sync {
+pub(crate) trait StorageClusters:
+    super::storage_recovery::RecoveryCatalog + Send + Sync
+{
+    async fn takeover_targets(&self, principal: &Principal, media: &[Uuid]) -> Result<Vec<Target>>;
+    async fn takeover(
+        &self,
+        principal: &Principal,
+        key: &Key,
+        catalog: Uuid,
+        anchor: &Manifest,
+        input: Takeover,
+    ) -> Result<Cluster>;
     async fn overview(&self) -> Result<Overview>;
+    async fn placement_snapshot(&self, id: Uuid) -> Result<(Cluster, Vec<Target>)>;
     async fn create(&self, principal: &Principal, key: &Key, input: Create) -> Result<Cluster>;
     async fn update(&self, principal: &Principal, id: Uuid, input: Update) -> Result<Cluster>;
     async fn add_members(&self, principal: &Principal, id: Uuid, input: Members)

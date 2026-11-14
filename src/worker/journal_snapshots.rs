@@ -2,6 +2,7 @@ use crate::{
     app::App,
     content::codec::Key,
     model::journal::{
+        native::SnapshotFile,
         policy::MAX_LIMIT,
         snapshots::{Item, Job, Member, SnapshotStore},
     },
@@ -33,6 +34,7 @@ use uuid::Uuid;
 
 struct Target {
     backend: Arc<dyn ObjectStore>,
+    native: Option<Arc<crate::storage::native::store::Store>>,
     client: Option<Client>,
     local: Option<Arc<crate::storage::journal::local::Local>>,
     storage: Arc<crate::storage::Storage>,
@@ -55,8 +57,13 @@ impl Target {
         let key = descriptor.unlock(id, &app.secrets.credential_key)?;
         let connection =
             model::Connection::unprotect(&model::Record::from(row), &app.secrets.credential_key)?;
-        let backend =
-            model::Store::connect(&connection, model::Options::from_profile(&profile)?)?.backend;
+        let native = app.storage.store_backend(id)?.native.clone();
+        let backend: Arc<dyn ObjectStore> = match &native {
+            Some(native) => native.clone(),
+            None => {
+                model::Store::connect(&connection, model::Options::from_profile(&profile)?)?.backend
+            }
+        };
         marker::verify_store(backend.as_ref(), &marker_value).await?;
         let grace = i64::try_from(
             crate::config::seconds(&profile.unreferenced_grace)?
@@ -64,6 +71,7 @@ impl Target {
         )?;
         Ok(Self {
             backend,
+            native,
             client: (connection.r#type == "s3")
                 .then(|| source::client(&connection))
                 .transpose()?,
@@ -84,9 +92,58 @@ impl Target {
             key: &self.key,
         }
     }
-    async fn put(&self, path: &str, data: Vec<u8>, condition: Condition) -> Result<Written> {
+    async fn envelope<T: serde::Serialize>(
+        &self,
+        job: &Job,
+        file: SnapshotFile,
+        kind: FrameType,
+        value: &T,
+    ) -> Result<Vec<u8>> {
+        let path = file.path(job)?;
+        let format = self.format(job.encrypt_frames);
+        if let Some(native) = &self.native {
+            snapshot::native_envelope(
+                &format,
+                native
+                    .next_recovery_identity(&Path::from(path.clone()))
+                    .await?,
+                job.id,
+                kind,
+                &path,
+                job.revision.try_into()?,
+                value,
+            )
+        } else {
+            snapshot::envelope(&format, kind, &path, job.revision.try_into()?, value)
+        }
+    }
+    async fn put(
+        &self,
+        app: &App,
+        job: &Job,
+        token: Uuid,
+        file: SnapshotFile,
+        data: Vec<u8>,
+        condition: Condition,
+    ) -> Result<Written> {
+        let path = file.path(job)?;
+        let path = path.as_str();
         let size = data.len();
         let digest = blake3::hash(&data);
+        if let Some(native) = &self.native {
+            return crate::storage::journal::remote::publish_snapshot(
+                native,
+                app.journal.as_ref(),
+                &app.secrets.credential_key,
+                job,
+                token,
+                file,
+                Bytes::from(data),
+                condition,
+            )
+            .await;
+        }
+
         let _guard = match &self.local {
             Some(l) => Some(l.lock(true).await?),
             None => None,
@@ -202,7 +259,8 @@ impl Group {
 }
 
 struct Builder<'a> {
-    db: &'a dyn SnapshotStore,
+    db: &'a dyn crate::model::journal::JournalStore,
+    native: bool,
     job: &'a Job,
     token: Uuid,
     format: Format<'a>,
@@ -211,11 +269,78 @@ struct Builder<'a> {
     group: Group,
 }
 impl Builder<'_> {
+    async fn save(
+        &mut self,
+        bucket: Uuid,
+        family: u32,
+        parts: &[(snapshot::Page, Vec<u8>)],
+        members: &[Member],
+    ) -> Result<()> {
+        self.db
+            .snapshot_page(
+                self.job,
+                self.token,
+                self.position,
+                i64::from(family),
+                bucket,
+                parts,
+                members,
+            )
+            .await?;
+        self.page = self
+            .page
+            .checked_add(u32::try_from(parts.len())?)
+            .context("snapshot page count overflow")?;
+        self.position += i64::try_from(parts.len())?;
+        Ok(())
+    }
     async fn flush(&mut self, bucket: Uuid, family: u32) -> Result<()> {
         if self.group.rows.is_empty() {
             return Ok(());
         }
         let mut group = std::mem::replace(&mut self.group, Group::new());
+        let mut physical = 0i64;
+        if self.native {
+            let mut seen = BTreeSet::new();
+            for row in &group.rows {
+                let Row::Material(material) = row else {
+                    continue;
+                };
+                let Some(hold) = material.hold()? else {
+                    continue;
+                };
+                if !seen.insert((hold.unit, hold.address)) {
+                    continue;
+                }
+                let mut after = None;
+                loop {
+                    let captured = self
+                        .db
+                        .native_snapshot_material(self.job, self.token, &hold, after)
+                        .await?;
+                    let parts = snapshot::encode_pages(
+                        &self.format,
+                        self.job.id,
+                        self.page,
+                        &[],
+                        self.job.page_limit.try_into()?,
+                        Some(bucket),
+                        Some(bucket),
+                        Some(&captured.records),
+                    )?;
+                    for (page, _) in &parts {
+                        physical = physical
+                            .checked_add(page.bytes.try_into()?)
+                            .context("snapshot size overflow")?;
+                    }
+                    self.save(bucket, family, &parts, &[]).await?;
+                    if captured.complete {
+                        break;
+                    }
+                    after = Some((captured.operation, captured.revision, captured.next));
+                }
+            }
+        }
         let parts = snapshot::encode_pages(
             &self.format,
             self.job.id,
@@ -224,8 +349,9 @@ impl Builder<'_> {
             usize::try_from(self.job.page_limit)?,
             Some(bucket),
             Some(bucket),
+            self.native.then_some(&[]),
         )?;
-        let physical = parts.iter().try_fold(0i64, |v, (p, _)| {
+        let physical = parts.iter().try_fold(physical, |v, (p, _)| {
             v.checked_add(p.bytes as i64)
                 .context("snapshot size overflow")
         })?;
@@ -240,22 +366,7 @@ impl Builder<'_> {
             };
             remaining -= m.bytes;
         }
-        self.db
-            .snapshot_page(
-                self.job,
-                self.token,
-                self.position,
-                i64::from(family),
-                bucket,
-                &parts,
-                &group.members,
-            )
-            .await?;
-        self.page = self
-            .page
-            .checked_add(u32::try_from(parts.len())?)
-            .context("snapshot page count overflow")?;
-        self.position += i64::try_from(parts.len())?;
+        self.save(bucket, family, &parts, &group.members).await?;
         Ok(())
     }
     async fn item(&mut self, bucket: Uuid, item: Item, family: &mut u32) -> Result<()> {
@@ -386,6 +497,7 @@ async fn build(app: &App, job: &Job, token: Uuid, remote: &Target) -> Result<()>
     let db = app.journal.as_ref();
     let mut builder = Builder {
         db,
+        native: remote.native.is_some(),
         job,
         token,
         format: remote.format(job.encrypt_frames),
@@ -439,13 +551,9 @@ async fn build(app: &App, job: &Job, token: Uuid, remote: &Target) -> Result<()>
             .try_into()?,
         pages,
     };
-    let data = snapshot::envelope(
-        &remote.format(job.encrypt_frames),
-        FrameType::Manifest,
-        &snapshot::manifest_path(job.id),
-        rev,
-        &manifest,
-    )?;
+    let data = remote
+        .envelope(job, SnapshotFile::Manifest, FrameType::Manifest, &manifest)
+        .await?;
     let index = Index {
         format_version: 1,
         snapshot: job.id,
@@ -457,14 +565,20 @@ async fn build(app: &App, job: &Job, token: Uuid, remote: &Target) -> Result<()>
         buckets: included,
         excluded,
     };
-    let root = snapshot::envelope(
-        &remote.format(job.encrypt_frames),
-        FrameType::Index,
-        &snapshot::index_path(),
-        rev,
-        &index,
-    )?;
-    db.snapshot_seal(job, token, &data, &root).await
+    let root = remote
+        .envelope(job, SnapshotFile::Index, FrameType::Index, &index)
+        .await?;
+    let checkpoint = if remote.native.is_some() {
+        Some(
+            remote
+                .envelope(job, SnapshotFile::Checkpoint, FrameType::Index, &index)
+                .await?,
+        )
+    } else {
+        None
+    };
+    db.snapshot_seal(job, token, &data, &root, checkpoint.as_deref())
+        .await
 }
 
 async fn publish(app: &App, job: &Job, token: Uuid, remote: &Target) -> Result<()> {
@@ -483,7 +597,10 @@ async fn publish(app: &App, job: &Job, token: Uuid, remote: &Target) -> Result<(
         );
         let tag = remote
             .put(
-                &snapshot::page_path(job.id, page.number),
+                app,
+                job,
+                token,
+                SnapshotFile::Page(page.number),
                 data,
                 Condition::Absent,
             )
@@ -497,11 +614,14 @@ async fn publish(app: &App, job: &Job, token: Uuid, remote: &Target) -> Result<(
         )
         .await?;
     }
-    let (manifest, index) = db.snapshot_blobs(job.id).await?;
+    let (manifest, index, checkpoint) = db.snapshot_blobs(job.id).await?;
     if job.manifest_etag.is_none() {
         let tag = remote
             .put(
-                &snapshot::manifest_path(job.id),
+                app,
+                job,
+                token,
+                SnapshotFile::Manifest,
                 manifest,
                 Condition::Absent,
             )
@@ -528,17 +648,24 @@ async fn publish(app: &App, job: &Job, token: Uuid, remote: &Target) -> Result<(
         Condition::Absent
     };
     let tag = remote
-        .put(&snapshot::index_path(), index.clone(), condition)
+        .put(
+            app,
+            job,
+            token,
+            SnapshotFile::Index,
+            index.clone(),
+            condition,
+        )
         .await?;
     #[cfg(feature = "fault-injection")]
     crate::faults::point("journal-snapshot-switched").await;
     let witness = remote
         .put(
-            &snapshot::checkpoint_path(
-                remote.descriptor.writer_epoch,
-                u64::try_from(job.revision)?,
-            ),
-            index,
+            app,
+            job,
+            token,
+            SnapshotFile::Checkpoint,
+            checkpoint,
             Condition::Absent,
         )
         .await?;
@@ -556,6 +683,12 @@ async fn publish(app: &App, job: &Job, token: Uuid, remote: &Target) -> Result<(
 async fn step(app: &App, storage: Uuid, token: Uuid) -> Result<()> {
     let db = app.journal.as_ref();
     let remote = Target::open(app, storage).await?;
+    if let Some(native) = &remote.native {
+        if let Some(proof) = db.native_gc_pending(storage, token).await? {
+            native.publish_evidence(db, token, &proof).await?;
+            db.native_gc_acknowledge(token, &proof).await?;
+        }
+    }
     if let Some(job) = db.snapshot_begin(storage, token).await? {
         let result = async {
             ensure!(
@@ -572,6 +705,19 @@ async fn step(app: &App, storage: Uuid, token: Uuid) -> Result<()> {
             let retryable = error.chain().any(|e| {
                 e.downcast_ref::<reqwest::Error>().is_some()
                     || e.downcast_ref::<sqlx::Error>().is_some()
+                    || matches!(
+                        e.downcast_ref::<crate::model::Error>(),
+                        Some(crate::model::Error::OperationAborted)
+                    )
+                    || e.downcast_ref::<tonic::Status>().is_some_and(|status| {
+                        matches!(
+                            status.code(),
+                            tonic::Code::Unavailable
+                                | tonic::Code::DeadlineExceeded
+                                | tonic::Code::ResourceExhausted
+                                | tonic::Code::Aborted
+                        )
+                    })
             }) || error.to_string() == "bucket settings changed during snapshot";
             db.snapshot_fail(
                 &job,
@@ -618,7 +764,19 @@ async fn step(app: &App, storage: Uuid, token: Uuid) -> Result<()> {
             anyhow::bail!("journal checkpoint changed");
         }
         for file in batch {
-            if let Some(local) = &remote.local {
+            if let Some(native) = &remote.native {
+                let proof = db
+                    .native_gc_prepare(token, &file, &app.secrets.credential_key)
+                    .await?;
+                native.publish_evidence(db, token, &proof).await?;
+                db.native_gc_acknowledge(token, &proof).await?;
+                if !native
+                    .reclaim_recovery(proof.publication.retired[0])
+                    .await?
+                {
+                    continue;
+                }
+            } else if let Some(local) = &remote.local {
                 let path = Path::parse(&file.file_path)?;
                 match remote.backend.head(&path).await {
                     Ok(m) => {

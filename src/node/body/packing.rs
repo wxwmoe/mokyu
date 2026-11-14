@@ -83,7 +83,7 @@ impl Reader {
         source.store.verify().await?;
         let data = if let Input::Raw { source: raw } = &work.input {
             ensure!(
-                raw.medium == "shared_s3" && !raw.pending_upload,
+                raw.medium == "shared" && !raw.pending_upload,
                 codec::IntegrityError::RawMetadata
             );
             let mut file = RawFile::remote(
@@ -126,6 +126,8 @@ impl Reader {
         materials: &crate::node::reads::Held,
         keys: Arc<BTreeMap<Uuid, codec::Key>>,
         batch: wire::Batch,
+        authority: crate::storage::native::store::Authority,
+        region: Option<String>,
     ) -> Result<(wire::Encoded, crate::storage::cache::Fills)> {
         let attempts = layout(&batch)?;
         let _io = self.acquire(&self.io, 1).await?;
@@ -135,7 +137,8 @@ impl Reader {
             let origin = crate::node::reads::backend(
                 materials,
                 source.storage().context("pack source storage missing")?,
-            )?;
+            )?
+            .scoped(authority.clone(), region.clone())?;
             if origin.profile.storage_id != backend.profile.storage_id {
                 origin.store.ensure_verified().await?;
             }
@@ -285,14 +288,29 @@ impl Reader {
                 );
                 let upper =
                     pack.raw_size as usize + 8 + pack.member_count as usize * pack::MAX_MEMBER_TAG;
-                let mut writer = crate::storage::pack_writer::Writer::new(
-                    backend.store.backend.clone(),
-                    crate::storage::location::Layout::S3.pack(pack.address()),
-                    None,
-                    upper,
-                    None,
-                )
-                .await?;
+                let path = crate::storage::location::Layout::S3.pack(pack.address());
+                let mut writer = if let Some(native) = &backend.store.native
+                    && upper > pack::SINGLE_PUT
+                {
+                    self.files
+                        .pack_writer(
+                            native.clone(),
+                            path,
+                            upper,
+                            &backend.profile,
+                            backend.io.write.clone(),
+                        )
+                        .await?
+                } else {
+                    crate::storage::pack_writer::Writer::new(
+                        backend.store.backend.clone(),
+                        path,
+                        None,
+                        upper,
+                        None,
+                    )
+                    .await?
+                };
                 writer.put(Bytes::from_static(pack::frame::HEADER)).await?;
                 Some(writer)
             } else {

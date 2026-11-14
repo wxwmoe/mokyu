@@ -86,7 +86,7 @@ async fn shared_raw_reader_validates_content_and_pins_remote_etag() -> Result<()
         size: bytes.len() as i64,
         digest: Some(Md5::digest(&bytes).to_vec()),
         state: "ready".into(),
-        medium: "shared_s3".into(),
+        medium: "shared".into(),
         pending_upload: false,
         revision: 1,
         quarantine_code: None,

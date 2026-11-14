@@ -137,6 +137,7 @@ fn cleared_work_cannot_be_replayed_as_an_empty_assignment() -> Result<()> {
         credential: String::new(),
     };
     let input = work::Exchange {
+        protected: vec![],
         run: Run {
             boot: Uuid::new_v4(),
             fence: Uuid::new_v4(),
@@ -226,6 +227,14 @@ async fn finish(
     let mut error = None;
     let mut complete = false;
     match row.plan.context("work plan is missing")?.0 {
+        work::Plan::Replicate(plan) => match completion.outcomes.as_slice() {
+            [work::Outcome::Replicated] => {
+                super::super::storage_payload::filled(db, &plan).await?;
+                deleted = 1;
+            }
+            [work::Outcome::Retry] => error = Some("backend_io_failed"),
+            _ => return Err(Error::NodeOperationConflict.into()),
+        },
         work::Plan::Mirror { task: id } => {
             let [work::Outcome::Mirrored { size, missing }] = completion.outcomes.as_slice() else {
                 anyhow::bail!(Error::NodeOperationConflict)
@@ -580,6 +589,12 @@ async fn finish(
                         work::Physical::Staging { key } => {
                             q::remove_staging(storage, key).execute(&mut **db).await?;
                         }
+                        work::Physical::Native { operation } => {
+                            ensure!(
+                                super::super::storage_payload::collected(db, *operation).await?,
+                                Error::NodeOperationConflict
+                            );
+                        }
                     }
                     deleted += 1;
                 }
@@ -887,7 +902,7 @@ async fn collect(
                     .fetch_all(&mut **db)
                     .await?
             {
-                if source.medium != "shared_s3"
+                if source.medium != "shared"
                     || q::physical_active(source.address())
                         .fetch_one(&mut **db)
                         .await?
@@ -935,6 +950,18 @@ async fn collect(
                     inspect_age: false,
                 });
             }
+        }
+    }
+    if reclaim {
+        for operation in
+            super::super::storage_payload::collect_in(db, storage, maximum - items.len()).await?
+        {
+            items.push(work::Deletion {
+                source: work::Physical::Native { operation },
+                identity: operation.into(),
+                location: operation,
+                inspect_age: false,
+            });
         }
     }
     let now = queries::node_clock().fetch_one(&mut **db).await?;
@@ -1281,6 +1308,8 @@ pub(crate) async fn exchange(
                     serde_json::from_value(detail["storage_id"].clone())?,
                     Some(serde_json::from_value(detail["source_storage"].clone())?),
                 )
+            } else if policy == "storage_migration" && detail["operation"] == "native" {
+                (serde_json::from_value(detail["storage_id"].clone())?, None)
             } else if policy == "storage_migration" {
                 (migration::storage(&mut tx, &detail).await?, None)
             } else {
@@ -1302,7 +1331,10 @@ pub(crate) async fn exchange(
             let record = queries::node_read_storages(&[storage])
                 .fetch_one(&mut *tx)
                 .await?;
-            ensure!(record.r#type == "s3", Error::SourceUnavailable);
+            ensure!(
+                matches!(record.r#type.as_str(), "s3" | "mokyu"),
+                Error::SourceUnavailable
+            );
             let secondary = if let Some(storage) = secondary_id.filter(|id| *id != storage) {
                 let profile = queries::storage_profile(storage)
                     .fetch_one(&mut *tx)
@@ -1310,7 +1342,10 @@ pub(crate) async fn exchange(
                 let record = queries::node_read_storages(&[storage])
                     .fetch_one(&mut *tx)
                     .await?;
-                ensure!(record.r#type == "s3", Error::SourceUnavailable);
+                ensure!(
+                    matches!(record.r#type.as_str(), "s3" | "mokyu"),
+                    Error::SourceUnavailable
+                );
                 Some((record, profile))
             } else {
                 None
@@ -1352,8 +1387,12 @@ pub(crate) async fn exchange(
                 }
             }
             if permitted {
-                let selected = if policy == "sweep" && detail["dry_run"] == false && !sweep_barrier
-                {
+                let native = policy == "storage_migration" && detail["operation"] == "native";
+                let selected = if native {
+                    super::super::storage_payload::fill_plan(&mut tx, task)
+                        .await?
+                        .map(|plan| (work::Plan::Replicate(plan), vec![]))
+                } else if policy == "sweep" && detail["dry_run"] == false && !sweep_barrier {
                     // A sweep queued after the shared mode lock needs a new exclusive admission.
                     None
                 } else if policy == "sweep" {
@@ -1596,7 +1635,10 @@ pub(crate) async fn exchange(
                                 let r = queries::node_read_storages(&[id])
                                     .fetch_one(&mut *tx)
                                     .await?;
-                                ensure!(r.r#type == "s3", Error::SourceUnavailable);
+                                ensure!(
+                                    matches!(r.r#type.as_str(), "s3" | "mokyu"),
+                                    Error::SourceUnavailable
+                                );
                                 let [io, job] = [Uuid::new_v4(), Uuid::new_v4()];
                                 ensure!(
                                     permits(&mut tx, node.node_id, io, job, &p, direction, false)
@@ -1639,6 +1681,10 @@ pub(crate) async fn exchange(
                         assigned = Some(task);
                         plan = Some(value);
                     }
+                } else if native {
+                    q::finish(task, token, 0, true, None)
+                        .execute(&mut *tx)
+                        .await?;
                 } else {
                     queries::requeue_owned_task(task, token)
                         .execute(&mut *tx)
@@ -1698,15 +1744,12 @@ pub(crate) async fn exchange(
     Ok(value)
 }
 
-async fn checkpoint_owner(
+async fn active_storage_work(
     db: &mut Transaction<'_, Postgres>,
     node: &NodeState,
-    key: &Key,
     run: Run,
     operation: Uuid,
-) -> Result<(work::Plan, Execution)> {
-    authenticate_rpc_node(db, node, key, false).await?;
-    require_node_run(db, node, run, true).await?;
+) -> Result<(work::Plan, Execution, i64)> {
     let row = q::batch(node.node_id, operation)
         .fetch_optional(&mut **db)
         .await?
@@ -1717,11 +1760,6 @@ async fn checkpoint_owner(
         Error::NodeExpired
     );
     let plan = row.plan.context("work plan missing")?.0;
-    ensure!(
-        matches!(node.role.as_str(), "worker" | "node")
-            || node.role == "data" && matches!(&plan, work::Plan::Mirror { .. }),
-        Error::NodeInactive
-    );
     let mut tokens = vec![row.token, row.maintenance_token];
     tokens.extend_from_slice(plan.source_permits());
     ensure!(
@@ -1738,6 +1776,38 @@ async fn checkpoint_owner(
             .await?
             .is_some(),
         Error::NodeExpired
+    );
+    Ok((
+        plan,
+        task,
+        chrono::Utc::now().timestamp_micros() + row.valid_for_ms * 1000,
+    ))
+}
+
+pub(in super::super) async fn storage_plan(
+    db: &mut Transaction<'_, Postgres>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+) -> Result<(work::Plan, i64)> {
+    let (plan, _, expires) = active_storage_work(db, node, run, operation).await?;
+    Ok((plan, expires))
+}
+
+async fn checkpoint_owner(
+    db: &mut Transaction<'_, Postgres>,
+    node: &NodeState,
+    key: &Key,
+    run: Run,
+    operation: Uuid,
+) -> Result<(work::Plan, Execution)> {
+    authenticate_rpc_node(db, node, key, false).await?;
+    require_node_run(db, node, run, true).await?;
+    let (plan, task, _) = active_storage_work(db, node, run, operation).await?;
+    ensure!(
+        matches!(node.role.as_str(), "worker" | "node")
+            || node.role == "data" && matches!(&plan, work::Plan::Mirror { .. }),
+        Error::NodeInactive
     );
     Ok((plan, task))
 }

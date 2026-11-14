@@ -58,7 +58,7 @@ pub(super) async fn check(
     let mut sources = vec![];
     for name in ["a", "b", "c"] {
         let raw = Uuid::now_v7();
-        sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared_s3','ready',2,$3,1)")
+        sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared','ready',2,$3,1)")
             .bind(raw).bind(storage).bind(vec![1u8;16]).execute(pool).await?;
         let stream: Uuid = sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,payload_type) VALUES($1,$2,'object','ready',2,'raw') RETURNING id")
             .bind(bucket).bind(name).fetch_one(pool).await?;
@@ -68,6 +68,7 @@ pub(super) async fn check(
         sources.push(raw);
     }
     let request = |operation, completion, max_items| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

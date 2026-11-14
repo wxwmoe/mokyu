@@ -15,10 +15,56 @@ use uuid::Uuid;
 pub(crate) const GRANT_LIMIT: usize = 256 * 1024;
 pub(crate) const STREAMS_PER_CONNECTION: usize = 16;
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum FragmentState {
+    Missing,
+    Pending {
+        bytes: u64,
+        complete: Option<Receipt>,
+    },
+    Complete(Receipt),
+}
+
+impl FragmentState {
+    pub fn validate(&self, planned: &Header) -> Result<()> {
+        let receipt = match self {
+            Self::Missing => None,
+            Self::Pending { bytes, complete } => {
+                ensure!(
+                    *bytes <= planned.file_bytes(),
+                    "pending fragment exceeds its plan"
+                );
+                complete.as_ref()
+            }
+            Self::Complete(receipt) => Some(receipt),
+        };
+        if let Some(receipt) = receipt {
+            receipt.validate()?;
+            let mut expected = receipt.header.clone();
+            if planned.digest == [0; 32] {
+                expected.digest = [0; 32];
+            }
+            ensure!(expected == *planned, "storage state differs from its plan");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Destination {
+    pub url: String,
+    pub authorization: SignedGrant,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     Write {
+        header: Header,
+    },
+    Repair {
         header: Header,
     },
     Read {
@@ -32,8 +78,12 @@ pub(crate) enum Action {
     Remove {
         receipt: Receipt,
     },
+    Discard {
+        header: Header,
+    },
     Publish {
         proof: Proof,
+        manifest: Manifest,
     },
     Scan {
         area: Area,
@@ -43,6 +93,7 @@ pub(crate) enum Action {
         namespace: Uuid,
     },
     Layouts,
+    Namespaces,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,7 +136,16 @@ impl Grant {
             "invalid storage grant identity or lifetime"
         );
         let header = match &self.action {
-            Action::Write { header } | Action::Stat { header } => Some(header),
+            Action::Write { header } | Action::Stat { header } | Action::Discard { header } => {
+                Some(header)
+            }
+            Action::Repair { header } => {
+                ensure!(
+                    header.generation > 0,
+                    "repair grant requires a replacement generation"
+                );
+                Some(header)
+            }
             Action::Read {
                 receipt,
                 offset,
@@ -104,11 +164,13 @@ impl Grant {
                 receipt.validate()?;
                 Some(&receipt.header)
             }
-            Action::Publish { proof } => {
+            Action::Publish { proof, manifest } => {
                 proof.publication.validate()?;
+                proof.verify(manifest)?;
                 ensure!(
                     proof.publication.cluster == self.cluster
-                        && proof.publication.takeover_epoch == self.takeover_epoch,
+                        && proof.publication.takeover_epoch <= self.takeover_epoch
+                        && manifest.revision as u64 <= self.manifest_revision,
                     "storage publication grant has another owner"
                 );
                 None
@@ -121,14 +183,16 @@ impl Grant {
                 ensure!(!namespace.is_nil(), "invalid storage history namespace");
                 None
             }
-            Action::Layouts => None,
+            Action::Layouts | Action::Namespaces => None,
         };
         if let Some(header) = header {
             header.validate()?;
             ensure!(
                 header.media == self.media
                     && header.cluster == self.cluster
-                    && header.takeover_epoch == self.takeover_epoch
+                    && (header.takeover_epoch == self.takeover_epoch
+                        || !matches!(self.action, Action::Write { .. })
+                            && header.takeover_epoch < self.takeover_epoch)
                     && header.layout_revision <= self.manifest_revision,
                 "storage grant has another fragment owner"
             );
@@ -203,15 +267,78 @@ impl SignedGrant {
 pub(crate) struct SignedReceipt {
     pub grant: Uuid,
     pub receipt: Receipt,
+    pub accounting: super::storage_cluster::Accounting,
     pub tag: [u8; 32],
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Completion {
+    pub authorization: SignedGrant,
+    pub receipt: SignedReceipt,
+}
+
+impl Completion {
+    pub fn verify(
+        &self,
+        key: &Key,
+        manifest: &Manifest,
+        target: &super::storage_cluster::Target,
+    ) -> Result<()> {
+        let grant = &self.authorization.grant;
+        self.authorization.verify(manifest)?;
+        let run = target.run.ok_or(super::Error::NodeExpired)?;
+        let now = chrono::Utc::now().timestamp();
+        ensure!(
+            grant.node == target.device.node_id
+                && grant.media == target.device.media_id
+                && grant.boot == run.boot
+                && grant.fence == run.fence
+                && grant.issued <= now + 5
+                && grant.expires > now
+                && target.expires > now * 1_000_000,
+            "storage receipt belongs to an inactive run"
+        );
+        let (Action::Write { header } | Action::Repair { header }) = &grant.action else {
+            anyhow::bail!("storage receipt requires a write grant");
+        };
+        let mut expected = self.receipt.receipt.header.clone();
+        if header.digest == [0; 32] {
+            expected.digest = [0; 32];
+        }
+        ensure!(
+            expected == *header,
+            "storage receipt differs from its write grant"
+        );
+        ensure!(
+            self.receipt.accounting.boot == grant.boot,
+            "storage receipt accounting belongs to another boot"
+        );
+        let credential = crate::content::codec::unprotect(
+            target
+                .credential
+                .as_deref()
+                .ok_or(super::Error::NodeAuthentication)?,
+            key,
+            crate::cluster::credential_binding(grant.node).as_bytes(),
+        )?;
+        self.receipt.verify(grant.id, &credential)
+    }
+}
+
 impl SignedReceipt {
-    pub fn seal(grant: Uuid, receipt: Receipt, credential: &str) -> Result<Self> {
+    pub fn seal(
+        grant: Uuid,
+        receipt: Receipt,
+        accounting: super::storage_cluster::Accounting,
+        credential: &str,
+    ) -> Result<Self> {
         receipt.validate()?;
+        accounting.validate()?;
         let mut value = Self {
             grant,
             receipt,
+            accounting,
             tag: [0; 32],
         };
         value.tag = value.mac(credential)?;
@@ -223,11 +350,13 @@ impl SignedReceipt {
         let mut digest = blake3::Hasher::new_keyed(&key);
         digest.update(self.grant.as_bytes());
         serde_json::to_writer(&mut digest, &self.receipt)?;
+        serde_json::to_writer(&mut digest, &self.accounting)?;
         Ok(*digest.finalize().as_bytes())
     }
 
     pub fn verify(&self, grant: Uuid, credential: &str) -> Result<()> {
         self.receipt.validate()?;
+        self.accounting.validate()?;
         ensure!(
             self.grant == grant,
             "storage receipt belongs to another grant"
@@ -320,6 +449,9 @@ mod tests {
                 through: 1,
                 parts: vec![],
                 retired: vec![],
+                identity: None,
+                root: None,
+                prefix: String::new(),
             },
             signature: signed.signature,
         };

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
+use futures_util::TryStreamExt;
 use object_store::{ObjectStore, ObjectStoreExt, WriteMultipart, path::Path};
 use std::{
     path::{Path as FilePath, PathBuf},
@@ -60,15 +61,70 @@ pub(super) async fn recover_local(root: &FilePath) -> Result<()> {
 const PART_SIZE: usize = 8 * 1024 * 1024;
 use crate::content::pack::SINGLE_PUT;
 
-enum Destination {
+struct Spool<'a> {
+    native: Arc<super::native::store::Store>,
+    path: Path,
+    files: super::file_cache::Files<'a>,
+    file: super::raw_request::File,
+    size: u64,
+    upper: u64,
+    digest: blake3::Hasher,
+    statistics: Option<Arc<crate::status::stats::Counters>>,
+}
+
+enum Destination<'a> {
     Local(Local),
     Single(Arc<dyn ObjectStore>, Path, Vec<Bytes>),
     Multipart(WriteMultipart),
+    Spool(Box<Spool<'a>>),
+    Stream {
+        sink: super::native::writer::Sink,
+        size: u64,
+        statistics: Option<Arc<crate::status::stats::Counters>>,
+        operation: Option<crate::status::stats::Operation>,
+    },
 }
 
-pub(crate) struct Writer(Option<Destination>);
+pub(crate) struct Writer<'a>(Option<Destination<'a>>);
 
-impl Writer {
+impl<'a> Writer<'a> {
+    pub(crate) async fn spool(
+        native: Arc<super::native::store::Store>,
+        path: Path,
+        upper: usize,
+        files: super::file_cache::Files<'a>,
+        policy: super::CachePolicy,
+        statistics: Option<Arc<crate::status::stats::Counters>>,
+    ) -> Result<Self> {
+        let id = uuid::Uuid::parse_str(path.filename().context("missing pack identity")?)?;
+        let file = super::raw_request::File::create_in(&files, id, policy).await?;
+        Ok(Self(Some(Destination::Spool(Box::new(Spool {
+            native,
+            path,
+            files,
+            file,
+            size: 0,
+            upper: upper as u64,
+            digest: blake3::Hasher::new(),
+            statistics,
+        })))))
+    }
+
+    pub(crate) fn stream(
+        native: Arc<super::native::store::Store>,
+        path: Path,
+        size: u64,
+        statistics: Option<Arc<crate::status::stats::Counters>>,
+    ) -> Self {
+        let operation = statistics.as_ref().map(|statistics| statistics.begin());
+        Self(Some(Destination::Stream {
+            sink: super::native::writer::Sink::new(native, path, size),
+            size,
+            statistics,
+            operation,
+        }))
+    }
+
     pub(crate) async fn new(
         backend: Arc<dyn ObjectStore>,
         path: Path,
@@ -143,6 +199,17 @@ impl Writer {
                 upload.wait_for_capacity(1).await?;
                 upload.put(bytes);
             }
+            Destination::Spool(spool) => {
+                let size = spool
+                    .size
+                    .checked_add(bytes.len() as u64)
+                    .context("pack length overflow")?;
+                ensure!(size <= spool.upper, "pack exceeds its planned bound");
+                spool.file.append_in(&spool.files, &bytes).await?;
+                spool.digest.update(&bytes);
+                spool.size = size;
+            }
+            Destination::Stream { sink, .. } => sink.write(&bytes).await?,
         }
         Ok(())
     }
@@ -168,12 +235,70 @@ impl Writer {
             Destination::Multipart(upload) => {
                 upload.finish().await?;
             }
+            Destination::Spool(spool) => {
+                let mut operation = spool
+                    .statistics
+                    .as_ref()
+                    .map(|statistics| statistics.begin());
+                let expected = spool.digest.finalize();
+                let mut native = spool.native.as_ref().clone();
+                let result = loop {
+                    let mut input = spool.file.replay();
+                    let body = async_stream::try_stream! {
+                        let mut digest = blake3::Hasher::new();
+                        while let Some(bytes) = input.try_next().await? {
+                            digest.update(&bytes);
+                            yield bytes;
+                        }
+                        if digest.finalize() != expected {
+                            Err(crate::content::codec::IntegrityError::Hash)?;
+                        }
+                    };
+                    let result = native
+                        .write(
+                            &spool.path,
+                            spool.size,
+                            Box::pin(body),
+                            object_store::PutMode::Create.into(),
+                        )
+                        .await;
+                    if result.as_ref().err().and_then(crate::model::error)
+                        == Some(crate::model::Error::StorageForwardFailed)
+                        && native.region.take().is_some()
+                    {
+                        continue;
+                    }
+                    break result;
+                };
+                if let Some(operation) = &mut operation {
+                    operation.finish(result.is_err());
+                }
+                result?;
+                if let Some(statistics) = &spool.statistics {
+                    statistics.bytes(spool.size);
+                }
+            }
+            Destination::Stream {
+                sink,
+                size,
+                statistics,
+                mut operation,
+            } => {
+                let result = sink.finish().await;
+                if let Some(operation) = &mut operation {
+                    operation.finish(result.is_err());
+                }
+                result?;
+                if let Some(statistics) = statistics {
+                    statistics.bytes(size);
+                }
+            }
         }
         Ok(())
     }
 }
 
-impl Drop for Writer {
+impl Drop for Writer<'_> {
     fn drop(&mut self) {
         if let Some(Destination::Multipart(upload)) = self.0.take()
             && let Ok(runtime) = tokio::runtime::Handle::try_current()

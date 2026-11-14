@@ -95,6 +95,22 @@ pub(in super::super) async fn lock_permit(
         if required.iter().any(|action| !available.contains(action)) {
             return Err(denied());
         }
+        if required.iter().any(|a| {
+            matches!(
+                a,
+                crate::authorization::Action::Write
+                    | crate::authorization::Action::Delete
+                    | crate::authorization::Action::Settings
+                    | crate::authorization::Action::Acl
+            )
+        }) {
+            ensure!(
+                !queries::journal_restore::native_read_only(*bucket)
+                    .fetch_one(&mut *connection)
+                    .await?,
+                s3s::s3_error!(ServiceUnavailable, "storage takeover is not complete")
+            );
+        }
     }
     Ok(())
 }

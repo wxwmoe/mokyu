@@ -91,7 +91,7 @@ pub(in super::super) fn raw_page(stream: Id, start: i64, end: i64) -> Rows<'stat
             .bind(stream).bind(start).bind(end)
 }
 
-const RAW_COPY_READY: &str = "r.state='ready' AND r.quarantine_code IS NULL AND r.durability='durable' AND NOT r.pending_upload AND r.medium IN ('local','shared_s3') AND r.size>=0 AND length(r.digest)=16";
+const RAW_COPY_READY: &str = "r.state='ready' AND r.quarantine_code IS NULL AND r.durability='durable' AND NOT r.pending_upload AND r.medium IN ('local','shared') AND r.size>=0 AND length(r.digest)=16";
 
 pub(in super::super) fn raw_copyable(stream: Id, storage: Uuid) -> sqlx::QueryBuilder<MySql> {
     let mut q = sqlx::QueryBuilder::new("SELECT EXISTS(SELECT 1 FROM raw_ranges WHERE stream_id=");
@@ -210,7 +210,7 @@ pub(in super::super) fn raw_finish(
     digest: &[u8],
     final_source: bool,
 ) -> Statement<'_> {
-    sqlx::query("UPDATE raw_sources SET size=?,digest=?,durability=CASE WHEN ? AND medium='shared_s3' THEN 'durable' ELSE durability END,state='ready',owner_stream=NULL,upload_id=NULL WHERE id=? AND owner_stream=? AND state='writing'").bind(size).bind(digest).bind(final_source).bind(source).bind(stream)
+    sqlx::query("UPDATE raw_sources SET size=?,digest=?,durability=CASE WHEN ? AND medium='shared' THEN 'durable' ELSE durability END,state='ready',owner_stream=NULL,upload_id=NULL WHERE id=? AND owner_stream=? AND state='writing'").bind(size).bind(digest).bind(final_source).bind(source).bind(stream)
 }
 
 pub(in super::super) fn raw_attach(stream: Id, source: Id, size: i64) -> Statement<'static> {
@@ -582,7 +582,7 @@ impl RawStore for Backend {
             !upload.is_empty() && upload.len() <= 4096,
             "invalid raw multipart upload id"
         );
-        let changed = sqlx::query("UPDATE raw_sources SET upload_id=? WHERE id=? AND state='writing' AND medium='shared_s3' AND upload_id IS NULL")
+        let changed = sqlx::query("UPDATE raw_sources SET upload_id=? WHERE id=? AND state='writing' AND medium='shared' AND upload_id IS NULL")
             .bind(upload).bind(source).execute(&self.pool).await?.rows_affected();
         anyhow::ensure!(changed == 1, crate::model::Error::OperationAborted);
         Ok(())
@@ -902,7 +902,7 @@ pub(in super::super) fn complete_key_replacement(result: &KeyReplacementResult) 
 }
 
 pub(in super::super) fn raw_receiving(source: Id, stream: Id) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT storage_id FROM raw_sources WHERE id=? AND owner_stream=? AND state='writing' AND medium='shared_s3' AND upload_id IS NULL FOR UPDATE").bind(source).bind(stream)
+    sqlx::query_scalar("SELECT storage_id FROM raw_sources WHERE id=? AND owner_stream=? AND state='writing' AND medium='shared' AND upload_id IS NULL FOR UPDATE").bind(source).bind(stream)
 }
 
 pub(in super::super) fn raw_discard(source: Id, stream: Id) -> Statement<'static> {
@@ -915,7 +915,7 @@ pub(in super::super) fn raw_reusable<'a>(
     size: i64,
     digest: &'a [u8],
 ) -> Scalar<'a, Id> {
-    sqlx::query_scalar("SELECT id FROM raw_sources WHERE storage_id=? AND content_hash=? AND size=? AND digest=? AND state='ready' AND medium='shared_s3' AND NOT pending_upload AND quarantine_code IS NULL").bind(storage).bind(hash).bind(size).bind(digest)
+    sqlx::query_scalar("SELECT id FROM raw_sources WHERE storage_id=? AND content_hash=? AND size=? AND digest=? AND state='ready' AND medium='shared' AND NOT pending_upload AND quarantine_code IS NULL").bind(storage).bind(hash).bind(size).bind(digest)
 }
 
 pub(in super::super) fn raw_uploads(after: Id) -> Rows<'static, RawUpload> {
@@ -1005,7 +1005,7 @@ pub(in super::super) fn raw_upload_references(source: Id) -> Scalar<'static, boo
 }
 
 pub(in super::super) fn raw_uploaded(source: Id) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET pending_upload=false,medium='shared_s3',boot_id=NULL,durability='durable',upload_id=NULL,revision=revision+1 WHERE id=? AND pending_upload").bind(source)
+    sqlx::query("UPDATE raw_sources SET pending_upload=false,medium='shared',boot_id=NULL,durability='durable',upload_id=NULL,revision=revision+1 WHERE id=? AND pending_upload").bind(source)
 }
 
 pub(in super::super) fn raw_upload_hash(source: Id, hash: Option<&[u8]>) -> Statement<'_> {

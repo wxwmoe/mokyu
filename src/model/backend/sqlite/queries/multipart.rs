@@ -1,5 +1,9 @@
 use super::*;
 
+pub(in super::super) fn native_multipart(bucket: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type='mokyu') OR EXISTS(SELECT 1 FROM runtime_settings r JOIN storages s ON lower(hex(s.id))=replace(lower(json_extract(r.value,'$.staging_storage_id')),'-','') WHERE r.section='uploads' AND s.type='mokyu')").bind(bucket)
+}
+
 pub(in super::super) fn web_upload_identity(
     user: Uuid,
     client: Uuid,

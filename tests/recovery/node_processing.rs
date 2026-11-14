@@ -7,7 +7,7 @@ use crate::{
 async fn seed(backend: &Backend, storage: Uuid, bucket: Uuid) -> Result<(Id, Id)> {
     let source = Id::from(Uuid::now_v7());
     let name = Uuid::now_v7().to_string();
-    sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared_s3','ready',2,$3,1)")
+    sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared','ready',2,$3,1)")
         .bind(source).bind(storage).bind(vec![2u8;16]).execute(&backend.pool).await?;
     let stream: Id=sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,payload_type) VALUES($1,$2,'object','ready',2,'raw') RETURNING id")
         .bind(bucket).bind(&name).fetch_one(&backend.pool).await?;
@@ -54,6 +54,7 @@ pub(super) async fn check(
     .fetch_one(pool)
     .await?;
     let request = |operation, completion| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

@@ -177,36 +177,45 @@ pub(in super::super) async fn complete_chunk_write(
 }
 
 pub(in super::super) async fn complete_chunk_write_in(
-    db: &mut PgConnection,
+    db: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     stream: Id,
     offset: i64,
     chunk: &Chunk,
     single: bool,
 ) -> Result<()> {
     require_chunk_writer(db, stream, single).await?;
-    ensure!(
-        queries::allocated_source(stream, chunk)
-            .build_query_scalar::<Id>()
-            .fetch_optional(&mut *db)
-            .await?
-            .is_some(),
-        crate::model::Error::OperationAborted
-    );
+    let native = queries::allocated_source(stream, chunk)
+        .build_query_scalar::<bool>()
+        .fetch_optional(&mut **db)
+        .await?
+        .ok_or(crate::model::Error::OperationAborted)?;
+    if native {
+        super::super::storage_native::publish_carrier(
+            db,
+            chunk
+                .storage_id
+                .context("native chunk storage is missing")?,
+            &crate::storage::location::Layout::S3.chunk(chunk.address()),
+            chunk.address(),
+            chunk.file_size()? as u64,
+        )
+        .await?;
+    }
     let changed = queries::complete_chunk(chunk.id)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await?
         .rows_affected();
     queries::complete_encoding(chunk.encoding_id)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await?;
     if changed != 1 {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
     queries::insert_chunk_extent(stream, offset, chunk.raw_size, chunk.id)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await?;
     queries::resize_writing_stream(stream, offset + chunk.raw_size as i64)
-        .execute(&mut *db)
+        .execute(&mut **db)
         .await?;
     Ok(())
 }

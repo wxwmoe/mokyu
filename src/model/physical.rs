@@ -152,7 +152,7 @@ impl PhysicalSource {
                 r.home_storage_id = (home != storage).then_some(home);
                 r.storage_id = storage;
                 r.address = Some(address);
-                r.medium = if local { "local" } else { "shared_s3" }.into();
+                r.medium = if local { "local" } else { "shared" }.into();
             }
         }
     }
@@ -239,7 +239,7 @@ mod tier_material_tests {
             size: 13,
             digest: Some(vec![7; 16]),
             state: "ready".into(),
-            medium: "shared_s3".into(),
+            medium: "shared".into(),
             pending_upload: false,
             revision: 2,
             quarantine_code: None,

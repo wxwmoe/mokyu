@@ -1,7 +1,7 @@
 use super::{files::Files, fragments};
 use crate::{
     content::fragment::{Area, HEADER_SIZE, Header},
-    model::storage_payload::Receipt,
+    model::storage_recovery::{EvidenceEntry, EvidencePage, Link},
     storage::Disk,
 };
 use anyhow::{Context, Result, ensure};
@@ -10,6 +10,8 @@ use std::{fs::ReadDir, io::Read, sync::Arc};
 use tokio::sync::OwnedRwLockWriteGuard;
 use uuid::Uuid;
 
+pub(crate) use crate::model::storage_recovery::{InventoryEntry as Entry, InventoryPage as Page};
+
 const PAGE_LIMIT: usize = 128;
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -17,28 +19,15 @@ const PAGE_LIMIT: usize = 128;
 pub(crate) enum EvidenceKind {
     History,
     Layouts,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct EvidenceEntry {
-    pub name: String,
-    pub pending: bool,
-    pub proof: Option<crate::model::storage_recovery::Proof>,
-    pub manifest: Option<crate::model::storage_cluster::Manifest>,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct EvidencePage {
-    pub number: u64,
-    pub entries: Vec<EvidenceEntry>,
-    pub complete: bool,
+    Namespaces,
 }
 
 pub(super) struct EvidenceScan {
     directory: Option<ReadDir>,
     owner: Uuid,
     kind: EvidenceKind,
+    root: std::path::PathBuf,
+    head: Option<Link>,
     last: Option<EvidencePage>,
     check: fragments::Check,
     _freeze: OwnedRwLockWriteGuard<()>,
@@ -59,14 +48,26 @@ impl EvidenceScan {
             .clone()
             .try_write_owned()
             .context("storage still has active mutations")?;
-        let path = files
-            .disk
-            .root
-            .join(match kind {
-                EvidenceKind::History => "recovery/history",
-                EvidenceKind::Layouts => "cluster/history",
-            })
-            .join(owner.simple().to_string());
+        let mut path = files.disk.root.join(match kind {
+            EvidenceKind::History | EvidenceKind::Namespaces => "recovery/history",
+            EvidenceKind::Layouts => "cluster/history",
+        });
+        if !matches!(kind, EvidenceKind::Namespaces) {
+            path = path.join(owner.simple().to_string());
+        }
+        let head = if matches!(kind, EvidenceKind::History) {
+            let path = files
+                .disk
+                .root
+                .join("recovery/heads")
+                .join(format!("{}.json", owner.simple()));
+            fragments::check_directories(&files.disk.root, &path)?;
+            super::recovery::read(&path)?
+                .map(|bytes| serde_json::from_slice(&bytes))
+                .transpose()?
+        } else {
+            None
+        };
         fragments::check_directories(&files.disk.root, &path.join("entry"))?;
         let directory = match std::fs::read_dir(path) {
             Ok(value) => Some(value),
@@ -77,6 +78,8 @@ impl EvidenceScan {
             directory,
             owner,
             kind,
+            root: files.disk.root.clone(),
+            head,
             last: None,
             check,
             _freeze: freeze,
@@ -100,6 +103,7 @@ impl EvidenceScan {
         let mut page = EvidencePage {
             number,
             entries: Vec::new(),
+            head: self.head.clone(),
             complete: false,
         };
         while page.entries.len() < 4 {
@@ -122,6 +126,34 @@ impl EvidenceScan {
                 error: None,
             };
             let result = (|| -> Result<()> {
+                if matches!(self.kind, EvidenceKind::Namespaces) {
+                    let namespace = Uuid::parse_str(&entry.name)?;
+                    ensure!(
+                        !namespace.is_nil()
+                            && entry.name == namespace.simple().to_string()
+                            && item.file_type()?.is_dir(),
+                        "invalid recovery namespace directory"
+                    );
+                    let head = self
+                        .root
+                        .join("recovery/heads")
+                        .join(format!("{}.json", namespace.simple()));
+                    fragments::check_directories(&self.root, &head)?;
+                    let link: Link = serde_json::from_slice(
+                        &super::recovery::read(&head)?.context("recovery head is missing")?,
+                    )?;
+                    let path = super::recovery::history(&self.root, namespace, link.id);
+                    fragments::check_directories(&self.root, &path)?;
+                    let proof: crate::model::storage_recovery::Proof = serde_json::from_slice(
+                        &super::recovery::read(&path)?.context("recovery head proof is missing")?,
+                    )?;
+                    ensure!(
+                        proof.publication.namespace == namespace && proof.link()? == link,
+                        "recovery head differs from its proof"
+                    );
+                    entry.proof = Some(proof);
+                    return Ok(());
+                }
                 let name = entry.name.strip_suffix(".part").unwrap_or(&entry.name);
                 let text = name
                     .strip_suffix(".json")
@@ -156,6 +188,7 @@ impl EvidenceScan {
                         );
                         entry.manifest = Some(manifest);
                     }
+                    EvidenceKind::Namespaces => unreachable!(),
                 }
                 Ok(())
             })();
@@ -168,24 +201,6 @@ impl EvidenceScan {
         self.last = Some(page.clone());
         Ok(page)
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Entry {
-    pub prefix: u16,
-    pub name: String,
-    pub pending: bool,
-    pub header: Option<Header>,
-    pub receipt: Option<Receipt>,
-    pub error: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Page {
-    pub number: u64,
-    pub restart_prefix: u16,
-    pub entries: Vec<Entry>,
-    pub complete: bool,
 }
 
 pub(super) struct Scan {

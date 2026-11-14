@@ -4,8 +4,8 @@ use crate::content::codec::Key;
 use anyhow::{Result, ensure};
 use uuid::Uuid;
 
-const MAGIC: &[u8; 8] = b"MOKYU\x00\x00\x0a";
-const HEADER: usize = 256;
+pub(super) const MAGIC: &[u8; 8] = b"MOKYU\x00\x00\x0a";
+pub(super) const HEADER: usize = 256;
 const LIMIT: usize = 32 * 1024 * 1024;
 
 pub(crate) struct Envelope {
@@ -90,6 +90,11 @@ fn mac(key: &Key, aad: &[u8], body: &[u8]) -> blake3::Hash {
         .update(aad)
         .update(body)
         .finalize()
+}
+
+pub(crate) fn overhead(logical: &str, encrypted: bool) -> Result<usize> {
+    path(logical)?;
+    Ok(HEADER + logical.len() + if encrypted { 16 } else { 32 } + 32)
 }
 
 pub(crate) fn encode(
@@ -191,34 +196,49 @@ fn encode_salted(
     Ok(bytes)
 }
 
-// The caller must separately check the digest against the published recovery proof.
-pub(crate) fn inspect(bytes: &[u8]) -> Result<Public<'_>> {
+pub(super) fn frame_size(header: &[u8]) -> Result<usize> {
     ensure!(
-        (HEADER + 48..=LIMIT).contains(&bytes.len()),
-        "invalid recovery payload size"
+        header.len() >= HEADER && &header[..8] == MAGIC,
+        "truncated or unsupported recovery header"
     );
-    let header = &bytes[..HEADER];
     ensure!(
-        &header[..8] == MAGIC
-            && header[8..10] == 1u16.to_be_bytes()
+        header[8..10] == 1u16.to_be_bytes()
             && header[10..12] == (HEADER as u16).to_be_bytes()
             && header[13] & !7 == 0
             && header[14..16] == [0; 2]
-            && header[234..] == [0; 22],
+            && header[234..HEADER] == [0; 22],
         "unsupported recovery format"
     );
-    let kind = match header[12] {
-        1 => FrameType::Changes,
-        2 => FrameType::Seal,
-        3 => FrameType::Snapshot,
-        4 => FrameType::Manifest,
-        5 => FrameType::Index,
-        6 => FrameType::Watermark,
-        7 => FrameType::Draft,
-        8 => FrameType::PartCommit,
-        9 => FrameType::History,
-        _ => anyhow::bail!("unknown recovery record type"),
-    };
+    let mut lengths = [0usize; 4];
+    for (i, length) in lengths.iter_mut().enumerate() {
+        *length = u32::from_be_bytes(header[152 + i * 4..156 + i * 4].try_into()?) as usize;
+        ensure!(*length <= FRAME_LIMIT, "recovery section exceeds its bound");
+    }
+    let path = u16::from_be_bytes(header[232..234].try_into()?) as usize;
+    ensure!(path <= 1024, "recovery path exceeds its bound");
+    let size =
+        HEADER + path + lengths[1] + lengths[3] + if header[13] & 4 != 0 { 16 } else { 32 } + 32;
+    ensure!(size <= LIMIT, "recovery frame exceeds its bound");
+    Ok(size)
+}
+
+pub(crate) fn inspect_prefix(bytes: &[u8]) -> Result<Public<'_>> {
+    let size = frame_size(bytes)?;
+    inspect(
+        bytes
+            .get(..size)
+            .ok_or_else(|| anyhow::anyhow!("truncated recovery frame"))?,
+    )
+}
+
+// The caller must separately check the digest against the published recovery proof.
+pub(crate) fn inspect(bytes: &[u8]) -> Result<Public<'_>> {
+    ensure!(
+        frame_size(bytes)? == bytes.len(),
+        "recovery payload length mismatch"
+    );
+    let header = &bytes[..HEADER];
+    let kind = FrameType::read(header)?;
     let id = |at| Uuid::from_slice(&header[at..at + 16]);
     let long = |at| u64::from_be_bytes(header[at..at + 8].try_into().unwrap());
     let size = |at| u32::from_be_bytes(header[at..at + 4].try_into().unwrap()) as usize;
@@ -226,21 +246,10 @@ pub(crate) fn inspect(bytes: &[u8]) -> Result<Public<'_>> {
     let physical_len = size(156);
     let plain_len = size(160);
     let body_len = size(164);
-    ensure!(
-        [physical_plain, physical_len, plain_len, body_len]
-            .iter()
-            .all(|&n| n <= FRAME_LIMIT),
-        "recovery section exceeds its bound"
-    );
     let path_len = u16::from_be_bytes(header[232..234].try_into()?) as usize;
-    ensure!(path_len <= 1024, "recovery path exceeds its bound");
     let binding_end = HEADER + path_len;
     let body_start = binding_end + physical_len;
     let encrypted = header[13] & 4 != 0;
-    ensure!(
-        body_start + body_len + if encrypted { 16 } else { 32 } + 32 == bytes.len(),
-        "recovery payload length mismatch"
-    );
     let logical = std::str::from_utf8(&bytes[HEADER..binding_end])?;
     path(logical)?;
     let digest = *blake3::hash(&bytes[..bytes.len() - 32]).as_bytes();
@@ -283,7 +292,7 @@ pub(crate) fn inspect(bytes: &[u8]) -> Result<Public<'_>> {
         path: logical,
         physical: decompress(physical, physical_plain, header[13] & 1 != 0)?,
         encrypted,
-        digest,
+        digest: *blake3::hash(bytes).as_bytes(),
         data: bytes,
         binding_end,
         body_start,
@@ -293,6 +302,10 @@ pub(crate) fn inspect(bytes: &[u8]) -> Result<Public<'_>> {
 }
 
 impl Public<'_> {
+    pub fn consumed(&self) -> usize {
+        self.data.len()
+    }
+
     pub fn open(&self, format: &Format<'_>) -> Result<Frame> {
         ensure!(
             self.namespace == format.storage
@@ -365,6 +378,8 @@ mod tests {
             assert_eq!(&bytes[..13], b"MOKYU\0\0\x0a\0\x01\x01\0\x01");
             assert!(!bytes.windows(8).any(|value| value == b"MOKYU\0\0\x06"));
             let public = inspect(&bytes)?;
+            assert_eq!(public.digest, *blake3::hash(&bytes).as_bytes());
+            assert_eq!(public.digest, public.open(&format)?.digest);
             assert_eq!(public.physical, b"physical mappings");
             assert_eq!(public.path, path);
             assert_eq!(public.open(&format)?.bytes, b"private object keys");

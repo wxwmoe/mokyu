@@ -55,6 +55,13 @@ pub(crate) struct Unlocked {
     pub expires_us: i64,
     pub storage_name: String,
     pub claim: Option<crate::storage::journal::history::Claim>,
+    pub native: Option<NativeRecovery>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct NativeRecovery {
+    pub catalog: Uuid,
+    pub head: crate::model::storage_recovery::Proof,
 }
 impl Unlocked {
     pub fn seal(&self, id: Uuid, key: &codec::Key) -> Result<Vec<u8>> {

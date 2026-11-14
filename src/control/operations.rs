@@ -199,6 +199,29 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let clusters = &app.storage_clusters;
             Ok(match command {
                 StorageClusters::List => serde_json::to_value(clusters.overview().await?)?,
+                StorageClusters::Repair { id, fragment } => serde_json::json!({"task_id":
+                    app.native_storage.request_repair(principal, id, fragment).await?}),
+                StorageClusters::Sources { id, media, after } => serde_json::to_value(
+                    super::recovery::native::list(
+                        app,
+                        principal,
+                        id,
+                        super::recovery::native::Query { media, after },
+                    )
+                    .await?,
+                )?,
+                StorageClusters::Takeover { name, media } => serde_json::to_value(
+                    crate::storage::native::recovery::takeover(
+                        clusters.as_ref(),
+                        principal,
+                        &app.secrets.credential_key,
+                        c::Takeover {
+                            name,
+                            media_ids: media,
+                        },
+                    )
+                    .await?,
+                )?,
                 StorageClusters::Create { name, policy } => serde_json::to_value(
                     clusters
                         .create(
@@ -357,6 +380,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                         Recoveries::Probe {
                             document,
                             deployment_key,
+                            namespace,
                             ..
                         } => serde_json::to_value(
                             recovery::probe(
@@ -367,6 +391,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                                         document.context("missing storage connection")?,
                                     )?,
                                     deployment_key,
+                                    namespace,
                                 },
                             )
                             .await?,
@@ -604,6 +629,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                             super::recovery::Probe {
                                 storage: input.clone(),
                                 deployment_key: None,
+                                namespace: None,
                             },
                         )
                         .await?;
@@ -913,7 +939,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 );
             }
             if !enabled && app.storage.enabled() {
-                app.storage.check_identity().await?;
+                app.storage.check_identity(false).await?;
             }
             app.maintenance_store.mode(enabled).await?;
             app.maintenance

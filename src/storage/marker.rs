@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub(super) const MAX_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_BYTES: usize = 16 * 1024;
 const VERSION: u32 = 6;
 
 #[derive(Deserialize, Serialize)]
@@ -296,20 +296,24 @@ impl Document {
     }
 
     pub async fn set_journal(
-        mut self,
+        self,
         backend: &dyn ObjectStore,
         descriptor: &Journal,
     ) -> Result<Value> {
+        self.set_journal_options(backend, descriptor, PutOptions::default())
+            .await
+    }
+
+    pub async fn set_journal_options(
+        mut self,
+        backend: &dyn ObjectStore,
+        descriptor: &Journal,
+        mut options: PutOptions,
+    ) -> Result<Value> {
         let body = self.journal_body(descriptor)?;
+        options.mode = PutMode::Update(self.version);
         backend
-            .put_opts(
-                &Path::from("mokyu.json"),
-                Bytes::from(body).into(),
-                PutOptions {
-                    mode: PutMode::Update(self.version),
-                    ..Default::default()
-                },
-            )
+            .put_opts(&Path::from("mokyu.json"), Bytes::from(body).into(), options)
             .await?;
         Ok(self.value)
     }

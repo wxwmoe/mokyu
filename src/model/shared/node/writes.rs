@@ -328,6 +328,56 @@ pub(super) async fn lookup(tx: &mut registry::Tx<'_>, node: Uuid, op: Uuid) -> R
         .await?
         .ok_or_else(|| Error::NodeOperationMissing.into())
 }
+
+pub(super) async fn authorize_storage_marker(
+    tx: &mut registry::Tx<'_>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+    storage: Uuid,
+) -> Result<i64> {
+    let row = lookup(tx, node.node_id, operation).await?;
+    row.active(tx, node, run).await?;
+    ensure!(row.storage_id == storage, s3s::s3_error!(AccessDenied));
+    Ok(chrono::Utc::now().timestamp_micros() + row.remaining * 1000)
+}
+
+pub(super) async fn authorize_storage_upload(
+    tx: &mut registry::Tx<'_>,
+    node: &NodeState,
+    run: Run,
+    input: &crate::model::storage_native::access::Upload,
+    prefix: &str,
+) -> Result<(Uuid, i64)> {
+    let row = lookup(tx, node.node_id, input.operation).await?;
+    row.active(tx, node, run).await?;
+    ensure!(
+        row.storage_id == input.storage,
+        s3s::s3_error!(AccessDenied)
+    );
+    let owner = if let Some(batch) = input.batch {
+        let batch = q::batch(node.node_id, input.operation, batch)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or(Error::NodeOperationMissing)?;
+        ensure!(
+            batch.ready && batch.commit_hash.is_none(),
+            Error::NodeExpired
+        );
+        input.chunks(prefix, &batch.plan, batch.packing.as_deref())?
+    } else {
+        let raw = q::raw(node.node_id, input.operation)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or(Error::NodeOperationMissing)?;
+        ensure!(!raw.committed, Error::NodeExpired);
+        input.raw(prefix, raw.location_id, raw.size)?
+    };
+    Ok((
+        owner,
+        chrono::Utc::now().timestamp_micros() + row.remaining * 1000,
+    ))
+}
 async fn end(
     tx: &mut registry::Tx<'_>,
     node: Uuid,
@@ -1660,7 +1710,7 @@ impl NodeWrites for Backend {
                     .filter(|s| {
                         s.validate().is_ok()
                             && !s.pending_upload
-                            && s.medium == "shared_s3"
+                            && s.medium == "shared"
                             && s.digest.as_deref() == Some(input.input.digest.as_slice())
                     })
             } else {
@@ -1690,11 +1740,7 @@ impl NodeWrites for Backend {
                         stream,
                         row.storage_id,
                         row.profile.revision,
-                        if input.input.local {
-                            "local"
-                        } else {
-                            "shared_s3"
-                        },
+                        if input.input.local { "local" } else { "shared" },
                     )
                     .await?,
                     location,
@@ -1774,6 +1820,7 @@ impl NodeWrites for Backend {
         if !raw.committed {
             let stream = row.active(&mut tx, node, input.run).await?;
             super::raw_pages::seal(&mut tx, raw.source_id, raw.size, &raw.digest).await?;
+            super::storage_native::publish_raw(&mut tx, raw.source_id, raw.size as u64).await?;
             ensure!(
                 queries::raw_finish(stream, raw.source_id, raw.size, &raw.digest, true)
                     .execute(&mut *tx)

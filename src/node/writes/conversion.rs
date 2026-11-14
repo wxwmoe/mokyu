@@ -13,7 +13,7 @@ impl Writes {
     ) -> Result<()> {
         source.validate()?;
         ensure!(
-            (source.medium == "shared_s3" && !source.pending_upload)
+            (source.medium == "shared" && !source.pending_upload)
                 || (source.medium == "local" && source.pending_upload),
             codec::IntegrityError::RawMetadata
         );

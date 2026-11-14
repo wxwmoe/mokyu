@@ -128,6 +128,7 @@ pub(in super::super) async fn publish_in(
         require_sources(tx, Some(id), &[]).await?;
     }
     let mut accounts = lock_quota(tx, stream.bucket_id).await?;
+    super::super::storage_native::publication(tx, id).await?;
     if let Some(publication) = publication_id {
         let intent = crate::model::write_intent(if_match.as_ref(), if_none.as_ref(), &completion)?;
         super::super::replica_transactions::publish(

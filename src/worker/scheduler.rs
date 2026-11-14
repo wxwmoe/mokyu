@@ -357,6 +357,13 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
                     ),
                 )
                 .await
+        } else if task_type == "storage_migration" && detail["operation"] == "native" {
+            crate::storage::resource_gate::PRIORITY
+                .scope(
+                    crate::storage::resource_gate::MAINTENANCE,
+                    app.native_replication_batch(execution, &detail),
+                )
+                .await
         } else if task_type == "storage_migration" && detail["operation"] == "mirroring" {
             app.mirror_batch(
                 execution,

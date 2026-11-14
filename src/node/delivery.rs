@@ -28,7 +28,10 @@ pub(crate) fn bucket(prepared: &Prepared) -> Result<Option<Bucket>> {
 }
 
 pub(crate) fn error(error: anyhow::Error) -> s3s::S3Error {
-    if let Some(status) = error.downcast_ref::<tonic::Status>() {
+    if let Some(status) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<tonic::Status>())
+    {
         if let Some(code) = status
             .metadata()
             .get("mokyu-s3-code")
@@ -45,6 +48,7 @@ pub(crate) fn error(error: anyhow::Error) -> s3s::S3Error {
                 "NoSuchBucket" => s3s::S3ErrorCode::NoSuchBucket,
                 "NoSuchKey" => s3s::S3ErrorCode::NoSuchKey,
                 "NoSuchUpload" => s3s::S3ErrorCode::NoSuchUpload,
+                "NotImplemented" => s3s::S3ErrorCode::NotImplemented,
                 "SlowDown" => s3s::S3ErrorCode::SlowDown,
                 "InvalidBucketState" => s3s::S3ErrorCode::InvalidBucketState,
                 "OperationAborted" => s3s::S3ErrorCode::OperationAborted,
@@ -217,7 +221,7 @@ pub(crate) async fn response(
             && let read::Source::Raw { source } = &segment.source
             && source.size == object.size
             && !source.pending_upload
-            && source.medium == "shared_s3"
+            && source.medium == "shared"
         {
             let backend = prepared.backend(source.storage_id)?;
             let profile = &backend.profile;

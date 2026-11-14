@@ -228,7 +228,10 @@ pub(in super::super) async fn begin_node_write(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(Error::SourceUnavailable)?;
-    ensure!(r#type == "s3", Error::SourceUnavailable);
+    ensure!(
+        matches!(r#type.as_str(), "s3" | "mokyu"),
+        Error::SourceUnavailable
+    );
     if let Some(id) = block_key {
         queries::lock_managed_key(id)
             .fetch_optional(&mut *tx)
@@ -698,6 +701,77 @@ pub(super) async fn require_node_write(
             .ok_or(Error::NodeExpired)?;
     }
     Ok(stream)
+}
+
+pub(in super::super) async fn authorize_storage_marker(
+    tx: &mut Transaction<'_, Postgres>,
+    node: &crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    operation: Uuid,
+    storage: Uuid,
+) -> Result<i64> {
+    let row = queries::node_write(node.node_id, operation)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    ensure!(
+        row.credential_generation == node.credential_generation
+            && row.boot_id == run.boot
+            && row.fence == run.fence,
+        Error::NodeExpired
+    );
+    require_node_write(tx, &row).await?;
+    ensure!(
+        row.storage_id == Some(storage),
+        s3s::s3_error!(AccessDenied)
+    );
+    Ok(chrono::Utc::now().timestamp_micros() + row.valid_for_ms * 1000)
+}
+
+pub(in super::super) async fn authorize_storage_upload(
+    tx: &mut Transaction<'_, Postgres>,
+    node: &crate::cluster::NodeState,
+    run: crate::model::session::Run,
+    input: &crate::model::storage_native::access::Upload,
+    prefix: &str,
+) -> Result<(Uuid, i64)> {
+    let row = queries::node_write(node.node_id, input.operation)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    ensure!(
+        row.credential_generation == node.credential_generation
+            && row.boot_id == run.boot
+            && row.fence == run.fence,
+        Error::NodeExpired
+    );
+    require_node_write(tx, &row).await?;
+    ensure!(
+        row.storage_id == Some(input.storage),
+        s3s::s3_error!(AccessDenied)
+    );
+    let owner = if let Some(batch) = input.batch {
+        let batch = queries::node_write_batch(node.node_id, input.operation, batch)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or(Error::NodeOperationMissing)?;
+        ensure!(
+            batch.ready && batch.commit_hash.is_none(),
+            Error::NodeExpired
+        );
+        input.chunks(prefix, &batch.plan, batch.packing.as_deref())?
+    } else {
+        let raw = queries::node_raw_write(node.node_id, input.operation)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or(Error::NodeOperationMissing)?;
+        ensure!(!raw.committed, Error::NodeExpired);
+        input.raw(prefix, raw.source_id, raw.size)?
+    };
+    Ok((
+        owner,
+        chrono::Utc::now().timestamp_micros() + row.valid_for_ms * 1000,
+    ))
 }
 
 async fn node_chunk_permits(
@@ -1747,7 +1821,7 @@ pub(in super::super) async fn prepare_node_raw(
             .filter(|source| {
                 source.validate().is_ok()
                     && !source.pending_upload
-                    && source.medium == "shared_s3"
+                    && source.medium == "shared"
                     && source.digest.as_deref() == Some(input.input.digest.as_slice())
             })
     } else {
@@ -1778,11 +1852,7 @@ pub(in super::super) async fn prepare_node_raw(
             stream,
             storage,
             row.profile.revision,
-            if input.input.local {
-                "local"
-            } else {
-                "shared_s3"
-            },
+            if input.input.local { "local" } else { "shared" },
             "durable",
         )
         .fetch_one(&mut *tx)
@@ -1886,6 +1956,7 @@ pub(in super::super) async fn commit_node_raw(
             .await?
             .medium
             == "local";
+        super::super::storage_native::publish_raw(&mut tx, source, raw.size as u64).await?;
         ensure!(
             queries::raw_finish(stream, source, raw.size, &raw.digest, true)
                 .execute(&mut *tx)

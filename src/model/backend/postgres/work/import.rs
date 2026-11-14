@@ -23,7 +23,10 @@ pub(super) async fn prepare(
     let (medium, block_key) = queries::node_write_storage(storage)
         .fetch_one(&mut **db)
         .await?;
-    ensure!(medium == "s3", Error::SourceUnavailable);
+    ensure!(
+        matches!(medium.as_str(), "s3" | "mokyu"),
+        Error::SourceUnavailable
+    );
     if let Some(id) = block_key {
         queries::lock_managed_key(id)
             .fetch_optional(&mut **db)

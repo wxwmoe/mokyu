@@ -717,9 +717,7 @@ impl Mapping {
                     SourceType::Pack,
                     pack.id,
                 ),
-                Source::Raw { source }
-                    if !source.pending_upload && source.medium == "shared_s3" =>
-                {
+                Source::Raw { source } if !source.pending_upload && source.medium == "shared" => {
                     (source.home_storage(), SourceType::Raw, source.id)
                 }
                 _ => return Err(s3s::s3_error!(InvalidArgument).into()),

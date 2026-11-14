@@ -159,7 +159,7 @@ impl Sources {
                 row.range.validate()?;
                 ensure!(
                     (!row.range.source.pending_upload
-                        && (row.range.source.medium == "shared_s3"
+                        && (row.range.source.medium == "shared"
                             || local_journal && row.range.source.medium == "local"))
                         || (row.range.source.pending_upload && row.node_id == Some(node)),
                     Error::SourceUnavailable

@@ -260,12 +260,17 @@ pub(in super::super) fn hold(bucket: Uuid, seq: i64) -> Statement<'static> {
     sqlx::query("INSERT INTO journal_snapshot_holds(bucket_id,seq,storage_id,unit,address,block_key) SELECT bucket_id,seq,storage_id,unit,address,block_key FROM journal_holds WHERE bucket_id=? AND seq=? ON CONFLICT DO NOTHING").bind(bucket).bind(seq)
 }
 
-pub(in super::super) fn seal<'a>(manifest: &'a [u8], root: &'a [u8], job: Uuid) -> Statement<'a> {
-    sqlx::query("UPDATE journal_snapshots SET manifest=?,root_index=?,manifest_size=?,index_size=?,state='prepared' WHERE id=? AND state='building'").bind(manifest).bind(root).bind(manifest.len() as i64).bind(root.len() as i64).bind(job)
+pub(in super::super) fn seal<'a>(
+    manifest: &'a [u8],
+    root: &'a [u8],
+    checkpoint: Option<&'a [u8]>,
+    job: Uuid,
+) -> Statement<'a> {
+    sqlx::query("UPDATE journal_snapshots SET manifest=?,root_index=?,manifest_size=?,index_size=?,checkpoint_body=?,checkpoint_size=?,state='prepared' WHERE id=? AND state='building'").bind(manifest).bind(root).bind(manifest.len() as i64).bind(root.len() as i64).bind(checkpoint).bind(checkpoint.map_or(root.len(), <[u8]>::len) as i64).bind(job)
 }
 
-pub(in super::super) fn blobs(job: Uuid) -> Rows<'static, (Vec<u8>, Vec<u8>)> {
-    sqlx::query_as("SELECT manifest,root_index FROM journal_snapshots WHERE id=?").bind(job)
+pub(in super::super) fn blobs(job: Uuid) -> Rows<'static, (Vec<u8>, Vec<u8>, Vec<u8>)> {
+    sqlx::query_as("SELECT manifest,root_index,COALESCE(checkpoint_body,root_index) FROM journal_snapshots WHERE id=?").bind(job)
 }
 
 pub(in super::super) fn bytes(owner: Uuid, number: i64) -> Scalar<'static, Vec<u8>> {
@@ -308,7 +313,7 @@ pub(in super::super) fn activate<'a>(
     version: Option<&'a str>,
     job: Uuid,
 ) -> Statement<'a> {
-    sqlx::query("UPDATE journal_snapshots SET state='current',index_etag=?,checkpoint_etag=?,checkpoint_version=?,manifest=NULL,root_index=NULL,confirmed_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state='prepared'").bind(etag).bind(checkpoint).bind(version).bind(job)
+    sqlx::query("UPDATE journal_snapshots SET state='current',index_etag=?,checkpoint_etag=?,checkpoint_version=?,manifest=NULL,root_index=NULL,checkpoint_body=NULL,confirmed_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state='prepared'").bind(etag).bind(checkpoint).bind(version).bind(job)
 }
 
 pub(in super::super) fn remove_values(storage: Uuid, cut: Uuid) -> Statement<'static> {
@@ -400,7 +405,7 @@ pub(in super::super) fn retained(
         i64,
     ),
 > {
-    sqlx::query_as("SELECT id,manifest_etag,manifest_version,manifest_size,epoch,revision,checkpoint_etag,checkpoint_version,index_size FROM journal_snapshots WHERE storage_id=? AND state='retained' AND gc_after<=CAST(unixepoch('subsec')*1000000 AS INTEGER) ORDER BY revision LIMIT 8").bind(storage)
+    sqlx::query_as("SELECT id,manifest_etag,manifest_version,manifest_size,epoch,revision,checkpoint_etag,checkpoint_version,checkpoint_size FROM journal_snapshots WHERE storage_id=? AND state='retained' AND gc_after<=CAST(unixepoch('subsec')*1000000 AS INTEGER) ORDER BY revision LIMIT 8").bind(storage)
 }
 
 pub(in super::super) fn gone(id: Uuid) -> Statement<'static> {

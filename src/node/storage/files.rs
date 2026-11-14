@@ -47,6 +47,17 @@ async fn verify_history(root: &Path, manifest: &Manifest) -> Result<()> {
     Ok(())
 }
 
+fn replacement(old: &Manifest, candidate: &Manifest) -> bool {
+    old.cluster_id == candidate.cluster_id
+        && candidate.revision >= old.revision
+        && (candidate == old
+            || candidate.revision > old.revision
+                && (candidate.takeover_epoch == old.takeover_epoch
+                    && candidate.deployment_id == old.deployment_id
+                    && candidate.publication_key == old.publication_key
+                    || candidate.takeover_epoch > old.takeover_epoch))
+}
+
 impl Files {
     pub async fn open(
         instance: &Instance,
@@ -114,9 +125,7 @@ impl Files {
                     ensure!(
                         manifest
                             .as_ref()
-                            .is_none_or(|old| old.cluster_id == candidate.cluster_id
-                                && old.deployment_id == candidate.deployment_id
-                                && candidate.revision >= old.revision),
+                            .is_none_or(|old| replacement(old, &candidate)),
                         "pending cluster head has another owner or older revision"
                     );
                     receiving = Some(candidate);
@@ -154,16 +163,18 @@ impl Files {
         })
     }
 
-    pub fn capacity(&self) -> Result<Capacity> {
+    pub fn capacity(&self, boot: Uuid) -> Result<Capacity> {
         let measurement = self
             .disk
             .data
             .as_ref()
             .context("storage accounting is missing")?
             .measurement();
-        let (used_bytes, reserved_bytes) = measurement.unwrap_or_default();
+        let (used_bytes, reserved_bytes, revision) = measurement.unwrap_or_default();
         Ok(Capacity {
             accounting_ready: measurement.is_some(),
+            accounting: measurement
+                .map(|_| crate::model::storage_cluster::Accounting { boot, revision }),
             limit: self.limit,
             used_bytes,
             reserved_bytes,
@@ -191,9 +202,7 @@ impl Files {
             .flatten()
             {
                 ensure!(
-                    old.cluster_id == candidate.cluster_id
-                        && old.deployment_id == candidate.deployment_id
-                        && candidate.revision >= old.revision,
+                    replacement(old, candidate),
                     "candidate would replace another owner or newer revision"
                 );
             }
@@ -213,16 +222,11 @@ impl Files {
         for record in &reply.history {
             record.validate()?;
             ensure!(
-                record.deployment_id == deployment && record.revision == after + 1,
+                record.revision == after + 1,
                 "cluster history is out of sequence"
             );
             if let Some(old) = &previous {
-                ensure!(
-                    old.cluster_id == record.cluster_id
-                        && old.record_id != record.record_id
-                        && record.previous.as_deref() == Some(old.digest()?.as_str()),
-                    "cluster history chain is incomplete"
-                );
+                record.follows(old)?;
             } else {
                 ensure!(
                     record.previous.is_none(),
@@ -411,8 +415,71 @@ mod tests {
         assert!(!directory.path().join("cluster.json.part").exists());
         drop(restarted);
         let complete = Files::open(&instance, &budget, lock.clone()).await?;
-        assert_eq!(*complete.manifest.read().unwrap(), Some(head));
+        complete.disk.data.as_ref().unwrap().reconcile()?;
+        assert_eq!(*complete.manifest.read().unwrap(), Some(head.clone()));
+        let mut takeover = Manifest {
+            record_id: Uuid::now_v7(),
+            deployment_id: Uuid::now_v7(),
+            publication_key: [2; 32],
+            takeover_epoch: head.takeover_epoch + 1,
+            revision: head.revision + 1,
+            previous: Some(head.digest()?),
+            ..head.clone()
+        };
+        takeover.members[0].node_id = Uuid::now_v7();
+        let mut invalid = takeover.clone();
+        invalid.takeover_epoch = head.takeover_epoch;
+        assert!(invalid.follows(&head).is_err());
+        assert!(
+            complete
+                .apply(
+                    Registration {
+                        manifest: Some(invalid.clone()),
+                        history: vec![invalid],
+                    },
+                    takeover.deployment_id
+                )
+                .await
+                .is_err()
+        );
+        complete
+            .apply(
+                Registration {
+                    manifest: Some(takeover.clone()),
+                    history: vec![],
+                },
+                takeover.deployment_id,
+            )
+            .await?;
+        assert_eq!(*complete.manifest.read().unwrap(), Some(head.clone()));
         drop(complete);
+        let adopted = Files::open(&instance, &budget, lock.clone()).await?;
+        adopted.disk.data.as_ref().unwrap().reconcile()?;
+        assert_eq!(*adopted.pending.read().unwrap(), Some(takeover.clone()));
+        adopted
+            .apply(
+                Registration {
+                    manifest: Some(takeover.clone()),
+                    history: vec![takeover.clone()],
+                },
+                takeover.deployment_id,
+            )
+            .await?;
+        assert_eq!(adopted.media.media_id, media);
+        assert_eq!(*adopted.manifest.read().unwrap(), Some(takeover));
+        assert!(
+            adopted
+                .apply(
+                    Registration {
+                        manifest: Some(head.clone()),
+                        history: vec![],
+                    },
+                    head.deployment_id
+                )
+                .await
+                .is_err()
+        );
+        drop(adopted);
         std::fs::remove_file(directory.path().join("cluster.json"))?;
         assert!(Files::open(&instance, &budget, lock.clone()).await.is_err());
         std::fs::remove_file(directory.path().join("media.json"))?;

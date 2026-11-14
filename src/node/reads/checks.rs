@@ -117,7 +117,7 @@ impl Reads {
         error: &anyhow::Error,
     ) {
         let shared = matches!(source, Source::Chunk { .. } | Source::Pack { .. })
-            || matches!(source, Source::Raw { source } if !source.pending_upload && source.medium == "shared_s3");
+            || matches!(source, Source::Raw { source } if !source.pending_upload && source.medium == "shared");
         if shared
             && (error
                 .downcast_ref::<crate::content::codec::IntegrityError>()

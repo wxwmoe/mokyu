@@ -97,7 +97,7 @@ pub(in super::super) fn node_read_raw(
 pub(in super::super) fn node_read_storages(
     ids: &[Uuid],
 ) -> Rows<'_, crate::storage::model::Record> {
-    sqlx::query_as("SELECT s.* FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=ANY($1) AND s.enabled AND s.type='s3' ORDER BY s.id FOR SHARE OF s,p").bind(ids)
+    sqlx::query_as("SELECT s.* FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id=ANY($1) AND s.enabled AND s.type IN ('s3','mokyu') ORDER BY s.id FOR SHARE OF s,p").bind(ids)
 }
 
 pub(in super::super) fn node_read_profiles(

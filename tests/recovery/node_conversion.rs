@@ -52,7 +52,7 @@ async fn check_case(
             .await?;
     let source = Id::from(Uuid::now_v7());
     let etag = "02".repeat(16);
-    sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared_s3','ready',16,$3,1)").bind(source).bind(storage).bind(vec![2u8;16]).execute(pool).await?;
+    sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared','ready',16,$3,1)").bind(source).bind(storage).bind(vec![2u8;16]).execute(pool).await?;
     let stream:Id=sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,payload_type,etag) VALUES($1,'original','object','ready',16,'raw',$2) RETURNING id").bind(bucket).bind(&etag).fetch_one(pool).await?;
     sqlx::query("INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_offset,source_id) VALUES($1,0,16,0,$2)").bind(stream).bind(source).execute(pool).await?;
     sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,'original',$2,uuidv7())").bind(bucket).bind(stream).execute(pool).await?;
@@ -83,6 +83,7 @@ async fn check_case(
         .await?;
     queries::conversion_link(source, task).execute(pool).await?;
     let exchange = |operation, completion| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

@@ -72,6 +72,7 @@ pub(super) async fn check(
     ]);
     items.sort_by(|a, b| a.path.cmp(&b.path));
     let request = |operation, completion| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

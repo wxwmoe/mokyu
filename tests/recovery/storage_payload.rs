@@ -4,9 +4,7 @@ use crate::model::storage_cluster::{
     Acknowledgement, Cluster, FORMAT, Group, Layout, Manifest, Member, Policy, Topology,
 };
 
-#[tokio::test]
-#[ignore = "requires MOKYU_TEST_PAYLOAD_CONFIG and an isolated database"]
-async fn storage_payload_contract() -> Result<()> {
+pub(crate) async fn fixture() -> Result<(Backend, Cluster)> {
     assert_eq!(
         std::env::var("MOKYU_TEST_ALLOW_STATE_CHANGES")?,
         "isolated-only"
@@ -60,6 +58,73 @@ async fn storage_payload_contract() -> Result<()> {
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
+    Ok((backend, cluster))
+}
+
+#[tokio::test]
+#[ignore = "requires MOKYU_TEST_PAYLOAD_CONFIG and an isolated database"]
+async fn storage_collection_rotates_failed_batches() -> Result<()> {
+    let (backend, cluster) = fixture().await?;
+    let group = &cluster.manifest.groups[0];
+    let namespace = Uuid::now_v7();
+    let mut operations = Vec::new();
+    for _ in 0..66 {
+        let intent = Intent {
+            operation: Uuid::now_v7(),
+            namespace,
+            payload: Uuid::now_v7(),
+            revision: 1,
+            cluster: cluster.id,
+            layout_revision: 1,
+            takeover_epoch: 1,
+            group: group.id,
+            layout: group.layout.clone(),
+            members: Vec::new(),
+            area: Area::Blocks,
+            total: 1,
+            acknowledgement: Acknowledgement::All,
+        };
+        let until = chrono::Utc::now().timestamp_micros() + 80_000_000;
+        backend.prepare(&intent, until).await?;
+        backend.write_window(intent.operation, 0, 1, until).await?;
+        backend.retire(intent.operation).await?;
+        let mut tx = q::begin(&backend).await?;
+        super::super::queries::storage_journal::test_expire(intent.operation)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        operations.push(intent.operation);
+    }
+    operations.sort();
+    assert_eq!(
+        backend.collect_candidates(namespace, 64).await?,
+        operations[..64]
+    );
+    // Unreachable storage in the first batch must not starve later files.
+    assert_eq!(
+        backend.collect_candidates(namespace, 64).await?,
+        operations[64..]
+    );
+    assert!(backend.collect_candidates(namespace, 64).await?.is_empty());
+    let mut tx = q::begin(&backend).await?;
+    q::claim_collection(operations[0], i64::MAX, 0)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    assert_eq!(
+        backend.collect_candidates(namespace, 64).await?,
+        [operations[0]]
+    );
+    assert_eq!(backend.reclaim(operations[0], None).await?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MOKYU_TEST_PAYLOAD_CONFIG and an isolated database"]
+async fn storage_payload_contract() -> Result<()> {
+    let (backend, cluster) = fixture().await?;
+    let id = cluster.id;
+    let group = &cluster.manifest.groups[0];
 
     for (index, acknowledgement) in [
         Acknowledgement::All,
@@ -79,6 +144,11 @@ async fn storage_payload_contract() -> Result<()> {
             takeover_epoch: 1,
             group: group.id,
             layout: group.layout.clone(),
+            members: if index == 1 {
+                group.members.iter().rev().copied().collect()
+            } else {
+                Vec::new()
+            },
             area: Area::Blocks,
             total: if index == 2 { 0 } else { 70_000 },
             acknowledgement,
@@ -101,12 +171,13 @@ async fn storage_payload_contract() -> Result<()> {
                 namespace: intent.namespace,
                 payload: intent.payload,
                 fragment: Uuid::now_v7(),
-                media: group.members[copy as usize],
+                media: intent.members(group)?[copy as usize],
                 cluster: id,
                 group: group.id,
                 operation: intent.operation,
                 layout_revision: 1,
                 revision: 1,
+                generation: 0,
                 takeover_epoch: 1,
                 offset: 0,
                 length: intent.total,
@@ -138,7 +209,7 @@ async fn storage_payload_contract() -> Result<()> {
             });
         }
         let mut wrong = headers.clone();
-        wrong[1].media = group.members[0];
+        wrong[1].media = headers[0].media;
         assert!(backend.stage(intent.operation, &wrong).await.is_err());
         // The first insertion must roll back with the invalid second member.
         let mut tx = q::begin(&backend).await?;

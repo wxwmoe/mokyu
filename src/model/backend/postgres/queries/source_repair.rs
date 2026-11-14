@@ -331,7 +331,7 @@ pub(in super::super) fn allocated_source(
     chunk: &Chunk,
 ) -> sqlx::QueryBuilder<Postgres> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT l.encoding_id FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.chunk_id=c.id WHERE c.state='uploading' AND l.state='uploading' AND l.quarantined_at IS NULL AND l.owner_task IS NULL AND c.id=",
+        "SELECT COALESCE(s.type='mokyu',FALSE) FROM chunks c JOIN chunk_encodings l ON l.encoding_id=c.current_encoding_id AND l.chunk_id=c.id LEFT JOIN storages s ON s.id=l.storage_id WHERE c.state='uploading' AND l.state='uploading' AND l.quarantined_at IS NULL AND l.owner_task IS NULL AND c.id=",
     );
     query
         .push_bind(chunk.id)
@@ -341,7 +341,7 @@ pub(in super::super) fn allocated_source(
         .push_bind(chunk.encoding_id)
         .push(" AND l.encoding_id=")
         .push_bind(chunk.location_id)
-        .push(" FOR UPDATE");
+        .push(" FOR UPDATE OF c,l");
     query
 }
 

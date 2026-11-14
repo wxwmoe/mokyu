@@ -32,7 +32,7 @@ pub(super) async fn check(
 ) -> Result<()> {
     let pool = &backend.pool;
     let raw = Uuid::now_v7();
-    sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared_s3','ready',1,$3,1)")
+    sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision) VALUES($1,$2,'shared','ready',1,$3,1)")
         .bind(raw).bind(storage).bind(vec![7u8;16]).execute(pool).await?;
     let scope = SourceScope {
         storage_id: storage,
@@ -40,6 +40,7 @@ pub(super) async fn check(
         id: raw.to_string(),
     };
     let request = |operation, completion| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

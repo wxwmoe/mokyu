@@ -68,6 +68,7 @@ impl Backend {
             return Ok(None);
         };
         let input = work::Exchange {
+            protected: vec![],
             run,
             operation: id,
             completion: None,

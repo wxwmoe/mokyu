@@ -19,6 +19,7 @@ pub(crate) mod marker;
 mod memory;
 pub(crate) mod model;
 mod multipart;
+pub(crate) mod native;
 pub(crate) mod origin;
 pub(crate) mod pack_ranges;
 pub(crate) mod pack_writer;
@@ -95,6 +96,8 @@ pub(crate) fn is_fragment_key(key: &str) -> bool {
 }
 
 pub struct Storage {
+    pub(crate) native_control: Arc<native::control::Control>,
+    region: Option<String>,
     local_memory: Mutex<HashMap<Uuid, local_memory::Body>>,
     write_backlog: Mutex<backlog::Backlog>,
     pub(crate) write_memory: memory::Pool,
@@ -174,6 +177,8 @@ pub struct Storage {
 async fn build_store(
     options: StoreOptions,
     secrets: &Secrets,
+    native_control: Arc<native::control::Control>,
+    region: Option<String>,
     shared_permits: &Option<Arc<dyn crate::model::cluster::StoragePermits>>,
     row: crate::model::StorageRecord,
     profile: &StorageProfile,
@@ -189,7 +194,7 @@ async fn build_store(
     let prefix = record.prefix.clone();
     let identity_marker = record.identity_marker.clone();
     let is_local = record.r#type == "local";
-    let target = VerifiedStore::build(&record, options, secrets)?;
+    let target = VerifiedStore::build_control(&record, options, secrets, native_control, region)?;
     let raw_root = record.path.as_ref().map(|path| {
         PathBuf::from(path)
             .join(prefix.trim_matches('/'))
@@ -216,6 +221,7 @@ async fn build_store(
         buffered_backend,
         profile: Arc::new(profile.clone()),
         backend: target.backend,
+        native: target.native,
         multipart: target.multipart,
         streaming: target.streaming,
         raw_root,
@@ -337,6 +343,7 @@ impl Storage {
     pub async fn new(
         c: &Config,
         secrets: Arc<Secrets>,
+        native_control: Arc<native::control::Control>,
         budget: &Budget,
         physical: Arc<dyn crate::model::PhysicalStore>,
         remote_parts: Option<Arc<dyn crate::model::cluster::NodeWrites>>,
@@ -428,6 +435,8 @@ impl Storage {
             let mut backend = build_store(
                 StoreOptions::from_profile(&profile)?,
                 &secrets,
+                native_control.clone(),
+                c.instance.region.clone(),
                 &shared_permits,
                 row,
                 &profile,
@@ -442,6 +451,8 @@ impl Storage {
             targets.insert(id, Arc::new(backend));
         }
         let s = Self {
+            native_control,
+            region: c.instance.region.clone(),
             write_backlog: Mutex::new(backlog::Backlog::new(physical.write_backlog().await?)),
             maintenance,
             access: Arc::new(crate::status::access::Access::new(
@@ -816,6 +827,8 @@ impl Storage {
                 build_store(
                     StoreOptions::from_profile(&profile)?,
                     &self.secrets,
+                    self.native_control.clone(),
+                    self.region.clone(),
                     &self.shared_permits,
                     row,
                     &profile,
@@ -952,10 +965,14 @@ impl Storage {
         }
         Ok(())
     }
-    pub async fn check_identity(&self) -> Result<()> {
+    pub async fn check_identity(&self, startup: bool) -> Result<()> {
         let ids = self.storage_ids();
         ensure!(!ids.is_empty(), "no store is configured");
         for id in ids {
+            // Native nodes must register with the listener before their first verified I/O.
+            if startup && self.store_backend(id)?.native.is_some() {
+                continue;
+            }
             self.check_storage(id).await?;
         }
         Ok(())
@@ -1029,7 +1046,13 @@ impl Storage {
             .await?;
         }
         let options = StoreOptions::from_profile(profile)?;
-        let target = VerifiedStore::build(&record, options, &self.secrets)?;
+        let target = VerifiedStore::build_control(
+            &record,
+            options,
+            &self.secrets,
+            self.native_control.clone(),
+            self.region.clone(),
+        )?;
         let _permit = crate::storage::resource_gate::PRIORITY
             .scope(
                 crate::storage::resource_gate::MAINTENANCE,
@@ -1060,8 +1083,20 @@ impl Storage {
             )?;
         }
         let options = StoreOptions::from_profile(profile)?;
-        let previous = VerifiedStore::build(source, options, &self.secrets)?;
-        let next = VerifiedStore::build(target, options, &self.secrets)?;
+        let previous = VerifiedStore::build_control(
+            source,
+            options,
+            &self.secrets,
+            self.native_control.clone(),
+            self.region.clone(),
+        )?;
+        let next = VerifiedStore::build_control(
+            target,
+            options,
+            &self.secrets,
+            self.native_control.clone(),
+            self.region.clone(),
+        )?;
         let _permit = self.controls.acquire().await?;
         next.verify_relocation(
             &previous,
@@ -1082,15 +1117,26 @@ impl Storage {
                 &PathBuf::from(path).join(record.prefix.trim_matches('/')),
             )?;
         }
-        let target =
-            VerifiedStore::build(&record, StoreOptions::from_profile(profile)?, &self.secrets)?;
+        let target = VerifiedStore::build_control(
+            &record,
+            StoreOptions::from_profile(profile)?,
+            &self.secrets,
+            self.native_control.clone(),
+            self.region.clone(),
+        )?;
         let _permit = crate::storage::resource_gate::PRIORITY
             .scope(
                 crate::storage::resource_gate::MAINTENANCE,
                 self.controls.acquire(),
             )
             .await?;
-        target.verify().await
+        target.verify().await?;
+        if record.enabled
+            && let Some(native) = &target.native
+        {
+            native.probe().await?;
+        }
+        Ok(())
     }
     async fn check_storage_inner(&self, target: &StoreBackend) -> Result<()> {
         // A restarting control must verify the marker while data nodes still hold read permits.
@@ -1313,11 +1359,15 @@ impl Storage {
         self.release_staging(storage_id, key).await
     }
     pub(crate) async fn shared_staging_ready(&self) -> Result<()> {
-        let _ = self.shared_staging_id()?;
+        let id = self.shared_staging_id()?;
         ensure!(
             self.staging_bytes_limit.is_none_or(|n| n > 0),
             "uploads.staging_bytes_limit must be positive"
         );
+        let target = self.store_backend(id)?;
+        if let Some(native) = &target.native {
+            native.probe().await?;
+        }
         Ok(())
     }
     pub(crate) async fn write_fragment(
@@ -2554,24 +2604,38 @@ impl Storage {
             let upper = pack.raw_size as usize
                 + 8
                 + pack.member_count as usize * crate::content::pack::MAX_MEMBER_TAG;
-            let mut writer = pack_writer::Writer::new(
-                target.backend.clone(),
-                path,
-                target.raw_root.as_ref().and_then(|p| p.parent()),
-                upper,
-                Some((
-                    self.disk.clone(),
-                    target
-                        .profile
-                        .min_free_space
-                        .as_deref()
-                        .map(config::bytes)
-                        .transpose()?
-                        .unwrap_or(0),
-                    _write.clone(),
-                )),
-            )
-            .await?;
+            let mut writer = if let Some(native) = &target.native
+                && upper > crate::content::pack::SINGLE_PUT
+            {
+                pack_writer::Writer::spool(
+                    native.clone(),
+                    path,
+                    upper,
+                    self.file_cache(),
+                    self.local_cache(Some(storage))?,
+                    None,
+                )
+                .await?
+            } else {
+                pack_writer::Writer::new(
+                    target.backend.clone(),
+                    path,
+                    target.raw_root.as_ref().and_then(|p| p.parent()),
+                    upper,
+                    Some((
+                        self.disk.clone(),
+                        target
+                            .profile
+                            .min_free_space
+                            .as_deref()
+                            .map(config::bytes)
+                            .transpose()?
+                            .unwrap_or(0),
+                        _write.clone(),
+                    )),
+                )
+                .await?
+            };
             writer.put(Bytes::from_static(frame::HEADER)).await?;
             let mut builder = frame::Builder::new();
             let mut entries = Vec::with_capacity(pack.member_count as usize);

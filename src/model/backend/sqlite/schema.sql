@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261113065937.
+-- Generated from the complete sqlite migration chain through 20261114063300.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -639,7 +639,7 @@ CREATE TABLE journal_snapshots (
     lease_until INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0,
     retry_after INTEGER,
-    error_detail TEXT,
+    error_detail TEXT, checkpoint_body BLOB, checkpoint_size INTEGER NOT NULL DEFAULT 0,
     UNIQUE (storage_id,id)
 ) STRICT, WITHOUT ROWID;
 
@@ -1347,12 +1347,12 @@ CREATE TABLE raw_ranges (
     PRIMARY KEY (stream_id,offset_bytes)
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE raw_sources (
+CREATE TABLE "raw_sources" (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     location_id BLOB NOT NULL UNIQUE CHECK(length(location_id)=16),
     storage_id BLOB NOT NULL REFERENCES storages(id),
     owner_stream INTEGER REFERENCES streams(id) ON DELETE SET NULL,
-    medium TEXT NOT NULL DEFAULT 'local' CHECK (medium IN ('local','memory','shared_s3')),
+    medium TEXT NOT NULL DEFAULT 'local' CHECK (medium IN ('local','memory','shared')),
     durability TEXT NOT NULL DEFAULT 'durable' CHECK (durability IN ('durable','buffered','volatile')),
     boot_id BLOB CHECK (boot_id IS NULL OR length(boot_id)=16),
     state TEXT NOT NULL DEFAULT 'writing' CHECK (state IN ('writing','ready','unavailable','deleting')),
@@ -1554,7 +1554,7 @@ CREATE TABLE storage_clusters (
     revision INTEGER NOT NULL CHECK(revision>0),
     policy TEXT NOT NULL CHECK(json_valid(policy)),
     manifest TEXT NOT NULL CHECK(json_valid(manifest))
-) STRICT, WITHOUT ROWID;
+, allocation_group BLOB) STRICT, WITHOUT ROWID;
 
 CREATE TABLE storage_devices (
     media_id BLOB PRIMARY KEY CHECK(length(media_id)=16),
@@ -1594,12 +1594,62 @@ CREATE TABLE storage_gates (
     FOREIGN KEY (storage_id) REFERENCES storages(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE storage_journal_publications (
+    id BLOB NOT NULL PRIMARY KEY,
+    namespace_id BLOB NOT NULL,
+    cluster_id BLOB NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision>0),
+    manifest_revision INTEGER NOT NULL CHECK(manifest_revision>0),
+    proof TEXT NOT NULL CHECK(json_valid(proof)),
+    settled INTEGER NOT NULL DEFAULT FALSE,
+    CONSTRAINT storage_journal_publication_revision UNIQUE(namespace_id,revision)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE storage_journal_receipts (
+    namespace_id BLOB NOT NULL,
+    media_id BLOB NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision>=0),
+    PRIMARY KEY(namespace_id,media_id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE storage_journal_sources (
+    operation BLOB NOT NULL PRIMARY KEY,
+    namespace_id BLOB NOT NULL,
+    path TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision>0),
+    allocated_revision INTEGER NOT NULL DEFAULT 0 CHECK(allocated_revision>=0),
+    cursor_id BLOB NOT NULL,
+    file_id BLOB, published_revision INTEGER NOT NULL DEFAULT 0 CHECK(published_revision>=0),
+    CONSTRAINT storage_journal_source_payload FOREIGN KEY(operation) REFERENCES storage_payloads(operation),
+    CONSTRAINT storage_journal_source_file FOREIGN KEY(file_id) REFERENCES journal_files(id) ON DELETE SET NULL
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE storage_maintenance (
     storage_id BLOB NOT NULL REFERENCES storages(id) ON DELETE CASCADE,
     policy TEXT NOT NULL,
     last_scheduled_at INTEGER NOT NULL,
     PRIMARY KEY(storage_id,policy)
 ) STRICT;
+
+CREATE TABLE storage_object_writes (
+    operation BLOB NOT NULL PRIMARY KEY REFERENCES storage_payloads(operation),
+    owner BLOB NOT NULL,
+    condition TEXT NOT NULL CHECK(json_valid(condition)),
+    previous BLOB REFERENCES storage_payloads(operation)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE "storage_objects" (
+    namespace_id BLOB NOT NULL,
+    payload_id BLOB NOT NULL,
+    path_hash BLOB NOT NULL CHECK(length(path_hash)=32),
+    path TEXT NOT NULL CHECK(length(CAST(path AS BLOB))<=1024),
+    revision INTEGER NOT NULL DEFAULT 0 CHECK(revision>=0),
+    head BLOB REFERENCES storage_payloads(operation),
+    pending BLOB REFERENCES storage_payloads(operation),
+    modified INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY(namespace_id,payload_id),
+    UNIQUE(namespace_id,path_hash)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE storage_payloads (
     operation BLOB NOT NULL PRIMARY KEY,
@@ -1610,7 +1660,7 @@ CREATE TABLE storage_payloads (
     intent TEXT NOT NULL CHECK(json_valid(intent)),
     state TEXT NOT NULL DEFAULT 'prepared',
     write_until INTEGER NOT NULL DEFAULT 0,
-    protected_until INTEGER NOT NULL DEFAULT 0,
+    protected_until INTEGER NOT NULL DEFAULT 0, collect_after INTEGER NOT NULL DEFAULT 0 CHECK(collect_after>=0),
     CONSTRAINT storage_payload_revision CHECK (revision>0),
     CONSTRAINT storage_payload_state CHECK (state IN ('prepared','published','retired')),
     CONSTRAINT storage_payload_protection CHECK (protected_until>=0),
@@ -1706,7 +1756,7 @@ CREATE TABLE storage_recovery_catalogs (
     id BLOB NOT NULL PRIMARY KEY,
     namespace_id BLOB NOT NULL,
     anchor TEXT NOT NULL CHECK(json_valid(anchor))
-) STRICT, WITHOUT ROWID;
+, publication TEXT CHECK(publication IS NULL OR json_valid(publication)), indexed_revision INTEGER NOT NULL DEFAULT 0) STRICT, WITHOUT ROWID;
 
 CREATE TABLE storage_recovery_cursors (
     catalog BLOB NOT NULL,
@@ -1736,6 +1786,51 @@ CREATE TABLE storage_recovery_entries (
     CONSTRAINT storage_recovery_entry_position CHECK(position>=0),
     CONSTRAINT storage_recovery_entry_hash CHECK(length(content_hash)=32),
     CONSTRAINT storage_recovery_entry_size CHECK(encoded_bytes BETWEEN 1 AND 8388608)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE storage_recovery_files (
+    catalog BLOB NOT NULL,
+    operation BLOB NOT NULL,
+    path_hash BLOB NOT NULL,
+    path TEXT NOT NULL,
+    publication_revision INTEGER NOT NULL,
+    through_sequence INTEGER NOT NULL,
+    retired INTEGER NOT NULL DEFAULT 0,
+    part TEXT NOT NULL CHECK(json_valid(part)),
+    decoded TEXT CHECK(decoded IS NULL OR json_valid(decoded)),
+    CONSTRAINT storage_recovery_file_id PRIMARY KEY(catalog,operation),
+    CONSTRAINT storage_recovery_file_catalog FOREIGN KEY(catalog) REFERENCES storage_recovery_catalogs(id) ON DELETE CASCADE,
+    CONSTRAINT storage_recovery_file_revision CHECK(publication_revision>0),
+    CONSTRAINT storage_recovery_file_sequence CHECK(through_sequence>=0),
+    CONSTRAINT storage_recovery_file_hash CHECK(length(path_hash)=32),
+    CONSTRAINT storage_recovery_file_retired CHECK(retired IN (0,1))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE storage_repairs (
+    id BLOB NOT NULL PRIMARY KEY,
+    operation BLOB NOT NULL,
+    sequence INTEGER NOT NULL,
+    original_receipt TEXT NOT NULL CHECK(json_valid(original_receipt)),
+    candidate_id BLOB,
+    candidate TEXT CHECK(candidate IS NULL OR json_valid(candidate)),
+    state TEXT NOT NULL DEFAULT 'queued',
+    original_removed INTEGER NOT NULL DEFAULT FALSE,
+    candidate_removed INTEGER NOT NULL DEFAULT FALSE, protected_until INTEGER NOT NULL DEFAULT 0 CHECK(protected_until>=0), collecting INTEGER NOT NULL DEFAULT FALSE,
+    CONSTRAINT storage_repair_payload FOREIGN KEY(operation) REFERENCES storage_payloads(operation),
+    CONSTRAINT storage_repair_state CHECK(state IN ('queued','healthy','writing','installed'))
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE storage_reservations (
+    operation BLOB NOT NULL,
+    media_id BLOB NOT NULL,
+    cluster_id BLOB NOT NULL,
+    bytes INTEGER NOT NULL CHECK(bytes>0),
+    accounting_boot BLOB,
+    accounting_revision INTEGER NOT NULL DEFAULT 0 CHECK(accounting_revision>=0),
+    complete INTEGER NOT NULL DEFAULT 0 CHECK(complete IN (0,1)),
+    PRIMARY KEY(operation,media_id),
+    CONSTRAINT storage_reservation_payload FOREIGN KEY(operation) REFERENCES storage_payloads(operation),
+    CONSTRAINT storage_reservation_cluster FOREIGN KEY(cluster_id) REFERENCES storage_clusters(id)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE "storages" (
@@ -2444,9 +2539,23 @@ CREATE INDEX storage_fragment_media ON storage_fragments(media_id,operation);
 
 CREATE INDEX storage_fragment_reclaim ON storage_fragments(operation,deleted,id);
 
+CREATE INDEX storage_journal_pending ON storage_journal_sources(namespace_id,allocated_revision,revision,operation);
+
+CREATE INDEX storage_objects_listing ON storage_objects(namespace_id,path) WHERE head IS NOT NULL;
+
+CREATE INDEX storage_payload_collection ON storage_payloads(namespace_id,state,collect_after,operation);
+
 CREATE INDEX storage_permit_usage ON storage_permits(storage_id,direction,expires_at);
 
 CREATE INDEX storage_recovery_entry_owner ON storage_recovery_entries(catalog,category,owner_id,id,position);
+
+CREATE INDEX storage_recovery_file_path ON storage_recovery_files(catalog,path_hash,publication_revision);
+
+CREATE INDEX storage_repair_operation ON storage_repairs(operation,state,id);
+
+CREATE INDEX storage_reservation_settlement ON storage_reservations(media_id,complete,accounting_boot,accounting_revision);
+
+CREATE INDEX storage_reservation_totals ON storage_reservations(cluster_id,media_id);
 
 CREATE INDEX storages_block_key ON storages(block_key_id);
 
@@ -2856,3 +2965,4 @@ END;
 DELETE FROM sqlite_sequence;
 INSERT INTO sqlite_sequence(name,seq) VALUES('audit_events',0);
 INSERT INTO sqlite_sequence(name,seq) VALUES('integrity_issues',0);
+INSERT INTO sqlite_sequence(name,seq) VALUES('raw_sources',0);

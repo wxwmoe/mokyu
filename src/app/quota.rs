@@ -23,6 +23,14 @@ pub(crate) fn database_error(error: &anyhow::Error) -> Option<s3s::S3Error> {
             "redundancy pending key limit reached"
         )),
         Error::ChunkBusy => Some(s3s::s3_error!(SlowDown)),
+        Error::StorageCopiesPending => Some(s3s::s3_error!(
+            ServiceUnavailable,
+            "required storage copies are not ready"
+        )),
+        Error::StorageForwardFailed => Some(s3s::s3_error!(
+            ServiceUnavailable,
+            "storage forwarding failed; retry the upload"
+        )),
         Error::SourceUnavailable => Some(s3s::s3_error!(InternalError)),
         reason @ (Error::LastAdministrator
         | Error::BucketAlreadyExists

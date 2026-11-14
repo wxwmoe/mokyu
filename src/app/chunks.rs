@@ -130,6 +130,7 @@ impl App {
             crate::faults::point("source-before-reference").await;
             if accepted.is_none()
                 && profile.upload_cache
+                && !self.storage.is_native(storage_id)?
                 && self.chunks.can_stage_reuse(c.id).await?
             {
                 let (data, compressed) = self
@@ -150,6 +151,7 @@ impl App {
         crate::faults::point("chunk-allocated").await;
         if accepted.is_none()
             && profile.upload_cache
+            && !self.storage.is_native(storage_id)?
             && self
                 .stage_chunk(
                     stream,

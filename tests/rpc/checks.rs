@@ -50,7 +50,7 @@ async fn node_checks_verify_bodies_and_report_owned_sources() -> Result<()> {
     let mut context = NodeContext::new(NodeConfig::parse(&config, "data")?, "data").await?;
     let dns = Dns::new().await?;
     *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
-    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, identity)?;
+    Arc::get_mut(&mut context).unwrap().client = std::sync::Arc::new(dns.client(&url, identity)?);
     let mut states = context.subscribe();
     let driver = tokio::spawn(context.clone().run());
     let initial = node_state(&mut states, |state| state.phase == Phase::Ready).await?;

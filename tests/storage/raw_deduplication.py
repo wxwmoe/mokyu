@@ -60,7 +60,7 @@ def main():
     large = bytes(range(256)) * (6 * 1024 * 1024 // 256 + 100)
     fixture.put('whole', large)
     whole = source('whole')
-    assert whole['medium'] == ('shared_s3' if fixture.backend else 'local')
+    assert whole['medium'] == ('shared' if fixture.backend else 'local')
     assert whole['upload_id'] is None
     for index, boundary in enumerate([5 * 1024 * 1024, 6 * 1024 * 1024]):
         key = 'multipart-' + str(index)

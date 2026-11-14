@@ -101,6 +101,7 @@ pub(super) async fn check(
         chunk(backend, storage, 2).await?;
     }
     let request = |operation, completion, max_items| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

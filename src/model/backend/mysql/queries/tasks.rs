@@ -1,7 +1,7 @@
 use super::*;
 
 pub(in super::super) fn claim_task(id: Uuid, token: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP(6)),execution_token=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (state='queued' OR (state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state='idle' AND (rl.next_reconcile_at<=UTC_TIMESTAMP(6) OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (state='failed' AND (CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')) AS BINARY)='cdc' OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state<>'paused')) AND updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6))))").bind(token).bind(id)
+    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CURRENT_TIMESTAMP(6)),execution_token=?,updated_at=CURRENT_TIMESTAMP(6) WHERE id=? AND (state='queued' OR (state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state='idle' AND (rl.next_reconcile_at<=UTC_TIMESTAMP(6) OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (state='failed' AND (CAST(JSON_UNQUOTE(JSON_EXTRACT(detail,'$.operation')) AS BINARY) IN ('cdc','native') OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state<>'paused')) AND updated_at<TIMESTAMPADD(SECOND,-30,CURRENT_TIMESTAMP(6))))").bind(token).bind(id)
 }
 
 pub(in super::super) fn task_record(id: Uuid) -> Rows<'static, TaskRecord> {
@@ -196,15 +196,24 @@ pub(in super::super) fn task_view(id: Uuid) -> sqlx::QueryBuilder<MySql> {
     query
 }
 
-pub(in super::super) fn task_file_uuids(chunk: Option<Id>, pack: Option<Id>) -> Rows<'static, (Option<Uuid>, Option<Uuid>)> {
-    sqlx::query_as("SELECT (SELECT uuid FROM chunks WHERE id=?), (SELECT location_id FROM packs WHERE id=?)")
-        .bind(chunk)
-        .bind(pack)
+pub(in super::super) fn task_file_uuids(
+    chunk: Option<Id>,
+    pack: Option<Id>,
+) -> Rows<'static, (Option<Uuid>, Option<Uuid>)> {
+    sqlx::query_as(
+        "SELECT (SELECT uuid FROM chunks WHERE id=?), (SELECT location_id FROM packs WHERE id=?)",
+    )
+    .bind(chunk)
+    .bind(pack)
 }
 
 #[async_trait::async_trait]
 impl TaskControlStore for Backend {
-    async fn file_uuids(&self, chunk: Option<Id>, pack: Option<Id>) -> Result<(Option<Uuid>, Option<Uuid>)> {
+    async fn file_uuids(
+        &self,
+        chunk: Option<Id>,
+        pack: Option<Id>,
+    ) -> Result<(Option<Uuid>, Option<Uuid>)> {
         Ok(task_file_uuids(chunk, pack).fetch_one(&self.pool).await?)
     }
 

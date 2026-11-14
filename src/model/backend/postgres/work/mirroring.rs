@@ -78,6 +78,7 @@ impl Backend {
             Error::NodeWriteBusy
         );
         let input = work::Exchange {
+            protected: vec![],
             run,
             operation: id,
             completion: None,
@@ -203,7 +204,10 @@ pub(crate) async fn begin(
     let (medium, block) = queries::node_write_storage(storage)
         .fetch_one(&mut *tx)
         .await?;
-    ensure!(medium == "s3", Error::SourceUnavailable);
+    ensure!(
+        matches!(medium.as_str(), "s3" | "mokyu"),
+        Error::SourceUnavailable
+    );
     let mut profile = queries::storage_profile(storage)
         .fetch_one(&mut *tx)
         .await?;

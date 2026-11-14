@@ -445,7 +445,7 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
     let mut context = NodeContext::new(NodeConfig::parse(&config, "data")?, "data").await?;
     let dns = Dns::new().await?;
     *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
-    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, identity)?;
+    Arc::get_mut(&mut context).unwrap().client = Arc::new(dns.client(&url, identity)?);
     let mut states = context.subscribe();
     let running = context.clone();
     let driver = tokio::spawn(async move {
@@ -548,7 +548,7 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
             &peer_directory.display().to_string(),
         );
         let mut peer = NodeContext::new(NodeConfig::parse(&peer_config, "data")?, "data").await?;
-        Arc::get_mut(&mut peer).unwrap().client = dns.client(&url, peer_identity)?;
+        Arc::get_mut(&mut peer).unwrap().client = Arc::new(dns.client(&url, peer_identity)?);
         let mut peer_states = peer.subscribe();
         let running = peer.clone();
         let peer_driver = tokio::spawn(async move { running.run().await });
@@ -673,7 +673,7 @@ async fn node_http_reads(case: HttpCase) -> Result<()> {
         );
         let mut background =
             NodeContext::new(NodeConfig::parse(&config, "worker")?, "worker").await?;
-        Arc::get_mut(&mut background).unwrap().client = dns.client(&url, identity)?;
+        Arc::get_mut(&mut background).unwrap().client = Arc::new(dns.client(&url, identity)?);
         let mut background_states = background.subscribe();
         let running = background.clone();
         let background_driver = tokio::spawn(async move { running.run().await });

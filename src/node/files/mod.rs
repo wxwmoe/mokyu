@@ -297,6 +297,26 @@ impl Cache {
         file.append_in(&self.files(), data).await
     }
 
+    pub(super) async fn pack_writer(
+        &self,
+        native: Arc<crate::storage::native::store::Store>,
+        path: object_store::path::Path,
+        upper: usize,
+        profile: &StorageProfile,
+        statistics: Arc<crate::status::stats::Counters>,
+    ) -> Result<crate::storage::pack_writer::Writer<'_>> {
+        self.initialize().await?;
+        crate::storage::pack_writer::Writer::spool(
+            native,
+            path,
+            upper,
+            self.files(),
+            self.policy(profile)?,
+            Some(statistics),
+        )
+        .await
+    }
+
     fn policy(&self, profile: &StorageProfile) -> Result<CachePolicy> {
         Ok(CachePolicy {
             enabled: profile.cache_enabled,

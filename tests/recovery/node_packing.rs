@@ -117,6 +117,7 @@ pub(super) async fn check(
     .await?;
     let ids = object(backend, storage, bucket, 6, 65536).await?;
     let request = |operation, completion| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

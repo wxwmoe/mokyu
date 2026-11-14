@@ -269,6 +269,69 @@ impl Client {
         self.unary(input, "/mokyu.node.v1.NodeReads/OpenRead").await
     }
 
+    pub(crate) async fn storage_read(
+        &self,
+        input: wire::NativeReadRequest,
+    ) -> Result<wire::NativeReadReply, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/Read").await
+    }
+
+    pub(crate) async fn storage_maintenance(
+        &self,
+        input: wire::NativeMaintenanceRequest,
+    ) -> Result<wire::StorageResult, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/Maintain")
+            .await
+    }
+
+    pub(crate) async fn storage_replicate(
+        &self,
+        input: wire::NativeMaintenanceRequest,
+    ) -> Result<wire::StorageResult, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/Replicate")
+            .await
+    }
+
+    pub(crate) async fn storage_read_renewal(
+        &self,
+        input: wire::NativeReadRenewal,
+    ) -> Result<wire::StorageRequest, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/RenewRead")
+            .await
+    }
+
+    pub(crate) async fn storage_upload(
+        &self,
+        input: wire::NativeUploadRequest,
+    ) -> Result<wire::StorageResult, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/PrepareUpload")
+            .await
+    }
+
+    pub(crate) async fn storage_write_window(
+        &self,
+        input: wire::NativeWriteWindow,
+    ) -> Result<wire::StorageResult, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/WriteWindow")
+            .await
+    }
+
+    pub(crate) async fn storage_accept(
+        &self,
+        input: wire::NativeUploadResult,
+    ) -> Result<wire::StorageResult, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/AcceptUpload")
+            .await
+    }
+
+    pub(crate) async fn storage_upload_renewal(
+        &self,
+        input: wire::NativeReadRenewal,
+    ) -> Result<wire::StorageRequest, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/RenewUpload")
+            .await
+    }
+
     pub(crate) async fn refresh_reads(
         &self,
         input: wire::RefreshReadsRequest,

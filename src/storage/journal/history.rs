@@ -12,11 +12,11 @@ use uuid::Uuid;
 
 const MAX_BYTES: u64 = 16 * 1024;
 
-#[derive(Deserialize, Serialize)]
-struct Record {
-    storage: Uuid,
-    next: Uuid,
-    cut: EpochCut,
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct Record {
+    pub storage: Uuid,
+    pub next: Uuid,
+    pub cut: EpochCut,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -31,6 +31,55 @@ fn path(epoch: Uuid) -> String {
 }
 
 impl Claim {
+    pub fn path(&self) -> String {
+        path(self.descriptor.writer_epoch)
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub async fn write_native(
+        &self,
+        native: &crate::storage::native::store::Store,
+        owner: Uuid,
+    ) -> Result<crate::model::storage_recovery::Part> {
+        use crate::{
+            content::fragment::Area, model::storage_native::RecoveryIdentity,
+            storage::native::store::Publication,
+        };
+        use futures_util::StreamExt;
+        let public = super::recovery::inspect_prefix(&self.bytes)?;
+        let mut options = PutOptions {
+            mode: PutMode::Create,
+            ..Default::default()
+        };
+        options.extensions.insert(Publication {
+            owner,
+            area: Area::Recovery,
+        });
+        options.extensions.insert(RecoveryIdentity {
+            payload: public.envelope.payload,
+            revision: public.envelope.revision,
+        });
+        let bytes = Bytes::copy_from_slice(&self.bytes);
+        let intent = native
+            .write(
+                &Path::from(self.path()),
+                bytes.len() as u64,
+                futures_util::stream::iter([Ok(bytes)]).boxed(),
+                options,
+            )
+            .await?;
+        let part = crate::model::storage_recovery::Part {
+            intent,
+            path: self.path(),
+            digest: *blake3::hash(&self.bytes).as_bytes(),
+        };
+        part.inspect(&self.bytes)?;
+        Ok(part)
+    }
+
     pub fn freeze(
         journal: &Journal,
         storage: Uuid,
@@ -39,6 +88,7 @@ impl Claim {
         key: &Key,
         encrypted: bool,
         revision: (Option<String>, Option<String>),
+        native: bool,
     ) -> Result<Self> {
         ensure!(
             cut.epoch == journal.writer_epoch && (revision.0.is_some() || revision.1.is_some()),
@@ -57,12 +107,24 @@ impl Claim {
             last: cut.sequence,
             previous: journal.head()?.unwrap_or([0; 32]),
         };
-        let bytes = format.encode(
-            FrameType::History,
-            &path(next),
-            sequence,
-            &serde_json::to_vec(&Record { storage, next, cut })?,
-        )?;
+        let data = serde_json::to_vec(&Record { storage, next, cut })?;
+        let bytes = if native {
+            super::recovery::encode(
+                &format,
+                &path(next),
+                &super::recovery::Envelope {
+                    payload: next,
+                    revision: 1,
+                    batch: next,
+                    kind: FrameType::History,
+                    sequence,
+                },
+                &[],
+                &data,
+            )?
+        } else {
+            format.encode(FrameType::History, &path(next), sequence, &data)?
+        };
         ensure!(
             bytes.len() as u64 <= MAX_BYTES,
             "history record exceeds limit"
@@ -176,6 +238,13 @@ mod tests {
 
     #[tokio::test]
     async fn recovery_follows_only_the_rooted_chain() -> Result<()> {
+        for native in [false, true] {
+            history_contract(native).await?;
+        }
+        Ok(())
+    }
+
+    async fn history_contract(native: bool) -> Result<()> {
         let store = InMemory::new();
         let storage = Uuid::new_v4();
         let original = Key::new("aes-256-gcm", [5; 32])?;
@@ -198,7 +267,13 @@ mod tests {
             &key,
             false,
             (Some("a".into()), None),
+            native,
         )?;
+        assert!(first.bytes.starts_with(if native {
+            b"MOKYU\x00\x00\x0a"
+        } else {
+            b"MOKYU\x00\x00\x06"
+        }));
         first.publish(&store, None).await?;
         first.publish(&store, None).await?;
         assert!(chain(&store, &root, storage, &key).await?.is_empty());
@@ -214,6 +289,7 @@ mod tests {
             &key,
             true,
             (Some("b".into()), None),
+            native,
         )?;
         second.publish(&store, None).await?;
         assert_eq!(chain(&store, middle, storage, &key).await?, [a.clone()]);

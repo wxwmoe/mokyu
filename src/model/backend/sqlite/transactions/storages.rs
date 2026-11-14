@@ -110,6 +110,7 @@ impl StorageInitializer for StorageInitialization {
         let prepared = self.prepared.take().context("storage was not prepared")?;
         let mut tx = self.write.begin_with(queries::BEGIN_WRITE).await?;
         prepared.insert(&mut tx).await?;
+        super::super::storage_native::initialized(&mut tx, &prepared.record).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -206,7 +207,7 @@ impl StorageUpdate for StorageModification {
                 if record.r#type == "local" {
                     "local"
                 } else {
-                    "shared_s3"
+                    "shared"
                 },
             )
             .execute(&mut *tx)

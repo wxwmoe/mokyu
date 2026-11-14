@@ -68,23 +68,17 @@ impl Offer {
     }
 }
 
-pub(super) async fn checkpoint(
+async fn active(
     tx: &mut registry::Tx<'_>,
     node: &NodeState,
     run: Run,
     operation: Uuid,
-) -> Result<(work::Plan, Execution)> {
+) -> Result<(work::Plan, Execution, i64)> {
     let row = q::offer(node.node_id, operation)
         .fetch_optional(&mut **tx)
         .await?
         .ok_or(Error::NodeExpired)?;
     row.verify(run)?;
-    ensure!(
-        matches!(node.role.as_str(), "worker" | "node")
-            || node.role == "data"
-                && matches!(row.plan.as_deref(), Some(work::Plan::Mirror { .. })),
-        Error::NodeAuthentication
-    );
     ensure!(
         row.remaining > 0 && row.result_hash.is_none(),
         Error::NodeExpired
@@ -98,7 +92,36 @@ pub(super) async fn checkpoint(
         record.state == "running" && record.execution_token == Some(task.token),
         Error::NodeExpired
     );
-    Ok((row.plan.ok_or(Error::NodeOperationConflict)?.0, task))
+    Ok((
+        row.plan.ok_or(Error::NodeOperationConflict)?.0,
+        task,
+        chrono::Utc::now().timestamp_micros() + row.remaining * 1000,
+    ))
+}
+
+pub(super) async fn checkpoint(
+    tx: &mut registry::Tx<'_>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+) -> Result<(work::Plan, Execution)> {
+    let (plan, task, _) = active(tx, node, run, operation).await?;
+    ensure!(
+        matches!(node.role.as_str(), "worker" | "node")
+            || node.role == "data" && matches!(&plan, work::Plan::Mirror { .. }),
+        Error::NodeAuthentication
+    );
+    Ok((plan, task))
+}
+
+pub(super) async fn storage_plan(
+    tx: &mut registry::Tx<'_>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+) -> Result<(work::Plan, i64)> {
+    let (plan, _, expires) = active(tx, node, run, operation).await?;
+    Ok((plan, expires))
 }
 
 pub(super) async fn material(
@@ -265,6 +288,26 @@ async fn finish(
     }
     let mut issue = None;
     let state = match (Some(plan), result.outcomes.as_slice()) {
+        (Some(work::Plan::Replicate(plan)), [work::Outcome::Replicated]) => {
+            super::storage_payload::filled(tx, &plan).await?;
+            let detail = queries::task_record(task.id)
+                .fetch_one(&mut **tx)
+                .await?
+                .detail;
+            ensure!(
+                queries::work_sweep::task_progress(task, &plan.sequence.to_string(), 1, detail)
+                    .execute(&mut **tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                Error::NodeExpired
+            );
+            "queued"
+        }
+        (Some(work::Plan::Replicate(_)), [work::Outcome::Retry]) => {
+            issue = Some("backend_io_failed");
+            "queued"
+        }
         (Some(work::Plan::Mirror { task: id }), [work::Outcome::Mirrored { size, missing }])
             if id == task.id =>
         {
@@ -705,6 +748,21 @@ impl NodeWork for Backend {
                     .await?;
             }
             let prepared = match detail["operation"].as_str() {
+                Some("native") if task_type == "storage_migration" => {
+                    if let Some(plan) = super::storage_payload::fill_plan(&mut tx, task.id).await? {
+                        let materials = work::Materials {
+                            storage: material(&mut tx, plan.storage, key).await?,
+                            additional: vec![],
+                            keys: vec![],
+                        };
+                        Some((work::Plan::Replicate(plan), serde_json::to_vec(&materials)?))
+                    } else {
+                        queries::finish_task(task, "completed", None)
+                            .execute(&mut *tx)
+                            .await?;
+                        None
+                    }
+                }
                 Some("mirroring") => super::work_mirroring::offer(&mut tx, task, key).await?,
                 Some("cache") if detail.get("source_node").is_some() => {
                     super::node_files::offer(&mut tx, node, task, &detail, key).await?
@@ -736,6 +794,7 @@ impl NodeWork for Backend {
                         task_type == "gc",
                         input.max_items,
                         key,
+                        &input.protected,
                     )
                     .await?
                 }

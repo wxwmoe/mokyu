@@ -188,6 +188,19 @@ pub(super) async fn acknowledge(
     q::fence(storage, token).fetch_one(&mut *db).await?;
     let ledger = q::ledger(storage).fetch_one(&mut *db).await?;
     let actual = q::file(storage, file.id).fetch_one(&mut *db).await?;
+    if super::queries::storage_journal::identity(storage)
+        .fetch_optional(&mut *db)
+        .await?
+        .is_some()
+    {
+        ensure!(
+            super::queries::storage_journal::publication(file.id)
+                .fetch_optional(&mut *db)
+                .await?
+                .is_some_and(|p| p.1),
+            "native recovery evidence must settle before its watermark"
+        );
+    }
     ensure!(
         actual.digest == file.digest && actual.last_seq == file.last_seq,
         "journal receipt disagrees"
@@ -366,6 +379,7 @@ pub(super) async fn prepare(
                         keys.insert(id);
                     }
                     q::hold(bucket, event.seq, &hold).execute(&mut *db).await?;
+                    super::storage_journal::track(db, &hold).await?;
                 }
                 batch.push(Record::Material(material));
             }

@@ -54,9 +54,11 @@ impl Budget {
         self.usage.lock().unwrap().ready
     }
 
-    pub(crate) fn measurement(&self) -> Option<(u64, u64)> {
+    pub(crate) fn measurement(&self) -> Option<(u64, u64, u64)> {
         let usage = self.usage.lock().unwrap();
-        usage.ready.then_some((usage.used, usage.reserved))
+        usage
+            .ready
+            .then_some((usage.used, usage.reserved, usage.revision))
     }
 
     pub(crate) fn contains(&self, path: &Path) -> Result<bool> {
@@ -83,7 +85,7 @@ impl Budget {
         );
         usage.reserved = reserved;
         usage.active += 1;
-        usage.revision = usage.revision.wrapping_add(1);
+        usage.advance();
         Ok(Reservation {
             budget: self.clone(),
             bytes,
@@ -112,6 +114,7 @@ impl Budget {
         if usage.active == 0 && usage.revision == started {
             usage.used = observed;
             usage.ready = true;
+            usage.advance();
         }
         Ok(())
     }
@@ -161,7 +164,7 @@ impl Reservation {
             } else {
                 usage.active -= 1;
             }
-            usage.revision = usage.revision.wrapping_add(1);
+            usage.advance();
             self.active = active;
         }
     }
@@ -178,7 +181,17 @@ impl Drop for Reservation {
         if self.active {
             usage.active -= 1;
         }
-        usage.revision = usage.revision.wrapping_add(1);
+        usage.advance();
+    }
+}
+
+impl Usage {
+    fn advance(&mut self) {
+        self.revision = self.revision.saturating_add(1);
+        // Exhaustion must never turn an old capacity sample into a current one.
+        if self.revision >= i64::MAX as u64 {
+            self.ready = false;
+        }
     }
 }
 
@@ -249,6 +262,29 @@ fn allocated_tree(root: &Path) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accounting_stamp_advances_with_usage_and_never_wraps() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let budget = Budget::open(directory.path(), u64::MAX)?;
+        let initial = budget.measurement().unwrap();
+        let mut reservation = budget.reserve(4096)?;
+        let reserved = budget.measurement().unwrap();
+        assert_eq!(reserved.1, 4096);
+        assert!(reserved.2 > initial.2);
+        reservation.written(4096);
+        drop(reservation);
+        let complete = budget.measurement().unwrap();
+        assert_eq!((complete.0, complete.1), (initial.0 + 4096, 0));
+        assert!(complete.2 > reserved.2);
+        budget.usage.lock().unwrap().revision = i64::MAX as u64 - 1;
+        budget.reconcile()?;
+        assert!(budget.measurement().is_none());
+        assert!(budget.reserve(0).is_err());
+        budget.reconcile()?;
+        assert!(budget.measurement().is_none());
+        Ok(())
+    }
 
     #[test]
     fn deferred_accounting_never_treats_unknown_space_as_empty() -> Result<()> {

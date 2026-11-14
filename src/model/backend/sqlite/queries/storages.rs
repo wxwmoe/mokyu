@@ -74,7 +74,7 @@ pub(in super::super) fn storage_relocation_ready() -> Scalar<'static, bool> {
 }
 
 pub(in super::super) fn relocate_raw_sources(id: Uuid, medium: &'static str) -> Statement<'static> {
-    sqlx::query("UPDATE raw_sources SET medium=?,revision=revision+1 WHERE storage_id=? AND medium IN ('local','shared_s3')").bind(medium).bind(id)
+    sqlx::query("UPDATE raw_sources SET medium=?,revision=revision+1 WHERE storage_id=? AND medium IN ('local','shared')").bind(medium).bind(id)
 }
 
 pub(in super::super) fn storage_row_lock<'q>(

@@ -53,7 +53,42 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
         complete_journal_upload,
     } = job.selection.context("missing recovery selection")?.0;
     let target = job.target_storage.context("missing recovery target")?;
-    let origin = unlocked.source.connect()?;
+    let native_scan = if let Some(native) = &unlocked.native {
+        let scan = recovery::native::scanner(
+            app,
+            unlocked
+                .source
+                .connection
+                .cluster_id
+                .context("missing recovery cluster")?,
+        )
+        .await?;
+        let data =
+            if exclusive_takeover && app.storage_records.enabled_by_id(target).await?.is_none() {
+                scan.recover(
+                    native.catalog,
+                    &unlocked.source,
+                    &native.head,
+                    &app.storage.disk,
+                    Some(&unlocked.cut),
+                )
+                .await?
+            } else {
+                scan.replay(
+                    native.catalog,
+                    &unlocked.source,
+                    &native.head,
+                    &app.storage.disk,
+                    Some(&unlocked.cut),
+                )
+                .await?
+            };
+        Some((scan, data))
+    } else {
+        None
+    };
+    let source_store = recovery::native::connect(app, &unlocked.source.connection)?;
+    let origin = source_store.backend.clone();
     let source_storage = unlocked.source.connection.id;
     let local = crate::storage::journal::local::Local::new(&unlocked.source.connection)?;
     let mut pin = match &local {
@@ -73,7 +108,8 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                     .is_some_and(|claim| claim.descriptor == existing)),
         "source ownership changed"
     );
-    if exclusive_takeover
+    if native_scan.is_none()
+        && exclusive_takeover
         && (unlocked.claim.is_none() || local.is_some() && existing == unlocked.source.journal)
     {
         if complete_journal_upload {
@@ -93,15 +129,21 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
         }
     }
     let selected = buckets.keys().copied().collect::<BTreeSet<_>>();
-    let (catalog, cut) = unlocked
-        .source
-        .read_locked(
-            origin.as_ref(),
-            Some(&unlocked.cut),
-            (!exclusive_takeover).then_some(&selected),
-            local.as_ref(),
-        )
-        .await?;
+    let (native_scan, catalog, cut) = match native_scan {
+        Some((scan, (catalog, cut))) => (Some(scan), catalog, cut),
+        None => {
+            let (catalog, cut) = unlocked
+                .source
+                .read_locked(
+                    origin.as_ref(),
+                    Some(&unlocked.cut),
+                    (!exclusive_takeover).then_some(&selected),
+                    local.as_ref(),
+                )
+                .await?;
+            (None, catalog, cut)
+        }
+    };
     if !exclusive_takeover {
         drop(pin.take());
     }
@@ -187,58 +229,86 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                 &key,
                 !required.is_empty(),
                 doc.revision(),
+                native_scan.is_some(),
             )?);
             app.journal
                 .recovery_intent(id, token, &unlocked.seal(id, &app.secrets.credential_key)?)
                 .await?;
         }
-        let claim = unlocked.claim.as_ref().unwrap();
-        let descriptor = &claim.descriptor;
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("journal-takeover-intent").await;
-        let value = if existing == *descriptor {
-            claim.verify(origin.as_ref()).await?;
-            doc.value
-        } else {
-            ensure!(
-                existing == unlocked.source.journal && claim.revision == doc.revision(),
-                "takeover source revision changed"
-            );
-            claim.publish(origin.as_ref(), local.as_ref()).await?;
-            #[cfg(feature = "fault-injection")]
-            crate::faults::point("journal-takeover-history").await;
-            let write = match &local {
-                Some(local) => {
-                    doc.set_local_locked(origin.as_ref(), local, descriptor)
-                        .await
-                }
-                None => doc.set_journal(origin.as_ref(), descriptor).await,
-            };
-            match write {
-                Ok(updated) => updated,
-                Err(error) => {
-                    let read = marker::Document::read(origin.as_ref())
-                        .await?
-                        .context("cannot verify takeover")?;
-                    if marker::journal(&read.value)?.as_ref() != Some(descriptor) {
-                        return Err(error);
-                    }
-                    read.value
-                }
+        if native_scan.is_some() {
+            if app.storage_records.enabled_by_id(target).await?.is_none() {
+                recovery::register(
+                    app,
+                    &unlocked,
+                    unlocked.source.connection.identity_marker.clone(),
+                    None,
+                )
+                .await?;
             }
-        };
-        drop(pin.take());
-        let write_key = if required.is_empty() {
-            None
+            if existing == unlocked.claim.as_ref().unwrap().descriptor {
+                native_takeover(
+                    app,
+                    id,
+                    token,
+                    &unlocked,
+                    native_scan.as_ref().unwrap(),
+                    source_store
+                        .native
+                        .as_ref()
+                        .context("missing native source")?,
+                    !required.is_empty(),
+                )
+                .await?;
+            }
         } else {
-            Some(fresh_key(app, id).await?)
-        };
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("journal-recovery-claimed").await;
-        recovery::register(app, &unlocked, value, write_key).await?;
-        app.journal
-            .recovery_adopt(id, token, target, descriptor)
-            .await?;
+            let claim = unlocked.claim.as_ref().unwrap();
+            let descriptor = &claim.descriptor;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("journal-takeover-intent").await;
+            let value = if existing == *descriptor {
+                claim.verify(origin.as_ref()).await?;
+                doc.value
+            } else {
+                ensure!(
+                    existing == unlocked.source.journal && claim.revision == doc.revision(),
+                    "takeover source revision changed"
+                );
+                claim.publish(origin.as_ref(), local.as_ref()).await?;
+                #[cfg(feature = "fault-injection")]
+                crate::faults::point("journal-takeover-history").await;
+                let write = match &local {
+                    Some(local) => {
+                        doc.set_local_locked(origin.as_ref(), local, descriptor)
+                            .await
+                    }
+                    None => doc.set_journal(origin.as_ref(), descriptor).await,
+                };
+                match write {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        let read = marker::Document::read(origin.as_ref())
+                            .await?
+                            .context("cannot verify takeover")?;
+                        if marker::journal(&read.value)?.as_ref() != Some(descriptor) {
+                            return Err(error);
+                        }
+                        read.value
+                    }
+                }
+            };
+            drop(pin.take());
+            let write_key = if required.is_empty() {
+                None
+            } else {
+                Some(fresh_key(app, id).await?)
+            };
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("journal-recovery-claimed").await;
+            recovery::register(app, &unlocked, value, write_key).await?;
+            app.journal
+                .recovery_adopt(id, token, target, descriptor)
+                .await?;
+        }
     }
     let row = app
         .storage_records
@@ -246,7 +316,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
         .await?
         .context("destination storage is disabled")?;
     let to = model::Connection::unprotect(&model::Record::from(row), &app.secrets.credential_key)?;
-    let destination_store = model::Store::connect(&to, source::options())?.backend;
+    let destination_store = recovery::native::connect(app, &to)?.backend;
     marker::verify_store(destination_store.as_ref(), &to.identity_marker).await?;
     if !exclusive_takeover {
         ensure!(
@@ -372,6 +442,153 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
         }
         progress.candidate_files = candidates;
     }
+    if exclusive_takeover && let Some(scan) = &native_scan {
+        native_takeover(
+            app,
+            id,
+            token,
+            &unlocked,
+            scan,
+            source_store
+                .native
+                .as_ref()
+                .context("missing native source")?,
+            !import.keys.is_empty(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn native_takeover(
+    app: &App,
+    id: Uuid,
+    token: Uuid,
+    unlocked: &Unlocked,
+    scan: &Arc<crate::storage::native::recovery::scan::Scanner>,
+    store: &crate::storage::native::store::Store,
+    encrypted: bool,
+) -> Result<()> {
+    use crate::{model::storage_recovery::verify, storage::native::store::Publication};
+    let native = unlocked
+        .native
+        .as_ref()
+        .context("missing native recovery source")?;
+    let storage = unlocked.source.connection.id;
+    let claim = unlocked
+        .claim
+        .as_ref()
+        .context("missing native takeover intent")?;
+    let mut after = 0;
+    while after < native.head.publication.revision {
+        let page = app
+            .storage_clusters
+            .catalog_proofs(native.catalog, after, native.head.publication.revision)
+            .await?;
+        ensure!(!page.is_empty(), "missing recovered publication history");
+        for proof in page {
+            ensure!(
+                proof.publication.revision == after + 1,
+                "recovered publication history has a gap"
+            );
+            let mut manifest = scan.anchor.clone();
+            while manifest.digest()? != proof.publication.manifest {
+                ensure!(
+                    manifest.revision > 1,
+                    "unknown recovered publication layout"
+                );
+                manifest = verify::layout(
+                    app.storage_clusters.as_ref(),
+                    native.catalog,
+                    &manifest,
+                    manifest.revision as u64 - 1,
+                )
+                .await?;
+            }
+            app.journal
+                .native_restore_publication(id, token, &proof, &manifest)
+                .await?;
+            after = proof.publication.revision;
+        }
+    }
+    let (_, targets) = app
+        .storage_clusters
+        .placement_snapshot(store.cluster)
+        .await?;
+    for target in targets {
+        if target.run.is_none() || target.expires <= chrono::Utc::now().timestamp_micros() {
+            continue;
+        }
+        let mut names = scan.namespaces(target.device.media_id).await?;
+        while let Some(entry) = names.try_next().await? {
+            if Uuid::parse_str(&entry.name).ok() == Some(storage) {
+                ensure!(
+                    entry.error.is_none(),
+                    "recovery media publication is damaged"
+                );
+                let head = entry.proof.context("recovery media has no publication")?;
+                app.journal
+                    .native_restore_receipt(id, token, target.device.media_id, &head)
+                    .await?;
+                break;
+            }
+        }
+    }
+    let part = claim.write_native(store, id).await?;
+    app.storage
+        .native_control
+        .publish(storage, part.intent.payload, id)
+        .await?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("journal-takeover-history").await;
+    let backend = recovery::native::connect(app, &unlocked.source.connection)?.backend;
+    let doc = marker::Document::read(backend.as_ref())
+        .await?
+        .context("missing native recovery marker")?;
+    let value = if marker::journal(&doc.value)?.as_ref() == Some(&claim.descriptor) {
+        claim.verify(backend.as_ref()).await?;
+        doc.value
+    } else {
+        marker::verify(&doc.value, &unlocked.source.connection.identity_marker)?;
+        ensure!(
+            doc.revision() == claim.revision,
+            "native takeover marker changed"
+        );
+        let mut options = object_store::PutOptions::default();
+        options.extensions.insert(Publication {
+            owner: id,
+            area: crate::content::fragment::Area::Blocks,
+        });
+        doc.set_journal_options(backend.as_ref(), &claim.descriptor, options)
+            .await?
+    };
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("journal-takeover-root").await;
+    let proof = app
+        .journal
+        .native_takeover_prepare(id, token, &part, &value, &app.secrets.credential_key)
+        .await?;
+    store
+        .publish_evidence(app.journal.as_ref(), token, &proof)
+        .await?;
+    #[cfg(feature = "fault-injection")]
+    crate::faults::point("journal-takeover-evidence").await;
+    app.journal
+        .native_takeover_acknowledge(id, token, &proof)
+        .await?;
+    app.journal
+        .recovery_adopt(id, token, storage, &claim.descriptor)
+        .await?;
+    if encrypted && app.managed_keys.for_storage(storage).await?.is_none() {
+        let key = fresh_key(app, id).await?;
+        crate::control::storage::set_current_key(
+            app,
+            unlocked.storage_name.clone(),
+            Some(key.to_string()),
+        )
+        .await?;
+    }
+    app.storage.refresh_store(storage).await?;
     Ok(())
 }
 

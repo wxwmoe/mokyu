@@ -1174,7 +1174,7 @@ mod tests {
                 size: 1,
                 digest: Some(vec![0; 16]),
                 state: "ready".into(),
-                medium: "shared_s3".into(),
+                medium: "shared".into(),
                 pending_upload: true,
                 revision: 1,
                 quarantine_code: None,

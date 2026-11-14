@@ -18,13 +18,19 @@ use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-async fn cleanup(tx: &mut Tx<'_>, storage: Uuid, maximum: i64, retention: f64) -> Result<usize> {
+async fn cleanup(
+    tx: &mut Tx<'_>,
+    storage: Uuid,
+    maximum: i64,
+    retention: f64,
+    protected: &[crate::model::Id],
+) -> Result<usize> {
     let mut count = 0;
     for id in queries::collect_uploads(&mut **tx, maximum, Some(storage)).await? {
         count +=
             usize::from(transactions::abort_multipart_in(tx, &Permit::system(), id, true).await?);
     }
-    for stream in queries::stale_streams(&[], 1, Some(storage), Some(retention))
+    for stream in queries::stale_streams(protected, 1, Some(storage), Some(retention))
         .build_query_scalar()
         .fetch_all(&mut **tx)
         .await?
@@ -33,7 +39,7 @@ async fn cleanup(tx: &mut Tx<'_>, storage: Uuid, maximum: i64, retention: f64) -
             count += transactions::cleanup_stream_in(tx, stream, maximum).await?;
         }
     }
-    for id in queries::stale_fragments(maximum, &[], Some(storage))
+    for id in queries::stale_fragments(maximum, protected, Some(storage))
         .build_query_scalar()
         .fetch_all(&mut **tx)
         .await?
@@ -59,6 +65,7 @@ pub(super) async fn offer(
     reclaim: bool,
     max_items: usize,
     key: &Key,
+    protected: &[crate::model::Id],
 ) -> Result<Option<(Plan, Vec<u8>)>> {
     let storage = serde_json::from_value(detail["storage_id"].clone())?;
     let destination = material(tx, storage, key).await?;
@@ -77,6 +84,7 @@ pub(super) async fn offer(
         } else {
             retention
         } as f64,
+        protected,
     )
     .await?;
     let mut items = Vec::new();
@@ -157,7 +165,7 @@ pub(super) async fn offer(
             )
             .await?
             {
-                if raw.medium == "shared_s3"
+                if raw.medium == "shared"
                     && !raw.pending_upload
                     && !q::active_location(storage, raw.address())
                         .fetch_one(&mut **tx)
@@ -208,6 +216,18 @@ pub(super) async fn offer(
             if items.len() == maximum {
                 break;
             }
+        }
+    }
+    if reclaim {
+        for operation in
+            super::storage_payload::collect_in(tx, storage, maximum - items.len()).await?
+        {
+            items.push(Deletion {
+                source: Physical::Native { operation },
+                identity: operation.into(),
+                location: operation,
+                inspect_age: false,
+            });
         }
     }
     if items.is_empty() {
@@ -320,6 +340,12 @@ pub(super) async fn finish(
                     queries::staging::release(storage, key)
                         .execute(&mut **tx)
                         .await?;
+                }
+                Physical::Native { operation } => {
+                    ensure!(
+                        super::storage_payload::collected(tx, *operation).await?,
+                        Error::NodeOperationConflict
+                    );
                 }
             }
             deleted += 1;

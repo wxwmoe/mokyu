@@ -331,8 +331,11 @@ Web 发起者才能续传自己的上传；管理员可查看和终止其他上�
 | `POST /api/v1/storage-clusters/{id}/members` | `{revision,media_ids}` 加入已登记介质；允许数量尚未满足布局，已有旧布局须另行核对 |
 | `POST /api/v1/storage-clusters/{id}/groups` | `{revision,media_ids}` 按完整组合启用；校验逐成员用途、运行权、容量及独立故障域 |
 | `PUT /api/v1/storage-clusters/{id}/members/{media}` | `{revision,state}` 设置 `available`、`paused` 或尚未分配的主存储 `spare` |
+| `POST /api/v1/storage-clusters/{id}/fragments/{fragment}/repair` | 管理员近期验证后创建或续接分片修复任务，返回 `{task_id}`；异步核验，健康片不改写，确认损坏后从有效主副本写新片并切换回执 |
+| `POST /api/v1/storage-clusters/takeover` | 管理员近期验证后提交 `{name,media_ids}`，核对原群集历史并接管介质，返回群集记录；不解锁业务元数据 |
+| `GET /api/v1/storage-clusters/{id}/recovery-sources?media=UUID&after=UUID` | 管理员分页查看恢复命名空间；`media` 必填，`after` 可省略，返回 `{entries,next}`，每页最多 100 项 |
 
-当前群集状态依次为 `waiting_members`、`waiting_layout`、`waiting_probe`。启用组合不代表正文能力已验证；原生后端保持停用，不能用于桶。策略结构、默认值和配置限制见 OpenAPI 及[存储群集](storage-clusters.md)。
+群集配置状态包括 `waiting_members`、`waiting_layout`、`waiting_probe`。启用组合不代表后端已通过验证；原生后端在启用时执行实际写入与读回探针，通过后可用于桶。`capabilities` 分别报告读写、Range、Multipart 和暂存能力；原生后端的 Multipart 与共享分片暂存尚未开放。策略结构、默认值和配置限制见 OpenAPI 及[存储群集](storage-clusters.md)。
 
 ## 存储
 

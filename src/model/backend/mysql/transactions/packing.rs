@@ -196,6 +196,14 @@ pub(in super::super) async fn commit_rewrite_chunk_in(
             .await?,
         "encoding output changed"
     );
+    super::super::storage_native::publish_rewrite(
+        tx,
+        physical.storage_id,
+        crate::storage::location::Layout::S3.chunk(physical.address()),
+        physical.address(),
+        physical.file_size()? as u64,
+    )
+    .await?;
     ensure!(
         queries::register_encoding(physical)
             .execute(&mut **tx)
@@ -310,6 +318,14 @@ pub(in super::super) async fn commit_rewrite_pack_in(
     );
     queries::refresh_pack_fingerprint(tx, new.id).await?;
     queries::write_pack_index(tx, new.id, members).await?;
+    super::super::storage_native::publish_rewrite(
+        tx,
+        new.storage_id,
+        crate::storage::location::Layout::S3.pack(new.address()),
+        new.address(),
+        u64::try_from(new.stored_size.context("missing native pack size")?)?,
+    )
+    .await?;
     ensure!(
         queries::publish_prepared_pack(new.id, task.id)
             .execute(&mut **tx)
@@ -411,7 +427,10 @@ pub(in super::super) async fn start_unpack(
         queries::pack_storages(None).fetch_all(&mut *tx).await?
     };
     let pack_uuid = if pack.is_some() {
-        queries::task_file_uuids(None, pack).fetch_one(&mut *tx).await?.1
+        queries::task_file_uuids(None, pack)
+            .fetch_one(&mut *tx)
+            .await?
+            .1
     } else {
         None
     };
@@ -768,6 +787,7 @@ pub(in super::super) async fn publish_pack_outputs_in(
     split: bool,
     cooldown: f64,
 ) -> Result<()> {
+    super::super::storage_native::publish_outputs(tx, outputs).await?;
     for output in outputs {
         ensure!(
             !output.chunks.is_empty() && output.pack.is_some() != output.independent.is_some(),

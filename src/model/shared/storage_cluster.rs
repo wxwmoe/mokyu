@@ -103,6 +103,203 @@ fn validate_ids(ids: &[Uuid]) -> Result<()> {
 
 #[async_trait::async_trait]
 impl StorageClusters for Backend {
+    async fn takeover_targets(&self, principal: &Principal, media: &[Uuid]) -> Result<Vec<Target>> {
+        validate_ids(media)?;
+        let mut tx = q::begin(self).await?;
+        q::admin(&mut tx, principal).await?;
+        let mut targets = Vec::new();
+        for id in media {
+            let assigned = q::device(*id).fetch_one(&mut *tx).await?.2;
+            let mut rows = q::targets(self, &mut tx, assigned, Some(*id), false).await?;
+            ensure!(rows.len() == 1, "storage media is missing");
+            targets.push(rows.pop().unwrap());
+        }
+        tx.commit().await?;
+        Ok(targets)
+    }
+
+    async fn takeover(
+        &self,
+        principal: &Principal,
+        key: &Key,
+        catalog: Uuid,
+        anchor: &Manifest,
+        input: Takeover,
+    ) -> Result<Cluster> {
+        use crate::model::storage_recovery::CatalogEntry;
+        validate_ids(&input.media_ids)?;
+        crate::config::storage::label(&input.name, "cluster name")?;
+        anchor.validate()?;
+        let mut tx = q::begin(self).await?;
+        q::admin(&mut tx, principal).await?;
+        let (namespace, frozen) = super::queries::storage_recovery::catalog(catalog)
+            .fetch_one(&mut *tx)
+            .await?;
+        ensure!(
+            namespace == anchor.cluster_id && frozen.0 == *anchor,
+            "takeover history changed"
+        );
+        let deployment = q::deployment().fetch_one(&mut *tx).await?;
+        ensure!(
+            q::cluster(anchor.cluster_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none(),
+            "storage cluster is already registered"
+        );
+        ensure!(
+            q::clusters().fetch_all(&mut *tx).await?.len() < 256,
+            "storage cluster limit reached"
+        );
+        let mut manifest = anchor.clone();
+        manifest.deployment_id = deployment;
+        manifest.publication_key =
+            crate::model::storage_recovery::public_key(key, anchor.cluster_id)?;
+        manifest.takeover_epoch = anchor
+            .takeover_epoch
+            .checked_add(1)
+            .context("takeover epoch exhausted")?;
+        manifest.revision = anchor
+            .revision
+            .checked_add(1)
+            .context("cluster revision exhausted")?;
+        manifest.record_id = Uuid::now_v7();
+        manifest.previous = Some(anchor.digest()?);
+        let mut observed = Vec::new();
+        for media in &input.media_ids {
+            let targets = q::targets(self, &mut tx, None, Some(*media), true).await?;
+            let target = targets
+                .first()
+                .filter(|_| targets.len() == 1)
+                .context("takeover storage is missing or already assigned")?;
+            ensure!(
+                target.run.is_some() && target.expires > chrono::Utc::now().timestamp_micros(),
+                "takeover storage is offline"
+            );
+            let announcement = &target.device.announcement;
+            let head = announcement
+                .manifest
+                .as_ref()
+                .context("storage has no committed layout")?;
+            ensure!(
+                head.cluster_id == anchor.cluster_id && head.revision <= anchor.revision,
+                "takeover storage has another layout"
+            );
+            observed.push((head.revision, head.digest()?));
+            let member = manifest
+                .members
+                .iter_mut()
+                .find(|m| m.media_id == *media)
+                .context("storage media is outside the recovered layout")?;
+            ensure!(
+                member.topology.purpose == announcement.topology.purpose
+                    && member.topology.storage_group == announcement.topology.storage_group,
+                "restore the original storage group and purpose before takeover"
+            );
+            member.node_id = target.device.node_id;
+            member.topology = announcement.topology.clone();
+        }
+        manifest.follows(anchor)?;
+        let policy = Policy {
+            layout: manifest
+                .groups
+                .first()
+                .map(|g| g.layout.clone())
+                .unwrap_or_default(),
+            ..Policy::default()
+        };
+        let value = Cluster {
+            id: anchor.cluster_id,
+            name: input.name,
+            revision: manifest.revision,
+            policy,
+            manifest,
+            state: "waiting_probe".into(),
+        };
+        ensure!(
+            q::recovered_count(catalog).fetch_one(&mut *tx).await? == anchor.revision,
+            "takeover history contains gaps or competing revisions"
+        );
+        q::insert(&value).execute(&mut *tx).await?;
+        let mut previous: Option<Manifest> = None;
+        loop {
+            let rows = q::recovered_history(catalog, previous.as_ref().map_or(0, |m| m.revision))
+                .fetch_all(&mut *tx)
+                .await?;
+            if rows.is_empty() {
+                break;
+            }
+            for (digest, entry) in rows {
+                ensure!(
+                    digest == blake3::hash(&serde_json::to_vec(&entry.0)?).as_bytes(),
+                    "takeover history is damaged"
+                );
+                let CatalogEntry::Manifest(record) = entry.0 else {
+                    anyhow::bail!("invalid takeover history")
+                };
+                record.validate()?;
+                if let Some(old) = &previous {
+                    record.follows(old)?;
+                } else {
+                    ensure!(
+                        record.revision == 1 && record.previous.is_none(),
+                        "takeover history has no origin"
+                    );
+                }
+                ensure!(
+                    record.cluster_id == value.id,
+                    "takeover history changed cluster"
+                );
+                let hash = record.digest()?;
+                for (_, expected) in observed
+                    .iter()
+                    .filter(|(revision, _)| *revision == record.revision)
+                {
+                    ensure!(*expected == hash, "storage has a competing layout history");
+                }
+                let historical = Cluster {
+                    manifest: record.clone(),
+                    revision: record.revision,
+                    ..value.clone()
+                };
+                q::history(&historical, &hash).execute(&mut *tx).await?;
+                previous = Some(record);
+            }
+        }
+        ensure!(
+            previous.as_ref() == Some(anchor),
+            "takeover history does not reach the selected head"
+        );
+        q::history(&value, &value.manifest.digest()?)
+            .execute(&mut *tx)
+            .await?;
+        for media in input.media_ids {
+            ensure!(
+                q::assign(media, value.id)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                Error::OperationAborted
+            );
+        }
+        tx.commit().await?;
+        Ok(value)
+    }
+
+    async fn placement_snapshot(&self, id: Uuid) -> Result<(Cluster, Vec<Target>)> {
+        let mut tx = q::begin(self).await?;
+        let value = cluster(
+            q::cluster(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .context("storage cluster is missing")?,
+        )?;
+        let targets = q::targets(self, &mut tx, Some(id), None, false).await?;
+        tx.commit().await?;
+        Ok((value, targets))
+    }
+
     async fn overview(&self) -> Result<Overview> {
         let mut tx = q::begin(self).await?;
         let clusters = q::clusters().fetch_all(&mut *tx).await?;
@@ -320,6 +517,12 @@ impl StorageClusters for Backend {
     ) -> Result<Registration> {
         ensure!(node.role == "storage", Error::NodeAuthentication);
         input.validate()?;
+        if let Some(stamp) = input.capacity.accounting {
+            ensure!(
+                stamp.boot == run.boot,
+                "storage capacity belongs to another boot"
+            );
+        }
         let mut tx = q::begin(self).await?;
         q::authenticate(&mut tx, node, key, run).await?;
         if let Some(bound) = q::node_media(node.node_id).fetch_optional(&mut *tx).await? {
@@ -331,11 +534,20 @@ impl StorageClusters for Backend {
                 )
             );
         }
-        let old = q::device(input.media.media_id)
+        let old = q::device_for_update(input.media.media_id)
             .fetch_optional(&mut *tx)
             .await?
             .map(device);
         if let Some(old) = &old {
+            if let (Some(before), Some(after)) = (
+                old.announcement.capacity.accounting,
+                input.capacity.accounting,
+            ) {
+                ensure!(
+                    before.boot != after.boot || before.revision <= after.revision,
+                    "storage capacity report moved backwards"
+                );
+            }
             ensure!(
                 old.node_id == node.node_id || !q::node_active(&mut tx, old.node_id).await?,
                 Error::NodeConflict
@@ -381,7 +593,7 @@ impl StorageClusters for Backend {
             for observed in input.manifest.iter().chain(input.pending_manifest.iter()) {
                 ensure!(
                     observed.cluster_id == id
-                        && observed.deployment_id == value.manifest.deployment_id
+                        && observed.takeover_epoch <= value.manifest.takeover_epoch
                         && observed.revision <= value.revision,
                     Error::OperationAborted
                 );

@@ -87,7 +87,7 @@ pub(super) async fn prepare(
         PhysicalSource::Pack(pack) => (pack.raw_size, pack.block_key_id),
         PhysicalSource::Raw(raw) => {
             ensure!(
-                raw.medium == "shared_s3" && !raw.pending_upload,
+                raw.medium == "shared" && !raw.pending_upload,
                 Error::SourceUnavailable
             );
             (raw.size, None)

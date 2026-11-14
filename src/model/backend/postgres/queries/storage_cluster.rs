@@ -54,6 +54,56 @@ pub(in super::super) fn deployment() -> Scalar<'static, Uuid> {
     sqlx::query_scalar("SELECT deployment_id FROM mokyu_meta WHERE singleton")
 }
 
+pub(in super::super) async fn targets(
+    _backend: &Backend,
+    tx: &mut Tx<'_>,
+    cluster: Option<Uuid>,
+    media: Option<Uuid>,
+    locked: bool,
+) -> Result<Vec<Target>> {
+    type Row = (
+        Uuid,
+        Uuid,
+        i64,
+        Json<Announcement>,
+        bool,
+        i64,
+        Option<Vec<u8>>,
+        Option<Uuid>,
+        Option<Uuid>,
+        i64,
+    );
+
+    let rows: Vec<Row> = sqlx::query_as(if locked { "SELECT d.media_id,d.node_id,d.observed_at,d.announcement,n.enabled,n.credential_generation,n.credential_encrypted,s.boot_id,s.fence,COALESCE(EXTRACT(EPOCH FROM s.expires_at)*1000000,0)::bigint FROM storage_devices d JOIN nodes n ON n.id=d.node_id AND n.role='storage' JOIN node_sessions s ON s.node_id=n.id AND s.credential_generation=n.credential_generation WHERE d.cluster_id IS NOT DISTINCT FROM $1 AND ($2::uuid IS NULL OR d.media_id=$2) ORDER BY d.media_id LIMIT 257 FOR SHARE OF n,s,d" } else { "SELECT d.media_id,d.node_id,d.observed_at,d.announcement,n.enabled,n.credential_generation,n.credential_encrypted,s.boot_id,s.fence,COALESCE(EXTRACT(EPOCH FROM s.expires_at)*1000000,0)::bigint FROM storage_devices d JOIN nodes n ON n.id=d.node_id AND n.role='storage' LEFT JOIN node_sessions s ON s.node_id=n.id AND s.credential_generation=n.credential_generation WHERE d.cluster_id IS NOT DISTINCT FROM $1 AND ($2::uuid IS NULL OR d.media_id=$2) ORDER BY d.media_id LIMIT 257" }).bind(cluster).bind(media).fetch_all(&mut **tx).await?;
+    ensure!(
+        rows.len() <= MEMBER_LIMIT,
+        "storage cluster has too many devices"
+    );
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let run = row
+                .7
+                .zip(row.8)
+                .filter(|_| row.4 && row.9 > chrono::Utc::now().timestamp_micros())
+                .map(|(boot, fence)| (Run { boot, fence }, row.9));
+            Target {
+                device: Device {
+                    media_id: row.0,
+                    node_id: row.1,
+                    cluster_id: cluster,
+                    observed_at: row.2,
+                    announcement: row.3.0,
+                },
+                run: run.map(|(run, _)| run),
+                expires: run.map_or(0, |(_, expires)| expires),
+                generation: row.5,
+                credential: row.6,
+            }
+        })
+        .collect())
+}
+
 pub(in super::super) fn clusters() -> Rows<'static, ClusterRow> {
     sqlx::query_as(
         "SELECT id,name,revision,policy,manifest FROM storage_clusters ORDER BY name,id LIMIT 257",
@@ -73,6 +123,10 @@ pub(in super::super) fn devices() -> Rows<'static, DeviceRow> {
 
 pub(in super::super) fn device(id: Uuid) -> Rows<'static, DeviceRow> {
     sqlx::query_as("SELECT media_id,node_id,cluster_id,observed_at,announcement FROM storage_devices WHERE media_id=$1").bind(id)
+}
+
+pub(in super::super) fn device_for_update(id: Uuid) -> Rows<'static, DeviceRow> {
+    sqlx::query_as("SELECT media_id,node_id,cluster_id,observed_at,announcement FROM storage_devices WHERE media_id=$1 FOR UPDATE").bind(id)
 }
 
 pub(in super::super) fn node_media(id: Uuid) -> Scalar<'static, Uuid> {
@@ -128,4 +182,19 @@ pub(in super::super) fn member_node(node: Uuid) -> Scalar<'static, bool> {
         "SELECT EXISTS(SELECT 1 FROM storage_devices WHERE node_id=$1 AND cluster_id IS NOT NULL)",
     )
     .bind(node)
+}
+
+pub(in super::super) fn recovered_history(
+    catalog: Uuid,
+    after: i64,
+) -> Rows<'static, (Vec<u8>, Json<crate::model::storage_recovery::CatalogEntry>)> {
+    sqlx::query_as("SELECT content_hash,content FROM storage_recovery_entries WHERE catalog=$1 AND category=0 AND position>$2 ORDER BY position,id LIMIT 16")
+        .bind(catalog).bind(after)
+}
+
+pub(in super::super) fn recovered_count(catalog: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM storage_recovery_entries WHERE catalog=$1 AND category=0",
+    )
+    .bind(catalog)
 }

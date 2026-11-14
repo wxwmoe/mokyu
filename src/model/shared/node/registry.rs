@@ -51,6 +51,18 @@ struct AccessReceipt {
     received: DateTime<Utc>,
 }
 
+impl Lease {
+    pub(super) fn storage_run(&self, control: i64) -> Option<(Run, i64)> {
+        (!self.closed && self.control == control && self.expires > Utc::now()).then_some((
+            Run {
+                boot: self.boot,
+                fence: self.fence,
+            },
+            self.expires.timestamp_micros(),
+        ))
+    }
+}
+
 pub(super) async fn observations(
     b: &Backend,
     state: &NodeState,

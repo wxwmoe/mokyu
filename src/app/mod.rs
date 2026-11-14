@@ -190,6 +190,7 @@ impl Active {
     }
 }
 pub struct App {
+    pub(crate) native_storage: Arc<crate::storage::native::control::Control>,
     pub(crate) storage_clusters: Arc<dyn crate::model::storage_cluster::StorageClusters>,
     pub(crate) mirror_readers: mirroring::Readers,
     pub(crate) mirroring: Arc<dyn crate::model::mirroring::MirroringStore>,
@@ -351,11 +352,17 @@ impl App {
         let maintenance = Arc::new(std::sync::atomic::AtomicBool::new(state.maintenance));
         let pack_creation_paused = state.pack_creation_paused;
         let secrets = Arc::new(secrets);
+        let native_storage = Arc::new(crate::storage::native::control::Control::new(
+            stores.storage_clusters.clone(),
+            stores.storage_payloads.clone(),
+            secrets.clone(),
+        ));
         let restart_required = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let storage = Arc::new(
             Storage::new(
                 &config,
                 secrets.clone(),
+                native_storage.clone(),
                 &budget,
                 stores.physical.clone(),
                 (state.mode != "single").then(|| stores.node_writes.clone()),
@@ -374,7 +381,7 @@ impl App {
             .await?,
         );
         if storage.enabled() {
-            if let Err(error) = storage.check_identity().await {
+            if let Err(error) = storage.check_identity(true).await {
                 let pending = stores.runtime.pending_uploads().await?;
                 if !pending || error.downcast_ref::<object_store::Error>().is_none() {
                     return Err(error);
@@ -414,6 +421,7 @@ impl App {
         let (public_reads, public_receiver) =
             public_reads::Cache::new(cors_cache.clone(), &response_cache);
         let app = Arc::new(Self {
+            native_storage,
             node_writes: stores.node_writes,
             node_reads: stores.node_reads,
             node_requests: stores.node_requests,
@@ -762,6 +770,9 @@ impl App {
 pub fn internal(error: anyhow::Error) -> s3s::S3Error {
     if let Some(error) = crate::app::quota::database_error(&error) {
         return error;
+    }
+    if error.chain().any(|cause| cause.is::<tonic::Status>()) {
+        return crate::node::delivery::error(error);
     }
     match error.downcast::<s3s::S3Error>() {
         Ok(e) => e,

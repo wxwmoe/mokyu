@@ -741,7 +741,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
         )
         .await?;
     assert_eq!(active(&pool).await?, (0, 0, 0));
-    let raw: Uuid = sqlx::query_scalar("INSERT INTO raw_sources(storage_id,medium,state,size,digest,profile_revision,created_at,unreferenced_at) VALUES($1,'shared_s3','ready',8,$2,1,clock_timestamp()-interval '1 day',clock_timestamp()-interval '1 day') RETURNING id")
+    let raw: Uuid = sqlx::query_scalar("INSERT INTO raw_sources(storage_id,medium,state,size,digest,profile_revision,created_at,unreferenced_at) VALUES($1,'shared','ready',8,$2,1,clock_timestamp()-interval '1 day',clock_timestamp()-interval '1 day') RETURNING id")
         .bind(storage).bind(vec![7u8; 16]).fetch_one(&pool).await?;
     sqlx::query("UPDATE streams SET payload_type='raw',payload_revision=payload_revision+1,size=8 WHERE id=$1").bind(stream).execute(&pool).await?;
     sqlx::query(
@@ -1152,7 +1152,7 @@ async fn postgres_node_reads_close_dependencies_bound_windows_and_protect_source
     let raw: Uuid=sqlx::query_scalar("INSERT INTO streams(bucket_id,object_key,stream_type,state,payload_type,size,etag,public_read,metadata) VALUES($1,'pages','object','ready','raw',$2,'pages',true,'{}') RETURNING id")
         .bind(bucket).bind(size).fetch_one(&pool).await?;
     sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token) VALUES($1,'pages',$2,uuidv7())").bind(bucket).bind(raw).execute(&pool).await?;
-    let src:Uuid=sqlx::query_scalar("INSERT INTO raw_sources(storage_id,state,medium,size,digest,profile_revision,page_count) VALUES($1,'ready','shared_s3',$2,decode(md5('test'),'hex'),1,1024) RETURNING id")
+    let src:Uuid=sqlx::query_scalar("INSERT INTO raw_sources(storage_id,state,medium,size,digest,profile_revision,page_count) VALUES($1,'ready','shared',$2,decode(md5('test'),'hex'),1,1024) RETURNING id")
         .bind(storage).bind(size).fetch_one(&pool).await?;
     sqlx::query(
         "INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id) VALUES($1,0,$2,$3)",
@@ -1324,7 +1324,7 @@ async fn postgres_refresh_reads_batch_public_metadata_and_fence_callers() -> Res
         .bind(stream)
         .execute(&pool)
         .await?;
-    let raw: Uuid = sqlx::query_scalar("INSERT INTO raw_sources(storage_id,medium,state,size,digest,profile_revision) VALUES($1,'shared_s3','ready',8,$2,1) RETURNING id").bind(storage).bind(vec![8u8;16]).fetch_one(&pool).await?;
+    let raw: Uuid = sqlx::query_scalar("INSERT INTO raw_sources(storage_id,medium,state,size,digest,profile_revision) VALUES($1,'shared','ready',8,$2,1) RETURNING id").bind(storage).bind(vec![8u8;16]).fetch_one(&pool).await?;
     sqlx::query(
         "INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_id) VALUES($1,0,8,$2)",
     )

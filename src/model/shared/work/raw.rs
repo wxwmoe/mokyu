@@ -80,7 +80,7 @@ pub(super) async fn offer(
         }
         let source = queries::raw_source(job.source).fetch_one(&mut **tx).await?;
         ensure!(
-            source.storage_id == storage && source.medium == "shared_s3" && !source.pending_upload,
+            source.storage_id == storage && source.medium == "shared" && !source.pending_upload,
             Error::SourceUnavailable
         );
         let hash = job

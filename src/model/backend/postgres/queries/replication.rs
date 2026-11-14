@@ -349,13 +349,13 @@ pub(in super::super) fn same_data<'q>(
 }
 
 pub(in super::super) fn ready<'q>(stream: Id, payload: &'q str) -> Scalar<'q, bool> {
-    sqlx::query_scalar("SELECT CASE WHEN $2='raw' THEN NOT EXISTS(SELECT 1 FROM raw_ranges x LEFT JOIN raw_sources r ON r.id=x.source_id WHERE x.stream_id=$1 AND (r.id IS NULL OR r.state<>'ready' OR r.pending_upload OR r.quarantine_code IS NOT NULL OR r.medium NOT IN ('local','shared_s3'))) ELSE NOT EXISTS(SELECT 1 FROM extents x LEFT JOIN chunks c ON c.id=x.chunk_id WHERE x.stream_id=$1 AND (c.id IS NULL OR x.fragment_id IS NOT NULL OR c.state<>'ready' OR (NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.encoding_id=c.current_encoding_id AND l.state='ready' AND l.quarantined_at IS NULL) AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=c.pack_id AND p.state='ready' AND p.quarantined_at IS NULL)))) END")
+    sqlx::query_scalar("SELECT CASE WHEN $2='raw' THEN NOT EXISTS(SELECT 1 FROM raw_ranges x LEFT JOIN raw_sources r ON r.id=x.source_id WHERE x.stream_id=$1 AND (r.id IS NULL OR r.state<>'ready' OR r.pending_upload OR r.quarantine_code IS NOT NULL OR r.medium NOT IN ('local','shared'))) ELSE NOT EXISTS(SELECT 1 FROM extents x LEFT JOIN chunks c ON c.id=x.chunk_id WHERE x.stream_id=$1 AND (c.id IS NULL OR x.fragment_id IS NOT NULL OR c.state<>'ready' OR (NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.encoding_id=c.current_encoding_id AND l.state='ready' AND l.quarantined_at IS NULL) AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=c.pack_id AND p.state='ready' AND p.quarantined_at IS NULL)))) END")
         .bind(stream)
         .bind(payload)
 }
 
 pub(in super::super) fn lock_raw(stream: Id) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT r.state='ready' AND NOT r.pending_upload AND r.quarantine_code IS NULL AND r.medium IN ('local','shared_s3') FROM raw_sources r WHERE r.id IN (SELECT source_id FROM raw_ranges WHERE stream_id=$1) ORDER BY r.id FOR SHARE").bind(stream)
+    sqlx::query_scalar("SELECT r.state='ready' AND NOT r.pending_upload AND r.quarantine_code IS NULL AND r.medium IN ('local','shared') FROM raw_sources r WHERE r.id IN (SELECT source_id FROM raw_ranges WHERE stream_id=$1) ORDER BY r.id FOR SHARE").bind(stream)
 }
 
 pub(in super::super) fn reuse_target(id: Id) -> Statement<'static> {

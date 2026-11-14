@@ -45,6 +45,30 @@ fn constraint(line: &str, table: &str, maria: bool) -> String {
 
 #[test]
 fn automatic_foreign_key_names_do_not_hide_structural_differences() {
+    assert_eq!(
+        constraint(
+            "  PRIMARY KEY (`namespace_id`,`media_id`),",
+            "receipts",
+            true
+        ),
+        constraint(
+            "  PRIMARY KEY (`namespace_id`,`media_id`)",
+            "receipts",
+            true
+        )
+    );
+    assert_ne!(
+        constraint(
+            "  PRIMARY KEY (`namespace_id`,`media_id`)",
+            "receipts",
+            true
+        ),
+        constraint(
+            "  PRIMARY KEY (`media_id`,`namespace_id`)",
+            "receipts",
+            true
+        )
+    );
     let definition =
         " FOREIGN KEY (`file_id`) REFERENCES `multipart_files` (`id`) ON DELETE CASCADE";
     let old = format!("  CONSTRAINT `fragments_ibfk_1`{definition},");
@@ -144,6 +168,7 @@ async fn structure(db: &mut MySqlConnection) -> Result<BTreeMap<String, String>>
         let unordered = |line: &str| {
             let line = line.trim_start();
             line.starts_with("CONSTRAINT ")
+                || line.starts_with("PRIMARY KEY ")
                 || line.starts_with("KEY ")
                 || line.starts_with("UNIQUE KEY ")
         };

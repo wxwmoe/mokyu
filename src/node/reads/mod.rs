@@ -305,6 +305,7 @@ pub(crate) struct Reads {
 }
 
 pub(crate) struct Prepared {
+    node: Arc<NodeContext>,
     pub(crate) reply: wire::ReadReply,
     pub(crate) run: Arc<RunLease>,
     materials: Held,
@@ -408,7 +409,14 @@ impl Prepared {
     }
 
     pub(super) fn backend(&self, id: Uuid) -> Result<Arc<super::body::Backend>> {
-        backend(&self.materials, id)
+        backend(&self.materials, id)?.scoped(
+            crate::storage::native::store::Authority::Read {
+                client: self.node.client.clone(),
+                run: self.run.clone(),
+                grants: self.grants.clone(),
+            },
+            self.node.config.instance.region.clone(),
+        )
     }
 
     pub(super) fn keys(
@@ -653,6 +661,7 @@ impl Reads {
             None
         };
         let prepared = Prepared {
+            node: self.node.clone(),
             reply,
             run: snapshot.lease.clone(),
             materials,
@@ -698,6 +707,7 @@ impl Reads {
             )?
         };
         let prepared = Prepared {
+            node: self.node.clone(),
             reply,
             run,
             materials,
@@ -789,6 +799,7 @@ impl Reads {
                     reply.object = Some(version.clone());
                 }
                 let prepared = Prepared {
+                    node: self.node.clone(),
                     reply,
                     run: previous.run.clone(),
                     materials,

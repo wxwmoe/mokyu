@@ -4,9 +4,9 @@ Mokyu 可部署一个主容器，或在 PostgreSQL 上部署多个平等的 cont
 
 ## 单主控群集
 
-没有桶、对象或 local/S3 后端的空部署，可以保持维护状态进入群集模式，先完成 [storage 登记与群集配置](storage-clusters.md)。原生后端目前仍等待共享读写与暂存验证，此时不能退出维护或承接业务。
+没有桶、对象或 local/S3 后端的空部署，可以保持维护状态进入群集模式，先完成 [storage 登记与群集配置](storage-clusters.md)。启用原生后端并选为暂存后端，通过写入和读回探针后可退出维护；原生后端的 Multipart 尚未开放。
 
-`single_control` 的英文名称是 **Single Control Cluster**。一个主容器运行 `mokyu`，负责管理、S3、公共读和元数据。PostgreSQL、MySQL、MariaDB 或 SQLite 均可作为元数据库。主容器以独占运行权访问它，远端 data、worker 和 node 使用现有的 `control_url`、gRPC 和共享 S3 存储。
+`single_control` 的英文名称是 **Single Control Cluster**。一个主容器运行 `mokyu`，负责管理、S3、公共读和元数据。PostgreSQL、MySQL、MariaDB 或 SQLite 均可作为元数据库。主容器以独占运行权访问它，远端 data、worker 和 node 使用现有的 `control_url`、gRPC 和共享 S3 或 Mokyu 存储群集。
 
 | 已接入的远端角色 | 接受数据流量 | 处理共享后台任务 |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ Mokyu 可部署一个主容器，或在 PostgreSQL 上部署多个平等的 cont
 
 ### 切入与回切
 
-1. 将本地正式存储上的对象迁到共享 S3。移除所有 local 后端定义，包括已停用的定义。将 `uploads.staging_storage_id` 指向启用并可用的 S3 后端，排空活动读写、分片和未完成任务。
+1. 将本地正式存储上的对象迁到可用的共享后端。移除所有 local 后端定义，包括已停用的定义。将 `uploads.staging_storage_id` 指向启用并可用的 S3 或 Mokyu 后端，排空活动读写、分片和未完成任务。
 2. 在主容器通过本机 CLI 执行 `mokyu cli maintenance enable` 和 `mokyu cli cluster mode single_control`。随后重启同一个 `mokyu` 主容器，保留数据库、持久目录和部署密钥。用 `mokyu cli status` 核对模式和修订，再执行 `mokyu cli maintenance disable`。
 3. 通过本机 CLI 执行 `mokyu cli cluster create worker-1 worker`，将输出仅保存到该节点的 `node.json`。配置 `instance.control_url` 后启动 `mokyu worker`。data 与 node 使用对应角色。Web 服务页可查看主容器职责、远端登记数、就绪能力和最近报告。`cluster status`、`cluster nodes` 提供相同部署的命令行视图。
 4. 退役节点时先转移流量并排空唯一文件、写入及受保护读取，停止节点，执行 `mokyu cli cluster release worker-1 --confirm`。离线时若仍有唯一副本，恢复原身份和目录以完成排空。回切时先释放全部远端，开启维护，执行 `mokyu cli cluster mode single`，重启主容器，退出维护并读回已有对象。
@@ -32,7 +32,7 @@ PostgreSQL 还支持多控制节点的 `cluster`。两种群集之间切换时�
 ```text
 data / worker / node -> control.example.com -> control-a / control-b -> PostgreSQL
       |                                    |
-      +---------- shared S3 storage -------+
+      +---------- S3 / Mokyu storage -------+
 
 S3 clients -> s3.example.com    -> data / node
 Public GET -> media.example.com -> data / node
@@ -46,7 +46,7 @@ Management -> control.example.com -> control nodes
 | `mokyu worker` | control_url、本机预算和数据目录、预创建 node.json | 执行来源已在共享后端就绪的后台工作；本机 status |
 | `mokyu node` | control_url、本机预算和数据目录、预创建 node.json | node (data + worker)：同时提供 data 与 worker 的能力，共用一份身份、会话、目录与资源预算；本机 status |
 
-每个进程使用独立配置和持久 data 目录。control 使用 [`config.example.toml`](../config.example.toml)，data/worker/node 使用 [`config.node.example.toml`](../config.node.example.toml)。节点禁止配置 database、replica_database、deployment_key 和数据库连接预算；名称由预创建身份确定。数据库只需允许 control 访问。后端 S3 应允许相应节点直接访问。
+每个进程使用独立配置和持久 data 目录。control 使用 [`config.example.toml`](../config.example.toml)，data/worker/node 使用 [`config.node.example.toml`](../config.node.example.toml)。节点禁止配置 database、replica_database、deployment_key 和数据库连接预算；名称由预创建身份确定。数据库只需允许 control 访问。后端 S3 或原生 storage 应允许相应节点直接访问。
 
 data/worker/node 主动连接 `control_url`；节点状态查询、CLI 和容器健康检查默认监听 `127.0.0.1:9002`，无需向 control 或公网开放。节点示例省略 `listen_control`；需要外部监控采集时，可显式设置监听地址。
 
@@ -118,7 +118,7 @@ control 首次启动通过 PostgreSQL 注册，使用自己的 node.json 恢复�
 
 在主容器或最后一个 control 上运行 `cluster mode MODE`。PostgreSQL 支持 `single`、`single_control` 和 `cluster`。MySQL、MariaDB 和 SQLite 支持前两项。切换前先进入维护并排空工作。
 
-1. 暂停定时维护，完成或中止上传与任务，使用 `cache flush` 排空唯一暂存。进入群集前迁移并移除 local storage、配置共享 S3 staging；回到单容器前释放其他启用节点。
+1. 暂停定时维护，完成或中止上传与任务，使用 `cache flush` 排空唯一暂存。进入群集前迁移并移除 local storage、配置可用的共享暂存后端；回到单容器前释放其他启用节点。
 2. 停止其他进程，包括已释放但仍运行的进程；只保留执行切换的单容器/control。执行 `maintenance enable`，等待活动读写、读取租约和后台工作排空。
 3. 执行模式切换。服务在数据库独占运行权下更新部署模式，当前进程进入需要重启的状态；停止它，再按目标模式启动。
 4. 核对状态和配置，执行 `maintenance disable`，恢复维护计划并检查 `status --ready`。
@@ -132,7 +132,7 @@ control 首次启动通过 PostgreSQL 注册，使用自己的 node.json 恢复�
 
 1. 选择迁移方式：新建 S3 storage 和目标桶，由 Web/CLI 的对象复制或移动任务迁移；或在单容器维护状态下，自行完整搬运原存储命名空间和根 `mokyu.json` 到 S3，再修改原 storage 的类型与连接参数。具体边界见[存储格式](storage-format.md#原始文件)。
 2. 自行搬迁前完成或中止 Multipart、排空待写来源及后台任务，停用公共/S3 入口和后台清理，复制后核对完整性；修改类型后重启单容器。由 Mokyu 跨存储迁移时核对任务结果，再移除原 local 桶和 storage。桶的 storage 绑定不直接更改。
-3. 配置共享 S3 暂存并移除 local storage，再用 `cluster mode single_control` 或 `cluster mode cluster` 切入目标模式。
+3. 配置共享暂存后端并移除 local storage，再用 `cluster mode single_control` 或 `cluster mode cluster` 切入目标模式。
 
 桶绑定的 `storage_id` 永久不变；同一 storage 的桶共享去重，不跨 storage 去重。跨 storage 的对象迁移由 Mokyu 异步任务负责复制、权限、校验和发布一致性；部署管理员负责目标容量、凭据、网络和供应商策略。
 
@@ -146,13 +146,13 @@ control 主库池至少五个连接，另有池外运行权连接；从库预算
 
 ## 备份与故障边界
 
-备份所用元数据库及其恢复日志、部署密钥、各节点持久目录及 S3 载荷，参见[部署与恢复](deployment-and-recovery.md)。元数据和正文必须属于一致的恢复边界，单独的对象存储副本不能恢复数据库、权限或密钥。
+备份所用元数据库及其恢复日志、部署密钥、各节点持久目录及后端载荷，参见[部署与恢复](deployment-and-recovery.md)。元数据和正文必须属于一致的恢复边界，单独的对象存储副本不能恢复数据库、权限或密钥。
 
 读取在 control 上固定对象版本和精确物理来源，NodeSession 批量续租和释放；丢失释放由 TTL 回收，超时租约不能复活。control 失联后只在已确认运行权及来源保护期限内继续已有工作，不能无限发布或读取。断线恢复重新同步权威配置、资源和任务；连接切换不直接等于业务失败或成功。
 
 对象、权限、桶路由和存储策略的变化随业务事务保存通知及目标会话代次。多 control 通过 PostgreSQL 唤醒，单主控使用本机唤醒。两种模式都从持久记录恢复未确认的投递，并向当前会话发送失效批次。节点先隔离旧授权，再确认应用，并主动刷新仍驻留的元数据；正文不随通知传输。control 退出或确认丢失可重投，旧代次退役不等于已收到通知。通知不能代替公开快照硬期限、来源检查或读取保护。
 
-已初始化节点在一次 OpenRead 中取得首窗口的对象映射、缺失的存储与解密材料、相交的 raw 页摘要及本次获授的读取名额，随后直接访问 S3。`include` 选择所需材料，`cached` 声明仍持有的修订。超出消息预算时，ReadWindow 取得后续窗口；多个区块和 raw 段在现有名额内并发。控制节点切换或重试继续核对读取身份、来源版本和期限。[节点 RPC](node-rpc.md)
+已初始化节点在一次 OpenRead 中取得首窗口的对象映射、缺失的存储与解密材料、相交的 raw 页摘要及本次获授的读取名额，随后直接访问后端存储。`include` 选择所需材料，`cached` 声明仍持有的修订。超出消息预算时，ReadWindow 取得后续窗口；多个区块和 raw 段在现有名额内并发。控制节点切换或重试继续核对读取身份、来源版本和期限。[节点 RPC](node-rpc.md)
 
 ## 节点观测
 

@@ -58,13 +58,29 @@ impl App {
             object.1,
             self.deployment_mode() == "single_control",
         );
-        let result = {
-            let _coord = self.coord.lock().await;
-            self.writable()?;
-            self.publish
-                .publish(id, if_match.cloned(), if_none.cloned(), completion)
-                .await
-        };
+        let result = tokio::time::timeout(crate::upload::multipart::completion_timeout(), async {
+            let mut delay = std::time::Duration::from_millis(100);
+            loop {
+                self.renew_write_lease(id).await?;
+                let result = {
+                    let _coord = self.coord.lock().await;
+                    self.writable()?;
+                    self.publish
+                        .publish(id, if_match.cloned(), if_none.cloned(), completion.clone())
+                        .await
+                };
+                if result.as_ref().err().and_then(crate::model::error)
+                    != Some(crate::model::Error::StorageCopiesPending)
+                {
+                    return result;
+                }
+                self.work_queued();
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(2));
+            }
+        })
+        .await
+        .map_err(|_| s3s::s3_error!(RequestTimeout, "required storage copies are still pending"))?;
         self.wait_publication(match result {
             Ok(true) => Ok(()),
             Ok(false) => Err(s3_error!(OperationAborted).into()),

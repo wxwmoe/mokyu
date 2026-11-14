@@ -1,3 +1,4 @@
+pub(crate) mod native;
 pub(crate) mod policy;
 pub(crate) mod publication;
 pub(crate) mod record;
@@ -92,7 +93,7 @@ pub(crate) struct Status {
 
 #[async_trait]
 pub(crate) trait JournalStore:
-    restore::RecoveryStore + snapshots::SnapshotStore + Send + Sync
+    restore::RecoveryStore + snapshots::SnapshotStore + native::NativeJournal + Send + Sync
 {
     async fn bucket(&self, bucket: uuid::Uuid) -> Result<Option<BucketJournal>>;
     async fn marker_intents(&self) -> Result<Vec<Uuid>>;

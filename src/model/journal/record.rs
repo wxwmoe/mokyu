@@ -111,8 +111,7 @@ impl Material {
             Self::Raw { source } => {
                 source.validate()?;
                 ensure!(
-                    matches!(source.medium.as_str(), "shared_s3" | "local")
-                        && !source.pending_upload,
+                    matches!(source.medium.as_str(), "shared" | "local") && !source.pending_upload,
                     "journal raw source is pending"
                 );
                 ("raw", source.storage_id, source.address(), None)

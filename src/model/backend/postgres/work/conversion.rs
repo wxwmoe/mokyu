@@ -62,7 +62,7 @@ pub(super) async fn prepare(
         .await?;
     ensure!(
         source.storage_id == profile.storage_id
-            && (local || source.medium == "shared_s3" && !source.pending_upload)
+            && (local || source.medium == "shared" && !source.pending_upload)
             && source.size == original.size
             && original.payload_type == "raw",
         Error::SourceUnavailable

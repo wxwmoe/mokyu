@@ -64,6 +64,7 @@ pub(super) async fn check(
         .execute(pool)
         .await?;
     let request = |operation, completion| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

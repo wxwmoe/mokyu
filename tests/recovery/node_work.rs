@@ -63,11 +63,12 @@ pub(super) async fn check(
         .execute(pool)
         .await?;
     let raw = Uuid::now_v7();
-    sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision,created_at,unreferenced_at,upload_id) VALUES($1,$2,'shared_s3','ready',2,$3,1,clock_timestamp()-interval '2 days',clock_timestamp()-interval '2 days','unfinished-upload')")
+    sqlx::query("INSERT INTO raw_sources(id,storage_id,medium,state,size,digest,profile_revision,created_at,unreferenced_at,upload_id) VALUES($1,$2,'shared','ready',2,$3,1,clock_timestamp()-interval '2 days',clock_timestamp()-interval '2 days','unfinished-upload')")
         .bind(raw).bind(storage).bind(vec![2u8;16]).execute(pool).await?;
     sqlx::query("INSERT INTO staging_objects(storage_id,object_key,bytes,created_at) VALUES($1,'staging/work-fixture',3,clock_timestamp()-interval '10 minutes')").bind(storage).execute(pool).await?;
     let task: Uuid = sqlx::query_scalar("INSERT INTO tasks(task_type,state,detail,execution_scope,target_node_id) VALUES('gc','queued',jsonb_build_object('storage_id',$1::uuid),'node',$2) RETURNING id").bind(storage).bind(other.node_id).fetch_one(pool).await?;
     let request = |operation, completion| work::Exchange {
+        protected: vec![],
         run,
         operation,
         completion,

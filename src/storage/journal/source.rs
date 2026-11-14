@@ -320,17 +320,24 @@ impl Source {
                 && root.as_ref().is_none_or(|r| r.revision < revision)
             {
                 let path = snapshot::checkpoint_path(epoch, revision);
-                let data = match bytes(store, &path, limit).await? {
-                    Some(data) => data,
-                    None if pinned == Some(revision) => bytes(store, &index_path, limit)
-                        .await?
-                        .context("missing pinned recovery index")?,
+                let (data, actual_path) = match bytes(store, &path, limit).await? {
+                    Some(data) => (data, &path),
+                    None if pinned == Some(revision) => (
+                        bytes(store, &index_path, limit)
+                            .await?
+                            .context("missing pinned recovery index")?,
+                        &index_path,
+                    ),
                     None => anyhow::bail!("missing confirmed checkpoint"),
                 };
                 let (r, index) = snapshot::open_envelope::<snapshot::Index>(
                     &format,
                     FrameType::Index,
-                    &index_path,
+                    if data.starts_with(super::recovery::MAGIC) {
+                        actual_path
+                    } else {
+                        &index_path
+                    },
                     &data,
                 )?;
                 ensure!(

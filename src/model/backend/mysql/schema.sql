@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261113065937.
+-- Generated from the complete mysql migration chain through 20261114063300.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -810,6 +810,8 @@ CREATE TABLE `journal_snapshots` (
   `attempts` bigint NOT NULL DEFAULT '0',
   `retry_after` datetime(6) DEFAULT NULL,
   `error_detail` text COLLATE utf8mb4_bin,
+  `checkpoint_body` longblob,
+  `checkpoint_size` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `storage_id` (`storage_id`,`id`),
   KEY `journal_snapshot_queue` (`storage_id`,`state`,`planned_at`),
@@ -1745,7 +1747,6 @@ CREATE TABLE `raw_sources` (
   CONSTRAINT `raw_sources_owner` FOREIGN KEY (`owner_stream`) REFERENCES `streams` (`id`) ON DELETE SET NULL,
   CONSTRAINT `raw_sources_processing_fk` FOREIGN KEY (`processing_task`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
   CONSTRAINT `raw_sources_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
-  CONSTRAINT `raw_sources_chk_1` CHECK ((`medium` in (_ascii'local',_ascii'memory',_ascii'shared_s3'))),
   CONSTRAINT `raw_sources_chk_2` CHECK ((`durability` in (_ascii'durable',_ascii'buffered',_ascii'volatile'))),
   CONSTRAINT `raw_sources_chk_3` CHECK ((`state` in (_ascii'writing',_ascii'ready',_ascii'unavailable',_ascii'deleting'))),
   CONSTRAINT `raw_sources_chk_4` CHECK ((`size` >= 0)),
@@ -1753,7 +1754,8 @@ CREATE TABLE `raw_sources` (
   CONSTRAINT `raw_sources_chk_6` CHECK ((`profile_revision` > 0)),
   CONSTRAINT `raw_sources_chk_7` CHECK (((`state` <> _ascii'ready') or (`digest` is not null))),
   CONSTRAINT `raw_sources_chk_8` CHECK (((`medium` = _ascii'memory') = (`boot_id` is not null))),
-  CONSTRAINT `raw_sources_chk_9` CHECK ((`page_count` >= 0))
+  CONSTRAINT `raw_sources_chk_9` CHECK ((`page_count` >= 0)),
+  CONSTRAINT `raw_sources_medium` CHECK ((`medium` in (_utf8mb4'local',_utf8mb4'memory',_utf8mb4'shared')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `raw_uploads` (
@@ -2010,6 +2012,7 @@ CREATE TABLE `storage_clusters` (
   `revision` bigint NOT NULL,
   `policy` json NOT NULL,
   `manifest` json NOT NULL,
+  `allocation_group` binary(16) DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`),
   CONSTRAINT `storage_clusters_revision` CHECK ((`revision` > 0))
@@ -2061,12 +2064,83 @@ CREATE TABLE `storage_gates` (
   CONSTRAINT `storage_gates_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `storage_journal_publications` (
+  `id` binary(16) NOT NULL,
+  `namespace_id` binary(16) NOT NULL,
+  `cluster_id` binary(16) NOT NULL,
+  `revision` bigint NOT NULL,
+  `manifest_revision` bigint NOT NULL,
+  `proof` json NOT NULL,
+  `settled` tinyint(1) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `storage_journal_publication_revision` (`namespace_id`,`revision`),
+  CONSTRAINT `storage_journal_publications_chk_1` CHECK ((`revision` > 0)),
+  CONSTRAINT `storage_journal_publications_chk_2` CHECK ((`manifest_revision` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_journal_receipts` (
+  `namespace_id` binary(16) NOT NULL,
+  `media_id` binary(16) NOT NULL,
+  `revision` bigint NOT NULL,
+  PRIMARY KEY (`namespace_id`,`media_id`),
+  CONSTRAINT `storage_journal_receipts_chk_1` CHECK ((`revision` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_journal_sources` (
+  `operation` binary(16) NOT NULL,
+  `namespace_id` binary(16) NOT NULL,
+  `path` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `revision` bigint NOT NULL DEFAULT '1',
+  `allocated_revision` bigint NOT NULL DEFAULT '0',
+  `cursor_id` binary(16) NOT NULL,
+  `file_id` binary(16) DEFAULT NULL,
+  `published_revision` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`operation`),
+  KEY `storage_journal_source_file` (`file_id`),
+  KEY `storage_journal_pending` (`namespace_id`,`allocated_revision`,`revision`,`operation`),
+  CONSTRAINT `storage_journal_source_file` FOREIGN KEY (`file_id`) REFERENCES `journal_files` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `storage_journal_source_payload` FOREIGN KEY (`operation`) REFERENCES `storage_payloads` (`operation`),
+  CONSTRAINT `storage_journal_sources_chk_1` CHECK ((`revision` > 0)),
+  CONSTRAINT `storage_journal_sources_chk_2` CHECK ((`allocated_revision` >= 0)),
+  CONSTRAINT `storage_journal_sources_chk_3` CHECK ((`published_revision` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `storage_maintenance` (
   `storage_id` binary(16) NOT NULL,
   `policy` varchar(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
   `last_scheduled_at` datetime(6) NOT NULL,
   PRIMARY KEY (`storage_id`,`policy`),
   CONSTRAINT `storage_maintenance_storage_fk` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_object_writes` (
+  `operation` binary(16) NOT NULL,
+  `owner` binary(16) NOT NULL,
+  `condition` json NOT NULL,
+  `previous` binary(16) DEFAULT NULL,
+  PRIMARY KEY (`operation`),
+  KEY `storage_object_previous` (`previous`),
+  CONSTRAINT `storage_object_previous` FOREIGN KEY (`previous`) REFERENCES `storage_payloads` (`operation`),
+  CONSTRAINT `storage_object_write` FOREIGN KEY (`operation`) REFERENCES `storage_payloads` (`operation`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_objects` (
+  `namespace_id` binary(16) NOT NULL,
+  `payload_id` binary(16) NOT NULL,
+  `path_hash` binary(32) NOT NULL,
+  `path` varbinary(1024) NOT NULL,
+  `revision` bigint NOT NULL DEFAULT '0',
+  `head` binary(16) DEFAULT NULL,
+  `pending` binary(16) DEFAULT NULL,
+  `modified` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`namespace_id`,`payload_id`),
+  UNIQUE KEY `storage_object_path` (`namespace_id`,`path_hash`),
+  KEY `storage_object_head` (`head`),
+  KEY `storage_object_pending` (`pending`),
+  KEY `storage_objects_listing` (`namespace_id`,`path`),
+  CONSTRAINT `storage_object_head` FOREIGN KEY (`head`) REFERENCES `storage_payloads` (`operation`),
+  CONSTRAINT `storage_object_pending` FOREIGN KEY (`pending`) REFERENCES `storage_payloads` (`operation`),
+  CONSTRAINT `storage_object_revision` CHECK ((`revision` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storage_payloads` (
@@ -2079,13 +2153,16 @@ CREATE TABLE `storage_payloads` (
   `state` varchar(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'prepared',
   `write_until` bigint NOT NULL DEFAULT '0',
   `protected_until` bigint NOT NULL DEFAULT '0',
+  `collect_after` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`operation`),
   UNIQUE KEY `storage_payload_identity` (`namespace_id`,`payload_id`,`revision`),
   KEY `storage_payload_cluster` (`cluster_id`),
+  KEY `storage_payload_collection` (`namespace_id`,`state`,`collect_after`,`operation`),
   CONSTRAINT `storage_payload_cluster` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`),
   CONSTRAINT `storage_payload_protection` CHECK ((`protected_until` >= 0)),
   CONSTRAINT `storage_payload_revision` CHECK ((`revision` > 0)),
-  CONSTRAINT `storage_payload_state` CHECK ((`state` in (_utf8mb4'prepared',_utf8mb4'published',_utf8mb4'retired')))
+  CONSTRAINT `storage_payload_state` CHECK ((`state` in (_utf8mb4'prepared',_utf8mb4'published',_utf8mb4'retired'))),
+  CONSTRAINT `storage_payloads_chk_1` CHECK ((`collect_after` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storage_permits` (
@@ -2207,6 +2284,8 @@ CREATE TABLE `storage_recovery_catalogs` (
   `id` binary(16) NOT NULL,
   `namespace_id` binary(16) NOT NULL,
   `anchor` json NOT NULL,
+  `publication` json DEFAULT NULL,
+  `indexed_revision` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
@@ -2239,6 +2318,60 @@ CREATE TABLE `storage_recovery_entries` (
   CONSTRAINT `storage_recovery_entry_hash` CHECK ((length(`content_hash`) = 32)),
   CONSTRAINT `storage_recovery_entry_position` CHECK ((`position` >= 0)),
   CONSTRAINT `storage_recovery_entry_size` CHECK ((`encoded_bytes` between 1 and 8388608))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_recovery_files` (
+  `catalog` binary(16) NOT NULL,
+  `operation` binary(16) NOT NULL,
+  `path_hash` binary(32) NOT NULL,
+  `path` varchar(1024) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL,
+  `publication_revision` bigint NOT NULL,
+  `through_sequence` bigint NOT NULL,
+  `retired` tinyint(1) NOT NULL DEFAULT '0',
+  `part` json NOT NULL,
+  `decoded` json DEFAULT NULL,
+  PRIMARY KEY (`catalog`,`operation`),
+  KEY `storage_recovery_file_path` (`catalog`,`path_hash`,`publication_revision`),
+  CONSTRAINT `storage_recovery_file_catalog` FOREIGN KEY (`catalog`) REFERENCES `storage_recovery_catalogs` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `storage_recovery_file_hash` CHECK ((length(`path_hash`) = 32)),
+  CONSTRAINT `storage_recovery_file_revision` CHECK ((`publication_revision` > 0)),
+  CONSTRAINT `storage_recovery_file_sequence` CHECK ((`through_sequence` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_repairs` (
+  `id` binary(16) NOT NULL,
+  `operation` binary(16) NOT NULL,
+  `sequence` bigint NOT NULL,
+  `original_receipt` json NOT NULL,
+  `candidate_id` binary(16) DEFAULT NULL,
+  `candidate` json DEFAULT NULL,
+  `state` varchar(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'queued',
+  `original_removed` tinyint(1) NOT NULL DEFAULT '0',
+  `candidate_removed` tinyint(1) NOT NULL DEFAULT '0',
+  `protected_until` bigint NOT NULL DEFAULT '0',
+  `collecting` tinyint(1) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`id`),
+  KEY `storage_repair_operation` (`operation`,`state`,`id`),
+  CONSTRAINT `storage_repair_payload` FOREIGN KEY (`operation`) REFERENCES `storage_payloads` (`operation`),
+  CONSTRAINT `storage_repair_state` CHECK ((`state` in (_utf8mb4'queued',_utf8mb4'healthy',_utf8mb4'writing',_utf8mb4'installed'))),
+  CONSTRAINT `storage_repairs_chk_1` CHECK ((`protected_until` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_reservations` (
+  `operation` binary(16) NOT NULL,
+  `media_id` binary(16) NOT NULL,
+  `cluster_id` binary(16) NOT NULL,
+  `bytes` bigint NOT NULL,
+  `accounting_boot` binary(16) DEFAULT NULL,
+  `accounting_revision` bigint NOT NULL DEFAULT '0',
+  `complete` tinyint(1) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`operation`,`media_id`),
+  KEY `storage_reservation_totals` (`cluster_id`,`media_id`),
+  KEY `storage_reservation_settlement` (`media_id`,`complete`,`accounting_boot`,`accounting_revision`),
+  CONSTRAINT `storage_reservation_cluster` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`),
+  CONSTRAINT `storage_reservation_payload` FOREIGN KEY (`operation`) REFERENCES `storage_payloads` (`operation`),
+  CONSTRAINT `storage_reservations_chk_1` CHECK ((`bytes` > 0)),
+  CONSTRAINT `storage_reservations_chk_2` CHECK ((`accounting_revision` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storages` (

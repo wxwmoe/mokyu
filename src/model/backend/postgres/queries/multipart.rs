@@ -1,5 +1,9 @@
 use super::*;
 
+pub(in super::super) fn native_multipart(bucket: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=$1 AND s.type='mokyu') OR EXISTS(SELECT 1 FROM runtime_settings r JOIN storages s ON s.id=NULLIF(r.value->>'staging_storage_id','')::uuid WHERE r.section='uploads' AND s.type='mokyu')").bind(bucket)
+}
+
 pub(in super::super) fn multipart_upload<'q>(
     id: Uuid,
     bucket: Uuid,

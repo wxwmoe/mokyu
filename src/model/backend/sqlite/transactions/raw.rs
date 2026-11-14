@@ -30,7 +30,10 @@ pub(in super::super) async fn copy_raw_references_in(
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
     ensure!(
-        matches!(storage_type.as_str(), "local" | "s3") && unencoded && !cdc && current == revision,
+        matches!(storage_type.as_str(), "local" | "s3" | "mokyu")
+            && unencoded
+            && !cdc
+            && current == revision,
         crate::model::Error::OperationAborted
     );
     if offset == 0 {
@@ -88,7 +91,7 @@ pub(in super::super) async fn begin_raw(
         .await?
         .ok_or(crate::model::Error::OperationAborted)?;
     ensure!(
-        matches!(storage_type.as_str(), "local" | "s3")
+        matches!(storage_type.as_str(), "local" | "s3" | "mokyu")
             && current == revision
             && if encoding.is_some() {
                 cdc && background
@@ -114,7 +117,7 @@ pub(in super::super) async fn begin_raw(
         if storage_type == "local" {
             "local"
         } else {
-            "shared_s3"
+            "shared"
         },
         durability,
     )
@@ -158,6 +161,7 @@ pub(in super::super) async fn finish_raw(
             .is_some(),
         crate::model::Error::OperationAborted
     );
+    super::super::storage_native::publish_raw(&mut tx, source, size as u64).await?;
     ensure!(
         queries::raw_finish(stream, source, size, digest, cached.is_none())
             .execute(&mut *tx)
@@ -723,7 +727,7 @@ pub(in super::super) async fn reuse_raw(
         .await?;
     let Some(candidate) = candidate.filter(|candidate| {
         candidate.validate().is_ok()
-            && candidate.medium == "shared_s3"
+            && candidate.medium == "shared"
             && candidate.digest.as_deref() == Some(digest)
     }) else {
         tx.commit().await?;
@@ -834,7 +838,7 @@ pub(in super::super) async fn reuse_raw_upload_in(
         c.id != work.source.id
             && c.validate().is_ok()
             && !c.pending_upload
-            && c.medium == "shared_s3"
+            && c.medium == "shared"
             && c.digest == work.source.digest
     }) else {
         return Ok(false);
@@ -907,6 +911,8 @@ pub(in super::super) async fn complete_raw_upload_in(
     current.source.validate()?;
     let mut shared = false;
     if current.source.pending_upload {
+        super::super::storage_native::publish_raw(tx, work.source.id, work.source.size as u64)
+            .await?;
         shared = super::super::queries::node_files::share_conversion(work.source.id)
             .execute(&mut **tx)
             .await?
@@ -931,7 +937,7 @@ pub(in super::super) async fn complete_raw_upload_in(
             duplicate = candidate.id != work.source.id
                 && candidate.validate().is_ok()
                 && !candidate.pending_upload
-                && candidate.medium == "shared_s3"
+                && candidate.medium == "shared"
                 && candidate.digest == work.source.digest;
             if !duplicate && candidate.id != work.source.id {
                 queries::raw_hash(candidate.id, None)
@@ -1079,6 +1085,7 @@ pub(in super::super) async fn commit_conversion_batch_in(
             .execute(&mut **tx)
             .await?;
     }
+    super::super::storage_native::publish_outputs(tx, outputs).await?;
     for output in outputs {
         if let Some(pack) = &output.pack {
             ensure!(

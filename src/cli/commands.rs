@@ -371,7 +371,7 @@ pub enum Storages {
     },
     Update {
         name: String,
-        #[arg(long, value_parser = ["local", "s3"])]
+        #[arg(long, value_parser = ["local", "s3", "mokyu"])]
         r#type: Option<String>,
         #[arg(long)]
         path: Option<PathBuf>,
@@ -442,6 +442,8 @@ pub enum Storages {
 pub enum Recoveries {
     Probe {
         file: PathBuf,
+        #[arg(long)]
+        namespace: Option<Uuid>,
         #[arg(long, conflicts_with = "key_stdin")]
         unlock: bool,
         #[arg(long)]
@@ -794,7 +796,7 @@ impl Command {
             | Self::Keys(Keys::List | Keys::Replacement { .. })
             | Self::Setup(Setup::Token)
             | Self::Cluster(Cluster::Status | Cluster::Nodes { .. })
-            | Self::StorageCluster(StorageClusters::List) => None,
+            | Self::StorageCluster(StorageClusters::List | StorageClusters::Sources { .. }) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),
             Self::Token(_) => Some("token.change"),
@@ -954,6 +956,21 @@ pub struct StyleExport {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum StorageClusters {
     List,
+    Repair {
+        id: Uuid,
+        fragment: Uuid,
+    },
+    Sources {
+        id: Uuid,
+        media: Uuid,
+        #[arg(long)]
+        after: Option<Uuid>,
+    },
+    Takeover {
+        name: String,
+        #[arg(required=true, num_args=1..)]
+        media: Vec<Uuid>,
+    },
     Create {
         name: String,
         #[arg(long)]

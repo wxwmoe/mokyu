@@ -69,12 +69,12 @@ pub(crate) struct StorageCapabilities {
 
 impl StorageCapabilities {
     pub(crate) fn for_type(kind: &str) -> Self {
-        let available = matches!(kind, "local" | "s3");
+        let available = matches!(kind, "local" | "s3" | "mokyu");
         Self {
             read: available,
             write: available,
             range: available,
-            multipart: available,
+            multipart: matches!(kind, "local" | "s3"),
             shared_staging: kind == "s3",
         }
     }
@@ -121,7 +121,7 @@ pub(crate) struct StorageRow {
     pub(crate) enabled: bool,
 }
 
-#[must_use = "keep the deployment lock until storage initialization finishes"]
+#[must_use = "finish storage creation after its marker has been verified"]
 pub(crate) struct StorageCreation {
     pub(crate) deployment: Uuid,
     pub(crate) mode: String,

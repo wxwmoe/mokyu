@@ -477,9 +477,7 @@ pub(crate) async fn create_installation_store(
     profile_for_init
         .validate_budget(&app.config, &budget)
         .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}"))?;
-    if record.r#type == "mokyu" {
-        // Keep the binding disabled until shared I/O and staging probes are available.
-    } else if resume {
+    if resume {
         app.storage
             .verify_store_with_profile(record.clone(), &profile_for_init)
             .await?;
@@ -568,10 +566,13 @@ pub(crate) async fn update_record(
     }
     let StorageEdit {
         row,
-        profile,
+        mut profile,
         mode,
         update,
     } = app.storage_records.edit(&name).await?;
+    if app.shared_storage_only() {
+        profile.write_durability = None;
+    }
     anyhow::ensure!(
         row.identity_marker != serde_json::json!({}),
         "storage identity marker is empty; initialize and check it before changing the connection"
@@ -687,11 +688,7 @@ pub(crate) async fn update_record(
         )?
     };
     record.enabled = input.enabled.unwrap_or(row.enabled);
-    if record.r#type == "mokyu" {
-        anyhow::ensure!(
-            !record.enabled,
-            "storage cluster is waiting for shared I/O and staging probes"
-        );
+    if record.r#type == "mokyu" && !record.enabled {
         Ok(())
     } else if let Some(previous) = previous {
         app.storage

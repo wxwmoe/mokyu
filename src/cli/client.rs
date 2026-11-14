@@ -48,6 +48,7 @@ pub async fn client(path: Option<&Path>, mut command: Command) -> Result<()> {
                     key_stdin,
                     document,
                     deployment_key,
+                    ..
                 },
         }) => {
             ensure!(

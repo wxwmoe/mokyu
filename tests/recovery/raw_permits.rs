@@ -69,7 +69,7 @@ async fn write(storage: &Arc<Storage>, target: Uuid, data: &[u8]) -> Result<RawS
         medium: if storage.store_backend(target)?.is_local {
             "local".into()
         } else {
-            "shared_s3".into()
+            "shared".into()
         },
         pending_upload: false,
         revision: 1,

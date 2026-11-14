@@ -48,16 +48,27 @@ const RAW_BUFFER: usize = 256 * 1024;
 pub(super) struct Backend {
     pub(super) store: Store,
     pub(super) profile: crate::storage::profile::StorageProfile,
+    io: Arc<super::io::Io>,
 }
 
 impl Backend {
     pub(super) fn new(value: read::Storage, io: &Arc<super::io::Io>) -> Result<Self> {
         ensure!(
-            value.connection.r#type == "s3",
-            "nodes require shared S3 storage"
+            matches!(value.connection.r#type.as_str(), "s3" | "mokyu"),
+            "nodes require shared storage"
         );
-        crate::storage::profile::validate(&value.profile, "s3")?;
-        let mut store = Store::connect(&value.connection, Options::from_profile(&value.profile)?)?;
+        crate::storage::profile::validate(&value.profile, &value.connection.r#type)?;
+        let options = Options::from_profile(&value.profile)?;
+        let mut store = if value.connection.r#type == "mokyu" {
+            Store::connect_native(
+                &value.connection,
+                options,
+                crate::storage::native::store::Authority::Unscoped,
+                None,
+            )?
+        } else {
+            Store::connect(&value.connection, options)?
+        };
         store.backend = io.observe(store.backend);
         store.multipart = store.multipart.map(|store| io.multipart(store));
         if let Some(streaming) = &mut store.streaming {
@@ -66,7 +77,30 @@ impl Backend {
         Ok(Self {
             store,
             profile: value.profile,
+            io: io.clone(),
         })
+    }
+
+    pub(super) fn scoped(
+        self: &Arc<Self>,
+        authority: crate::storage::native::store::Authority,
+        region: Option<String>,
+    ) -> Result<Arc<Self>> {
+        let Some(native) = &self.store.native else {
+            return Ok(self.clone());
+        };
+        let native = Arc::new(crate::storage::native::store::Store {
+            authority,
+            region,
+            ..native.as_ref().clone()
+        });
+        let mut store = self.store.scope_native(native)?;
+        store.backend = self.io.observe(store.backend);
+        Ok(Arc::new(Self {
+            store,
+            profile: self.profile.clone(),
+            io: self.io.clone(),
+        }))
     }
 }
 
@@ -103,7 +137,7 @@ impl Reader {
     ) -> Result<Bytes> {
         range.validate()?;
         ensure!(
-            range.source.medium == "shared_s3" && !range.source.pending_upload,
+            range.source.medium == "shared" && !range.source.pending_upload,
             codec::IntegrityError::RawMetadata
         );
         let _io = self.io(prepared, Some(range.source.storage_id)).await?;
@@ -575,7 +609,7 @@ impl Reader {
             );
             return Ok((RawFile::Local(file), io));
         }
-        ensure!(source.medium == "shared_s3", "invalid node raw medium");
+        ensure!(source.medium == "shared", "invalid node raw medium");
         let backend = prepared.backend(source.storage_id)?;
         let verify = verify_backend;
         let lock = self.files.raw_lock(source, &backend.profile);

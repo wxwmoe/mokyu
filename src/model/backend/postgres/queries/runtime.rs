@@ -328,7 +328,7 @@ pub(in super::super) fn cluster_staging_id() -> Scalar<'static, Option<Uuid>> {
 
 pub(in super::super) fn cluster_staging_valid(id: Option<Uuid>) -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM storages WHERE id=$1 AND enabled AND type='s3')",
+        "SELECT EXISTS(SELECT 1 FROM storages WHERE id=$1 AND enabled AND type IN ('s3','mokyu'))",
     )
     .bind(id)
 }

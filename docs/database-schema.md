@@ -50,11 +50,17 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 | `storage_clusters` | `id` UUID、`name` 文本、`revision` 正整数、`policy` JSON、`manifest` JSON | 均非空，无字段默认值；UUID 主键，名称唯一且应用限制 1–128 字节；策略和清单通过 CAS 一并保存 |
 | `storage_cluster_history` | `cluster_id` UUID、`revision` 正整数、`manifest` JSON、`digest` 64 字符十六进制摘要 | 均非空，无默认值；群集外键，`(cluster_id,revision)` 主键；追加后不可修改 |
 | `storage_devices` | `media_id` UUID、`node_id` UUID、可空 `cluster_id` UUID、`observed_at` 整数微秒时间、`announcement` JSON | 介质主键，节点唯一外键，群集外键；除群集外均非空且无默认值；未入群介质也保留登记与旧布局线索 |
-| `storage_payloads` | `operation`、`namespace_id`、`payload_id`、`cluster_id` 为 UUID；`revision` 正整数；`intent` JSON；`state` 文本默认 prepared；`write_until`、`protected_until` 为微秒整数，默认 0 | 全部非空；操作主键，命名空间/载荷/修订联合唯一，群集外键；状态为 prepared/published/retired；保护水位非负 |
+| `storage_payloads` | `operation`、`namespace_id`、`payload_id`、`cluster_id` 为 UUID；`revision` 正整数；`intent` JSON；`state` 文本默认 prepared；`write_until`、`protected_until`、`collect_after` 为微秒整数，默认 0（后者为回收重试时间） | 全部非空；操作主键，命名空间/载荷/修订联合唯一，群集外键；状态为 prepared/published/retired；保护水位与重试时间非负；按命名空间/状态/回收重试时间/操作建立索引 |
 | `storage_fragments` | `id`、`operation`、`media_id` 为 UUID；`sequence`、`copy_index`、`shard_index`、`file_bytes` 为整数；`header` 二进制；`required` 布尔；`root`、`commitment` 可空二进制；`deleted` 布尔默认 false | 除两种摘要外全部非空；分片主键、操作外键和操作/序号/套号/片号唯一；头恰为 320 字节；两个摘要同时为空或各 32 字节；文件至少 432 字节；按介质/操作及操作/删除状态/分片建立索引 |
-| `storage_recovery_catalogs` | `id`、`namespace_id` 为 UUID，`anchor` 为历史群集清单 JSON | 全部非空，无默认值；恢复目录 UUID 主键，固定恢复命名空间及受信起点 |
+| `storage_repairs` | `id`、`operation` 为 UUID；`sequence` 为整数；`original_receipt` JSON；`candidate_id` 可空 UUID，`candidate` 可空 JSON；`state` 文本默认 queued；`original_removed`、`candidate_removed`、`collecting` 布尔默认 false；`protected_until` 非负微秒整数默认 0 | 原片 UUID 主键、载荷操作外键；其余字段非空且无默认值；状态限 queued/healthy/writing/installed；按操作/状态/原片索引。保留原回执和新片候选，切换只更新原物理槽位 |
+| `storage_recovery_catalogs` | `id`、`namespace_id` 为 UUID，`anchor` 为历史群集清单 JSON，`publication` 为可空发布证明 JSON，`indexed_revision` 为非负整数默认 0 | 除发布证明外非空；恢复目录 UUID 主键，固定命名空间、受信布局和恢复水位；按连续证明建立文件目录，未完成时禁止读取目录 |
+| `storage_recovery_files` | `catalog`、`operation` 为 UUID；`path_hash` 为 32 字节摘要，`path` 文本；`publication_revision`、`through_sequence` 为整数；`part` JSON，`decoded` 可空 JSON；`retired` 布尔默认 false | 目录/操作联合主键、目录外键级联删除；修订为正数，水位非负；按目录/路径摘要/修订建立索引，退役版本不会回退为旧文件；解析摘要绑定日志密钥及已验证载荷摘要 |
+| `storage_journal_sources` | `operation`、`namespace_id`、`cursor_id` 为 UUID；`path` 文本；`revision` 正整数默认 1，`allocated_revision`、`published_revision` 非负整数默认 0；`file_id` 可空 UUID | 操作主键及载荷外键；只登记元数据日志依赖的物理来源，按修订和分页游标条件分配；文件删除时清空文件外键，来源保护另行结算；已发布物理修订仅在恢复证据确认后推进，不随旧日志文件清理丢失 |
+| `storage_journal_publications` | `id`、`namespace_id`、`cluster_id` 为 UUID；`revision`、`manifest_revision` 为正整数；`proof` JSON；`settled` 布尔默认 false | 全部非空；证据主键、命名空间/修订唯一；保存签名发布链、引导标记及完整载荷清单，结算与日志水位同事务 |
+| `storage_journal_receipts` | `namespace_id`、`media_id` 为 UUID；`revision` 非负整数 | 全部非空，无字段默认值；命名空间/介质联合主键；记录逐介质已确认的连续发布证据，用于中断重试和新成员补齐 |
+| `journal_snapshots` 的原生检查点 | `checkpoint_body` 可空二进制；`checkpoint_size` 非空整数默认 0 | 原生后端保存独立路径认证的检查点正文，发布成功后释放正文，保留实际字节数供回收统计；local/S3 沿用索引正文 |
 | `storage_recovery_cursors` | `catalog`、`media` 为 UUID，`scope` 文本，`revision` 正整数，`cursor_value` JSON，`batch_hash` 32 字节二进制 | 全部非空，无默认值；目录/介质/扫描范围联合主键，目录外键级联删除；游标与同批记录在一个事务提交 |
-| `storage_recovery_entries` | `catalog`、`owner_id`、`id` 为 UUID；`category`、`position`、`encoded_bytes` 为整数；`content_hash` 为 32 字节摘要，`content` 为 JSON | 全部非空，无默认值；目录/类别/记录/位置联合主键；类别 0–6，位置非负，单项至多 8 MiB；目录外键级联删除，按目录/类别/所属载荷/记录/位置建立索引 |
+| `storage_recovery_entries` | `catalog`、`owner_id`、`id` 为 UUID；`category`、`position`、`encoded_bytes` 为整数；`content_hash` 为 32 字节摘要，`content` 为 JSON | 全部非空，无默认值；目录/类别/记录/位置联合主键；类别 0–6，位置非负，单项至多 8 MiB；目录外键级联删除，按目录/类别/所属载荷/记录/位置建立索引；物理记录的暂存身份包含日志写入代次 |
 
 UUID、JSON 和整数分别使用各数据库的原生表示，SQLite 为受约束的 BLOB、TEXT 和 INTEGER。`storages.cluster_id` 为可空群集外键，原生 `mokyu` 后端必须绑定群集且不得带 local/S3 连接字段，其他类型必须为空。群集成员尚未完成排空时不能释放节点身份；本机数据不会随节点凭据轮换删除。
 
@@ -99,7 +105,7 @@ storage 连接和 profile 修改只改变后续写入及新请求的策略；已
 
 | `raw_uploads` | `source_id` 主键及级联外键；可空执行 `token`、32 字节 `content_hash`、`last_error`；`deduplicate`、`background` 固定接收时策略；`next_attempt_at` 默认当前时间、`attempts` 默认 0 | S3 raw 的必须排空队列，群集另保存 `node_id` 和 `lease_expires_at`，只由所属节点处理；按来源保存，不依赖原对象名称；失败保留唯一缓存，完成后清除待上传标记并释放 pin |
 
-UUID、时间、整数分别使用各数据库既有原生类型。原始来源使用 local、memory 或 shared_s3，确认策略为 durable、buffered 或 volatile；memory 必须带非空 boot_id，其余介质必须为空；完整读取校验长度和 MD5。逻辑用量按对象字节计量，物理用量按独立来源去重，并将共享收益归属到相应桶和项目；raw 没有编码节省。物理库存同时区分保留引用及待回收来源。
+UUID、时间、整数分别使用各数据库既有原生类型。原始来源使用 local、memory 或 shared，确认策略为 durable、buffered 或 volatile；memory 必须带非空 boot_id，其余介质必须为空；完整读取校验长度和 MD5。逻辑用量按对象字节计量，物理用量按独立来源去重，并将共享收益归属到相应桶和项目；raw 没有编码节省。物理库存同时区分保留引用及待回收来源。
 
 ## 逻辑区块和物理来源
 

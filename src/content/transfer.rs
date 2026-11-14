@@ -447,7 +447,7 @@ mod tests {
                 size: bytes.len() as i64,
                 digest: Some(<md5::Md5 as md5::Digest>::digest(bytes).to_vec()),
                 state: "ready".into(),
-                medium: "shared_s3".into(),
+                medium: "shared".into(),
                 pending_upload: false,
                 revision: 1,
                 quarantine_code: None,

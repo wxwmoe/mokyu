@@ -2,7 +2,7 @@
 
 `mokyu storage` 是由 control 登记的独立存储角色，仅限 `single_control` 和 `cluster`。storage 使用节点凭据注册，不连接元数据库，不配置部署 key。地区、地址和存储分组由 storage 的配置文件宣告；群集策略和成员归属保存在 control 的数据库中。
 
-当前支持身份登记、群集策略、成员管理和后端绑定。启用组合后显示“等待存储验证”，后端保持停用；共享正文读写和跨节点暂存尚未开放。不能把此状态当成可用容量，也不能解除维护模式承接数据。
+原生后端支持双副本 PUT、GET、HEAD、Range、元数据日志与恢复，不依赖远端 S3。启用后端时会实际写入探针并读回；只有验证通过才能承接业务。原生后端尚不支持 Multipart，创建 Multipart 会返回 `NotImplemented`。
 
 ## 从空部署开始
 
@@ -45,13 +45,24 @@ mokyu cli storage-cluster list
 mokyu cli storage-cluster members CLUSTER_UUID --revision 1 MEDIA_UUID_1 MEDIA_UUID_2
 mokyu cli storage-cluster enable CLUSTER_UUID --revision 2 MEDIA_UUID_1 MEDIA_UUID_2
 mokyu cli storage create native mokyu --cluster-id CLUSTER_UUID --init
+mokyu cli storage update native --enabled true
 ```
 
 命令中的修订和 UUID 取自上一步实际结果。成员可按任意合法数量加入；启用组合才检查主盘数、成员用途、状态、故障域及逐盘空间。目前只开放数据分片 1、校验分片 0、额外副本 1 的组合。两块主存储必须属于不同 `storage_group`，不能用另一块盘的剩余空间代替其中一块。
 
 群集策略分别保存，更新必须携带当前修订；并发编辑冲突时重新加载后再核对。`storage-cluster update UUID --revision N --name NAME --policy JSON` 更新名称和策略；`state UUID MEDIA_UUID --revision N paused` 暂停成员，`available` 恢复，尚未分配的主存储可设为 `spare`。人工状态与节点连接状态分开保存。
 
-Mokyu 后端仅绑定群集 UUID，不绑定某个 storage 地址。管理 API 返回 `cluster_id` 与 `capabilities`，当前原生后端能力均为关闭，不能启用或用于桶。空部署在维护状态可以预选原生后端作为 `uploads.staging_storage_id`，通过能力验证前不能退出维护。
+Mokyu 后端仅绑定群集 UUID，不绑定某个 storage 地址。管理 API 返回 `cluster_id` 与 `capabilities`；读取、写入和 Range 可用，Multipart 与共享分片暂存未开放。群集仍需显式设置 `uploads.staging_storage_id`，可选择已启用的原生后端，通过探针后退出维护。选择原生后端不会开放 Multipart。
+
+## 写入、读取与修复
+
+正常写入确认档可选全部落盘、原套数据与校验落盘、仅原套数据落盘。双副本没有校验片，后两档均在原份落盘并提交元数据后返回，镜像由持久任务补齐。全部落盘档等待两份独立回执。提前确认期间只有一份数据，丢失该份后不能依靠尚未完成的镜像恢复。
+
+每个群集可另选降级确认档，默认沿用正常档。暂停或离线只影响镜像位时，允许按较弱的降级档继续写入；主数据位不可用时拒绝新写入。已确认对象从健康的主副本读取，备份存储不参与普通读取。恢复节点后，后台任务补齐欠缺的镜像。
+
+data 使用 HTTP/2 直接访问 storage，分范围并行读取并按对象顺序交付。写入目的节点位于同一地区而 data 位于其他地区时，可由首收 storage 向同区节点转发；同区直写、跨区转发共用布局和独立回执校验。未配置地区时不据此推断网络位置。
+
+使用 `storage-cluster repair CLUSTER_UUID FRAGMENT_UUID` 核验并修复分片。健康片保持不变；确认损坏或缺失后，从健康主副本生成新片，完整校验后切换映射。读租约、共享引用、任务和元数据恢复点仍使用旧来源时不会回收它。网络错误不会被当作磁盘损坏。
 
 ## 身份和恢复边界
 
@@ -59,6 +70,8 @@ Mokyu 后端仅绑定群集 UUID，不绑定某个 storage 地址。管理 API �
 
 control 的物理映射与 storage 文件字段分别见[数据库结构](database-schema.md#存储群集)和[原生分片格式](storage-fragments.md)。
 
-更换新部署签发的 `node.json` 后，storage 可以向新 control 登记，无需原部署 key。现存清单和历史保留并标为待核对，不会自动覆盖，也不能直接加入新的布局。完整接管和业务恢复尚未开放。一个目录只能有一个进程持有运行锁，control 也限制同一身份的有效会话与介质绑定。
+更换新部署签发的 `node.json` 后，storage 可以向新 control 登记，无需原部署 key。现存清单和历史保留并标为待核对，不会自动覆盖，也不能直接加入新的布局。停止旧群集后，在新 control 使用 `storage-cluster takeover NAME MEDIA_UUID...` 核对历史并接管所选介质；介质 UUID 与已存载荷保持不变。一个目录只能有一个进程持有运行锁，control 也限制同一身份的有效会话与介质绑定。
+
+只有启用元数据日志的桶能从 `recovery/` 恢复业务目录。control 遍历恢复载荷、重建物理映射后使用现有后端恢复入口预览和导入；需要解锁时仅由 control 读取上层密钥，storage 不接触部署 key。恢复依赖与发布证据必须齐全，缺少正文、日志或快照块时报告缺口。异步尚未导出的变更不属于恢复点，关闭日志的桶不会被猜测还原。导入桶默认私有，不恢复原账号、权限、API key 或运行配置。
 
 当前每群集最多 256 个成员，管理目录最多 256 个群集、1024 个已登记介质。历史按批次同步，每批最多 16 条、256 KiB，单清单最多 128 KiB。这些边界用于限制控制面和注册消息大小，不表示相应布局已完成性能验收。

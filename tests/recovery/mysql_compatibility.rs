@@ -248,6 +248,7 @@ async fn mysql_owner_continues_after_local_task_cleanup() -> Result<()> {
         )
         .await?;
     let request = |operation| node_work::Exchange {
+        protected: vec![],
         run: session.run,
         operation,
         completion: None,

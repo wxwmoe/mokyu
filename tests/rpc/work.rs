@@ -26,7 +26,7 @@ async fn node_work_batches_recover_results_and_preserve_read_pins() -> Result<()
     let mut context = NodeContext::new(NodeConfig::parse(&config, "worker")?, "worker").await?;
     let dns = Dns::new().await?;
     *dns.answers.write().unwrap() = Some(vec![Ipv4Addr::new(127, 0, 0, 2)]);
-    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, identity)?;
+    Arc::get_mut(&mut context).unwrap().client = std::sync::Arc::new(dns.client(&url, identity)?);
     let mut states = context.subscribe();
     let current = context.clone();
     let driver = tokio::spawn(async move {

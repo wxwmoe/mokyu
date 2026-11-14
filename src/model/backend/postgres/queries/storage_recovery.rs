@@ -8,6 +8,95 @@ use anyhow::Result;
 use sqlx::types::Json;
 use uuid::Uuid;
 
+pub(in super::super) type FileRow = (
+    Json<crate::model::storage_recovery::Part>,
+    i64,
+    i64,
+    bool,
+    Option<Json<crate::model::storage_recovery::DecodedFile>>,
+);
+
+pub(in super::super) fn root(
+    id: Uuid,
+) -> Rows<'static, (Option<Json<crate::model::storage_recovery::Proof>>, i64)> {
+    sqlx::query_as("SELECT publication,indexed_revision FROM storage_recovery_catalogs WHERE id=$1")
+        .bind(id)
+}
+
+pub(in super::super) fn bind_head(
+    id: Uuid,
+    proof: &crate::model::storage_recovery::Proof,
+) -> Statement<'_> {
+    sqlx::query("UPDATE storage_recovery_catalogs SET publication=$1 WHERE id=$2")
+        .bind(Json(proof))
+        .bind(id)
+}
+
+pub(in super::super) fn proofs(
+    id: Uuid,
+    after: u64,
+    through: u64,
+) -> Rows<'static, (Vec<u8>, Json<CatalogEntry>)> {
+    sqlx::query_as("SELECT content_hash,content FROM storage_recovery_entries WHERE catalog=$1 AND category=1 AND position>$2 AND position<=$3 ORDER BY position,id LIMIT 32").bind(id).bind(after as i64).bind(through as i64)
+}
+
+pub(in super::super) fn file(id: Uuid, operation: Uuid) -> Rows<'static, FileRow> {
+    sqlx::query_as("SELECT part,through_sequence,publication_revision,retired,decoded FROM storage_recovery_files WHERE catalog=$1 AND operation=$2").bind(id).bind(operation)
+}
+
+pub(in super::super) fn file_path<'a>(
+    id: Uuid,
+    hash: &'a [u8],
+    path: &'a str,
+) -> Rows<'a, FileRow> {
+    sqlx::query_as("SELECT part,through_sequence,publication_revision,retired,decoded FROM storage_recovery_files WHERE catalog=$1 AND path_hash=$2 AND path=$3 ORDER BY publication_revision DESC LIMIT 1").bind(id).bind(hash).bind(path)
+}
+
+pub(in super::super) fn insert_file(
+    id: Uuid,
+    part: &crate::model::storage_recovery::Part,
+    hash: Vec<u8>,
+    revision: u64,
+    through: u64,
+) -> Statement<'_> {
+    sqlx::query("INSERT INTO storage_recovery_files(catalog,operation,path_hash,path,publication_revision,through_sequence,part) VALUES($1,$2,$3,$4,$5,$6,$7)").bind(id).bind(part.intent.operation).bind(hash).bind(&part.path).bind(revision as i64).bind(through as i64).bind(Json(part))
+}
+
+pub(in super::super) fn reference_file(
+    id: Uuid,
+    operation: Uuid,
+    revision: u64,
+) -> Statement<'static> {
+    sqlx::query("UPDATE storage_recovery_files SET publication_revision=$1 WHERE catalog=$2 AND operation=$3").bind(revision as i64).bind(id).bind(operation)
+}
+
+pub(in super::super) fn retire_file(id: Uuid, operation: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE storage_recovery_files SET retired=TRUE WHERE catalog=$1 AND operation=$2")
+        .bind(id)
+        .bind(operation)
+}
+
+pub(in super::super) fn indexed(id: Uuid, revision: u64) -> Statement<'static> {
+    sqlx::query("UPDATE storage_recovery_catalogs SET indexed_revision=$1 WHERE id=$2")
+        .bind(revision as i64)
+        .bind(id)
+}
+
+pub(in super::super) fn decoded(
+    id: Uuid,
+    operation: Uuid,
+    summary: &crate::model::storage_recovery::DecodedFile,
+) -> Statement<'_> {
+    sqlx::query("UPDATE storage_recovery_files SET decoded=$1 WHERE catalog=$2 AND operation=$3")
+        .bind(Json(summary))
+        .bind(id)
+        .bind(operation)
+}
+
+pub(in super::super) fn files(id: Uuid, after: Uuid) -> Rows<'static, FileRow> {
+    sqlx::query_as("SELECT f.part,f.through_sequence,f.publication_revision,f.retired,f.decoded FROM storage_recovery_files f WHERE f.catalog=$1 AND f.operation>$2 AND NOT f.retired AND NOT EXISTS(SELECT 1 FROM storage_recovery_files n WHERE n.catalog=f.catalog AND n.path_hash=f.path_hash AND n.path=f.path AND n.publication_revision>f.publication_revision) ORDER BY f.operation LIMIT 128").bind(id).bind(after)
+}
+
 pub(in super::super) type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 pub(in super::super) type CursorRow = (i64, Json<Cursor>, Vec<u8>);
 
@@ -121,4 +210,7 @@ pub(in super::super) fn page(
 ) -> Rows<'static, (Uuid, i64, i32)> {
     sqlx::query_as("SELECT id,position,encoded_bytes FROM storage_recovery_entries WHERE catalog=$1 AND category=$2 AND (owner_id=$3 OR $4 IS NULL) AND (id>$5 OR (id=$6 AND position>$7)) ORDER BY id,position LIMIT 128")
         .bind(id).bind(category).bind(owner).bind(owner).bind(after.0).bind(after.0).bind(after.1)
+}
+pub(in super::super) fn covered(operation: Uuid) -> Rows<'static, (i64,)> {
+    sqlx::query_as("SELECT COUNT(DISTINCT sequence) FROM storage_fragments WHERE operation=$1 AND root IS NOT NULL AND NOT deleted").bind(operation)
 }

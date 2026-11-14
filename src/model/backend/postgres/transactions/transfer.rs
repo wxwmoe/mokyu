@@ -558,6 +558,7 @@ pub(in super::super) async fn copied(
         }
     }
     if !rows.is_empty() {
+        super::super::storage_native::publish_outputs(db, outputs).await?;
         super::super::queries::pack_work::publish_outputs(db, &rows, outputs, false, 0.).await?;
     }
     super::super::transactions::require_sources(db, Some(plan.candidate), &[]).await?;
@@ -687,11 +688,7 @@ pub(in super::super) async fn prepare_raw(
                 == 1,
             Error::OperationAborted
         );
-        let medium = if medium == "local" {
-            "local"
-        } else {
-            "shared_s3"
-        };
+        let medium = if medium == "local" { "local" } else { "shared" };
         let id: Id = base::raw_insert(
             candidate,
             run.storage()?,
@@ -825,7 +822,7 @@ pub(in super::super) async fn raw_progress(
         }
         RawProgress::Started { upload } => {
             ensure!(
-                plan.target.medium == "shared_s3" && !plan.parts.is_empty(),
+                plan.target.medium == "shared" && !plan.parts.is_empty(),
                 Error::OperationAborted
             );
             if let Some(current) = unit.upload_id {

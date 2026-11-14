@@ -122,7 +122,7 @@ impl RawCopy {
                 && self.target.storage_id != self.input.home_storage()?
                 && self.target.address.is_none()
                 && !self.target.location_id.is_nil()
-                && matches!(self.target.medium.as_str(), "local" | "shared_s3")
+                && matches!(self.target.medium.as_str(), "local" | "shared")
                 && self.target.size == self.input.size()? as i64
                 && self.parts.len() == self.receipts.len()
                 && self.parts.len() <= 10000,
@@ -165,7 +165,7 @@ impl RawCopy {
         }
         if let Some(upload) = &self.upload {
             ensure!(
-                self.target.medium == "shared_s3" && !self.parts.is_empty(),
+                self.target.medium == "shared" && !self.parts.is_empty(),
                 "invalid raw upload"
             );
             RawProgress::Started {

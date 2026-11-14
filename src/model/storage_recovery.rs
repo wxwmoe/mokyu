@@ -9,12 +9,48 @@ pub(crate) mod verify;
 
 pub(crate) const PROOF_LIMIT: usize = 128 * 1024;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct EvidenceEntry {
+    pub name: String,
+    pub pending: bool,
+    pub proof: Option<Proof>,
+    pub manifest: Option<Manifest>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct EvidencePage {
+    pub number: u64,
+    pub entries: Vec<EvidenceEntry>,
+    pub head: Option<Link>,
+    pub complete: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct InventoryEntry {
+    pub prefix: u16,
+    pub name: String,
+    pub pending: bool,
+    pub header: Option<crate::content::fragment::Header>,
+    pub receipt: Option<super::storage_payload::Receipt>,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct InventoryPage {
+    pub number: u64,
+    pub restart_prefix: u16,
+    pub entries: Vec<InventoryEntry>,
+    pub complete: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Physical {
     Payload {
         sequence: u64,
         intent: Intent,
+        path: String,
     },
     Fragment {
         sequence: u64,
@@ -30,8 +66,13 @@ pub(crate) enum Physical {
 impl Physical {
     pub fn validate(&self, namespace: Uuid) -> Result<()> {
         let sequence = match self {
-            Self::Payload { sequence, intent } => {
+            Self::Payload {
+                sequence,
+                intent,
+                path,
+            } => {
                 intent.validate()?;
+                super::storage_native::path(path)?;
                 ensure!(intent.namespace == namespace, "foreign physical payload");
                 *sequence
             }
@@ -71,11 +112,31 @@ pub(crate) enum CatalogEntry {
     Manifest(Manifest),
     Proof(Proof),
     Fragment(super::storage_payload::Receipt),
-    Physical(Physical),
+    Physical(Uuid, Physical),
     Business {
         payload: Uuid,
         position: u64,
         record: crate::storage::journal::batch::Record,
+    },
+    Snapshot {
+        payload: Uuid,
+        position: u64,
+        row: crate::storage::journal::snapshot::Row,
+    },
+    SnapshotManifest {
+        payload: Uuid,
+        position: u64,
+        manifest: crate::storage::journal::snapshot::Manifest,
+    },
+    SnapshotIndex {
+        payload: Uuid,
+        position: u64,
+        index: crate::storage::journal::snapshot::Index,
+    },
+    History {
+        payload: Uuid,
+        position: u64,
+        record: crate::storage::journal::history::Record,
     },
 }
 
@@ -90,21 +151,46 @@ impl CatalogEntry {
                 value.publication.revision,
             ),
             Self::Fragment(value) => (2, value.header.operation, value.header.fragment, 0),
-            Self::Physical(Physical::Payload { sequence, intent }) => {
-                (3, intent.operation, intent.operation, *sequence)
+            Self::Physical(epoch, value) => {
+                let (category, owner, key, sequence) = match value {
+                    Physical::Payload {
+                        sequence, intent, ..
+                    } => (3, intent.operation, intent.operation, *sequence),
+                    Physical::Fragment { sequence, receipt } => (
+                        4,
+                        receipt.header.operation,
+                        receipt.header.fragment,
+                        *sequence,
+                    ),
+                    Physical::State {
+                        sequence,
+                        operation,
+                        ..
+                    } => (5, *operation, *operation, *sequence),
+                };
+                let mut digest = blake3::Hasher::new_derive_key("mokyu/storage/recovery-entry/v1");
+                digest.update(epoch.as_bytes());
+                digest.update(key.as_bytes());
+                (
+                    category,
+                    owner,
+                    Uuid::from_bytes(digest.finalize().as_bytes()[..16].try_into().unwrap()),
+                    sequence,
+                )
             }
-            Self::Physical(Physical::Fragment { sequence, receipt }) => (
-                4,
-                receipt.header.operation,
-                receipt.header.fragment,
-                *sequence,
-            ),
-            Self::Physical(Physical::State {
-                sequence,
-                operation,
-                ..
-            }) => (5, *operation, *operation, *sequence),
             Self::Business {
+                payload, position, ..
+            }
+            | Self::Snapshot {
+                payload, position, ..
+            }
+            | Self::SnapshotManifest {
+                payload, position, ..
+            }
+            | Self::SnapshotIndex {
+                payload, position, ..
+            }
+            | Self::History {
                 payload, position, ..
             } => (6, *payload, *payload, *position),
         }
@@ -134,7 +220,8 @@ impl CatalogEntry {
                     "foreign recovery fragment"
                 );
             }
-            Self::Physical(value) => {
+            Self::Physical(epoch, value) => {
+                ensure!(!epoch.is_nil(), "missing physical journal epoch");
                 value.validate(namespace)?;
                 let owner = match value {
                     Physical::Payload { intent, .. } => intent.cluster,
@@ -144,6 +231,18 @@ impl CatalogEntry {
                 ensure!(owner == cluster, "foreign physical cluster");
             }
             Self::Business {
+                payload, position, ..
+            }
+            | Self::Snapshot {
+                payload, position, ..
+            }
+            | Self::SnapshotManifest {
+                payload, position, ..
+            }
+            | Self::SnapshotIndex {
+                payload, position, ..
+            }
+            | Self::History {
                 payload, position, ..
             } => ensure!(
                 !payload.is_nil() && *position <= i64::MAX as u64,
@@ -195,6 +294,19 @@ pub(crate) struct CatalogPage {
 
 #[async_trait::async_trait]
 pub(crate) trait RecoveryCatalog: Send + Sync {
+    async fn catalog_restore(
+        &self,
+        id: Uuid,
+        operation: Uuid,
+        epochs: &[crate::storage::marker::EpochCut],
+    ) -> Result<()>;
+    async fn catalog_bind(&self, id: Uuid, head: &Proof) -> Result<()>;
+    async fn catalog_proofs(&self, id: Uuid, after: u64, through: u64) -> Result<Vec<Proof>>;
+    async fn catalog_index(&self, id: Uuid, proof: &Proof) -> Result<()>;
+    async fn catalog_file(&self, id: Uuid, path: &str) -> Result<Option<RecoveryFile>>;
+    async fn catalog_files(&self, id: Uuid, after: Uuid) -> Result<Vec<RecoveryFile>>;
+    async fn catalog_decoded(&self, id: Uuid, operation: Uuid, summary: &DecodedFile)
+    -> Result<()>;
     async fn catalog_open(&self, id: Uuid, namespace: Uuid, anchor: &Manifest) -> Result<()>;
     async fn catalog_stage(&self, id: Uuid, entries: &[CatalogEntry]) -> Result<()>;
     async fn catalog_checkpoint(
@@ -223,6 +335,28 @@ pub(crate) trait RecoveryCatalog: Send + Sync {
         key: Uuid,
         position: u64,
     ) -> Result<Option<CatalogEntry>>;
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DecodedFile {
+    pub journal: Uuid,
+    pub epoch: Uuid,
+    pub kind: crate::storage::journal::FrameType,
+    pub first: u64,
+    pub last: u64,
+    pub previous: [u8; 32],
+    pub tail: [u8; 32],
+    pub starts_complete: bool,
+    pub complete: bool,
+    pub authentication: [u8; 32],
+}
+
+pub(crate) struct RecoveryFile {
+    pub part: Part,
+    pub through: u64,
+    pub revision: u64,
+    pub retired: bool,
+    pub decoded: Option<DecodedFile>,
 }
 
 pub(crate) fn signing_key(key: &Key, cluster: Uuid) -> Result<Ed25519KeyPair> {
@@ -255,26 +389,106 @@ pub(crate) struct Part {
     pub digest: [u8; 32],
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Root {
+    pub intent: Intent,
+    pub receipts: Vec<super::storage_payload::Receipt>,
+}
+
+impl Root {
+    pub fn validate(&self, namespace: Uuid, cluster: Uuid) -> Result<()> {
+        self.intent.validate()?;
+        ensure!(
+            self.intent.namespace == namespace
+                && self.intent.cluster == cluster
+                && self.intent.area == Area::Blocks
+                && self.intent.acknowledgement == super::storage_cluster::Acknowledgement::All
+                && self.intent.total > 0
+                && self.intent.total <= crate::storage::marker::MAX_BYTES as u64
+                && self.receipts.len() as u64 == self.intent.required_files()
+                && self.receipts.len() <= 256,
+            "invalid recovery root mapping"
+        );
+        let mut slots = std::collections::HashSet::new();
+        for receipt in &self.receipts {
+            receipt.validate()?;
+            self.intent.accepts(&receipt.header)?;
+            ensure!(
+                slots.insert((
+                    receipt.header.sequence,
+                    receipt.header.copy,
+                    receipt.header.shard
+                )),
+                "duplicate recovery root fragment"
+            );
+        }
+        Ok(())
+    }
+
+    pub fn validate_layout(&self, manifest: &Manifest) -> Result<()> {
+        ensure!(
+            self.intent.cluster == manifest.cluster_id
+                && self.intent.layout_revision == manifest.revision as u64
+                && self.intent.takeover_epoch == manifest.takeover_epoch,
+            "recovery root differs from its historical layout"
+        );
+        let group = manifest
+            .groups
+            .iter()
+            .find(|g| g.id == self.intent.group)
+            .ok_or_else(|| anyhow::anyhow!("recovery root group is missing"))?;
+        let members = self.intent.members(group)?;
+        let width = usize::from(self.intent.layout.data_shards + self.intent.layout.parity_shards);
+        for receipt in &self.receipts {
+            let h = &receipt.header;
+            ensure!(
+                members.get(usize::from(h.copy) * width + usize::from(h.shard)) == Some(&h.media),
+                "recovery root is on another historical member"
+            );
+        }
+        Ok(())
+    }
+}
+
 impl Part {
-    pub fn inspect<'a>(
+    pub fn inspect(&self, bytes: &[u8]) -> Result<()> {
+        self.visit(bytes, |_| Ok(()))
+    }
+
+    pub fn visit<'a>(
         &self,
         bytes: &'a [u8],
-    ) -> Result<crate::storage::journal::recovery::Public<'a>> {
+        mut visit: impl FnMut(crate::storage::journal::recovery::Public<'a>) -> Result<()>,
+    ) -> Result<()> {
         self.validate(self.intent.namespace)?;
         ensure!(
             bytes.len() as u64 == self.intent.total
                 && blake3::hash(bytes).as_bytes() == &self.digest,
             "recovery part differs from its publication"
         );
-        let public = crate::storage::journal::recovery::inspect(bytes)?;
-        ensure!(
-            public.namespace == self.intent.namespace
-                && public.envelope.payload == self.intent.payload
-                && public.envelope.revision == self.intent.revision
-                && public.path == self.path,
-            "recovery part has another identity"
-        );
-        Ok(public)
+        let mut rest = bytes;
+        let mut identity = None;
+        while !rest.is_empty() {
+            let public = crate::storage::journal::recovery::inspect_prefix(rest)?;
+            ensure!(
+                public.namespace == self.intent.namespace
+                    && public.envelope.payload == self.intent.payload
+                    && public.envelope.revision == self.intent.revision
+                    && public.path == self.path,
+                "recovery part has another identity"
+            );
+            let current = (public.journal, public.epoch);
+            ensure!(
+                identity.is_none_or(|previous| previous == current),
+                "recovery part contains multiple journals"
+            );
+            identity = Some(current);
+            rest = &rest[public.consumed()..];
+            visit(public)?;
+        }
+        ensure!(identity.is_some(), "empty recovery part");
+        Ok(())
     }
 
     pub fn validate(&self, namespace: Uuid) -> Result<()> {
@@ -284,7 +498,7 @@ impl Part {
             self.intent.namespace == namespace
                 && self.intent.area == Area::Recovery
                 && self.intent.acknowledgement == super::storage_cluster::Acknowledgement::All
-                && self.intent.total <= 32 * 1024 * 1024
+                && self.intent.total <= u64::from(super::journal::policy::MAX_LIMIT)
                 && self.digest != [0; 32],
             "invalid published recovery part"
         );
@@ -319,10 +533,32 @@ pub(crate) struct Publication {
     pub through: u64,
     pub parts: Vec<Part>,
     pub retired: Vec<Uuid>,
+    pub identity: Option<serde_json::Value>,
+    pub root: Option<Root>,
+    pub prefix: String,
 }
 
 impl Publication {
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.prefix.len() <= 1024
+                && object_store::path::Path::parse(&self.prefix)?.as_ref() == self.prefix,
+            "invalid recovery backend prefix"
+        );
+        if let Some(identity) = &self.identity {
+            ensure!(
+                crate::storage::marker::identity(identity)?.storage_id == self.namespace,
+                "recovery identity belongs to another namespace"
+            );
+            crate::storage::marker::journal(identity)?;
+        }
+        if let Some(root) = &self.root {
+            root.validate(self.namespace, self.cluster)?;
+            ensure!(
+                self.identity.is_some() && root.intent.takeover_epoch <= self.takeover_epoch,
+                "recovery root has no identity or uses future ownership"
+            );
+        }
         ensure!(
             self.format_version == 1
                 && !self.id.is_nil()
@@ -425,6 +661,15 @@ impl Proof {
                 part.validate_layout(manifest)?;
             }
         }
+        if let Some(root) = &publication.root {
+            ensure!(
+                root.intent.layout_revision <= manifest.revision as u64,
+                "recovery root uses a future layout"
+            );
+            if root.intent.layout_revision == manifest.revision as u64 {
+                root.validate_layout(manifest)?;
+            }
+        }
         Ok(())
     }
 
@@ -439,15 +684,65 @@ impl Proof {
     pub fn follows(&self, previous: Option<&Self>) -> Result<()> {
         self.publication.validate()?;
         match previous {
-            Some(previous) => ensure!(
-                self.publication.namespace == previous.publication.namespace
-                    && self.publication.cluster == previous.publication.cluster
-                    && self.publication.previous == Some(previous.link()?)
-                    && previous.publication.revision.checked_add(1)
-                        == Some(self.publication.revision)
-                    && self.publication.through >= previous.publication.through,
-                "recovery publication chain is incomplete or reordered"
-            ),
+            Some(previous) => {
+                let value = &self.publication;
+                let old = &previous.publication;
+                let descriptor = |p: &Publication| {
+                    p.identity
+                        .as_ref()
+                        .map(crate::storage::marker::journal)
+                        .transpose()
+                        .map(Option::flatten)
+                };
+                let takeover = match (descriptor(old)?, descriptor(value)?) {
+                    (Some(before), Some(after)) => {
+                        ensure!(
+                            before.journal_id == after.journal_id,
+                            "recovery publication changed its journal"
+                        );
+                        if before.writer_epoch == after.writer_epoch {
+                            ensure!(before == after, "journal ownership changed without history");
+                            false
+                        } else {
+                            ensure!(
+                                value.through == 0
+                                    && value.retired.is_empty()
+                                    && value.parts.len() == 1
+                                    && value.parts[0].path
+                                        == format!(
+                                            "{}/history/{}",
+                                            crate::storage::journal::ROOT,
+                                            after.writer_epoch.simple()
+                                        )
+                                    && after.head()? == Some(value.parts[0].digest),
+                                "journal epoch changed without a committed takeover record"
+                            );
+                            true
+                        }
+                    }
+                    (None, None) => false,
+                    _ => anyhow::bail!("recovery journal descriptor disappeared or changed"),
+                };
+                if let (Some(before), Some(after)) = (&old.identity, &value.identity) {
+                    let before = crate::storage::marker::identity(before)?;
+                    let after = crate::storage::marker::identity(after)?;
+                    ensure!(
+                        before.deployment_id == after.deployment_id,
+                        "recovery backend identity changed"
+                    );
+                }
+                ensure!(
+                    self.publication.namespace == previous.publication.namespace
+                        && self.publication.cluster == previous.publication.cluster
+                        && self.publication.prefix == previous.publication.prefix
+                        && self.publication.takeover_epoch >= previous.publication.takeover_epoch
+                        && self.publication.previous == Some(previous.link()?)
+                        && previous.publication.revision.checked_add(1)
+                            == Some(self.publication.revision)
+                        && (takeover || self.publication.through >= previous.publication.through),
+                    "recovery publication chain is incomplete or reordered"
+                );
+            }
             None => ensure!(
                 self.publication.revision == 1 && self.publication.previous.is_none(),
                 "recovery publication predecessor is missing"
@@ -489,6 +784,9 @@ mod tests {
             through: 42,
             parts: vec![],
             retired: vec![],
+            identity: None,
+            root: None,
+            prefix: String::new(),
         };
         let first = Proof::sign(publication, &key, &manifest)?;
         first.follows(None)?;
@@ -517,6 +815,60 @@ mod tests {
         unsigned.signature.clear();
         assert!(unsigned.verify(&manifest).is_err());
         assert!(crate::storage::journal::recovery::path("metadata/changes/epoch/1.part").is_err());
+        let namespace = first.publication.namespace;
+        let journal = crate::storage::marker::Journal::create(namespace, &key)?;
+        let mut identity = crate::storage::marker::create(manifest.deployment_id, namespace)?;
+        identity["metadata_journal"] = serde_json::to_value(&journal)?;
+        let mut origin = first.clone();
+        origin.publication.identity = Some(identity.clone());
+        let next_epoch = Uuid::now_v7();
+        let descriptor = journal.transfer(namespace, next_epoch, [23; 32], &key, &key)?;
+        identity["metadata_journal"] = serde_json::to_value(&descriptor)?;
+        let mut handoff = origin.clone();
+        handoff.publication.id = Uuid::now_v7();
+        handoff.publication.revision = 2;
+        handoff.publication.previous = Some(origin.link()?);
+        handoff.publication.identity = Some(identity);
+        handoff.publication.through = 0;
+        handoff.publication.parts.push(Part {
+            intent: Intent {
+                operation: Uuid::now_v7(),
+                namespace,
+                payload: next_epoch,
+                revision: 1,
+                cluster,
+                layout_revision: 1,
+                takeover_epoch: 1,
+                group: Uuid::now_v7(),
+                layout: crate::model::storage_cluster::Layout::default(),
+                members: Vec::new(),
+                area: Area::Recovery,
+                total: 512,
+                acknowledgement: crate::model::storage_cluster::Acknowledgement::All,
+            },
+            path: format!("metadata/history/{}", next_epoch.simple()),
+            digest: [23; 32],
+        });
+        handoff.follows(Some(&origin))?;
+        for change in 0..6 {
+            let mut invalid = handoff.clone();
+            match change {
+                0 => invalid.publication.parts.clear(),
+                1 => invalid.publication.parts[0].digest = [24; 32],
+                2 => invalid.publication.through = 1,
+                3 => invalid.publication.identity = origin.publication.identity.clone(),
+                4 => invalid.publication.prefix = "another".into(),
+                _ => invalid.publication.identity = None,
+            }
+            assert!(invalid.follows(Some(&origin)).is_err());
+        }
+        let mut continued = handoff.clone();
+        continued.publication.id = Uuid::now_v7();
+        continued.publication.revision += 1;
+        continued.publication.previous = Some(handoff.link()?);
+        continued.publication.through = 2;
+        continued.publication.parts.clear();
+        continued.follows(Some(&handoff))?;
         Ok(())
     }
 }

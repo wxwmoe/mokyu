@@ -44,6 +44,7 @@ async fn scan(
             scope: match kind {
                 EvidenceKind::Layouts => "layouts",
                 EvidenceKind::History => "history",
+                EvidenceKind::Namespaces => unreachable!(),
             }
             .into(),
             page: 0,
@@ -56,6 +57,7 @@ async fn scan(
             match kind {
                 EvidenceKind::Layouts => anchor.cluster_id,
                 EvidenceKind::History => namespace,
+                EvidenceKind::Namespaces => unreachable!(),
             },
             allowed(),
         )?;
@@ -221,8 +223,33 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
             range_count: 0,
             range_digest: [0; 32],
         };
-        let frame = batch::frames(&[record], 4096, true)?.remove(0);
-        let path = format!("metadata/changes/{}/{sequence}", format.epoch.simple());
+        let (kind, path, position, frame) = if index < 2 {
+            let Record::Change { value, .. } = record else {
+                unreachable!()
+            };
+            let row = journal::snapshot::Row::Object {
+                bucket,
+                key: "object".into(),
+                generation: 1,
+                seq: sequence as i64,
+                attributes: value.attributes.unwrap(),
+                range_count: 0,
+                range_digest: [0; 32],
+            };
+            (
+                FrameType::Snapshot,
+                journal::snapshot::page_path(payload, 1),
+                1,
+                batch::frames(&[row], 4096, true)?.remove(0),
+            )
+        } else {
+            (
+                FrameType::Changes,
+                journal::segment_path(format.epoch, sequence),
+                sequence,
+                batch::frames(&[record], 4096, true)?.remove(0),
+            )
+        };
         let bytes = journal::recovery::encode(
             &format,
             &path,
@@ -230,14 +257,10 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
                 payload,
                 revision: 1,
                 batch: Uuid::now_v7(),
-                kind: if index < 2 {
-                    FrameType::Snapshot
-                } else {
-                    FrameType::Changes
-                },
+                kind,
                 sequence: Sequence {
-                    first: sequence,
-                    last: sequence,
+                    first: position,
+                    last: position,
                     previous: [0; 32],
                 },
             },
@@ -266,6 +289,7 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
             takeover_epoch: 1,
             group,
             layout: Layout::default(),
+            members: Vec::new(),
             area: Area::Recovery,
             total: bytes.len() as u64,
             acknowledgement: Acknowledgement::All,
@@ -291,6 +315,9 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
                 through: sequence,
                 parts: vec![part],
                 retired: vec![],
+                identity: None,
+                root: None,
+                prefix: String::new(),
             },
             &key,
             &anchor,
@@ -342,7 +369,7 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
                 &bytes,
                 proof.publication.through,
                 None,
-                &mut Decoder::default(),
+                &mut model::verify::Decoders::default(),
             )?;
             assert_eq!(physical.len(), 1);
             let entries = model::verify::records(
@@ -350,13 +377,20 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
                 &bytes,
                 proof.publication.through,
                 Some(&format),
-                &mut Decoder::default(),
+                &mut model::verify::Decoders::default(),
             )?;
             assert_eq!(entries.len(), 2);
             catalog.catalog_stage(job, &entries).await?;
             catalog.catalog_stage(job, &entries).await?;
             assert!(
-                model::verify::records(part, &bytes, 0, None, &mut Decoder::default()).is_err()
+                model::verify::records(
+                    part,
+                    &bytes,
+                    0,
+                    None,
+                    &mut model::verify::Decoders::default()
+                )
+                .is_err()
             );
             bytes[300] ^= 1;
             assert!(part.inspect(&bytes).is_err());
@@ -376,11 +410,14 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
     assert_eq!(states.entries.len(), 6);
     assert!(matches!(
         states.entries.last(),
-        Some(CatalogEntry::Physical(Physical::State {
-            sequence: 30,
-            published: false,
-            ..
-        }))
+        Some(CatalogEntry::Physical(
+            _,
+            Physical::State {
+                sequence: 30,
+                published: false,
+                ..
+            }
+        ))
     ));
     let business = catalog.catalog_page(job, 6, None, None).await?;
     assert_eq!(business.entries.len(), 6);

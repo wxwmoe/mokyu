@@ -115,6 +115,7 @@ pub(in super::super) async fn install_replica(
         Some((candidate, stream.size)),
     )
     .await?;
+    super::super::storage_native::publication(db, candidate).await?;
     queries::publish_object(&stream).execute(&mut **db).await?;
     queries::publish_stream(candidate)
         .execute(&mut **db)

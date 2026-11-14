@@ -26,12 +26,15 @@ use std::{collections::BTreeSet, sync::Arc};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+pub(crate) mod native;
+
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 #[schema(as=StorageRecoveryProbe)]
 pub(crate) struct Probe {
     pub storage: StorageInput,
     pub deployment_key: Option<String>,
+    pub namespace: Option<Uuid>,
 }
 #[derive(Serialize, ToSchema)]
 #[schema(as=StorageRecoveryProbeResult)]
@@ -99,17 +102,24 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
     let info = input.storage;
     ensure!(
         info.storage_type == "s3"
-            || info.storage_type == "local" && app.deployment_mode() == "single",
+            || info.storage_type == "local" && app.deployment_mode() == "single"
+            || info.storage_type == "mokyu" && app.deployment_mode() != "single",
         "unsupported metadata recovery storage"
     );
+    ensure!(
+        (info.storage_type == "mokyu") == input.namespace.is_some()
+            && input.namespace.is_none_or(|id| !id.is_nil()),
+        "native recovery requires a namespace; local and S3 do not"
+    );
     let name = storage::validate_name(&info.name)?;
-    let tmp = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    let tmp = input.namespace.unwrap_or_else(Uuid::new_v4);
     let row = storage::build_record(
         app,
         tmp,
         name.clone(),
         info.storage_type,
-        None,
+        info.cluster_id,
         info.path,
         info.endpoint,
         info.bucket,
@@ -126,20 +136,52 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
     {
         return Ok(response("empty", None, None));
     }
-    let store = model::Store::connect(&conn, source::options())?;
-    let Some(doc) = marker::Document::probe(store.backend.as_ref())
-        .await
-        .map_err(|e| probe_error(e, "RecoveryMarkerInvalid"))?
-    else {
-        return Ok(response("empty", None, None));
+    let native = if conn.r#type == "mokyu" {
+        Some(
+            native::collect(
+                app,
+                id,
+                conn.cluster_id.context("missing storage cluster")?,
+                tmp,
+            )
+            .await
+            .map_err(|e| probe_error(e, "RecoveryIncomplete"))?,
+        )
+    } else {
+        None
     };
-    let identity = marker::identity(&doc.value)?;
+    let store = if native.is_none() {
+        Some(model::Store::connect(&conn, source::options())?)
+    } else {
+        None
+    };
+    let value = if let Some((_, native)) = &native {
+        ensure!(
+            native.head.publication.prefix == conn.prefix,
+            "recovery prefix differs"
+        );
+        native
+            .head
+            .publication
+            .identity
+            .clone()
+            .context("recovery identity is missing")?
+    } else {
+        let Some(doc) = marker::Document::probe(store.as_ref().unwrap().backend.as_ref())
+            .await
+            .map_err(|e| probe_error(e, "RecoveryMarkerInvalid"))?
+        else {
+            return Ok(response("empty", None, None));
+        };
+        doc.value
+    };
+    let identity = marker::identity(&value)?;
     let sid = identity.storage_id;
     if let Some(existing) = app.storage_records.enabled_by_id(sid).await? {
-        marker::verify(&doc.value, &existing.identity_marker)?;
+        marker::verify(&value, &existing.identity_marker)?;
         return Ok(response("registered", Some(sid), None));
     }
-    let Some(journal) = marker::journal(&doc.value)? else {
+    let Some(journal) = marker::journal(&value)? else {
         return Ok(response("no_journal", Some(sid), None));
     };
     let key = match journal.unlock(sid, &app.secrets.credential_key) {
@@ -157,16 +199,27 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
         },
     };
     conn.id = sid;
-    conn.identity_marker = doc.value;
+    conn.identity_marker = value;
     let source = Source {
         connection: conn,
         journal,
         material: key.material,
     };
-    let (catalog, cut) = source
-        .read(store.backend.as_ref(), None)
+    let (catalog, cut) = if let Some((scan, native)) = &native {
+        scan.replay(
+            native.catalog,
+            &source,
+            &native.head,
+            &app.storage.disk,
+            None,
+        )
         .await
-        .map_err(|e| probe_error(e, "RecoveryIncomplete"))?;
+    } else {
+        source
+            .read(store.as_ref().unwrap().backend.as_ref(), None)
+            .await
+    }
+    .map_err(|e| probe_error(e, "RecoveryIncomplete"))?;
     let mut progress = Progress::default();
     for b in catalog.buckets.values() {
         let summary = b.summary()?;
@@ -202,7 +255,6 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
             .ok()
             .and_then(|(v, more)| (!more).then_some(v.len() as u32));
     }
-    let id = Uuid::new_v4();
     let unlocked = Unlocked {
         source,
         cut,
@@ -210,6 +262,7 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
         expires_us: (chrono::Utc::now() + chrono::TimeDelta::hours(24)).timestamp_micros(),
         storage_name: name,
         claim: None,
+        native: native.map(|(_, native)| native),
     };
     app.journal
         .recovery_create(
@@ -363,12 +416,12 @@ pub(crate) async fn register(
         marker::verify(&value, &row.identity_marker)?;
         return Ok(());
     }
-    let record = storage::build_record(
+    let mut record = storage::build_record(
         app,
         c.id,
         unlocked.storage_name.clone(),
         c.r#type.clone(),
-        None,
+        c.cluster_id,
         c.path.clone(),
         c.endpoint_url.clone(),
         c.remote_bucket_name.clone(),
@@ -378,6 +431,7 @@ pub(crate) async fn register(
         c.secret.clone(),
         value,
     )?;
+    record.enabled = true;
     let mut profiles = app.storage_profiles.enabled_profiles().await?;
     let mut writer = app.storage_records.creation().await?.writer;
     let profile = writer

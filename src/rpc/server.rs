@@ -4,6 +4,7 @@ use crate::{
     cluster::NodeState,
     model::{self, session},
 };
+use anyhow::Context as _;
 use std::{pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status, Streaming};
@@ -13,6 +14,7 @@ use wire::{
     node_objects_server::{NodeObjects, NodeObjectsServer},
     node_reads_server::{NodeReads, NodeReadsServer},
     node_sessions_server::{NodeSessions, NodeSessionsServer},
+    node_storage_server::{NodeStorage, NodeStorageServer},
     node_work_server::{NodeWork, NodeWorkServer},
     node_writes_server::{NodeWrites, NodeWritesServer},
     storage_control_server::{StorageControl, StorageControlServer},
@@ -84,6 +86,11 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     .add_service(
         NodeWorkServer::new(service.clone())
             .max_decoding_message_size(model::node_pack::RESULT_LIMIT)
+            .max_encoding_message_size(MESSAGE_LIMIT),
+    )
+    .add_service(
+        NodeStorageServer::new(service.clone())
+            .max_decoding_message_size(super::read::REQUEST_LIMIT)
             .max_encoding_message_size(MESSAGE_LIMIT),
     )
     .add_service(
@@ -238,8 +245,196 @@ impl StorageControl for Service {
     }
 }
 
+#[tonic::async_trait]
+impl NodeStorage for Service {
+    async fn replicate(
+        &self,
+        request: Request<wire::NativeMaintenanceRequest>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let input = serde_json::from_slice(&input.input_json)
+            .map_err(|_| Status::invalid_argument("invalid native replication request"))?;
+        let result = bounded(self.app.native_storage.node_replicate(&node, run, input)).await?;
+        Ok(Response::new(wire::StorageResult {
+            result_json: serde_json::to_vec(&result)
+                .map_err(|_| Status::internal("encode native replication result"))?,
+        }))
+    }
+
+    async fn maintain(
+        &self,
+        request: Request<wire::NativeMaintenanceRequest>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let input = serde_json::from_slice(&input.input_json)
+            .map_err(|_| Status::invalid_argument("invalid native maintenance request"))?;
+        let result = bounded(async {
+            let result = self
+                .app
+                .native_storage
+                .node_maintenance(&node, run, &input)
+                .await?;
+            if let crate::model::storage_native::access::MaintenanceAction::Collect { payload } =
+                input.action
+            {
+                let backend = self.app.storage.store_backend(input.storage)?;
+                let native = backend
+                    .native
+                    .as_ref()
+                    .context("cleanup backend is not native")?;
+                anyhow::ensure!(
+                    native.reclaim_blocks(payload).await?,
+                    crate::model::Error::OperationAborted
+                );
+            }
+            Ok(result)
+        })
+        .await?;
+        Ok(Response::new(wire::StorageResult {
+            result_json: serde_json::to_vec(&result)
+                .map_err(|_| Status::internal("encode native maintenance result"))?,
+        }))
+    }
+
+    async fn prepare_upload(
+        &self,
+        request: Request<wire::NativeUploadRequest>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let upload = serde_json::from_slice(&input.input_json)
+            .map_err(|_| Status::invalid_argument("invalid native upload request"))?;
+        let intent = bounded(self.app.native_storage.node_upload(
+            &node,
+            run,
+            &upload,
+            input.region.as_deref(),
+        ))
+        .await?;
+        Ok(Response::new(wire::StorageResult {
+            result_json: serde_json::to_vec(&intent)
+                .map_err(|_| Status::internal("encode native write intent"))?,
+        }))
+    }
+
+    async fn write_window(
+        &self,
+        request: Request<wire::NativeWriteWindow>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let operation = super::uuid(&input.operation_id)?;
+        let upload = serde_json::from_slice(&input.input_json)
+            .map_err(|_| Status::invalid_argument("invalid native upload request"))?;
+        let plan = bounded(self.app.native_storage.node_write_window(
+            &node,
+            run,
+            &upload,
+            operation,
+            input.sequence,
+        ))
+        .await?;
+        Ok(Response::new(wire::StorageResult {
+            result_json: serde_json::to_vec(&plan)
+                .map_err(|_| Status::internal("encode native write window"))?,
+        }))
+    }
+
+    async fn accept_upload(
+        &self,
+        request: Request<wire::NativeUploadResult>,
+    ) -> Result<Response<wire::StorageResult>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let operation = super::uuid(&input.operation_id)?;
+        let upload = serde_json::from_slice(&input.input_json)
+            .map_err(|_| Status::invalid_argument("invalid native upload request"))?;
+        let completed: Vec<_> = serde_json::from_slice(&input.receipts_json)
+            .map_err(|_| Status::invalid_argument("invalid native upload receipts"))?;
+        bounded(
+            self.app
+                .native_storage
+                .node_accept(&node, run, &upload, operation, &completed),
+        )
+        .await?;
+        Ok(Response::new(wire::StorageResult {
+            result_json: Vec::new(),
+        }))
+    }
+
+    async fn renew_upload(
+        &self,
+        request: Request<wire::NativeReadRenewal>,
+    ) -> Result<Response<wire::StorageRequest>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let access = serde_json::from_slice(&input.access_json)
+            .map_err(|_| Status::invalid_argument("invalid native upload access"))?;
+        let grant = serde_json::from_slice(&input.grant_json)
+            .map_err(|_| Status::invalid_argument("invalid storage authority"))?;
+        let grant = bounded(
+            self.app
+                .native_storage
+                .renew_write(&node, run, &access, &grant),
+        )
+        .await?;
+        Ok(Response::new(wire::StorageRequest {
+            grant_json: serde_json::to_vec(&grant)
+                .map_err(|_| Status::internal("encode storage authority"))?,
+        }))
+    }
+
+    async fn read(
+        &self,
+        request: Request<wire::NativeReadRequest>,
+    ) -> Result<Response<wire::NativeReadReply>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let request = serde_json::from_slice(&input.request_json)
+            .map_err(|_| Status::invalid_argument("invalid native read request"))?;
+        let plan = bounded(self.app.native_storage.node_read(&node, run, &request)).await?;
+        Ok(Response::new(wire::NativeReadReply {
+            plan_json: serde_json::to_vec(&plan)
+                .map_err(|_| Status::internal("encode native read plan"))?,
+        }))
+    }
+
+    async fn renew_read(
+        &self,
+        request: Request<wire::NativeReadRenewal>,
+    ) -> Result<Response<wire::StorageRequest>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run)?;
+        let access = serde_json::from_slice(&input.access_json)
+            .map_err(|_| Status::invalid_argument("invalid native read access"))?;
+        let grant = serde_json::from_slice(&input.grant_json)
+            .map_err(|_| Status::invalid_argument("invalid storage authority"))?;
+        let grant = bounded(
+            self.app
+                .native_storage
+                .renew_read(&node, run, &access, &grant),
+        )
+        .await?;
+        Ok(Response::new(wire::StorageRequest {
+            grant_json: serde_json::to_vec(&grant)
+                .map_err(|_| Status::internal("encode storage authority"))?,
+        }))
+    }
+}
+
 pub(super) fn failure(error: anyhow::Error) -> Status {
     use model::Error;
+    tracing::debug!(?error, "node operation failed");
     let mut status = match model::error(&error) {
         Some(Error::NodeAuthentication) => {
             Status::unauthenticated("invalid node identity or credential")
@@ -267,8 +462,8 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
         Some(Error::NodeWorkLimit) => {
             Status::resource_exhausted("node work exceeds its resource or message budget")
         }
-        Some(Error::NodeWriteBusy | Error::ChunkBusy) => {
-            let mut status = Status::resource_exhausted("node write capacity is busy");
+        Some(reason @ (Error::NodeWriteBusy | Error::ChunkBusy | Error::StorageCopiesPending)) => {
+            let mut status = Status::resource_exhausted(reason.to_string());
             status
                 .metadata_mut()
                 .insert("mokyu-retryable", "write-capacity".parse().unwrap());
@@ -300,6 +495,9 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::NoSuchBucket => Status::not_found("bucket was not found"),
                 s3s::S3ErrorCode::NoSuchKey => Status::not_found("object was not found"),
                 s3s::S3ErrorCode::NoSuchUpload => Status::not_found("upload was not found"),
+                s3s::S3ErrorCode::NotImplemented => {
+                    Status::unimplemented("operation is unsupported")
+                }
                 s3s::S3ErrorCode::SlowDown => {
                     Status::resource_exhausted("multipart admission is busy")
                 }
@@ -359,6 +557,7 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::PreconditionFailed => Some("PreconditionFailed"),
                 s3s::S3ErrorCode::IncompleteBody => Some("IncompleteBody"),
                 s3s::S3ErrorCode::NoSuchUpload => Some("NoSuchUpload"),
+                s3s::S3ErrorCode::NotImplemented => Some("NotImplemented"),
                 s3s::S3ErrorCode::SlowDown => Some("SlowDown"),
                 s3s::S3ErrorCode::InvalidArgument => Some("InvalidArgument"),
                 s3s::S3ErrorCode::InvalidRequest => Some("InvalidRequest"),
@@ -1512,10 +1711,31 @@ mod tests {
                 tonic::Code::NotFound,
                 "NoSuchKey",
             ),
+            (
+                s3s::s3_error!(NotImplemented).into(),
+                tonic::Code::Unimplemented,
+                "NotImplemented",
+            ),
         ] {
             let status = failure(error);
             assert_eq!(status.code(), code);
             assert_eq!(status.metadata().get("mokyu-s3-code").unwrap(), business);
+            let wrapped = object_store::Error::Generic {
+                store: "Mokyu",
+                source: Box::new(status.clone()),
+            };
+            assert_eq!(
+                crate::node::delivery::error(wrapped.into()).code().as_str(),
+                business
+            );
+            let wrapped = object_store::Error::Generic {
+                store: "Mokyu",
+                source: Box::new(status),
+            };
+            assert_eq!(
+                crate::app::internal(wrapped.into()).code().as_str(),
+                business
+            );
         }
         let status = failure(model::Error::NodeWriteLimit.into());
         assert_eq!(status.code(), tonic::Code::ResourceExhausted);
@@ -1706,7 +1926,14 @@ impl NodeWork for Service {
         request: Request<wire::WorkRequest>,
     ) -> Result<Response<wire::WorkReply>, Status> {
         let node = identity(&request)?;
-        let input = super::work::exchange(request.into_inner())?;
+        let mut input = super::work::exchange(request.into_inner())?;
+        // Remote collection shares the local readers' and writers' publication boundary.
+        let _coord = if input.class == 0 && input.max_items > 0 {
+            Some(self.app.coord.lock().await)
+        } else {
+            None
+        };
+        input.protected = self.app.active.lock().unwrap().keys().copied().collect();
         let value = bounded(self.app.node_work.exchange_work(
             &node,
             &self.app.secrets.credential_key,

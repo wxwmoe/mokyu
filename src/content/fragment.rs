@@ -48,6 +48,8 @@ pub(crate) struct Header {
     pub operation: Uuid,
     pub layout_revision: u64,
     pub revision: u64,
+    #[serde(default, skip_serializing_if = "initial_generation")]
+    pub generation: u64,
     pub takeover_epoch: u64,
     pub offset: u64,
     pub length: u64,
@@ -58,6 +60,10 @@ pub(crate) struct Header {
     pub copy: u16,
     pub shard: u16,
     pub digest: Digest,
+}
+
+fn initial_generation(value: &u64) -> bool {
+    *value == 0
 }
 
 impl Header {
@@ -77,6 +83,7 @@ impl Header {
             .all(|id| !id.is_nil())
                 && self.layout_revision > 0
                 && self.revision > 0
+                && self.generation <= i64::MAX as u64
                 && self.takeover_epoch > 0,
             "fragment identity is missing"
         );
@@ -168,6 +175,7 @@ impl Header {
         }
         bytes[204..208].copy_from_slice(&(UNIT as u32).to_be_bytes());
         bytes[208..240].copy_from_slice(&self.digest);
+        bytes[240..248].copy_from_slice(&self.generation.to_be_bytes());
         let hash = blake3::hash(&bytes[..288]);
         bytes[288..].copy_from_slice(hash.as_bytes());
         Ok(bytes)
@@ -184,7 +192,7 @@ impl Header {
                 && bytes[14] == 1
                 && bytes[15] == 0
                 && bytes[202..204] == [0; 2]
-                && bytes[240..288] == [0; 48]
+                && bytes[248..288] == [0; 40]
                 && bytes[204..208] == (UNIT as u32).to_be_bytes(),
             "unsupported fragment format"
         );
@@ -210,6 +218,7 @@ impl Header {
             operation: id(112)?,
             layout_revision: long(128),
             revision: long(136),
+            generation: long(240),
             takeover_epoch: long(144),
             offset: long(152),
             length: long(160),
@@ -385,6 +394,7 @@ mod tests {
             operation: Uuid::from_u128(7),
             layout_revision: 3,
             revision: 4,
+            generation: 0,
             takeover_epoch: 1,
             offset: 0,
             length: bytes,
@@ -410,6 +420,15 @@ mod tests {
             &[0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0]
         );
         assert_eq!(Header::decode(&encoded)?, header);
+        let initial = serde_json::to_value(&header)?;
+        assert!(initial.get("generation").is_none());
+        assert_eq!(serde_json::from_value::<Header>(initial)?, header);
+        let mut replaced = header.clone();
+        replaced.generation = 8;
+        let encoded_replacement = replaced.encode()?;
+        assert_eq!(&encoded_replacement[240..248], &8u64.to_be_bytes());
+        assert_eq!(Header::decode(&encoded_replacement)?, replaced);
+        assert_eq!(serde_json::to_value(&replaced)?["generation"], 8);
         assert_eq!(
             header.area.path(header.fragment),
             PathBuf::from("blocks/987/00000000000000000000000123456789")

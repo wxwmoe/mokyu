@@ -1,8 +1,12 @@
 //! SQLite statements and native row decoding.
 
+pub(super) mod storage_capacity;
 pub(super) mod storage_cluster;
+pub(super) mod storage_journal;
+pub(super) mod storage_native;
 pub(super) mod storage_payload;
 pub(super) mod storage_recovery;
+pub(super) mod storage_repair;
 
 use crate::model::Id;
 use sqlx::{

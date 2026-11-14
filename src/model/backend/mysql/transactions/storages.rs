@@ -73,9 +73,43 @@ pub(in super::super) async fn update_storage_profile(
     Ok(storage_id)
 }
 
+struct PreparedStorage {
+    record: BackendRecord,
+    key: Option<Uuid>,
+    read: Option<i32>,
+    upload: Option<i32>,
+    control: Option<i32>,
+    profile: Option<StorageProfile>,
+}
+
+impl PreparedStorage {
+    async fn insert(&self, tx: &mut Transaction<'_, MySql>) -> Result<()> {
+        let (_, mode) = lock_mode(tx).await?;
+        self.record.validate_mode(&mode)?;
+        validate_block_key(tx, self.key).await?;
+        queries::insert_storage_record(&self.record, self.key)
+            .execute(&mut **tx)
+            .await?;
+        queries::insert_storage_profile(
+            self.record.id,
+            self.read,
+            self.upload,
+            self.control,
+            self.record.r#type != "local",
+        )
+        .execute(&mut **tx)
+        .await?;
+        if let Some(profile) = &self.profile {
+            save_storage_profile(tx, profile).await?;
+        }
+        Ok(())
+    }
+}
+
 struct StorageInitialization {
-    tx: Option<Transaction<'static, MySql>>,
-    id: Option<Uuid>,
+    pool: MySqlPool,
+    attempted: bool,
+    prepared: Option<PreparedStorage>,
 }
 
 #[async_trait::async_trait]
@@ -87,40 +121,41 @@ impl StorageInitializer for StorageInitialization {
         read: Option<i32>,
         upload: Option<i32>,
         control: Option<i32>,
-        profile: Option<StorageProfile>,
+        mut profile: Option<StorageProfile>,
     ) -> Result<StorageProfile> {
-        anyhow::ensure!(self.id.is_none(), "storage is already prepared");
-        let mut tx = self.tx.take().context("storage preparation failed")?;
-        record.validate_mode(&lock_mode(&mut tx).await?.1)?;
-        validate_block_key(&mut tx, key).await?;
-        queries::insert_storage_record(record, key)
-            .execute(&mut *tx)
-            .await?;
-        queries::insert_storage_profile(record.id, read, upload, control, record.r#type != "local")
-            .execute(&mut *tx)
-            .await?;
-        if let Some(mut profile) = profile {
+        ensure!(!self.attempted, "storage preparation was already attempted");
+        self.attempted = true;
+        if let Some(profile) = &mut profile {
             profile.storage_id = record.id;
             profile.revision = 1;
-            validate_storage_profile(&profile, &record.r#type)?;
+            validate_storage_profile(profile, &record.r#type)?;
             profile.validate_key(key)?;
-            save_storage_profile(&mut tx, &profile).await?;
         }
+        let prepared = PreparedStorage {
+            record: record.clone(),
+            key,
+            read,
+            upload,
+            control,
+            profile,
+        };
+        // Validate native constraints, then release the writer before external storage I/O.
+        let mut tx = self.pool.begin().await?;
+        prepared.insert(&mut tx).await?;
         let effective = queries::storage_profile(record.id)
             .fetch_one(&mut *tx)
             .await?;
         validate_storage_profile(&effective, &record.r#type)?;
-        self.tx = Some(tx);
-        self.id = Some(record.id);
+        tx.rollback().await?;
+        self.prepared = Some(prepared);
         Ok(effective)
     }
     async fn finish(mut self: Box<Self>) -> Result<()> {
-        self.id.context("storage was not prepared")?;
-        self.tx
-            .take()
-            .context("storage preparation failed")?
-            .commit()
-            .await?;
+        let prepared = self.prepared.take().context("storage was not prepared")?;
+        let mut tx = self.pool.begin().await?;
+        prepared.insert(&mut tx).await?;
+        super::super::storage_native::initialized(&mut tx, &prepared.record).await?;
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -128,20 +163,24 @@ impl StorageInitializer for StorageInitialization {
 pub(in super::super) async fn storage_creation(pool: &MySqlPool) -> Result<StorageCreation> {
     let mut tx = pool.begin().await?;
     let (deployment, mode) = lock_mode(&mut tx).await?;
+    tx.rollback().await?;
     Ok(StorageCreation {
         deployment,
         mode,
         writer: Box::new(StorageInitialization {
-            tx: Some(tx),
-            id: None,
+            pool: pool.clone(),
+            attempted: false,
+            prepared: None,
         }),
     })
 }
 
 struct StorageModification {
     original_type: String,
-    tx: Transaction<'static, MySql>,
+    pool: MySqlPool,
     id: Uuid,
+    revision: i64,
+    mode: String,
 }
 
 pub(in super::super) async fn storage_edit(pool: &MySqlPool, name: &str) -> Result<StorageEdit> {
@@ -153,13 +192,17 @@ pub(in super::super) async fn storage_edit(pool: &MySqlPool, name: &str) -> Resu
         .await?;
     let id = row.id;
     let original_type = row.r#type.clone();
+    let revision = profile.revision;
+    tx.commit().await?;
     Ok(StorageEdit {
         row,
         profile,
-        mode,
+        mode: mode.clone(),
         update: Box::new(StorageModification {
-            tx,
+            pool: pool.clone(),
             id,
+            revision,
+            mode,
             original_type,
         }),
     })
@@ -168,20 +211,38 @@ pub(in super::super) async fn storage_edit(pool: &MySqlPool, name: &str) -> Resu
 #[async_trait::async_trait]
 impl StorageUpdate for StorageModification {
     async fn finish(
-        mut self: Box<Self>,
+        self: Box<Self>,
         record: &BackendRecord,
         key: Option<Uuid>,
         profile: &StorageProfile,
     ) -> Result<()> {
         ensure!(
-            record.id == self.id && profile.storage_id == self.id,
+            record.id == self.id
+                && profile.storage_id == self.id
+                && profile.revision == self.revision,
             "storage update belongs to another storage"
         );
         validate_storage_profile(profile, &record.r#type)?;
         profile.validate_key(key)?;
+        let mut tx = self.pool.begin().await?;
+        let (_, mode) = lock_mode(&mut tx).await?;
+        ensure!(
+            mode == self.mode,
+            crate::model::runtime::ModeConflict("deployment mode changed while checking storage")
+        );
+        let current = load_row(&mut tx, &record.name).await?;
+        let current_profile = queries::storage_profile_lock(self.id)
+            .fetch_one(&mut *tx)
+            .await?;
+        ensure!(
+            current.id == self.id
+                && current.r#type == self.original_type
+                && current_profile.revision == self.revision,
+            crate::model::Error::StorageProfileConflict
+        );
         ensure!(
             !super::super::queries::redundancy::relocation(record)
-                .fetch_one(&mut *self.tx)
+                .fetch_one(&mut *tx)
                 .await?,
             s3s::s3_error!(
                 OperationAborted,
@@ -191,7 +252,7 @@ impl StorageUpdate for StorageModification {
         if self.original_type != record.r#type {
             ensure!(
                 queries::storage_relocation_ready()
-                    .fetch_one(&mut *self.tx)
+                    .fetch_one(&mut *tx)
                     .await?,
                 crate::model::Error::StorageNotDrained
             );
@@ -200,14 +261,14 @@ impl StorageUpdate for StorageModification {
                 if record.r#type == "local" {
                     "local"
                 } else {
-                    "shared_s3"
+                    "shared"
                 },
             )
-            .execute(&mut *self.tx)
+            .execute(&mut *tx)
             .await?;
         }
         if !record.enabled || record.r#type == "local" {
-            let mode = queries::guard_stage_mode().fetch_one(&mut *self.tx).await?;
+            let mode = queries::guard_stage_mode().fetch_one(&mut *tx).await?;
             if mode != "single" {
                 ensure!(
                     record.r#type != "local",
@@ -215,7 +276,7 @@ impl StorageUpdate for StorageModification {
                 );
                 ensure!(
                     queries::configured_stage()
-                        .fetch_optional(&mut *self.tx)
+                        .fetch_optional(&mut *tx)
                         .await?
                         .flatten()
                         != Some(record.id),
@@ -225,12 +286,12 @@ impl StorageUpdate for StorageModification {
                 );
             }
         }
-        validate_block_key(&mut self.tx, key).await?;
+        validate_block_key(&mut tx, key).await?;
         queries::update_storage_record(record, key)
-            .execute(&mut *self.tx)
+            .execute(&mut *tx)
             .await?;
-        save_storage_profile(&mut self.tx, profile).await?;
-        self.tx.commit().await?;
+        save_storage_profile(&mut tx, profile).await?;
+        tx.commit().await?;
         Ok(())
     }
 }

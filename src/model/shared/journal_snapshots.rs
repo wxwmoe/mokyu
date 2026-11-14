@@ -282,6 +282,7 @@ impl SnapshotStore for Backend {
         token: Uuid,
         manifest: &[u8],
         index: &[u8],
+        checkpoint: Option<&[u8]>,
     ) -> Result<()> {
         let mut tx = q::begin(self).await?;
         q::fence(job.storage_id, token).fetch_one(&mut *tx).await?;
@@ -290,7 +291,7 @@ impl SnapshotStore for Backend {
             "bucket settings changed during snapshot"
         );
         ensure!(
-            q::seal(manifest, index, job.id)
+            q::seal(manifest, index, checkpoint, job.id)
                 .execute(&mut *tx)
                 .await?
                 .rows_affected()
@@ -300,7 +301,7 @@ impl SnapshotStore for Backend {
         tx.commit().await?;
         Ok(())
     }
-    async fn snapshot_blobs(&self, job: Uuid) -> Result<(Vec<u8>, Vec<u8>)> {
+    async fn snapshot_blobs(&self, job: Uuid) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
         Ok(q::blobs(job).fetch_one(q::read(self)).await?)
     }
     async fn snapshot_bytes(&self, owner: Uuid, number: i64) -> Result<Vec<u8>> {
@@ -316,6 +317,16 @@ impl SnapshotStore for Backend {
     ) -> Result<()> {
         let mut tx = q::begin(self).await?;
         q::fence(job.storage_id, token).fetch_one(&mut *tx).await?;
+        super::storage_journal::snapshot_confirmed(
+            &mut tx,
+            job,
+            match number {
+                Some(n) => crate::model::journal::native::SnapshotFile::Page(n.try_into()?),
+                None => crate::model::journal::native::SnapshotFile::Manifest,
+            },
+            etag,
+        )
+        .await?;
         if let Some(n) = number {
             q::receipt(etag, version, job.id, n)
                 .execute(&mut *tx)
@@ -380,6 +391,26 @@ impl SnapshotStore for Backend {
         let id = job.id;
         let mut tx = q::begin(self).await?;
         q::fence(s, token).fetch_one(&mut *tx).await?;
+        use crate::model::journal::native::SnapshotFile;
+        let actual = q::job(id).fetch_one(&mut *tx).await?;
+        super::storage_journal::snapshot_confirmed(
+            &mut tx,
+            job,
+            SnapshotFile::Manifest,
+            actual
+                .manifest_etag
+                .as_deref()
+                .context("snapshot manifest receipt missing")?,
+        )
+        .await?;
+        super::storage_journal::snapshot_confirmed(&mut tx, job, SnapshotFile::Index, etag).await?;
+        super::storage_journal::snapshot_confirmed(
+            &mut tx,
+            job,
+            SnapshotFile::Checkpoint,
+            checkpoint,
+        )
+        .await?;
         let (parent, revision, _, _, bytes, policy, _) = q::point(s).fetch_one(&mut *tx).await?;
         ensure!(
             parent == job.parent && revision + 1 == job.revision && bytes >= job.covered_bytes,
@@ -537,6 +568,7 @@ impl SnapshotStore for Backend {
         let id = g.object_id;
         let mut tx = q::begin(self).await?;
         q::fence(s, token).fetch_one(&mut *tx).await?;
+        super::storage_journal::garbage_confirmed(&mut tx, g).await?;
         match g.kind.as_str() {
             "segment" => {
                 q::log_gone(id).execute(&mut *tx).await?;

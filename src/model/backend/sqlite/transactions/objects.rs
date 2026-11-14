@@ -367,6 +367,7 @@ pub(in super::super) async fn publish_copy_in(
         publication_id,
     } = validate_copy(tx, id, input.target_bucket, input.target_key, public).await?;
     require_sources(tx, Some(id), &[]).await?;
+    super::super::storage_native::publication(tx, id).await?;
     if let Some(publication) = publication_id {
         let intent = input.media_intent(permit, "copy", public, expected_public);
         super::super::replica_transactions::publish(

@@ -91,6 +91,9 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
             super::storage_clusters::create
         ))
         .routes(routes!(super::storage_clusters::update))
+        .routes(routes!(super::storage_clusters::takeover))
+        .routes(routes!(super::storage_clusters::sources))
+        .routes(routes!(super::storage_clusters::repair))
         .routes(routes!(super::storage_clusters::members))
         .routes(routes!(super::storage_clusters::groups))
         .routes(routes!(super::storage_clusters::state))
@@ -396,6 +399,10 @@ mod tests {
             ("/api/v1/domains", "post"),
             ("/api/v1/domains/{host}", "delete"),
             ("/api/v1/cluster/recover", "post"),
+            (
+                "/api/v1/storage-clusters/{id}/fragments/{fragment}/repair",
+                "post",
+            ),
         ] {
             assert!(schema["paths"][path][method].is_object(), "{method} {path}");
         }

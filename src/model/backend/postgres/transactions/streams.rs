@@ -40,6 +40,7 @@ pub(in super::super) async fn install_replica(
             .await?,
         crate::model::Error::SourceUnavailable
     );
+    super::super::storage_native::publication(db, candidate).await?;
     ensure!(
         apply_publish(db, candidate, bucket, key, old, None).await?,
         crate::model::Error::OperationAborted

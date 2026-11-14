@@ -501,7 +501,7 @@ mod tests {
             size: 4,
             digest: Some(Md5::digest(b"data").to_vec()),
             state: "ready".into(),
-            medium: "shared_s3".into(),
+            medium: "shared".into(),
             pending_upload: false,
             revision: 1,
             quarantine_code: None,

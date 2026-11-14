@@ -3,21 +3,50 @@ use crate::model::{storage_cluster::Manifest, storage_payload::Receipt};
 use anyhow::{Context, Result, ensure};
 use uuid::Uuid;
 
-pub(crate) fn records(
+#[derive(Default)]
+pub(crate) struct Decoders {
+    physical: crate::storage::journal::batch::Decoder,
+    business: crate::storage::journal::batch::Decoder,
+}
+
+impl Decoders {
+    pub fn complete(&self) -> bool {
+        self.physical.complete() && self.business.complete()
+    }
+}
+
+// Stage candidates until the complete publication and journal chains have been verified.
+pub(crate) fn visit(
     part: &Part,
     bytes: &[u8],
     through: u64,
     format: Option<&crate::storage::journal::Format<'_>>,
-    decoder: &mut crate::storage::journal::batch::Decoder,
-) -> Result<Vec<CatalogEntry>> {
-    let public = part.inspect(bytes)?;
-    let physical: Vec<Physical> = serde_json::from_slice(&public.physical)?;
+    decoder: &mut Decoders,
+    mut visit: impl FnMut(CatalogEntry) -> Result<()>,
+) -> Result<()> {
+    part.visit(bytes, |public| {
+        frame(part, public, through, format, decoder, &mut visit)
+    })
+}
+
+pub(crate) fn frame(
+    part: &Part,
+    public: crate::storage::journal::recovery::Public<'_>,
+    through: u64,
+    format: Option<&crate::storage::journal::Format<'_>>,
+    decoder: &mut Decoders,
+    mut visit: impl FnMut(CatalogEntry) -> Result<()>,
+) -> Result<()> {
+    use crate::storage::journal::FrameType;
     ensure!(
-        physical.len() <= 256,
-        "recovery physical batch exceeds its bound"
+        public.namespace == part.intent.namespace
+            && public.envelope.payload == part.intent.payload
+            && public.envelope.revision == part.intent.revision
+            && public.path == part.path,
+        "recovery frame belongs to another published part"
     );
-    let mut entries = Vec::with_capacity(physical.len());
-    for record in physical {
+    let kind = public.envelope.kind;
+    let physical = |record: Physical| -> Result<()> {
         let sequence = match &record {
             Physical::Payload { sequence, .. }
             | Physical::Fragment { sequence, .. }
@@ -27,42 +56,115 @@ pub(crate) fn records(
             sequence <= through,
             "physical record exceeds its published watermark"
         );
-        let entry = CatalogEntry::Physical(record);
+        let entry = CatalogEntry::Physical(public.epoch, record);
         entry.validate(part.intent.namespace, part.intent.cluster)?;
-        entries.push(entry);
+        visit(entry)
+    };
+    let count = public
+        .envelope
+        .sequence
+        .last
+        .checked_sub(public.envelope.sequence.first)
+        .and_then(|n| n.checked_add(1))
+        .context("recovery record count overflow")?;
+    if kind == FrameType::Mappings {
+        decoder.physical.read(&public.physical, count, physical)?;
+    } else if !public.physical.is_empty() {
+        let records: Vec<Physical> = serde_json::from_slice(&public.physical)?;
+        ensure!(
+            records.len() <= 256,
+            "recovery physical batch exceeds its bound"
+        );
+        let mut physical = physical;
+        for record in records {
+            physical(record)?;
+        }
     }
     if let Some(format) = format {
-        ensure!(
-            matches!(
-                public.envelope.kind,
-                crate::storage::journal::FrameType::Changes
-                    | crate::storage::journal::FrameType::Snapshot
-            ),
-            "recovery payload is not a record batch"
-        );
         let frame = public.open(format)?;
+        if matches!(kind, FrameType::Mappings | FrameType::Seal) {
+            ensure!(
+                frame.bytes.is_empty(),
+                "recovery boundary contains business data"
+            );
+            return Ok(());
+        }
         let mut position = frame.sequence.first;
-        let count = frame
-            .sequence
-            .last
-            .checked_sub(position)
-            .and_then(|n| n.checked_add(1))
-            .context("recovery record count overflow")?;
-        decoder.read(&frame.bytes, count, |record| {
-            entries.push(CatalogEntry::Business {
-                payload: part.intent.payload,
-                position,
-                record,
-            });
-            position = position
-                .checked_add(1)
-                .context("recovery record position overflow")?;
-            Ok(())
-        })?;
+        let payload = part.intent.payload;
+        match kind {
+            FrameType::Changes => decoder.business.read(&frame.bytes, count, |record| {
+                visit(CatalogEntry::Business {
+                    payload,
+                    position,
+                    record,
+                })?;
+                position = position
+                    .checked_add(1)
+                    .context("recovery record position overflow")?;
+                Ok(())
+            })?,
+            FrameType::Snapshot => decoder.business.read(&frame.bytes, count, |row| {
+                visit(CatalogEntry::Snapshot {
+                    payload,
+                    position,
+                    row,
+                })?;
+                position = position
+                    .checked_add(1)
+                    .context("recovery record position overflow")?;
+                Ok(())
+            })?,
+            FrameType::Manifest | FrameType::Index => {
+                ensure!(
+                    count == 1 && frame.sequence.previous == [0; 32] && decoder.business.complete(),
+                    "invalid recovery snapshot envelope"
+                );
+                visit(if kind == FrameType::Manifest {
+                    CatalogEntry::SnapshotManifest {
+                        payload,
+                        position,
+                        manifest: serde_json::from_slice(&frame.bytes)?,
+                    }
+                } else {
+                    CatalogEntry::SnapshotIndex {
+                        payload,
+                        position,
+                        index: serde_json::from_slice(&frame.bytes)?,
+                    }
+                })?;
+            }
+            FrameType::History => {
+                ensure!(
+                    count == 1 && decoder.business.complete(),
+                    "invalid recovery history envelope"
+                );
+                visit(CatalogEntry::History {
+                    payload,
+                    position,
+                    record: serde_json::from_slice(&frame.bytes)?,
+                })?;
+            }
+            _ => anyhow::bail!("unexpected recovery record type"),
+        }
     }
-    Ok(entries)
+    Ok(())
 }
 
+#[cfg(test)]
+pub(crate) fn records(
+    part: &Part,
+    bytes: &[u8],
+    through: u64,
+    format: Option<&crate::storage::journal::Format<'_>>,
+    decoder: &mut Decoders,
+) -> Result<Vec<CatalogEntry>> {
+    let mut entries = Vec::new();
+    visit(part, bytes, through, format, decoder, |entry| {
+        entries.push(entry);
+        Ok(())
+    })?;
+    Ok(entries)
+}
 async fn history(
     catalog: &dyn RecoveryCatalog,
     id: Uuid,
@@ -104,10 +206,7 @@ pub(crate) async fn layout(
             .as_deref()
             .context("recovery layout predecessor is missing")?;
         let old = history(catalog, id, current.revision - 1, previous).await?;
-        ensure!(
-            old.cluster_id == anchor.cluster_id && old.takeover_epoch <= current.takeover_epoch,
-            "recovery layout chain changed identity"
-        );
+        current.follows(&old)?;
         current = old;
     }
     Ok(current)
@@ -147,8 +246,58 @@ pub(crate) async fn chain(
         head.publication.revision == count,
         "recovery history contains a gap or a competing branch"
     );
+    walk(catalog, id, anchor, &head, &[]).await?;
+    Ok(head)
+}
+
+pub(crate) async fn rooted_chain(
+    catalog: &dyn RecoveryCatalog,
+    id: Uuid,
+    anchor: &Manifest,
+    heads: &[super::Link],
+) -> Result<Proof> {
+    ensure!(
+        !heads.is_empty() && heads.len() <= 256,
+        "no committed recovery head was found"
+    );
+    let mut after = None;
+    let mut head: Option<Proof> = None;
+    loop {
+        let page = catalog.catalog_page(id, 1, None, after).await?;
+        for entry in page.entries {
+            let CatalogEntry::Proof(proof) = entry else {
+                anyhow::bail!("invalid proof catalog category");
+            };
+            if heads.contains(&proof.link()?)
+                && head
+                    .as_ref()
+                    .is_none_or(|old| old.publication.revision < proof.publication.revision)
+            {
+                head = Some(proof);
+            }
+        }
+        match page.after {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    let head = head.context("committed recovery proof is missing")?;
+    walk(catalog, id, anchor, &head, heads).await?;
+    Ok(head)
+}
+
+async fn walk(
+    catalog: &dyn RecoveryCatalog,
+    id: Uuid,
+    anchor: &Manifest,
+    head: &Proof,
+    heads: &[super::Link],
+) -> Result<()> {
+    let mut pending = heads.to_vec();
     let mut current = head.clone();
     loop {
+        let link = current.link()?;
+        pending.retain(|head| head != &link);
         let mut trusted = anchor.clone();
         while trusted.digest()? != current.publication.manifest {
             ensure!(
@@ -158,6 +307,11 @@ pub(crate) async fn chain(
             trusted = layout(catalog, id, &trusted, trusted.revision as u64 - 1).await?;
         }
         current.verify(&trusted)?;
+        if let Some(root) = &current.publication.root {
+            root.validate_layout(
+                &layout(catalog, id, &trusted, root.intent.layout_revision).await?,
+            )?;
+        }
         for part in &current.publication.parts {
             part.validate_layout(
                 &layout(catalog, id, &trusted, part.intent.layout_revision).await?,
@@ -178,7 +332,11 @@ pub(crate) async fn chain(
             break;
         }
     }
-    Ok(head)
+    ensure!(
+        pending.is_empty(),
+        "recovery heads contain a missing or competing branch"
+    );
+    Ok(())
 }
 
 // These are scan candidates; the caller still verifies the selected bytes against Part.digest.
@@ -196,6 +354,7 @@ pub(crate) async fn fragments(
         .find(|g| g.id == part.intent.group)
         .context("recovery group is missing")?;
     let width = usize::from(group.layout.data_shards + group.layout.parity_shards);
+    let members = part.intent.members(group)?;
     let mut slots = vec![None; group.layout.width()];
     let mut after = None;
     loop {
@@ -214,15 +373,15 @@ pub(crate) async fn fragments(
             );
             let slot = usize::from(header.copy) * width + usize::from(header.shard);
             ensure!(
-                group.members.get(slot) == Some(&header.media),
+                members.get(slot) == Some(&header.media),
                 "recovery fragment is on another historical member"
             );
-            if let Some(old) = &slots[slot] {
-                ensure!(
-                    old == &receipt,
-                    "competing fragments occupy one recovery slot"
-                );
-            } else {
+            if slots[slot]
+                .as_ref()
+                .map(|old| receipt.newer_than(old))
+                .transpose()?
+                .unwrap_or(true)
+            {
                 slots[slot] = Some(receipt);
             }
         }

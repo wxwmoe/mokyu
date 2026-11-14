@@ -119,6 +119,14 @@ pub(super) async fn commit_rewrite_chunk_in(
     queries::publish_rewrite_encoding(physical)
         .execute(&mut **tx)
         .await?;
+    super::super::storage_native::publish_rewrite(
+        tx,
+        physical.storage_id,
+        crate::storage::location::Layout::S3.chunk(physical.address()),
+        physical.address(),
+        physical.file_size()? as u64,
+    )
+    .await?;
     queries::publish_rewrite_chunk(physical)
         .execute(&mut **tx)
         .await?;
@@ -172,6 +180,14 @@ pub(super) async fn commit_rewrite_pack_in(
         .await?;
     ensure!(locked == current, "pack membership changed during rewrite");
     check_source_inputs(tx, task, current).await?;
+    super::super::storage_native::publish_rewrite(
+        tx,
+        new.storage_id,
+        crate::storage::location::Layout::S3.pack(new.address()),
+        new.address(),
+        u64::try_from(new.stored_size.context("missing native pack size")?)?,
+    )
+    .await?;
     let updated = queries::publish_rewrite_pack(new)
         .execute(&mut **tx)
         .await?

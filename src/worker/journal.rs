@@ -52,6 +52,7 @@ async fn step(
             &app.secrets,
             ledger,
             token,
+            target.native.clone(),
         )
         .await?;
         if target.revision != remote.revision {
@@ -67,7 +68,19 @@ async fn step(
             .storage
             .pack_memory(usize::try_from(file.byte_count)?.saturating_mul(2))
             .await?;
-        return Ok((remote.publish(db, &app.storage, id, token, &file).await?, 0));
+        return Ok((
+            remote
+                .publish(
+                    db,
+                    &app.storage,
+                    id,
+                    token,
+                    &file,
+                    &app.secrets.credential_key,
+                )
+                .await?,
+            0,
+        ));
     }
     let open = match ledger.open_file {
         Some(file) => Some(db.open(id, file).await?),
@@ -90,7 +103,19 @@ async fn step(
                 .storage
                 .pack_memory(usize::try_from(file.byte_count)?.saturating_mul(2))
                 .await?;
-            return Ok((remote.publish(db, &app.storage, id, token, file).await?, 0));
+            return Ok((
+                remote
+                    .publish(
+                        db,
+                        &app.storage,
+                        id,
+                        token,
+                        file,
+                        &app.secrets.credential_key,
+                    )
+                    .await?,
+                0,
+            ));
         }
     }
     let mut prepared = false;
@@ -129,11 +154,28 @@ async fn step(
         tokio::task::spawn_blocking(move || publication::unpack(&decoder.format(), drafts))
             .await??;
     let known = db.known(id, remote.journal.writer_epoch, &ids).await?;
+    if remote.native.is_some()
+        && let Some(capture) = db.native_capture(id, token).await?
+    {
+        let writer = remote.clone();
+        let state = ledger.clone();
+        let records = capture.records.clone();
+        let plan = tokio::task::spawn_blocking(move || {
+            publication::allocate_native(&state, vec![], records, vec![], &writer.format())
+        })
+        .await??;
+        db.native_allocate(id, token, &capture, &plan).await?;
+        return Ok((true, 0));
+    }
     let writer = remote.clone();
     let state = ledger.clone();
     let wait = deadline(ledger, open.as_ref());
     let plan = tokio::task::spawn_blocking(move || {
-        publication::allocate(&state, open, records, known, &writer.format())
+        if writer.native.is_some() {
+            publication::allocate_native(&state, records, vec![], known, &writer.format())
+        } else {
+            publication::allocate(&state, open, records, known, &writer.format())
+        }
     })
     .await??;
     if !plan.frames.is_empty() {

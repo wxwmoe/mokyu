@@ -322,6 +322,7 @@ pub(super) async fn commit_pack_outputs_in(
                 .unwrap_or(0)
         })
         .sum();
+    super::super::storage_native::publish_outputs(tx, outputs).await?;
     queries::pack_work::publish_outputs(
         tx,
         rows,

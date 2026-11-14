@@ -45,10 +45,6 @@ impl Record {
                 mode != "single" && self.cluster_id.is_some(),
                 "mokyu storage requires a cluster in single_control or cluster mode"
             );
-            ensure!(
-                !self.enabled,
-                "storage cluster is waiting for shared I/O and staging probes"
-            );
         }
         Ok(())
     }
@@ -132,6 +128,7 @@ impl Connection {
 
 pub(crate) struct Store {
     pub backend: Arc<dyn ObjectStore>,
+    pub native: Option<Arc<super::native::store::Store>>,
     pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
     pub streaming: Option<super::s3::Streaming>,
     identity_marker: Value,
@@ -139,6 +136,73 @@ pub(crate) struct Store {
 }
 
 impl Store {
+    pub fn build_control(
+        row: &Record,
+        options: Options,
+        secrets: &Secrets,
+        control: Arc<super::native::control::Control>,
+        region: Option<String>,
+    ) -> Result<Self> {
+        if row.r#type != "mokyu" {
+            return Self::build(row, options, secrets);
+        }
+        Self::connect_native(
+            &Connection::unprotect(row, &secrets.credential_key)?,
+            options,
+            super::native::store::Authority::Control(control),
+            region,
+        )
+    }
+
+    pub fn connect_native(
+        row: &Connection,
+        options: Options,
+        authority: super::native::store::Authority,
+        region: Option<String>,
+    ) -> Result<Self> {
+        ensure!(
+            row.r#type == "mokyu"
+                && super::marker::identity(&row.identity_marker)?.storage_id == row.id,
+            "invalid native storage identity"
+        );
+        super::marker::journal(&row.identity_marker)?;
+        let native = Arc::new(super::native::store::Store {
+            authority,
+            namespace: row.id,
+            cluster: row
+                .cluster_id
+                .context("native storage cluster is missing")?,
+            prefix: Path::parse(&row.prefix)?,
+            region,
+            pool: Arc::new(super::native::transport::Pool::new(options.request_timeout)),
+        });
+        Ok(Self::native(native, row.identity_marker.clone()))
+    }
+
+    pub fn native(native: Arc<super::native::store::Store>, identity_marker: Value) -> Self {
+        Self {
+            backend: native.clone(),
+            native: Some(native),
+            multipart: None,
+            streaming: None,
+            identity_marker,
+            verified: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    pub fn scope_native(&self, native: Arc<super::native::store::Store>) -> Result<Self> {
+        ensure!(
+            self.native
+                .as_ref()
+                .is_some_and(|previous| previous.namespace == native.namespace
+                    && previous.cluster == native.cluster
+                    && previous.prefix == native.prefix
+                    && Arc::ptr_eq(&previous.pool, &native.pool)),
+            "native scope changed its connection"
+        );
+        Ok(Self::native(native, self.identity_marker.clone()))
+    }
+
     pub fn build(row: &Record, options: Options, secrets: &Secrets) -> Result<Self> {
         Self::connect(
             &Connection::unprotect(row, &secrets.credential_key)?,
@@ -233,6 +297,7 @@ impl Store {
         };
         Ok(Self {
             backend,
+            native: None,
             multipart,
             streaming,
             identity_marker: row.identity_marker.clone(),
@@ -351,6 +416,7 @@ mod tests {
         let id = Uuid::new_v4();
         let expected = identity_marker(Uuid::new_v4(), id).unwrap();
         let target = Store {
+            native: None,
             backend: Arc::new(PrefixStore::new(store, "test/nested")),
             multipart: None,
             streaming: None,

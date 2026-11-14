@@ -199,6 +199,21 @@ pub(super) fn error(error: anyhow::Error) -> Status {
         return status.clone();
     }
     tracing::debug!(%error, "storage transfer failed");
+    if error
+        .downcast_ref::<crate::content::codec::IntegrityError>()
+        .is_some()
+    {
+        return Status::data_loss("stored fragment failed integrity verification");
+    }
+    if let Some(io) = error.downcast_ref::<std::io::Error>() {
+        match io.kind() {
+            std::io::ErrorKind::NotFound => return Status::not_found("stored fragment is missing"),
+            std::io::ErrorKind::UnexpectedEof => {
+                return Status::data_loss("stored fragment is truncated");
+            }
+            _ => (),
+        }
+    }
     Status::failed_precondition(error.to_string())
 }
 
@@ -315,6 +330,8 @@ pub(super) async fn read(
         Box::pin(async_stream::try_stream! {
             let _cancel = cancellation;
             let _renewal = renewal;
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point(&format!("storage-read-{}-{offset}", auth.value().media)).await;
             let mut delivered = 0u64;
             while let Some(bytes) = tokio::time::timeout(Duration::from_secs(30), bytes.recv()).await.map_err(|_| Status::deadline_exceeded("storage read is idle"))? {
                 auth.check().map_err(error)?;
@@ -338,6 +355,68 @@ enum Inventory {
     Evidence(EvidenceScan),
 }
 
+pub(super) async fn layouts(
+    node: Arc<Node>,
+    permit: OwnedSemaphorePermit,
+    run: wire::Run,
+    digest: String,
+) -> Result<Output> {
+    let manifest = node
+        .files
+        .manifest
+        .read()
+        .unwrap()
+        .clone()
+        .context("storage membership is missing")?;
+    ensure!(
+        manifest.digest()? == digest,
+        "storage layout changed before inspection"
+    );
+    let cluster = manifest.cluster_id;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    let current = node.clone();
+    let check: Check = Arc::new(move || {
+        let state = current.connection.lock().unwrap();
+        ensure!(
+            state.phase == "registered"
+                && state.deadline > tokio::time::Instant::now()
+                && deadline > tokio::time::Instant::now()
+                && state
+                    .run
+                    .as_ref()
+                    .is_some_and(|r| r.boot_id == run.boot_id && r.fence == run.fence)
+                && current.files.manifest.read().unwrap().as_ref() == Some(&manifest),
+            Status::permission_denied("storage layout inspection is no longer active")
+        );
+        Ok(())
+    });
+    // The current node credential permits discovery before the old layout is adopted.
+    let scan = EvidenceScan::open(&node.files, EvidenceKind::Layouts, cluster, check.clone())?;
+    let checking = check.clone();
+    Ok(monitored(
+        Box::pin(async_stream::try_stream! {
+            let _permit = permit;
+            let mut scan = scan;
+            let mut number = 0;
+            loop {
+                checking().map_err(error)?;
+                let (next, page) = tokio::task::spawn_blocking(move || -> Result<_> {
+                    let page = scan.page(number)?;
+                    Ok((scan, page))
+                }).await.map_err(|_| Status::internal("storage layout inspection failed"))?.map_err(error)?;
+                scan = next;
+                checking().map_err(error)?;
+                let complete = page.complete;
+                yield wire::StorageOutput { data: vec![], page_json: serde_json::to_vec(&page)
+                    .map_err(|_| Status::internal("encode storage layouts"))?, complete };
+                if complete { break; }
+                number += 1;
+            }
+        }),
+        check,
+    ))
+}
+
 pub(super) async fn inventory(
     node: Arc<Node>,
     input: Streaming<wire::StorageInput>,
@@ -357,6 +436,12 @@ pub(super) async fn inventory(
         Action::Layouts => Inventory::Evidence(EvidenceScan::open(
             &node.files,
             EvidenceKind::Layouts,
+            auth.value().cluster,
+            check,
+        )?),
+        Action::Namespaces => Inventory::Evidence(EvidenceScan::open(
+            &node.files,
+            EvidenceKind::Namespaces,
             auth.value().cluster,
             check,
         )?),
@@ -394,6 +479,35 @@ mod tests {
     use super::*;
     use crate::content::fragment::Area;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn storage_failures_distinguish_damage_from_transient_errors() {
+        assert_eq!(
+            error(crate::content::codec::IntegrityError::Hash.into()).code(),
+            tonic::Code::DataLoss
+        );
+        assert_eq!(
+            error(std::io::Error::from(std::io::ErrorKind::NotFound).into()).code(),
+            tonic::Code::NotFound
+        );
+        assert_eq!(
+            error(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()).code(),
+            tonic::Code::DataLoss
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert_eq!(
+                error(std::io::Error::from(kind).into()).code(),
+                tonic::Code::FailedPrecondition
+            );
+        }
+        assert_eq!(
+            error(Status::unavailable("disconnected").into()).code(),
+            tonic::Code::Unavailable
+        );
+    }
 
     #[tokio::test]
     async fn expired_inventory_releases_its_freeze_without_receiver_progress() -> Result<()> {

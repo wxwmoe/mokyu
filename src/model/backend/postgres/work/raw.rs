@@ -2,7 +2,7 @@ use super::*;
 use crate::model::raw::RawProcessing;
 
 pub(super) async fn schedule(db: &mut PgConnection, maximum: usize) -> Result<()> {
-    let rows: Vec<(Id,Uuid,i64)> = sqlx::query_as("SELECT w.stream_id,r.storage_id,r.size FROM raw_processing w JOIN streams s ON s.id=w.stream_id JOIN raw_sources r ON r.id=w.source_id JOIN storages st ON st.id=r.storage_id WHERE st.enabled AND st.type='s3' AND r.medium='shared_s3' AND r.state='ready' AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=r.id) AND s.state<>'writing' AND w.next_attempt_at<=clock_timestamp() AND (w.token IS NULL OR w.lease_expires_at IS NULL OR w.lease_expires_at<clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=w.token AND t.state IN ('queued','running','paused','failed')) ORDER BY w.next_attempt_at,w.stream_id LIMIT $1 FOR UPDATE OF w SKIP LOCKED")
+    let rows: Vec<(Id,Uuid,i64)> = sqlx::query_as("SELECT w.stream_id,r.storage_id,r.size FROM raw_processing w JOIN streams s ON s.id=w.stream_id JOIN raw_sources r ON r.id=w.source_id JOIN storages st ON st.id=r.storage_id WHERE st.enabled AND st.type IN ('s3','mokyu') AND r.medium='shared' AND r.state='ready' AND NOT EXISTS(SELECT 1 FROM raw_uploads u WHERE u.source_id=r.id) AND s.state<>'writing' AND w.next_attempt_at<=clock_timestamp() AND (w.token IS NULL OR w.lease_expires_at IS NULL OR w.lease_expires_at<clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM tasks t WHERE t.id=w.token AND t.state IN ('queued','running','paused','failed')) ORDER BY w.next_attempt_at,w.stream_id LIMIT $1 FOR UPDATE OF w SKIP LOCKED")
         .bind(maximum as i64).fetch_all(&mut *db).await?;
     let Some((_, storage, _)) = rows.first().copied() else {
         return Ok(());

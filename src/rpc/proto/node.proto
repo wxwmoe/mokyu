@@ -5,9 +5,60 @@ service StorageControl {
   rpc Announce(StorageAnnouncement) returns (StorageRegistration);
 }
 
+service NodeStorage {
+  rpc Read(NativeReadRequest) returns (NativeReadReply);
+  rpc RenewRead(NativeReadRenewal) returns (StorageRequest);
+  rpc PrepareUpload(NativeUploadRequest) returns (StorageResult);
+  rpc WriteWindow(NativeWriteWindow) returns (StorageResult);
+  rpc AcceptUpload(NativeUploadResult) returns (StorageResult);
+  rpc RenewUpload(NativeReadRenewal) returns (StorageRequest);
+  rpc Maintain(NativeMaintenanceRequest) returns (StorageResult);
+  rpc Replicate(NativeMaintenanceRequest) returns (StorageResult);
+}
+
+message NativeMaintenanceRequest {
+  Run run = 1;
+  bytes input_json = 2;
+}
+
+message NativeUploadRequest {
+  Run run = 1;
+  bytes input_json = 2;
+  optional string region = 3;
+}
+
+message NativeWriteWindow {
+  Run run = 1;
+  bytes input_json = 2;
+  string operation_id = 3;
+  uint32 sequence = 4;
+}
+
+message NativeUploadResult {
+  Run run = 1;
+  bytes input_json = 2;
+  string operation_id = 3;
+  bytes receipts_json = 4;
+}
+
+message NativeReadRequest {
+  Run run = 1;
+  bytes request_json = 2;
+}
+
+message NativeReadReply { bytes plan_json = 1; }
+
+message NativeReadRenewal {
+  Run run = 1;
+  bytes access_json = 2;
+  bytes grant_json = 3;
+}
+
 service StorageNode {
   rpc Inspect(StorageInspect) returns (StorageInspection);
+  rpc Layouts(StorageInspect) returns (stream StorageOutput);
   rpc Write(stream StorageInput) returns (StorageResult);
+  rpc Forward(stream StorageInput) returns (StorageResult);
   rpc Read(stream StorageInput) returns (stream StorageOutput);
   rpc State(StorageRequest) returns (StorageResult);
   rpc Remove(StorageRequest) returns (StorageResult);
@@ -24,7 +75,10 @@ message StorageRegistration {
   bytes registration_json = 1;
 }
 
-message StorageInspect {}
+message StorageInspect {
+  Run run = 1;
+  string manifest = 2;
+}
 message StorageInspection { bytes identity_json = 1; }
 
 message StorageRequest { bytes grant_json = 1; }

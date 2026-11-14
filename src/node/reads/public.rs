@@ -401,6 +401,7 @@ impl Reads {
                             "invalid refresh result"
                         );
                         let prepared = Prepared {
+                            node: self.node.clone(),
                             cached_body: if reply.body_reused {
                                 Some(candidate.context("control reused an undeclared body")?.1)
                             } else {
@@ -587,6 +588,7 @@ impl Reads {
             std::mem::take(&mut reply.materials),
         )?;
         let prepared = Prepared {
+            node: self.node.clone(),
             reply,
             run: snapshot.lease.clone(),
             materials,

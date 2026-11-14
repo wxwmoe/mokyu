@@ -36,7 +36,7 @@ pub(in super::super) fn node_read_fragments(ids: &[Id]) -> Rows<'_, NodeReadFrag
 pub(in super::super) fn node_read_storages(
     ids: &[Uuid],
 ) -> Rows<'_, crate::storage::model::Record> {
-    sqlx::query_as("SELECT s.* FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id IN (SELECT unhex(value) FROM json_each(?)) AND s.enabled AND s.type='s3' ORDER BY s.id").bind(Json(ids.iter().map(|id|id.simple().to_string()).collect::<Vec<_>>()))
+    sqlx::query_as("SELECT s.* FROM storages s JOIN storage_profiles p ON p.storage_id=s.id WHERE s.id IN (SELECT unhex(value) FROM json_each(?)) AND s.enabled AND s.type IN ('s3','mokyu') ORDER BY s.id").bind(Json(ids.iter().map(|id|id.simple().to_string()).collect::<Vec<_>>()))
 }
 pub(in super::super) fn node_read_profiles(
     ids: &[Uuid],

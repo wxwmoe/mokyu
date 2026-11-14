@@ -591,7 +591,7 @@ impl Storage {
         tokio::spawn(async move {
             let destination = current
                 .as_ref()
-                .filter(|source| source.validate().is_ok() && source.medium == "shared_s3")
+                .filter(|source| source.validate().is_ok() && source.medium == "shared")
                 .map(|_| location);
             let policy =
                 if let Some(target) = current.as_ref().map(|source| source.storage_id).or(target) {

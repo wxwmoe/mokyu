@@ -5,6 +5,42 @@ use crate::{
 use anyhow::Result;
 use std::sync::atomic::Ordering;
 
+impl App {
+    pub(crate) async fn native_replication_batch(
+        &self,
+        task: Execution,
+        detail: &serde_json::Value,
+    ) -> Result<bool> {
+        use anyhow::Context;
+        let Some(plan) = self.native_storage.next_fill(task.id).await? else {
+            self.task_control.complete(task).await?;
+            return Ok(false);
+        };
+        let _read = self.storage.reads.acquire().await?;
+        let _write = self.storage.writes.acquire().await?;
+        let _permit = self
+            .storage
+            .profile_permit(plan.storage, "migration")
+            .await?;
+        let _memory = self.storage.pack_work(1024 * 1024).await?;
+        let backend = self.storage.store_backend(plan.storage)?;
+        let native = backend
+            .native
+            .as_ref()
+            .context("replica backend is not native")?;
+        std::sync::Arc::new(crate::storage::native::replication::Worker::Local {
+            control: self.native_storage.clone(),
+            plan: plan.clone(),
+        })
+        .execute(&native.pool, &plan)
+        .await?;
+        self.task_control
+            .progress(task, &plan.sequence.to_string(), 1, detail.clone())
+            .await?;
+        Ok(false)
+    }
+}
+
 struct Export<'a> {
     app: &'a App,
     task: Execution,

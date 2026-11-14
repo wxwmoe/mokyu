@@ -83,7 +83,7 @@ pub(crate) struct Part {
     pub description: Json<Page>,
     pub etag: Option<String>,
 }
-#[derive(sqlx::FromRow)]
+#[derive(Debug, PartialEq, Eq, sqlx::FromRow)]
 pub(crate) struct Garbage {
     pub storage_id: Uuid,
     pub object_id: Uuid,
@@ -157,8 +157,9 @@ pub(crate) trait SnapshotStore: Send + Sync {
         token: Uuid,
         manifest: &[u8],
         index: &[u8],
+        checkpoint: Option<&[u8]>,
     ) -> Result<()>;
-    async fn snapshot_blobs(&self, job: Uuid) -> Result<(Vec<u8>, Vec<u8>)>;
+    async fn snapshot_blobs(&self, job: Uuid) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)>;
     async fn snapshot_bytes(&self, owner: Uuid, number: i64) -> Result<Vec<u8>>;
     async fn snapshot_receipt(
         &self,

@@ -34,6 +34,22 @@ pub(crate) async fn lock_permit(
         if required.iter().any(|a| !available.contains(a)) {
             return Err(s3s::s3_error!(AccessDenied).into());
         }
+        if required.iter().any(|a| {
+            matches!(
+                a,
+                crate::authorization::Action::Write
+                    | crate::authorization::Action::Delete
+                    | crate::authorization::Action::Settings
+                    | crate::authorization::Action::Acl
+            )
+        }) {
+            ensure!(
+                !queries::journal_restore::native_read_only(*bucket)
+                    .fetch_one(&mut *tx)
+                    .await?,
+                s3s::s3_error!(ServiceUnavailable, "storage takeover is not complete")
+            );
+        }
     }
     Ok(())
 }

@@ -52,15 +52,24 @@ pub(in super::super) fn task_view(id: Uuid) -> sqlx::QueryBuilder<Sqlite> {
     query
 }
 
-pub(in super::super) fn task_file_uuids(chunk: Option<Id>, pack: Option<Id>) -> Rows<'static, (Option<Uuid>, Option<Uuid>)> {
-    sqlx::query_as("SELECT (SELECT uuid FROM chunks WHERE id=?), (SELECT location_id FROM packs WHERE id=?)")
-        .bind(chunk)
-        .bind(pack)
+pub(in super::super) fn task_file_uuids(
+    chunk: Option<Id>,
+    pack: Option<Id>,
+) -> Rows<'static, (Option<Uuid>, Option<Uuid>)> {
+    sqlx::query_as(
+        "SELECT (SELECT uuid FROM chunks WHERE id=?), (SELECT location_id FROM packs WHERE id=?)",
+    )
+    .bind(chunk)
+    .bind(pack)
 }
 
 #[async_trait::async_trait]
 impl TaskControlStore for Backend {
-    async fn file_uuids(&self, chunk: Option<Id>, pack: Option<Id>) -> Result<(Option<Uuid>, Option<Uuid>)> {
+    async fn file_uuids(
+        &self,
+        chunk: Option<Id>,
+        pack: Option<Id>,
+    ) -> Result<(Option<Uuid>, Option<Uuid>)> {
         Ok(task_file_uuids(chunk, pack).fetch_one(&self.read).await?)
     }
 
@@ -168,7 +177,7 @@ impl TaskControlStore for Backend {
 }
 
 pub(in super::super) fn claim_task(id: Uuid, token: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)),execution_token=?,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND (state='queued' OR (state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state='idle' AND (rl.next_reconcile_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now') OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (state='failed' AND (json_extract(detail,'$.operation')='cdc' OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state<>'paused')) AND updated_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-30000000))").bind(token).bind(id)
+    sqlx::query("UPDATE tasks SET state='running',started_at=COALESCE(started_at,CAST(unixepoch('subsec')*1000000 AS INTEGER)),execution_token=?,updated_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND (state='queued' OR (state='paused' AND EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state='idle' AND (rl.next_reconcile_at<=strftime('%Y-%m-%dT%H:%M:%fZ','now') OR EXISTS(SELECT 1 FROM transfer_changes rc WHERE rc.task_id=rl.id)))) OR (state='failed' AND (json_extract(detail,'$.operation') IN ('cdc','native') OR EXISTS(SELECT 1 FROM redundancy_links rl WHERE rl.id=tasks.id AND rl.state<>'paused')) AND updated_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-30000000))").bind(token).bind(id)
 }
 
 pub(in super::super) fn task_record(id: Uuid) -> Rows<'static, TaskRecord> {

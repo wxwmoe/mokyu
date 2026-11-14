@@ -10,7 +10,7 @@ impl Reader {
     ) -> Result<crate::model::transfer::Scanned> {
         plan.source.validate()?;
         ensure!(
-            plan.source.medium == "shared_s3"
+            plan.source.medium == "shared"
                 && !plan.source.pending_upload
                 && plan.source.storage_id == backend.profile.storage_id,
             codec::IntegrityError::RawMetadata
@@ -47,7 +47,7 @@ impl Reader {
         let source = item.source;
         source.validate()?;
         ensure!(
-            source.medium == "shared_s3" && !source.pending_upload,
+            source.medium == "shared" && !source.pending_upload,
             codec::IntegrityError::RawMetadata
         );
         if let Some(hash) = item.hash {

@@ -21,7 +21,8 @@ const AEAD_TAG: usize = 16;
 const MAC_TAG: usize = 32;
 const MAGIC: &[u8; 8] = b"MOKYU\0\0\x06";
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[repr(u8)]
 pub(crate) enum FrameType {
     Changes = 1,
@@ -33,6 +34,30 @@ pub(crate) enum FrameType {
     Draft = 7,
     PartCommit = 8,
     History = 9,
+    Mappings = 10,
+}
+
+impl FrameType {
+    pub fn read(data: &[u8]) -> Result<Self> {
+        let position = match data.get(..8) {
+            Some(bytes) if bytes == MAGIC => 8,
+            Some(bytes) if bytes == recovery::MAGIC => 12,
+            _ => anyhow::bail!("unsupported metadata frame"),
+        };
+        Ok(match data.get(position) {
+            Some(1) => Self::Changes,
+            Some(2) => Self::Seal,
+            Some(3) => Self::Snapshot,
+            Some(4) => Self::Manifest,
+            Some(5) => Self::Index,
+            Some(6) => Self::Watermark,
+            Some(7) => Self::Draft,
+            Some(8) => Self::PartCommit,
+            Some(9) => Self::History,
+            Some(10) if position == 12 => Self::Mappings,
+            _ => anyhow::bail!("unknown metadata frame type"),
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +151,10 @@ impl Format<'_> {
         salt: [u8; 32],
     ) -> Result<Vec<u8>> {
         ensure!(
+            ty != FrameType::Mappings,
+            "physical mappings require a native recovery frame"
+        );
+        ensure!(
             seq.first <= seq.last && plain.len() <= FRAME_LIMIT,
             "invalid journal frame bounds"
         );
@@ -158,6 +187,18 @@ impl Format<'_> {
     }
 
     pub fn decode(&self, ty: FrameType, path: &str, data: &[u8]) -> Result<Frame> {
+        if data.starts_with(recovery::MAGIC) {
+            let public = recovery::inspect_prefix(data)?;
+            ensure!(
+                public.path == path && public.envelope.kind == ty,
+                "recovery frame purpose or path changed"
+            );
+            return public.open(self);
+        }
+        ensure!(
+            ty != FrameType::Mappings,
+            "physical mappings require a native recovery frame"
+        );
         let header = data.get(..HEADER).context("truncated journal header")?;
         ensure!(
             &header[..8] == MAGIC && header[8] == ty as u8 && header[9] & !3 == 0,
@@ -269,7 +310,25 @@ fn verify_frames(
     let mut prior = confirmed.previous;
     let mut part_end = confirmed.last;
     loop {
-        if rest.get(8) == Some(&(FrameType::PartCommit as u8)) {
+        let kind = FrameType::read(rest)?;
+        if kind == FrameType::Mappings {
+            let frame = format.decode(kind, path, rest)?;
+            ensure!(
+                frame.sequence.first == next
+                    && frame.sequence.previous == prior
+                    && frame.bytes.is_empty(),
+                "invalid recovery mapping boundary"
+            );
+            next = frame
+                .sequence
+                .last
+                .checked_add(1)
+                .context("journal sequence exhausted")?;
+            prior = frame.digest;
+            rest = &rest[frame.consumed..];
+            continue;
+        }
+        if kind == FrameType::PartCommit {
             let part = format.decode(FrameType::PartCommit, path, rest)?;
             ensure!(
                 next > first
@@ -288,7 +347,7 @@ fn verify_frames(
             }
             continue;
         }
-        if rest.get(8) == Some(&(FrameType::Seal as u8)) {
+        if kind == FrameType::Seal {
             let seal = format.decode(FrameType::Seal, path, rest)?;
             ensure!(
                 next > first

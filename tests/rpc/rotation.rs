@@ -22,7 +22,7 @@ async fn node_rpc_survives_connection_rotation() -> Result<()> {
     );
     let mut context = NodeContext::new(NodeConfig::parse(&config, "data")?, "data").await?;
     let dns = Dns::new().await?;
-    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, identity)?;
+    Arc::get_mut(&mut context).unwrap().client = std::sync::Arc::new(dns.client(&url, identity)?);
     let mut states = context.subscribe();
     let driver = tokio::spawn(context.clone().run());
     node_state(&mut states, |state| state.phase == Phase::Ready).await?;

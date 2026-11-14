@@ -1,5 +1,5 @@
 use crate::content::fragment::{self, Area, Digest, Header};
-use crate::model::storage_cluster::{Acknowledgement, Layout};
+use crate::model::storage_cluster::{Acknowledgement, Group, Layout};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -18,6 +18,8 @@ pub(crate) struct Intent {
     pub takeover_epoch: u64,
     pub group: Uuid,
     pub layout: Layout,
+    #[serde(default)]
+    pub members: Vec<Uuid>,
     pub area: Area,
     pub total: u64,
     pub acknowledgement: Acknowledgement,
@@ -26,6 +28,18 @@ pub(crate) struct Intent {
 impl Intent {
     pub fn validate(&self) -> Result<()> {
         self.layout.validate()?;
+        ensure!(
+            self.members.is_empty()
+                || self.members.len() == self.layout.width()
+                    && self.members.iter().all(|id| !id.is_nil())
+                    && self
+                        .members
+                        .iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        == self.members.len(),
+            "invalid payload member order"
+        );
         ensure!(
             [
                 self.operation,
@@ -61,8 +75,74 @@ impl Intent {
             * u64::from(self.layout.data_shards)
     }
 
+    pub fn members<'a>(&'a self, group: &'a Group) -> Result<&'a [Uuid]> {
+        ensure!(
+            group.id == self.group && group.layout == self.layout,
+            "payload group differs from its historical layout"
+        );
+        if self.members.is_empty() {
+            return Ok(&group.members);
+        }
+        ensure!(
+            self.members.len() == group.members.len()
+                && self.members.iter().all(|id| group.members.contains(id)),
+            "payload members differ from their historical group"
+        );
+        Ok(&self.members)
+    }
+
     pub fn sequences(&self) -> u64 {
         self.total.div_ceil(self.span()).max(1)
+    }
+
+    pub fn header(
+        &self,
+        sequence: u32,
+        copy: u16,
+        shard: u16,
+        media: Uuid,
+        fragment: Uuid,
+    ) -> Result<Header> {
+        self.validate()?;
+        let offset = u64::from(sequence)
+            .checked_mul(self.span())
+            .context("payload offset overflow")?;
+        let length = self.total.saturating_sub(offset).min(self.span());
+        let stripe = u64::from(self.layout.stripe_bytes);
+        let row = u64::from(self.layout.data_shards) * stripe;
+        let shard_bytes = if self.layout.parity_shards > 0 {
+            length.div_ceil(row) * stripe
+        } else {
+            length / row * stripe
+                + (length % row)
+                    .saturating_sub(u64::from(shard) * stripe)
+                    .min(stripe)
+        };
+        let header = Header {
+            area: self.area,
+            namespace: self.namespace,
+            payload: self.payload,
+            fragment,
+            media,
+            cluster: self.cluster,
+            group: self.group,
+            operation: self.operation,
+            layout_revision: self.layout_revision,
+            revision: self.revision,
+            generation: 0,
+            takeover_epoch: self.takeover_epoch,
+            offset,
+            length,
+            total: self.total,
+            shard_bytes,
+            sequence,
+            layout: self.layout.clone(),
+            copy,
+            shard,
+            digest: [0; 32],
+        };
+        self.accepts(&header)?;
+        Ok(header)
     }
 
     pub fn required(&self, copy: u16, shard: u16) -> bool {
@@ -119,6 +199,23 @@ pub(crate) struct Receipt {
 }
 
 impl Receipt {
+    pub fn newer_than(&self, previous: &Self) -> Result<bool> {
+        self.validate()?;
+        previous.validate()?;
+        let mut expected = previous.header.clone();
+        expected.fragment = self.header.fragment;
+        expected.generation = self.header.generation;
+        ensure!(
+            expected == self.header && self.root == previous.root,
+            "fragment generation changed its content or placement"
+        );
+        ensure!(
+            self.header.generation != previous.header.generation || self == previous,
+            "competing fragments occupy the same generation"
+        );
+        Ok(self.header.generation > previous.header.generation)
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.header.validate()?;
         ensure!(
@@ -130,7 +227,7 @@ impl Receipt {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Mapping {
     pub header: Header,
     pub receipt: Option<Receipt>,
@@ -148,13 +245,24 @@ pub(crate) struct Payload {
 // These methods accept control-authorized work, never untrusted node input directly.
 #[async_trait::async_trait]
 pub(crate) trait StoragePayloads:
-    super::storage_recovery::RecoveryCatalog + Send + Sync
+    super::storage_recovery::RecoveryCatalog
+    + super::storage_native::NativeObjects
+    + super::storage_repair::Repairs
+    + Send
+    + Sync
 {
     async fn prepare(&self, intent: &Intent, until: i64) -> Result<Payload>;
     async fn stage(&self, operation: Uuid, headers: &[Header]) -> Result<()>;
     async fn receipts(&self, operation: Uuid, receipts: &[Receipt]) -> Result<()>;
     async fn publish(&self, operation: Uuid) -> Result<()>;
     async fn get(&self, operation: Uuid) -> Result<Payload>;
+    async fn write_window(
+        &self,
+        operation: Uuid,
+        first: u32,
+        count: u32,
+        until: i64,
+    ) -> Result<Vec<Mapping>>;
     async fn read(
         &self,
         operation: Uuid,
@@ -163,7 +271,15 @@ pub(crate) trait StoragePayloads:
         until: i64,
     ) -> Result<Vec<Mapping>>;
     async fn retire(&self, operation: Uuid) -> Result<()>;
+    async fn resume_read(
+        &self,
+        operation: Uuid,
+        first: u32,
+        count: u32,
+        until: i64,
+    ) -> Result<Vec<Mapping>>;
     async fn reclaim(&self, operation: Uuid, after: Option<Uuid>) -> Result<Vec<Mapping>>;
+    async fn collect_candidates(&self, namespace: Uuid, limit: usize) -> Result<Vec<Uuid>>;
     async fn removed(&self, operation: Uuid, fragments: &[Uuid]) -> Result<()>;
 }
 
@@ -192,6 +308,7 @@ mod tests {
                 takeover_epoch: 1,
                 group: Uuid::from_u128(5),
                 layout,
+                members: Vec::new(),
                 area: Area::Blocks,
                 total: 0,
                 acknowledgement: Acknowledgement::All,
@@ -218,6 +335,7 @@ mod tests {
                             namespace: intent.namespace,
                             payload: intent.payload,
                             fragment: Uuid::from_u128(6),
+                            generation: 0,
                             media: Uuid::from_u128(7),
                             cluster: intent.cluster,
                             group: intent.group,

@@ -58,9 +58,31 @@ impl App {
                 count += 1;
             }
         }
-        let physical = self
+        let mut physical = self
             .reclaim_physical(grace_seconds as f64, storage_id, batch, min_storage_seconds)
             .await?;
+        if !self.maintenance.load(Ordering::Acquire) {
+            let backend = self.storage.store_backend(storage_id)?;
+            if let Some(native) = &backend.native {
+                let limit = batch
+                    .saturating_sub(physical)
+                    .min(crate::model::node_work::MAX_ITEMS);
+                for operation in self
+                    .native_storage
+                    .collect_candidates(storage_id, limit)
+                    .await?
+                {
+                    match native.reclaim_blocks(operation).await {
+                        Ok(true) => physical += 1,
+                        Ok(false) => (),
+                        Err(error) => {
+                            self.statistics.gc_failures.fetch_add(1, Ordering::Relaxed);
+                            tracing::warn!(%error, %operation, "native physical deletion will be retried");
+                        }
+                    }
+                }
+            }
+        }
         Ok((count, physical))
     }
 

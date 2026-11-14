@@ -129,6 +129,35 @@ pub(crate) fn open_envelope<T: serde::de::DeserializeOwned>(
     Ok((frame.sequence.first, serde_json::from_slice(&frame.bytes)?))
 }
 
+pub(crate) fn native_envelope<T: Serialize>(
+    format: &Format<'_>,
+    identity: crate::model::storage_native::RecoveryIdentity,
+    batch: Uuid,
+    ty: FrameType,
+    path: &str,
+    revision: u64,
+    value: &T,
+) -> Result<Vec<u8>> {
+    ensure!(revision > 0, "invalid snapshot envelope revision");
+    super::recovery::encode(
+        format,
+        path,
+        &super::recovery::Envelope {
+            payload: identity.payload,
+            revision: identity.revision,
+            batch,
+            kind: ty,
+            sequence: Sequence {
+                first: revision,
+                last: revision,
+                previous: [0; 32],
+            },
+        },
+        &[],
+        &serde_json::to_vec(value)?,
+    )
+}
+
 pub(crate) fn encode_pages(
     format: &Format<'_>,
     owner: Uuid,
@@ -137,30 +166,77 @@ pub(crate) fn encode_pages(
     limit: usize,
     first_bucket: Option<Uuid>,
     last_bucket: Option<Uuid>,
+    physical: Option<&[crate::model::storage_recovery::Physical]>,
 ) -> Result<Vec<(Page, Vec<u8>)>> {
     let mut pages = Vec::new();
     let mut number = first_page;
     let mut data = Vec::new();
     let mut next = 1u64;
     let mut prior = [0; 32];
-    for plain in frames(items, limit, format.encrypted)? {
-        let encode = |number: u32, first: u64, previous: [u8; 32]| -> Result<_> {
+    let native = physical.is_some();
+    let mut payload = if native { Uuid::now_v7() } else { Uuid::nil() };
+    let frame_limit = if native {
+        limit
+            .checked_sub(super::recovery::overhead(
+                &page_path(owner, u32::MAX),
+                format.encrypted,
+            )?)
+            .context("snapshot page limit cannot fit its header")?
+    } else {
+        limit
+    };
+    let mut input = Vec::new();
+    if let Some(records) = physical {
+        for record in records {
+            record.validate(format.storage)?;
+        }
+        input.extend(
+            frames(records, frame_limit, false)?
+                .into_iter()
+                .map(|p| (FrameType::Mappings, p)),
+        );
+    }
+    input.extend(
+        frames(items, frame_limit, format.encrypted)?
+            .into_iter()
+            .map(|p| (FrameType::Snapshot, p)),
+    );
+    for (kind, plain) in input {
+        let encode = |payload: Uuid, number: u32, first: u64, previous: [u8; 32]| -> Result<_> {
             let last = first
                 .checked_add(u64::from(plain.records) - 1)
                 .context("snapshot page sequence exhausted")?;
-            let bytes = format.encode(
-                FrameType::Snapshot,
-                &page_path(owner, number),
-                Sequence {
-                    first,
-                    last,
-                    previous,
-                },
-                &plain.bytes,
-            )?;
+            let path = page_path(owner, number);
+            let sequence = Sequence {
+                first,
+                last,
+                previous,
+            };
+            let bytes = if native {
+                let (physical, business) = if kind == FrameType::Mappings {
+                    (plain.bytes.as_slice(), [].as_slice())
+                } else {
+                    ([].as_slice(), plain.bytes.as_slice())
+                };
+                super::recovery::encode(
+                    format,
+                    &path,
+                    &super::recovery::Envelope {
+                        payload,
+                        revision: 1,
+                        batch: owner,
+                        kind,
+                        sequence,
+                    },
+                    physical,
+                    business,
+                )?
+            } else {
+                format.encode(kind, &path, sequence, &plain.bytes)?
+            };
             Ok((last, bytes))
         };
-        let (mut last, mut bytes) = encode(number, next, prior)?;
+        let (mut last, mut bytes) = encode(payload, number, next, prior)?;
         if !data.is_empty() && data.len() + bytes.len() > limit {
             pages.push((
                 Page {
@@ -177,7 +253,10 @@ pub(crate) fn encode_pages(
             number = number
                 .checked_add(1)
                 .context("snapshot page count exhausted")?;
-            (last, bytes) = encode(number, 1, [0; 32])?;
+            if native {
+                payload = Uuid::now_v7();
+            }
+            (last, bytes) = encode(payload, number, 1, [0; 32])?;
         }
         ensure!(
             data.len() + bytes.len() <= limit,

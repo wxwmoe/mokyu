@@ -117,7 +117,7 @@ pub(in super::super) fn complete_key_replacement(result: &KeyReplacementResult) 
 }
 
 pub(in super::super) fn raw_receiving(source: Id, stream: Id) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT storage_id FROM raw_sources WHERE id=$1 AND owner_stream=$2 AND state='writing' AND medium='shared_s3' AND upload_id IS NULL FOR UPDATE").bind(source).bind(stream)
+    sqlx::query_scalar("SELECT storage_id FROM raw_sources WHERE id=$1 AND owner_stream=$2 AND state='writing' AND medium='shared' AND upload_id IS NULL FOR UPDATE").bind(source).bind(stream)
 }
 
 pub(in super::super) fn raw_discard(source: Id, stream: Id) -> Statement<'static> {
@@ -130,7 +130,7 @@ pub(in super::super) fn raw_reusable<'a>(
     size: i64,
     digest: &'a [u8],
 ) -> Scalar<'a, Id> {
-    sqlx::query_scalar("SELECT id FROM raw_sources WHERE storage_id=$1 AND content_hash=$2 AND size=$3 AND digest=$4 AND state='ready' AND medium='shared_s3' AND NOT pending_upload AND quarantine_code IS NULL").bind(storage).bind(hash).bind(size).bind(digest)
+    sqlx::query_scalar("SELECT id FROM raw_sources WHERE storage_id=$1 AND content_hash=$2 AND size=$3 AND digest=$4 AND state='ready' AND medium='shared' AND NOT pending_upload AND quarantine_code IS NULL").bind(storage).bind(hash).bind(size).bind(digest)
 }
 
 pub(in super::super) fn raw_uploads(after: Id, owner: Option<Uuid>) -> Rows<'static, RawUpload> {

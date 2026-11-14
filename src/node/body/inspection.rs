@@ -35,7 +35,7 @@ impl Reader {
                 let mut raw = raw.clone();
                 raw.quarantine_code = None;
                 ensure!(
-                    raw.medium == "shared_s3" && !raw.pending_upload,
+                    raw.medium == "shared" && !raw.pending_upload,
                     codec::IntegrityError::RawMetadata
                 );
                 let _cpu = self.cpu.clone().acquire_owned().await?;

@@ -69,6 +69,28 @@ struct Operation {
 }
 
 impl Operation {
+    fn scope(
+        &self,
+        node: &NodeContext,
+        backend: &Arc<super::body::Backend>,
+        batch: Option<i64>,
+        grants: &[Arc<Grant>],
+    ) -> Result<Arc<super::body::Backend>> {
+        if backend.store.native.is_none() {
+            return Ok(backend.clone());
+        }
+        backend.scoped(
+            crate::storage::native::store::Authority::Upload {
+                client: node.client.clone(),
+                run: self.request.run.clone(),
+                grants: self.grants.iter().chain(grants).cloned().collect(),
+                operation: Uuid::parse_str(&self.id)?,
+                batch,
+            },
+            node.config.instance.region.clone(),
+        )
+    }
+
     fn lookup(&self) -> wire::WriteRequest {
         wire::WriteRequest {
             run: Some(self.request.run.run.clone()),
@@ -751,7 +773,8 @@ impl Writes {
         let files = &self.reads.reader.files;
         let epoch = node.cache_epoch.load(std::sync::atomic::Ordering::Acquire);
         files.recover_uploads(node).await?;
-        let charge = if let Some(size) = length {
+        let native = operation.backend.store.native.is_some();
+        let charge = if !native && let Some(size) = length {
             files
                 .claim_upload(node, &operation.backend.profile, size)
                 .await?
@@ -815,7 +838,9 @@ impl Writes {
         let digest: [u8; 16] = hex::decode(&etag)?
             .try_into()
             .map_err(|_| anyhow::anyhow!("invalid raw digest"))?;
-        let charge = if length.is_some() {
+        let charge = if native {
+            None
+        } else if length.is_some() {
             charge
         } else {
             files
@@ -889,6 +914,26 @@ impl Writes {
                 operation
                     .cached_upload
                     .store(true, std::sync::atomic::Ordering::Release);
+            } else if native {
+                let backend = operation.scope(node, &operation.backend, None, &grants)?;
+                operation
+                    .guard(node, &grants, async {
+                        backend.store.ensure_verified().await?;
+                        backend
+                            .store
+                            .native
+                            .as_ref()
+                            .unwrap()
+                            .write(
+                                &crate::storage::raw::remote_path(source),
+                                size,
+                                file.as_ref().unwrap().replay(),
+                                Default::default(),
+                            )
+                            .await?;
+                        Ok(())
+                    })
+                    .await?;
             } else {
                 ensure!(
                     operation.backend.profile.upload_concurrency.is_none()
@@ -1202,7 +1247,12 @@ impl Writes {
                             .or_insert((payload.input.hash, Bytes::from(payload.bytes)));
                     }
                 }
-                let backend = operation.backend.clone();
+                let backend = operation.scope(
+                    node,
+                    &operation.backend,
+                    Some(batch_id.try_into()?),
+                    &grants,
+                )?;
                 let (packed, fills) = operation
                     .guard(
                         node,
@@ -1260,6 +1310,8 @@ impl Writes {
                         &materials,
                         chunk.storage_id.context("chunk storage missing")?,
                     )?;
+                    let backend =
+                        operation.scope(node, &backend, Some(batch_id.try_into()?), &grants)?;
                     ensure!(
                         backend.profile.storage_id == operation.backend.profile.storage_id,
                         "write storage changed"

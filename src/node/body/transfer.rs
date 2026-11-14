@@ -19,7 +19,7 @@ impl Reader {
         ensure!(
             plan.input.storage()? == source.profile.storage_id
                 && plan.target.storage_id == target.profile.storage_id
-                && plan.target.medium == "shared_s3",
+                && plan.target.medium == "shared",
             "raw transfer storage differs"
         );
         let payload = match &plan.input {
@@ -38,7 +38,7 @@ impl Reader {
         target.store.verify().await?;
         let (mut file, digest) = if let Input::Raw { source: raw } = &plan.input {
             ensure!(
-                raw.medium == "shared_s3" && !raw.pending_upload,
+                raw.medium == "shared" && !raw.pending_upload,
                 codec::IntegrityError::RawMetadata
             );
             (

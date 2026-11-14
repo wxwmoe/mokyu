@@ -76,11 +76,18 @@ pub(crate) struct Allocation {
 
 pub(crate) struct Input {
     encrypted: bool,
-    record: Record,
-    page: Page,
+    record: Entry,
+    page: Option<Page>,
     end: bool,
     time: i64,
     dictionary: Option<([u8; 32], [u8; 32])>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum Entry {
+    Business(Record),
+    Physical(crate::model::storage_recovery::Physical),
 }
 
 pub(crate) fn unpack(
@@ -144,8 +151,8 @@ pub(crate) fn unpack(
             );
             records.push(Input {
                 encrypted: frame.encrypted,
-                record,
-                page,
+                record: Entry::Business(record),
+                page: Some(page),
                 end,
                 time: draft.recorded_us,
                 dictionary: mark,
@@ -193,21 +200,21 @@ impl Allocation {
         Ok(())
     }
 
-    fn seal(&mut self, format: &Format<'_>, mut file: File) -> Result<()> {
+    fn seal(&mut self, format: &Format<'_>, mut file: File, native: bool) -> Result<()> {
         let format = Format {
             encrypted: file.encrypt_frames,
             ..*format
         };
-        let data = format.encode(
-            FrameType::Seal,
-            &file.path()?,
-            Sequence {
-                first: u64::try_from(file.first_seq)?,
-                last: u64::try_from(file.last_seq)?,
-                previous: file.digest.as_slice().try_into()?,
-            },
-            &[],
-        )?;
+        let sequence = Sequence {
+            first: u64::try_from(file.first_seq)?,
+            last: u64::try_from(file.last_seq)?,
+            previous: file.digest.as_slice().try_into()?,
+        };
+        let data = if native {
+            native_frame(&format, &file, FrameType::Seal, sequence, &[], &[])?
+        } else {
+            format.encode(FrameType::Seal, &file.path()?, sequence, &[])?
+        };
         let digest = *blake3::hash(&data).as_bytes();
         let last = file.last_seq;
         self.append(&mut file, data, last, digest)?;
@@ -216,7 +223,7 @@ impl Allocation {
         Ok(())
     }
 
-    fn current(&self, ledger: &Ledger, oldest: i64, epoch: Uuid) -> Result<File> {
+    fn current(&self, ledger: &Ledger, oldest: i64, epoch: Uuid, native: bool) -> Result<File> {
         Ok(File {
             encrypt_frames: false,
             id: Uuid::new_v4(),
@@ -230,7 +237,7 @@ impl Allocation {
             previous_digest: self.digest.to_vec(),
             digest: self.digest.to_vec(),
             byte_count: 0,
-            mode: if ledger.local || ledger.policy.mode == WriteMode::Put {
+            mode: if native || ledger.local || ledger.policy.mode == WriteMode::Put {
                 "put"
             } else {
                 "multipart"
@@ -254,8 +261,73 @@ pub(crate) fn allocate(
     known: Vec<(Vec<u8>, Vec<u8>)>,
     format: &Format<'_>,
 ) -> Result<Allocation> {
+    allocate_frames(ledger, current, input, known, format, false)
+}
+
+fn native_frame(
+    format: &Format<'_>,
+    file: &File,
+    kind: FrameType,
+    sequence: Sequence,
+    physical: &[u8],
+    business: &[u8],
+) -> Result<Vec<u8>> {
+    crate::storage::journal::recovery::encode(
+        format,
+        &file.path()?,
+        &crate::storage::journal::recovery::Envelope {
+            payload: file.id,
+            revision: 1,
+            batch: file.id,
+            kind,
+            sequence,
+        },
+        physical,
+        business,
+    )
+}
+
+pub(crate) fn allocate_native(
+    ledger: &Ledger,
+    input: Vec<Input>,
+    physical: Vec<crate::model::storage_recovery::Physical>,
+    known: Vec<(Vec<u8>, Vec<u8>)>,
+    format: &Format<'_>,
+) -> Result<Allocation> {
+    ensure!(
+        !ledger.local && ledger.open_file.is_none() && ledger.storage_id == format.storage,
+        "invalid native journal ledger"
+    );
+    ensure!(
+        physical.len() <= 256,
+        "native physical batch exceeds its bound"
+    );
+    let mut records = Vec::with_capacity(physical.len() + input.len());
+    for record in physical {
+        record.validate(format.storage)?;
+        records.push(Input {
+            encrypted: false,
+            record: Entry::Physical(record),
+            page: None,
+            end: false,
+            time: ledger.now_us,
+            dictionary: None,
+        });
+    }
+    records.extend(input);
+    allocate_frames(ledger, None, records, known, format, true)
+}
+
+fn allocate_frames(
+    ledger: &Ledger,
+    current: Option<File>,
+    input: Vec<Input>,
+    known: Vec<(Vec<u8>, Vec<u8>)>,
+    format: &Format<'_>,
+    native: bool,
+) -> Result<Allocation> {
     let policy = &ledger.policy;
-    policy.validate(ledger.local)?;
+    policy.validate(ledger.local || native)?;
     let mut plan = Allocation {
         revision: ledger.revision,
         base: ledger.allocated_seq,
@@ -287,13 +359,16 @@ pub(crate) fn allocate(
     let mut owners = Vec::new();
     let mut pages = std::collections::BTreeSet::new();
     for item in inputs {
-        pages.insert(item.page);
+        if let Some(page) = item.page {
+            pages.insert(page);
+        }
         owners.push((
             item.page,
             item.time,
             item.end,
             item.dictionary,
             item.encrypted,
+            matches!(item.record, Entry::Physical(_)),
         ));
         entries.push(item.record);
     }
@@ -301,14 +376,21 @@ pub(crate) fn allocate(
     let max = usize::try_from(policy.segment_bytes)?;
     let mut active = current;
     let mut start = 0;
-    for group in owners.chunk_by(|a, b| a.4 == b.4) {
+    for group in owners.chunk_by(|a, b| a.4 == b.4 && a.5 == b.5) {
         let encrypted = group[0].4;
         let frame_format = Format {
             encrypted,
             ..*format
         };
-        let seal_bytes = Format::overhead(encrypted);
-        for frame in batch::frames(&entries[start..start + group.len()], max, encrypted)? {
+        let seal_bytes = if native {
+            crate::storage::journal::recovery::overhead(&segment_path(format.epoch, 1), encrypted)?
+        } else {
+            Format::overhead(encrypted)
+        };
+        let batch_limit = max
+            .checked_sub(2 * (seal_bytes - Format::overhead(encrypted)))
+            .context("native journal segment is too small")?;
+        for frame in batch::frames(&entries[start..start + group.len()], batch_limit, encrypted)? {
             let oldest = frame
                 .origins
                 .iter()
@@ -317,9 +399,36 @@ pub(crate) fn allocate(
                 .context("journal frame has no members")?;
             let mut file = match active.take() {
                 Some(f) => f,
-                None => plan.current(ledger, oldest, format.epoch)?,
+                None => plan.current(ledger, oldest, format.epoch, native)?,
             };
             let encode = |f: &File, part: &PlainFrame| -> Result<_> {
+                if native {
+                    let first = u64::try_from(f.last_seq)?
+                        .checked_add(1)
+                        .context("journal sequence exhausted")?;
+                    let last = first
+                        .checked_add(u64::from(part.records) - 1)
+                        .context("journal sequence exhausted")?;
+                    let mappings = group[0].5;
+                    let data = native_frame(
+                        &frame_format,
+                        f,
+                        if mappings {
+                            FrameType::Mappings
+                        } else {
+                            FrameType::Changes
+                        },
+                        Sequence {
+                            first,
+                            last,
+                            previous: f.digest.as_slice().try_into()?,
+                        },
+                        if mappings { &part.bytes } else { &[] },
+                        if mappings { &[] } else { &part.bytes },
+                    )?;
+                    let digest = *blake3::hash(&data).as_bytes();
+                    return Ok((data, last, digest));
+                }
                 batch::encode_frame(
                     &frame_format,
                     &f.path()?,
@@ -332,8 +441,8 @@ pub(crate) fn allocate(
             };
             let (mut bytes, mut last, mut hash) = encode(&file, &frame)?;
             if file.byte_count > 0 && file.byte_count as usize + bytes.len() + seal_bytes > max {
-                plan.seal(format, file)?;
-                file = plan.current(ledger, oldest, format.epoch)?;
+                plan.seal(format, file, native)?;
+                file = plan.current(ledger, oldest, format.epoch, native)?;
                 (bytes, last, hash) = encode(&file, &frame)?;
             }
             ensure!(
@@ -345,7 +454,10 @@ pub(crate) fn allocate(
             file.part_since_us = Some(file.part_since_us.unwrap_or(oldest).min(oldest));
             let mut shares = BTreeMap::new();
             for (index, weight, complete) in frame.origins {
-                let (page, _, final_event, mark, _) = group[index];
+                let (page, _, final_event, mark, _, _) = group[index];
+                let Some(page) = page else {
+                    continue;
+                };
                 let share = shares.entry(page).or_insert((0i64, false));
                 share.0 += i64::try_from(weight)?;
                 share.1 |= complete && final_event;
@@ -373,7 +485,11 @@ pub(crate) fn allocate(
             encrypted: file.encrypt_frames,
             ..*format
         };
-        let seal_bytes = Format::overhead(file.encrypt_frames);
+        let seal_bytes = if native {
+            crate::storage::journal::recovery::overhead(&file.path()?, file.encrypt_frames)?
+        } else {
+            Format::overhead(file.encrypt_frames)
+        };
         let bytes = usize::try_from(file.byte_count)? + seal_bytes;
         let (rollover, commit) = if ledger.local {
             (bytes + seal_bytes > max, !plan.pages.is_empty())
@@ -400,7 +516,7 @@ pub(crate) fn allocate(
                 full,
             )
         };
-        let due = ledger.flush_requested || bytes >= max || rollover;
+        let due = native || ledger.flush_requested || bytes >= max || rollover;
         if !due && commit {
             let data = format.encode(
                 FrameType::PartCommit,
@@ -421,7 +537,7 @@ pub(crate) fn allocate(
             file.part_since_us = None;
         }
         if due {
-            plan.seal(format, file)?;
+            plan.seal(format, file, native)?;
         } else {
             plan.open = Some(file.id);
             if !plan.frames.is_empty() {

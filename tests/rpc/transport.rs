@@ -203,7 +203,8 @@ async fn node_runtime_recovers_without_database_or_resurrecting_old_work() -> Re
             .is_err()
     );
     let dns = Dns::new().await?;
-    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, identity.clone())?;
+    Arc::get_mut(&mut context).unwrap().client =
+        std::sync::Arc::new(dns.client(&url, identity.clone())?);
     let mut states = context.subscribe();
     assert!(context.snapshot().is_err());
 
@@ -319,7 +320,7 @@ async fn node_runtime_recovers_without_database_or_resurrecting_old_work() -> Re
     let rotated: NodeState = serde_json::from_slice(&tokio::fs::read(&path).await?)?;
     crate::cluster::identity::write_state(&directory.join("node.json"), &rotated).await?;
     let mut context = NodeContext::new(NodeConfig::parse(&configuration, "data")?, "data").await?;
-    Arc::get_mut(&mut context).unwrap().client = dns.client(&url, rotated)?;
+    Arc::get_mut(&mut context).unwrap().client = std::sync::Arc::new(dns.client(&url, rotated)?);
     let mut states = context.subscribe();
     let driver = tokio::spawn(context.clone().run());
     node_state(&mut states, |state| state.phase == Phase::Ready).await?;

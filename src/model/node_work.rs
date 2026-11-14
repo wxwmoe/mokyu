@@ -24,6 +24,7 @@ pub(crate) enum Physical {
     Pack,
     Raw { upload: Option<String> },
     Staging { key: String },
+    Native { operation: Uuid },
 }
 
 impl Physical {
@@ -127,6 +128,7 @@ pub(crate) struct UploadFile {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Plan {
+    Replicate(super::storage_native::Fill),
     Tier {
         storage: Uuid,
         work: Box<super::tiering::Work>,
@@ -252,6 +254,7 @@ impl Plan {
     }
     pub(crate) fn storage(&self) -> Option<Uuid> {
         match self {
+            Self::Replicate(value) => Some(value.storage),
             Self::Mirror { .. } | Self::ExternalTest(_) | Self::ExternalTransfer(_) => None,
             Self::ScanTransfer(value) => Some(value.source.storage_id),
             Self::ConvertRaw { storage, .. }
@@ -275,6 +278,7 @@ impl Plan {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
+    Replicated,
     Tier(Box<super::tiering::Outcome>),
     ExternalTest(super::external_test::Report),
     ExternalTransfer(super::replication::external::Outcome),
@@ -321,6 +325,7 @@ pub(crate) struct Completion {
 }
 
 pub(crate) struct Exchange {
+    pub protected: Vec<super::Id>,
     pub run: Run,
     pub operation: Uuid,
     pub completion: Option<Completion>,
@@ -448,6 +453,7 @@ mod tests {
     #[test]
     fn exchange_identity_covers_results_and_limits() -> Result<()> {
         let mut input = Exchange {
+            protected: vec![],
             run: Run {
                 boot: Uuid::new_v4(),
                 fence: Uuid::new_v4(),

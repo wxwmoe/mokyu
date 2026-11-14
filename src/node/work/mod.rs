@@ -258,9 +258,41 @@ impl Worker {
                         outcomes: vec![outcome],
                     });
                 }
-                let backend =
-                    reads::backend(&materials, plan.storage().context("work storage missing")?)?;
+                let authority = crate::storage::native::store::Authority::Work {
+                    client: self.node.client.clone(),
+                    run: snapshot.lease.clone(),
+                    grants: grants.clone(),
+                    operation,
+                };
+                let region = self.node.config.instance.region.clone();
+                let resolve =
+                    |id| reads::backend(&materials, id)?.scoped(authority.clone(), region.clone());
+                let backend = resolve(plan.storage().context("work storage missing")?)?;
                 let outcomes = match plan {
+                    work::Plan::Replicate(plan) => {
+                        let result = async {
+                            let _io = self.reader.acquire(&self.reader.io, 1).await?;
+                            let _write = self.writes.io.clone().acquire_owned().await?;
+                            let _memory = self.reader.work_memory(1024 * 1024).await?;
+                            let native = backend
+                                .store
+                                .native
+                                .as_ref()
+                                .context("replica backend is not native")?;
+                            Arc::new(crate::storage::native::replication::Worker::Remote {
+                                client: self.node.client.clone(),
+                                run: snapshot.lease.run.clone(),
+                                work: operation,
+                            })
+                            .execute(&native.pool, &plan)
+                            .await
+                        }
+                        .await;
+                        if let Err(error) = &result {
+                            tracing::debug!(%error, "native replication postponed");
+                        }
+                        vec![result.map(|_| work::Outcome::Replicated).or_else(retry)?]
+                    }
                     work::Plan::Mirror { .. }
                     | work::Plan::ExternalTest(_)
                     | work::Plan::ExternalTransfer(_) => unreachable!(),
@@ -363,11 +395,9 @@ impl Worker {
                                     b.store.multipart.as_deref(),
                                 )
                             }
-                            let source = reads::backend(&materials, work.source().storage()?)?;
-                            let target = work
-                                .target()
-                                .map(|v| reads::backend(&materials, v.storage()?))
-                                .transpose()?;
+                            let source = resolve(work.source().storage()?)?;
+                            let target =
+                                work.target().map(|v| resolve(v.storage()?)).transpose()?;
                             let memory = self.reader.work_memory(work.memory()?).await?;
                             let _io = self.reader.acquire(&self.reader.io, 1).await?;
                             source.store.verify().await?;
@@ -407,7 +437,7 @@ impl Worker {
                         ]
                     }
                     work::Plan::RawTransfer { transfer, .. } => {
-                        let source = reads::backend(&materials, transfer.input.storage()?)?;
+                        let source = resolve(transfer.input.storage()?)?;
                         let keys = Arc::new(reads::keys(&materials)?);
                         let result = self
                             .reader
@@ -448,7 +478,7 @@ impl Worker {
                     work::Plan::CopyTransfer {
                         transfer, batch, ..
                     } => {
-                        let source = reads::backend(&materials, transfer.input.storage()?)?;
+                        let source = resolve(transfer.input.storage()?)?;
                         let keys = Arc::new(reads::keys(&materials)?);
                         let result = self
                             .reader
@@ -506,6 +536,20 @@ impl Worker {
                             for grant in &grants {
                                 grant.check()?;
                             }
+                            if let work::Physical::Native { operation } = item.source {
+                                let native = backend
+                                    .store
+                                    .native
+                                    .as_ref()
+                                    .context("cleanup backend is not native")?;
+                                let result = native.reclaim_blocks(operation).await;
+                                outcomes.push(match result {
+                                    Ok(true) => work::Outcome::Deleted { stored_at: None },
+                                    Ok(false) => work::Outcome::Retry,
+                                    Err(error) => retry(error)?,
+                                });
+                                continue;
+                            }
                             let path = match &item.source {
                                 work::Physical::Chunk => {
                                     crate::storage::location::Layout::S3.chunk(item.location)
@@ -523,6 +567,7 @@ impl Worker {
                                     );
                                     Path::parse(key)?
                                 }
+                                work::Physical::Native { .. } => unreachable!(),
                             };
                             let result: Result<work::Outcome> = async {
                                 let stored_at = if item.inspect_age {
@@ -539,7 +584,9 @@ impl Worker {
                                 } else {
                                     None
                                 };
-                                if let work::Physical::Raw { upload } = &item.source {
+                                if let work::Physical::Raw { upload } = &item.source
+                                    && backend.store.native.is_none()
+                                {
                                     backend
                                         .store
                                         .streaming
@@ -676,8 +723,17 @@ impl Worker {
                     work::Plan::Pack { batch, .. } => {
                         let keys = Arc::new(reads::keys(&materials)?);
                         let encoding = async {
-                            let (result, candidates) =
-                                self.reader.pack(backend, &materials, keys, *batch).await?;
+                            let (result, candidates) = self
+                                .reader
+                                .pack(
+                                    backend,
+                                    &materials,
+                                    keys,
+                                    *batch,
+                                    authority.clone(),
+                                    region.clone(),
+                                )
+                                .await?;
                             fills.extend(candidates);
                             #[cfg(feature = "fault-injection")]
                             crate::faults::point("node-pack-stored").await;
@@ -700,8 +756,7 @@ impl Worker {
                                     .reader
                                     .rewrite(
                                         backend.clone(),
-                                        reads::backend(
-                                            &materials,
+                                        resolve(
                                             item.storage()
                                                 .context("rewrite source storage missing")?,
                                         )?,

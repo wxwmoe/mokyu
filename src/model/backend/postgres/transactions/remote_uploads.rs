@@ -317,6 +317,7 @@ pub(super) async fn commit_conversion_batch_in(
             .execute(&mut **tx)
             .await?;
     }
+    super::super::storage_native::publish_outputs(tx, outputs).await?;
     for output in outputs {
         if let Some(pack) = &output.pack {
             ensure!(

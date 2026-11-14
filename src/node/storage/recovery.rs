@@ -96,13 +96,30 @@ fn publish(root: &Path, path: &Path, bytes: &[u8], immutable: bool, check: &Chec
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn commit(
     files: &Files,
     proof: Proof,
     manifest: Manifest,
     check: Check,
 ) -> Result<Link> {
-    proof.verify(&manifest)?;
+    commit_historical(files, proof, manifest.clone(), manifest, check).await
+}
+
+pub(super) async fn commit_historical(
+    files: &Files,
+    proof: Proof,
+    manifest: Manifest,
+    historical: Manifest,
+    check: Check,
+) -> Result<Link> {
+    proof.verify(&historical)?;
+    ensure!(
+        historical.cluster_id == manifest.cluster_id
+            && historical.revision <= manifest.revision
+            && historical.takeover_epoch <= manifest.takeover_epoch,
+        "foreign recovery history"
+    );
     ensure!(
         manifest
             .members
@@ -246,6 +263,9 @@ mod tests {
             through: 1,
             parts: vec![],
             retired: vec![],
+            identity: None,
+            root: None,
+            prefix: String::new(),
         };
         let first = Proof::sign(publication, &key, &manifest)?;
         let link = commit(&files, first.clone(), manifest.clone(), allowed()).await?;

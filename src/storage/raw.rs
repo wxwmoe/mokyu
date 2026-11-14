@@ -325,6 +325,10 @@ impl Storage {
             .raw_writer(storage, source, location, declared, false)
             .await?;
         Ok(match writer {
+            RawWriter::Native(mut writer) => {
+                writer.external();
+                RawWriter::Native(writer)
+            }
             RawWriter::Remote(writer) if size >= PART_SIZE as i64 => {
                 let part_size = replay_part_size(size as u64, parts)?;
                 // Avoid rereading when the existing bounded writer sends as few requests.
@@ -363,13 +367,18 @@ impl Storage {
         Ok(self.store_backend(storage)?.is_local)
     }
 
+    pub(crate) fn is_native(&self, storage: Uuid) -> Result<bool> {
+        Ok(self.store_backend(storage)?.native.is_some())
+    }
+
     pub(crate) fn raw_buffered(&self, storage: Uuid) -> Result<bool> {
         let target = self.store_backend(storage)?;
         Ok(self.buffers_raw(storage, &target))
     }
 
     fn buffers_raw(&self, storage: Uuid, target: &StoreBackend) -> bool {
-        !self.write_overdue(storage, &target.profile)
+        target.native.is_none()
+            && !self.write_overdue(storage, &target.profile)
             && !self.cluster_mode
             && (target.is_local || target.profile.upload_cache)
             && matches!(
@@ -418,7 +427,7 @@ impl Storage {
         if buffered && !recorded_buffered {
             self.raw_store.buffer(source).await?;
         }
-        if cache && !target.is_local && target.profile.upload_cache {
+        if cache && !target.is_local && target.native.is_none() && target.profile.upload_cache {
             remote_size(declared.unwrap_or(0).max(0) as u64)?;
             return Ok(RawWriter::Pending(
                 super::raw_upload::Writer::new(self, storage, source, location, buffered, declared)
@@ -447,6 +456,20 @@ impl Storage {
             } else {
                 None
             };
+            if let Some(native) = &target.native {
+                return Ok(RawWriter::Native(super::native::raw::Writer::new(
+                    self.clone(),
+                    target.clone(),
+                    native.clone(),
+                    source,
+                    location,
+                    declared,
+                    hash,
+                    fill,
+                    permit,
+                    global,
+                )));
+            }
             return Ok(RawWriter::Remote(RemoteWriter {
                 storage: self,
                 source,
@@ -729,7 +752,7 @@ impl Storage {
             self.backend_gets.fetch_add(1, Ordering::Relaxed);
             RawFile::Local(file)
         } else {
-            ensure!(source.medium == "shared_s3", "raw source medium changed");
+            ensure!(source.medium == "shared", "raw source medium changed");
             RawFile::remote(
                 target.backend.clone(),
                 source,
@@ -788,19 +811,21 @@ impl Storage {
             self.remove_raw_checkpoint(source.location_id).await?;
             let _permit = target.controls.acquire().await?;
             let key = remote_path(source.address());
-            target
-                .streaming
-                .as_ref()
-                .context("S3 streaming backend is missing")?
-                .abort_pending_multipart(
-                    &key,
-                    target
-                        .multipart
-                        .as_deref()
-                        .context("S3 multipart backend is missing")?,
-                    self.raw_store.upload_id(source.id).await?.as_deref(),
-                )
-                .await?;
+            if target.native.is_none() {
+                target
+                    .streaming
+                    .as_ref()
+                    .context("S3 streaming backend is missing")?
+                    .abort_pending_multipart(
+                        &key,
+                        target
+                            .multipart
+                            .as_deref()
+                            .context("S3 multipart backend is missing")?,
+                        self.raw_store.upload_id(source.id).await?.as_deref(),
+                    )
+                    .await?;
+            }
             match target.backend.delete(&key).await {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
                 Err(error) => return Err(error.into()),
@@ -935,6 +960,7 @@ pub(crate) fn remote_path(id: Uuid) -> ObjectPath {
 }
 
 pub(crate) enum RawWriter<'a> {
+    Native(super::native::raw::Writer),
     Memory(Uuid, super::local_memory::Writer),
     Local(LocalWriter<'a>),
     Pending(super::raw_upload::Writer),
@@ -952,6 +978,9 @@ impl RawWriter<'_> {
     }
 
     pub fn may_reuse_source(&self) -> bool {
+        if let Self::Native(writer) = self {
+            return writer.may_reuse();
+        }
         !matches!(
             self,
             Self::Local(_) | Self::Memory(..) | Self::Remote(RemoteWriter { hash: None, .. })
@@ -1078,11 +1107,16 @@ impl RemoteWriter<'_> {
 }
 
 impl RawWriter<'_> {
-    pub async fn reuse(&self, stream: Id, digest: &[u8]) -> Result<bool> {
+    pub async fn reuse(&mut self, stream: Id, digest: &[u8]) -> Result<bool> {
+        if let Self::Native(writer) = self {
+            return writer.reuse(stream, digest).await;
+        }
         let writer = match self {
             Self::Remote(writer) => writer,
             Self::Replay(replay) => &replay.writer,
-            Self::Local(_) | Self::Memory(..) | Self::Pending(_) => return Ok(false),
+            Self::Local(_) | Self::Memory(..) | Self::Pending(_) | Self::Native(_) => {
+                return Ok(false);
+            }
         };
         let Some(hash) = &writer.hash else {
             return Ok(false);
@@ -1114,6 +1148,7 @@ impl RawWriter<'_> {
 
     pub async fn write(&mut self, data: &[u8]) -> Result<()> {
         match self {
+            Self::Native(writer) => writer.write(data).await,
             Self::Memory(_, writer) => {
                 if !writer.external {
                     writer.buffer.append(data)?;
@@ -1192,7 +1227,7 @@ impl RawWriter<'_> {
         }
     }
     pub async fn finish(
-        self,
+        mut self,
         stream: Id,
         expected: u64,
         digest: &[u8],
@@ -1212,6 +1247,7 @@ impl RawWriter<'_> {
         received: Option<Bytes>,
     ) -> Result<super::raw_upload::Written> {
         match self {
+            Self::Native(writer) => writer.finish(expected, digest, None).await,
             Self::Memory(location, writer) => {
                 let data = if writer.external {
                     writer
@@ -1351,7 +1387,7 @@ impl RawWriter<'_> {
     }
 
     pub async fn finish_replay<'a>(
-        self,
+        mut self,
         stream: Id,
         expected: u64,
         digest: &[u8],
@@ -1361,6 +1397,11 @@ impl RawWriter<'_> {
     ) -> Result<super::raw_upload::Written> {
         if self.reuse(stream, digest).await? {
             return Ok(super::raw_upload::Written::Reused);
+        }
+        if let Self::Native(writer) = self {
+            return writer
+                .finish(expected, digest, Some(input(0..expected)))
+                .await;
         }
         let Self::Replay(mut replay) = self else {
             return self.finish_received(stream, expected, digest, None).await;

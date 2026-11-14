@@ -1,4 +1,5 @@
 mod files;
+mod forward;
 mod fragments;
 mod inventory;
 mod recovery;
@@ -8,11 +9,14 @@ mod transfer;
 #[cfg(test)]
 pub(crate) mod recovery_tests;
 
+#[cfg(test)]
+pub(crate) use server::tests::TestNode;
+
 use crate::{
     config::{Budget, node::NodeConfig},
     model::{
         node::NodeReport,
-        storage_cluster::{Announcement, Registration, Topology},
+        storage_cluster::{Announcement, Registration, Topology, WriteLoad},
     },
     rpc::{
         client::{Client, Session},
@@ -55,9 +59,23 @@ pub(super) struct Node {
     boot: Uuid,
     started: chrono::DateTime<chrono::Utc>,
     connection: Mutex<Connection>,
+    writes: Arc<Semaphore>,
+    active_writes: Mutex<Vec<Uuid>>,
 }
 
 impl Node {
+    fn write_load(&self) -> WriteLoad {
+        let active = self.active_writes.lock().unwrap().clone();
+        let slots = self.budget.storage_upload_slots as u32;
+        WriteLoad {
+            slots,
+            admitting: slots
+                .saturating_sub(self.writes.available_permits() as u32)
+                .saturating_sub(active.len() as u32),
+            active,
+        }
+    }
+
     fn ready(&self) -> bool {
         let state = self.connection.lock().unwrap();
         state.phase == "registered" && state.deadline > Instant::now()
@@ -80,7 +98,7 @@ impl Node {
             "boot_id": self.boot, "started_at": self.started, "resources": self.budget,
             "region": self.config.instance.region, "storage_url": self.config.instance.storage_url,
             "storage_group": self.config.instance.storage_group, "storage_purpose": self.config.instance.storage_purpose.as_deref().unwrap_or("primary"),
-            "data_directory": self.files.capacity()?, "maintenance": state.maintenance, "draining": false,
+            "data_directory": self.files.capacity(self.boot)?, "write_load": self.write_load(), "maintenance": state.maintenance, "draining": false,
             "work": if foreign { "recovery" } else if ready { "normal" } else { "starting" },
             "cluster_id": manifest.as_ref().map(|m| m.cluster_id), "cluster_revision": manifest.as_ref().map(|m| m.revision),
             "recovery_pending": foreign, "control": { "url": self.config.instance.control_url, "peer": state.peer, "id": state.control_id, "epoch": state.epoch, "last_error": state.error },
@@ -95,8 +113,9 @@ impl Node {
             media: self.files.media.clone(),
             capacity: self
                 .files
-                .capacity()
+                .capacity(self.boot)
                 .map_err(|_| Status::internal("cannot inspect storage capacity"))?,
+            load: Some(self.write_load()),
             topology: Topology {
                 url: instance.storage_url.clone().unwrap(),
                 region: instance.region.clone(),
@@ -140,6 +159,8 @@ impl Node {
         session: &mut Session,
         report_sequence: &mut i64,
     ) -> Result<(), Status> {
+        // Storage has no logical object cache, but must acknowledge invalidation notices.
+        session.on_notice = Some(Arc::new(|_, _| {}));
         let run = session
             .welcome
             .run
@@ -237,7 +258,7 @@ impl Node {
             if permanent {
                 anyhow::bail!("storage registration rejected: {:?}", error.code());
             }
-            tracing::warn!(code=?error.code(), "storage control connection recovering");
+            tracing::warn!(code=?error.code(), reason=error.message(), "storage control connection recovering");
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
@@ -309,6 +330,8 @@ pub(crate) async fn run(config: NodeConfig, budget: Budget) -> Result<()> {
     let client = Client::new(config.instance.control_url.as_deref().unwrap(), identity)?;
     let node = Arc::new(Node {
         config,
+        writes: Arc::new(Semaphore::new(budget.storage_upload_slots)),
+        active_writes: Mutex::new(Vec::new()),
         budget,
         client,
         files,

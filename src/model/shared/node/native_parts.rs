@@ -209,7 +209,7 @@ pub(super) async fn candidate(
         ensure!(
             current.location_id == upload.source
                 && current.storage_id == upload.storage
-                && current.medium == "shared_s3",
+                && current.medium == "shared",
             Error::OperationAborted
         );
         if current.state == "writing" {
@@ -225,7 +225,7 @@ pub(super) async fn candidate(
         stream,
         upload.storage,
         upload.profile,
-        "shared_s3",
+        "shared",
     )
     .await?;
     ensure!(

@@ -991,7 +991,7 @@ pub(in super::super) async fn verification(
     }
     ensure!(
         source.home_storage() == run.storage()?
-            && matches!(source.medium.as_str(), "local" | "shared_s3"),
+            && matches!(source.medium.as_str(), "local" | "shared"),
         Error::SourceUnavailable
     );
     Ok(Step::Verify {

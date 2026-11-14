@@ -1792,6 +1792,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storage-clusters/takeover": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_takeover"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storage-clusters/{id}": {
         parameters: {
             query?: never;
@@ -1802,6 +1818,22 @@ export interface paths {
         get?: never;
         put: operations["storage_cluster_update"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/fragments/{fragment}/repair": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_repair"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1849,6 +1881,22 @@ export interface paths {
         };
         get?: never;
         put: operations["storage_cluster_member_state"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/recovery-sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_cluster_recovery_sources"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -4223,18 +4271,26 @@ export interface components {
             shared_staging: boolean;
             write: boolean;
         };
+        StorageClusterAccounting: {
+            /** Format: uuid */
+            boot: string;
+            /** Format: int64 */
+            revision: number;
+        };
         /** @enum {string} */
         StorageClusterAcknowledgement: "all" | "data_and_parity" | "data";
         StorageClusterAnnouncement: {
             capacity: components["schemas"]["StorageClusterCapacity"];
             /** Format: int64 */
             history_after: number;
+            load?: components["schemas"]["StorageClusterWriteLoad"] | null;
             manifest?: components["schemas"]["StorageClusterManifest"] | null;
             media: components["schemas"]["StorageClusterMedia"];
             pending_manifest?: components["schemas"]["StorageClusterManifest"] | null;
             topology: components["schemas"]["StorageClusterTopology"];
         };
         StorageClusterCapacity: {
+            accounting?: components["schemas"]["StorageClusterAccounting"] | null;
             accounting_ready?: boolean;
             /** Format: int64 */
             available_bytes: number;
@@ -4356,7 +4412,7 @@ export interface components {
              *     }
              */
             layout: components["schemas"]["StorageClusterLayout"];
-            /** @default none */
+            /** @default idle */
             node_priority: string;
             /** @default spread */
             parity_regions: string;
@@ -4370,6 +4426,10 @@ export interface components {
             /** @default different_region */
             replica_regions: string;
         };
+        StorageClusterTakeover: {
+            media_ids: string[];
+            name: string;
+        };
         StorageClusterTopology: {
             purpose: string;
             region?: string | null;
@@ -4381,6 +4441,13 @@ export interface components {
             policy: components["schemas"]["StorageClusterPolicy"];
             /** Format: int64 */
             revision: number;
+        };
+        StorageClusterWriteLoad: {
+            active: string[];
+            /** Format: int32 */
+            admitting: number;
+            /** Format: int32 */
+            slots: number;
         };
         StorageInput: {
             access_key?: string | null;
@@ -4528,6 +4595,8 @@ export interface components {
         };
         StorageRecoveryProbe: {
             deployment_key?: string | null;
+            /** Format: uuid */
+            namespace?: string | null;
             storage: components["schemas"]["StorageInput"];
         };
         StorageRecoveryProbeResult: {
@@ -4535,6 +4604,18 @@ export interface components {
             state: string;
             /** Format: uuid */
             storage?: string | null;
+        };
+        StorageRecoverySource: {
+            available: boolean;
+            /** Format: uuid */
+            id: string;
+            prefix?: string | null;
+            revision?: string | null;
+        };
+        StorageRecoverySources: {
+            entries: components["schemas"]["StorageRecoverySource"][];
+            /** Format: uuid */
+            next?: string | null;
         };
         StorageRecoveryStart: {
             revision: string;
@@ -8318,6 +8399,29 @@ export interface operations {
             };
         };
     };
+    storage_cluster_takeover: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterTakeover"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterCluster"];
+                };
+            };
+        };
+    };
     storage_cluster_update: {
         parameters: {
             query?: never;
@@ -8339,6 +8443,28 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StorageClusterCluster"];
+                };
+            };
+        };
+    };
+    storage_cluster_repair: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                fragment: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskStarted"];
                 };
             };
         };
@@ -8415,6 +8541,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StorageClusterCluster"];
+                };
+            };
+        };
+    };
+    storage_cluster_recovery_sources: {
+        parameters: {
+            query: {
+                media: string;
+                after?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageRecoverySources"];
                 };
             };
         };

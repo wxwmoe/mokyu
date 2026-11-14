@@ -30,6 +30,7 @@ pub(crate) struct Remote {
     pub journal: marker::Journal,
     pub key: crate::content::codec::Key,
     pub backend: Arc<dyn ObjectStore>,
+    pub native: Option<Arc<crate::storage::native::store::Store>>,
     client: Option<Client>,
     pub local: Option<Arc<super::local::Local>>,
     pub revision: i64,
@@ -53,6 +54,7 @@ impl Remote {
         secrets: &Secrets,
         ledger: &Ledger,
         token: Uuid,
+        native: Option<Arc<crate::storage::native::store::Store>>,
     ) -> Result<Self> {
         let row = records
             .enabled_by_id(ledger.storage_id)
@@ -63,13 +65,28 @@ impl Remote {
         let profile = profiles.load(record.id).await?;
         let opts = Options::from_profile(&profile)?;
         let conn = model::Connection::unprotect(&record, &secrets.credential_key)?;
-        let backend = model::Store::connect(&conn, opts)?.backend;
+        ensure!(
+            (conn.r#type == "mokyu") == native.is_some(),
+            "native journal connection is missing"
+        );
+        let backend: Arc<dyn ObjectStore> = match &native {
+            Some(store) => {
+                ensure!(
+                    store.namespace == record.id
+                        && Some(store.cluster) == record.cluster_id
+                        && store.prefix == Path::parse(&conn.prefix)?,
+                    "native journal connection changed"
+                );
+                store.clone()
+            }
+            None => model::Store::connect(&conn, opts)?.backend,
+        };
         let local = super::local::Local::new(&conn)?.map(Arc::new);
         let _lock = match &local {
             Some(l) => Some(l.lock(true).await?),
             None => None,
         };
-        let client = if local.is_none() {
+        let client = if conn.r#type == "s3" {
             Some(
                 Connection {
                     endpoint_url: conn.endpoint_url.context("missing S3 endpoint")?,
@@ -135,6 +152,7 @@ impl Remote {
             journal,
             key,
             backend,
+            native,
             client,
             local,
             revision,
@@ -172,6 +190,82 @@ impl Remote {
         Ok(Some(Written { etag, version }))
     }
 
+    pub(crate) async fn publish_native(
+        &self,
+        db: &dyn JournalStore,
+        token: Uuid,
+        file: &File,
+        bytes: Bytes,
+        credential: &crate::content::codec::Key,
+    ) -> Result<bool> {
+        let native = self
+            .native
+            .as_ref()
+            .context("native journal connection missing")?;
+        let storage = self.id;
+        let path = file.path()?;
+        let size = usize::try_from(file.byte_count)?;
+        ensure!(bytes.len() == size, "native journal file is incomplete");
+        use crate::{
+            content::fragment::Area,
+            model::{storage_native::RecoveryIdentity, storage_recovery::Part},
+            storage::native::store::Publication,
+        };
+        use futures_util::StreamExt;
+        ensure!(
+            file.mode == "put" && file.state == "sealed",
+            "native journal must be sealed before writing"
+        );
+        let (last, digest) = super::verify_frames(
+            &self.format(),
+            &path,
+            &bytes,
+            super::Sequence {
+                first: file.first_seq.try_into()?,
+                last: (file.first_seq - 1).try_into()?,
+                previous: file.previous_digest.as_slice().try_into()?,
+            },
+            false,
+            |_| Ok(()),
+        )?;
+        ensure!(
+            last == file.last_seq as u64 && digest.as_slice() == file.digest,
+            "native journal chain differs from its ledger"
+        );
+        let mut options = object_store::PutOptions {
+            mode: object_store::PutMode::Create,
+            ..Default::default()
+        };
+        options.extensions.insert(Publication {
+            owner: file.id,
+            area: Area::Recovery,
+        });
+        options.extensions.insert(RecoveryIdentity {
+            payload: file.id,
+            revision: 1,
+        });
+        let intent = native
+            .write(
+                &Path::from(path.clone()),
+                size as u64,
+                futures_util::stream::iter([Ok(bytes.clone())]).boxed(),
+                options,
+            )
+            .await?;
+        let part = Part {
+            intent,
+            path,
+            digest: *blake3::hash(&bytes).as_bytes(),
+        };
+        part.inspect(&bytes)?;
+        let proof = db
+            .native_prepare(storage, token, file, &part, credential)
+            .await?;
+        native.publish_evidence(db, token, &proof).await?;
+        db.native_acknowledge(storage, token, file, &proof).await?;
+        Ok(true)
+    }
+
     pub async fn publish(
         &self,
         db: &dyn JournalStore,
@@ -179,6 +273,7 @@ impl Remote {
         storage: Uuid,
         token: Uuid,
         file: &File,
+        credential: &crate::content::codec::Key,
     ) -> Result<bool> {
         let path = file.path()?;
         let frames = db.file_frames(file.id).await?;
@@ -246,7 +341,6 @@ impl Remote {
                 .await?;
             return Ok(true);
         }
-        let client = self.client.as_ref().context("missing S3 journal client")?;
         let mut body = Vec::with_capacity(size);
         let mut cuts = Vec::new();
         for frame in frames {
@@ -254,7 +348,7 @@ impl Remote {
                 frame.len() <= size - body.len(),
                 "journal file length mismatch"
             );
-            let boundary = frame.get(8) == Some(&(super::FrameType::PartCommit as u8));
+            let boundary = super::FrameType::read(&frame)? == super::FrameType::PartCommit;
             body.extend_from_slice(&frame);
             if boundary {
                 cuts.push(body.len());
@@ -262,6 +356,12 @@ impl Remote {
         }
         ensure!(body.len() == size, "journal file is incomplete");
         let bytes = Bytes::from(body);
+        if self.native.is_some() {
+            return self
+                .publish_native(db, token, file, bytes, credential)
+                .await;
+        }
+        let client = self.client.as_ref().context("missing S3 journal client")?;
         let written = if file.mode == "put" {
             ensure!(file.state == "sealed", "unsealed journal PUT");
             match client
@@ -368,6 +468,14 @@ impl Remote {
 
 pub(crate) async fn resume_markers(stores: &crate::model::Stores, secrets: &Secrets) -> Result<()> {
     for storage in stores.journal.marker_intents().await? {
+        if stores
+            .storage_records
+            .enabled_by_id(storage)
+            .await?
+            .is_some_and(|s| s.store_type == "mokyu")
+        {
+            continue;
+        }
         let token = Uuid::new_v4();
         if let Some(ledger) = stores.journal.claim(storage, token).await? {
             let result = Remote::connect(
@@ -377,6 +485,7 @@ pub(crate) async fn resume_markers(stores: &crate::model::Stores, secrets: &Secr
                 secrets,
                 &ledger,
                 token,
+                None,
             )
             .await;
             stores.journal.release(storage, token, None).await?;
@@ -384,4 +493,72 @@ pub(crate) async fn resume_markers(stores: &crate::model::Stores, secrets: &Secr
         }
     }
     Ok(())
+}
+
+pub(crate) async fn publish_snapshot(
+    native: &crate::storage::native::store::Store,
+    db: &dyn JournalStore,
+    credential: &crate::content::codec::Key,
+    job: &crate::model::journal::snapshots::Job,
+    token: Uuid,
+    file: crate::model::journal::native::SnapshotFile,
+    data: Bytes,
+    condition: Condition,
+) -> Result<Written> {
+    let path = file.path(job)?;
+    let path = path.as_str();
+    let size = data.len();
+    let digest = blake3::hash(&data);
+    use crate::{
+        content::fragment::Area,
+        model::{storage_native::RecoveryIdentity, storage_recovery::Part},
+        storage::native::store::Publication,
+    };
+    use futures_util::StreamExt;
+    use object_store::{PutMode, PutOptions, UpdateVersion};
+    let public = crate::storage::journal::recovery::inspect_prefix(&data)?;
+    let mut options = PutOptions {
+        mode: match condition {
+            Condition::Absent => PutMode::Create,
+            Condition::Match(etag) => PutMode::Update(UpdateVersion {
+                e_tag: Some(etag),
+                version: None,
+            }),
+        },
+        ..Default::default()
+    };
+    options.extensions.insert(Publication {
+        owner: job.id,
+        area: Area::Recovery,
+    });
+    options.extensions.insert(RecoveryIdentity {
+        payload: public.envelope.payload,
+        revision: public.envelope.revision,
+    });
+    let bytes = data;
+    let intent = native
+        .write(
+            &Path::from(path),
+            size as u64,
+            futures_util::stream::iter([Ok(bytes.clone())]).boxed(),
+            options,
+        )
+        .await?;
+    let part = Part {
+        intent,
+        path: path.into(),
+        digest: *digest.as_bytes(),
+    };
+    part.inspect(&bytes)?;
+    let proof = db
+        .native_snapshot_prepare(job, token, file, &part, credential)
+        .await?;
+    native.publish_evidence(db, token, &proof).await?;
+    db.native_snapshot_acknowledge(job, token, file, &proof)
+        .await?;
+    let version = part.intent.operation.to_string();
+    Ok(Written {
+        etag: format!("\"{version}\""),
+        version: Some(version),
+    })
 }
