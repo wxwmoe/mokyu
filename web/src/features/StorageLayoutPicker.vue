@@ -16,7 +16,7 @@ const choice = ref(''), group = useId(), viewport = ref<HTMLDivElement>()
 const keyOf = (row: Preset) => [row.data, row.parity, row.copies].join('-')
 const selected = computed(() => props.rows.find(row => keyOf(row) === choice.value))
 const order = ref<Column>(), direction = ref(1), page = ref(1)
-const pageSize = 20
+const pageSize = 25
 const sorted = computed(() => {
   const key = order.value
   return [...props.rows].sort(key ? (a,b) => direction.value * (a[key] - b[key]) : (a,b) => Number(b.featured) - Number(a.featured))
@@ -60,7 +60,7 @@ function apply() { if (selected.value) { emit('select', selected.value); open.va
         </tbody>
       </table>
     </div>
-    <UiListFooter :previous="page > 1" :next="page < pages" :first="page > 2" :summary="t('scLayoutPage', { page, pages, count: rows.length })" @previous="page--" @next="page++" @first="page=1" />
+    <UiListFooter :previous="page > 1" :next="page < pages" :first="page > 2" :summary="t('scLayoutPage', { page, pages, count: rows.length, first: rows.length ? (page-1)*pageSize+1 : 0, last: Math.min(page*pageSize, rows.length) })" @previous="page--" @next="page++" @first="page=1" />
     <template #footer>
       <span v-if="selected" class="layout-selection"><Layers :size="16" aria-hidden="true" />{{ t('scLayoutValue', { data: selected.data, parity: selected.parity, copies: selected.copies }) }}</span>
       <button @click="open=false">{{ t('cancel') }}</button><button class="primary" :disabled="!selected" @click="apply"><Check :size="16" />{{ t('scApplyLayout') }}</button>

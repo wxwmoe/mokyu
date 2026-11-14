@@ -116,7 +116,7 @@ export default {
   scColumn_members: "每组主盘",
   scColumn_factor: "占用倍率",
   scColumn_tolerance: "可坏盘数",
-  scLayoutPage: "第 {page} / {pages} 页 · 共 {count} 种布局",
+  scLayoutPage: "第 {page} / {pages} 页 · 第 {first}–{last} 项，共 {count} 项",
   scApplyLayout: "填入参数",
   scCanEnable: "可启用 {groups} 组 · 可写 {size}",
   scPreview_unsupported_layout: "此布局尚不可用",

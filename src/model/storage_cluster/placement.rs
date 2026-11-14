@@ -152,101 +152,8 @@ impl Table {
                         .get(&m.media_id)
                         .is_some_and(|s| s.online && s.free >= bytes)
             };
-            if !simple && layout.parity_shards > 0 {
-                let mut regions = HashMap::new();
-                for m in members {
-                    if let Some(r) = m.topology.region.as_deref() {
-                        *regions.entry(r).or_insert(0usize) += 1;
-                    }
-                }
-                let local = (self.policy.data_regions == "same_region")
-                    .then(|| {
-                        regions.keys().copied().min_by_key(|r| {
-                            let count = regions[r];
-                            (count < k, Some(*r) != region, std::cmp::Reverse(count), *r)
-                        })
-                    })
-                    .flatten();
-                if let Some(local) = local {
-                    order.sort_by_key(|m| m.topology.region.as_deref() != Some(local));
-                }
-                if self.policy.parity_regions == "spread" {
-                    let mut used = std::collections::HashSet::new();
-                    for m in &order[..k] {
-                        used.insert(m.topology.region.as_deref());
-                    }
-                    for i in k..width {
-                        let next = (i..width)
-                            .find(|j| {
-                                order[*j].topology.region.is_some()
-                                    && !used.contains(&order[*j].topology.region.as_deref())
-                            })
-                            .unwrap_or(i);
-                        order.swap(i, next);
-                        used.insert(order[i].topology.region.as_deref());
-                    }
-                }
-            }
-            if !simple && layout.parity_shards == 0 {
-                if self.policy.data_regions == "same_region" {
-                    let mut counts = HashMap::new();
-                    for m in &order {
-                        if let Some(r) = m.topology.region.as_deref() {
-                            *counts.entry(r).or_insert(0usize) += 1;
-                        }
-                    }
-                    order.sort_by_key(|m| {
-                        let r = m.topology.region.as_deref();
-                        let count = r.and_then(|r| counts.get(r)).copied().unwrap_or(0);
-                        (
-                            count < k,
-                            count >= k && r != region,
-                            std::cmp::Reverse(count),
-                            r != region,
-                            r,
-                        )
-                    });
-                }
-                if layout.extra_copies > 0 && self.policy.replica_regions != "any" {
-                    let mut used = std::collections::HashSet::new();
-                    let primary = order[0].topology.region.as_deref();
-                    used.extend(
-                        order[..k]
-                            .iter()
-                            .filter_map(|m| m.topology.region.as_deref()),
-                    );
-                    for start in (k..order.len()).step_by(k) {
-                        let mut counts = HashMap::new();
-                        for m in &order[start..] {
-                            if let Some(r) = m.topology.region.as_deref() {
-                                *counts.entry(r).or_insert(0usize) += 1;
-                            }
-                        }
-                        if let Some((&r, _)) = counts.iter().min_by_key(|(r, n)| {
-                            let same = matches!(
-                                self.policy.replica_regions.as_str(),
-                                "same_region" | "original"
-                            );
-                            (
-                                **n < k,
-                                if same {
-                                    Some(**r) != primary
-                                } else {
-                                    used.contains(**r)
-                                },
-                                std::cmp::Reverse(**n),
-                                **r,
-                            )
-                        }) {
-                            order[start..].sort_by_key(|m| m.topology.region.as_deref() != Some(r));
-                        }
-                        used.extend(
-                            order[start..start + k]
-                                .iter()
-                                .filter_map(|m| m.topology.region.as_deref()),
-                        );
-                    }
-                }
+            if !simple {
+                order = ordered_members(order, &self.policy, region);
             }
             for reverse in 0..if !simple && width == 1 && members.len() == 2 {
                 2
@@ -356,6 +263,97 @@ impl Table {
     }
 }
 
+fn ordered_members<'a>(
+    members: Vec<&'a Member>,
+    policy: &Policy,
+    writer: Option<&str>,
+) -> Vec<&'a Member> {
+    type Regions<'a> = std::collections::HashSet<&'a str>;
+    let layout = &policy.layout;
+    let k = usize::from(layout.data_shards);
+    let m = usize::from(layout.parity_shards);
+    let width = k + m;
+    let mut left = members;
+    let mut sets: Vec<Vec<&Member>> = Vec::with_capacity(usize::from(layout.extra_copies) + 1);
+    let mut occupied = Regions::new();
+    for index in 0..=layout.extra_copies {
+        let own_rules = index == 0 || policy.replica_regions == "original";
+        let take = if own_rules { k } else { width };
+        if (own_rules && policy.data_regions == "same_region")
+            || (!own_rules && policy.replica_regions != "any")
+        {
+            let mut counts = HashMap::new();
+            for member in &left {
+                if let Some(r) = member.topology.region.as_deref() {
+                    *counts.entry(r).or_insert(0usize) += 1;
+                }
+            }
+            let primary = sets.first().and_then(|s| s[0].topology.region.as_deref());
+            left.sort_by_key(|member| {
+                let r = member.topology.region.as_deref();
+                let count = r.and_then(|r| counts.get(r)).copied().unwrap_or(0);
+                let miss = if own_rules {
+                    writer.is_some() && r != writer
+                } else if policy.replica_regions == "same_region" {
+                    r != primary
+                } else {
+                    r.is_none_or(|r| occupied.contains(r))
+                };
+                (
+                    count < take,
+                    count >= take && miss,
+                    std::cmp::Reverse(count),
+                    miss,
+                    r,
+                )
+            });
+        }
+        let set: Vec<_> = left.drain(..take).collect();
+        occupied.extend(
+            set.iter()
+                .filter_map(|member| member.topology.region.as_deref()),
+        );
+        sets.push(set);
+    }
+    // Reserve whole additional sets before assigning the original parity.
+    for set in &mut sets {
+        if set.len() == width {
+            continue;
+        }
+        let home = set[0].topology.region.as_deref();
+        let main: Regions = set
+            .iter()
+            .filter_map(|m| m.topology.region.as_deref())
+            .collect();
+        let mut parity = HashMap::new();
+        while set.len() < width {
+            let at = left
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, member)| {
+                    let r = member.topology.region.as_deref();
+                    match policy.parity_regions.as_str() {
+                        "spread" => (
+                            r.is_none(),
+                            r.is_some_and(|r| main.contains(r)),
+                            parity.get(&r).copied().unwrap_or(0),
+                        ),
+                        "data_region" => (r.is_none(), r != home, 0),
+                        _ => (false, false, 0),
+                    }
+                })
+                .unwrap()
+                .0;
+            let member = left.remove(at);
+            *parity
+                .entry(member.topology.region.as_deref())
+                .or_insert(0usize) += 1;
+            set.push(member);
+        }
+    }
+    sets.into_iter().flatten().collect()
+}
+
 fn ratio(a: (u64, u32), b: (u64, u32)) -> Ordering {
     (u128::from(a.0) * u128::from(b.1)).cmp(&(u128::from(b.0) * u128::from(a.1)))
 }
@@ -447,6 +445,66 @@ mod tests {
         assert_eq!(free(&status), 6 * stripe);
         status.get_mut(&other).unwrap().online = false;
         assert_eq!(free(&status), 0);
+    }
+
+    #[test]
+    fn extra_sets_reserve_a_complete_region_before_primary_parity() {
+        let (c, _) = fixture();
+        let mut members = Vec::new();
+        for (i, r) in ["b", "b", "a", "b", "c", "b", "a", "b"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut member = c.manifest.members[0].clone();
+            member.media_id = Uuid::from_u128(i as u128 + 1);
+            member.topology.storage_group = format!("disk-{i}");
+            member.topology.region = Some(r.into());
+            members.push(member);
+        }
+        let mut p = c.policy;
+        p.layout = Layout {
+            data_shards: 2,
+            parity_shards: 2,
+            extra_copies: 1,
+            ..Layout::default()
+        };
+        for region in [Some("a"), Some("unknown")] {
+            let arranged = ordered_members(members.iter().collect(), &p, region);
+            let first = &arranged[..2];
+            assert_eq!(first[0].topology.region, first[1].topology.region);
+            if region == Some("a") {
+                assert_eq!(first[0].topology.region.as_deref(), Some("a"));
+                let parity: std::collections::HashSet<_> = arranged[2..4]
+                    .iter()
+                    .map(|m| m.topology.region.as_deref())
+                    .collect();
+                assert_eq!(parity, [Some("b"), Some("c")].into_iter().collect());
+                assert!(
+                    arranged[4..]
+                        .iter()
+                        .all(|m| m.topology.region.as_deref() == Some("b"))
+                );
+            }
+            assert_eq!(
+                arranged
+                    .iter()
+                    .map(|m| &m.topology.storage_group)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len(),
+                8
+            );
+        }
+        members[0].topology.region = Some("c".into());
+        members[1].topology.region = Some("c".into());
+        let arranged = ordered_members(members.iter().collect(), &p, Some("a"));
+        assert_eq!(
+            arranged
+                .iter()
+                .map(|m| m.media_id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            8
+        );
     }
 
     #[test]

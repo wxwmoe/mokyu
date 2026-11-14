@@ -550,6 +550,15 @@ pub(super) async fn read(
                 inspect_file(&mut file)? == receipt,
                 crate::content::codec::IntegrityError::Metadata
             );
+            if offset == 0 && length == receipt.header.shard_bytes {
+                file.seek(SeekFrom::Start(HEADER_SIZE as u64 + length))?;
+                let mut indexed_root = [0; 32];
+                file.read_exact(&mut indexed_root)?;
+                ensure!(
+                    indexed_root == receipt.root,
+                    crate::content::codec::IntegrityError::Metadata
+                );
+            }
             drop(permit);
             if length == 0 {
                 return Ok(());

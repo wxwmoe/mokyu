@@ -756,6 +756,14 @@ impl Control {
             !sources.is_empty(),
             "no verified primary copy is available for repair"
         );
+        if let Some(region) = target.device.announcement.topology.region.as_deref() {
+            sources.sort_by_key(|source| {
+                !snapshot.targets.iter().any(|t| {
+                    t.device.media_id == source.authorization.grant.media
+                        && t.device.announcement.topology.region.as_deref() == Some(region)
+                })
+            });
+        }
         Ok(Reply::Window {
             rate: movement.unwrap_or(0),
             sources,

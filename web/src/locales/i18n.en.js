@@ -116,7 +116,7 @@ export default {
   scColumn_members: "Primary disks",
   scColumn_factor: "Space factor",
   scColumn_tolerance: "Disk tolerance",
-  scLayoutPage: "Page {page} of {pages} · {count} layouts",
+  scLayoutPage: "Page {page} of {pages} · {first}–{last} of {count} layouts",
   scApplyLayout: "Use these parameters",
   scCanEnable: "{groups} complete groups · {size} writable",
   scPreview_unsupported_layout: "This layout is unavailable.",

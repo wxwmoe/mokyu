@@ -157,6 +157,11 @@ pub(crate) async fn write(
             groups[slot].push(target);
         }
         for mut targets in groups {
+            if targets.len() > 1 {
+                let seed = (intent.payload.as_u128() ^ u128::from(sequence)) as usize;
+                let start = seed % targets.len();
+                targets.rotate_left(start);
+            }
             let (send, receive) = mpsc::channel::<Bytes>(2);
             let shard = targets[0]
                 .authorization

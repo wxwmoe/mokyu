@@ -186,58 +186,56 @@ impl Worker {
                 }
             }
             if completed.is_none() && header.layout.parity_shards > 0 && plan.backup.is_none() {
-                let mut distinct = std::collections::HashSet::new();
-                let mut streams = Vec::new();
-                for source in &sources {
-                    let (receipt, _, _) = source
-                        .authorization
-                        .grant
-                        .action
-                        .read_range()
-                        .context("read grant required")?;
-                    let shard = receipt.header.shard;
-                    if shard == header.shard || distinct.contains(&shard) {
-                        continue;
-                    }
-                    if let Ok(body) = pool.read(source.clone(), self.clone()).await {
-                        streams.push((usize::from(shard), body, bytes::Bytes::new()));
-                        distinct.insert(shard);
-                    }
-                }
-                ensure!(
-                    streams.len() >= usize::from(header.layout.data_shards),
-                    "too few independent repair sources"
-                );
+                let mut unused: Vec<_> = sources
+                    .iter()
+                    .filter_map(|source| {
+                        let (r, _, _) = source.authorization.grant.action.read_range()?;
+                        (r.header.shard != header.shard)
+                            .then_some((usize::from(r.header.shard), source.clone()))
+                    })
+                    .collect();
                 let size = header.shard_bytes;
                 let code = crate::content::erasure::codec(&header.layout)?;
                 let count = usize::from(header.layout.data_shards + header.layout.parity_shards);
                 let wanted = usize::from(header.shard);
                 let data = usize::from(header.layout.data_shards);
+                let renewal = self.clone();
                 let body = async_stream::try_stream! {
-                    use futures_util::TryStreamExt;
-                    let mut left=size;
-                    while left>0 {
-                        let len=left.min(crate::content::fragment::UNIT as u64) as usize;
+                    let mut streams:Vec<RepairSource>=Vec::new();
+                    let mut offset=0;
+                    loop {
+                        let len=(size-offset).min(crate::content::fragment::UNIT as u64) as usize;
                         let mut shards=vec![None;count];
-                        // Keep all open source streams at the same physical offset; a failed one stays excluded.
-                        let next=futures_util::future::join_all(streams.iter_mut().map(|(index,body,pending)| async move {
-                            let mut out=Vec::with_capacity(len);
-                            while out.len()<len {
-                                if pending.is_empty() { *pending=body.try_next().await?.context("truncated repair source")?; }
-                                out.extend_from_slice(&pending.split_to((len-out.len()).min(pending.len())));
+                        let results=futures_util::future::join_all(streams.iter_mut().map(|s|s.take(len))).await;
+                        let mut keep=results.iter().map(Result::is_ok);
+                        streams.retain(|_|keep.next().unwrap());
+                        for (s,bytes) in streams.iter().zip(results.into_iter().flatten()) {shards[s.index]=Some(bytes);}
+                        while streams.len()<data {
+                            let at=unused.iter().position(|(index,_)|shards[*index].is_none()).context("too few verified repair sources")?;
+                            let (index,grant)=unused.remove(at);
+                            let Ok(stream)=pool.read(grant,renewal.clone()).await else {continue;};
+                            let mut source=RepairSource{index,stream,pending:bytes::Bytes::new()};
+                            // Only a mid-stream failure requires replaying the confirmed prefix on another source.
+                            let mut skip=offset;
+                            while skip>0 {
+                                let n=skip.min(crate::content::fragment::UNIT as u64);
+                                if source.take(n as usize).await.is_err(){break;}
+                                skip-=n;
                             }
-                            Ok::<_,anyhow::Error>((*index,out))
-                        })).await;
-                        let mut live=next.iter().map(Result::is_ok);
-                        streams.retain(|_|live.next().unwrap());
-                        for (index,buf) in next.into_iter().flatten() { shards[index]=Some(buf); }
-                        (streams.len()>=data).then_some(()).context("repair lost too many fragments")?;
-                        code.reconstruct(&mut shards)?;
-                        yield bytes::Bytes::from(shards[wanted].take().context("missing repaired shard")?);
-                        left-=len as u64;
-                    }
-                    for (_,mut body,pending) in streams {
-                        (pending.is_empty() && body.try_next().await?.is_none()).then_some(()).context("invalid repair source length")?;
+                            if skip==0 && let Ok(bytes)=source.take(len).await {shards[index]=Some(bytes);streams.push(source);}
+                        }
+                        if len!=0 {
+                            if wanted<data {code.reconstruct_data(&mut shards)?;} else {code.reconstruct(&mut shards)?;}
+                            yield bytes::Bytes::from(shards[wanted].take().context("missing repaired shard")?);
+                            offset+=len as u64;
+                        }
+                        if offset==size {
+                            use futures_util::TryStreamExt;
+                            for mut source in streams {
+                                (source.pending.is_empty() && source.stream.try_next().await?.is_none()).then_some(()).context("invalid repair source length")?;
+                            }
+                            break;
+                        }
                     }
                 };
                 completed = Some(
@@ -269,10 +267,38 @@ impl Worker {
     }
 }
 
-pub(super) fn paced(
-    body: futures_util::stream::BoxStream<'static, Result<bytes::Bytes>>,
+struct RepairSource {
+    index: usize,
+    stream: futures_util::stream::BoxStream<'static, Result<bytes::Bytes>>,
+    pending: bytes::Bytes,
+}
+
+impl RepairSource {
+    async fn take(&mut self, len: usize) -> Result<Vec<u8>> {
+        use futures_util::TryStreamExt;
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            if self.pending.is_empty() {
+                self.pending = self
+                    .stream
+                    .try_next()
+                    .await?
+                    .context("truncated repair source")?;
+            }
+            out.extend_from_slice(
+                &self
+                    .pending
+                    .split_to((len - out.len()).min(self.pending.len())),
+            );
+        }
+        Ok(out)
+    }
+}
+
+pub(super) fn paced<'a>(
+    body: futures_util::stream::BoxStream<'a, Result<bytes::Bytes>>,
     rate: u64,
-) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes>> {
+) -> futures_util::stream::BoxStream<'a, Result<bytes::Bytes>> {
     use futures_util::{StreamExt, TryStreamExt};
     if rate == 0 {
         return body;

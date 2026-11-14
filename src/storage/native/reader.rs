@@ -19,7 +19,13 @@ pub(crate) fn part_length(layout: &Layout) -> u64 {
     if layout.data_shards == 1 {
         PART
     } else {
-        u64::from(layout.stripe_bytes).min(2 * 1024 * 1024)
+        u64::from(layout.stripe_bytes).min(if layout.parity_shards == 0 {
+            2 * 1024 * 1024
+        } else {
+            (WINDOW / u64::from(layout.data_shards)).min(2 * 1024 * 1024)
+                / crate::content::fragment::UNIT as u64
+                * crate::content::fragment::UNIT as u64
+        })
     }
 }
 

@@ -116,7 +116,7 @@ export default {
   scColumn_members: "主ディスク数",
   scColumn_factor: "容量倍率",
   scColumn_tolerance: "耐障害台数",
-  scLayoutPage: "{page} / {pages} ページ · {count} 件",
+  scLayoutPage: "{page} / {pages} ページ · 全 {count} 件のうち {first}–{last} 件",
   scApplyLayout: "この設定を使う",
   scCanEnable: "{groups} グループを有効化可能 · 書き込み可能量 {size}",
   scPreview_unsupported_layout: "このレイアウトは利用できません",

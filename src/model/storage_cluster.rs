@@ -47,8 +47,11 @@ impl Layout {
 
     pub fn supported(&self) -> bool {
         self.width() <= Self::PLAN_MEMBERS
-            && ((1..=8).contains(&self.data_shards) && self.parity_shards == 0
-                || (self.data_shards, self.parity_shards, self.extra_copies) == (4, 2, 0))
+            && match self.parity_shards {
+                0 => (1..=8).contains(&self.data_shards),
+                1..=4 => (2..=20).contains(&self.data_shards),
+                _ => false,
+            }
     }
 
     fn preset(&self, featured: bool) -> Preset {
@@ -66,8 +69,8 @@ impl Layout {
 
     pub fn catalog() -> Vec<Preset> {
         let mut presets = Vec::new();
-        for data in 1..=8 {
-            for parity in 0..=2 {
+        for data in 1..=20 {
+            for parity in 0..=4 {
                 for copies in 0..Self::PLAN_MEMBERS as u16 {
                     let layout = Self {
                         data_shards: data,
@@ -78,7 +81,16 @@ impl Layout {
                     if layout.supported() {
                         presets.push(layout.preset(matches!(
                             (data, parity, copies),
-                            (1, 0, 1..=2) | (4, 0, 0) | (4, 2, 0)
+                            (1, 0, 1..=2)
+                                | (4, 0, 0)
+                                | (2, 1..=2, 0)
+                                | (2, 2, 1)
+                                | (4, 2, 0)
+                                | (5, 1, 0)
+                                | (6, 3, 0)
+                                | (10, 2, 0)
+                                | (15, 3, 0)
+                                | (20, 4, 0)
                         )));
                     }
                 }

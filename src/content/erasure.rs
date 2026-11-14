@@ -47,6 +47,91 @@ mod tests {
     use super::*;
 
     #[test]
+    fn systematic_code_works_for_every_supported_width_and_failure_mask() -> Result<()> {
+        // Independent polynomial evaluation, without the codec's field or matrix implementation.
+        fn mul(mut a: u8, mut b: u8) -> u8 {
+            let mut result = 0;
+            while b != 0 {
+                if b & 1 != 0 {
+                    result ^= a;
+                }
+                a = (a << 1) ^ if a & 128 != 0 { 0x1d } else { 0 };
+                b >>= 1;
+            }
+            result
+        }
+        for k in 2..=20usize {
+            for m in 1..=4usize {
+                let layout = Layout {
+                    data_shards: k as u16,
+                    parity_shards: m as u16,
+                    extra_copies: 0,
+                    ..Layout::default()
+                };
+                if !layout.supported() {
+                    continue;
+                }
+                let rs = codec(&layout)?;
+                let reference: Vec<Vec<_>> = (0..k + m)
+                    .map(|x| {
+                        (0..3)
+                            .map(|i| {
+                                (0..k).rev().fold(0, |value, j| {
+                                    mul(value, x as u8) ^ ((j * 53 + i * 73 + j * i + 19) as u8)
+                                })
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let mut encoded = reference[..k].to_vec();
+                encoded.resize(k + m, vec![0; 3]);
+                rs.encode(&mut encoded)?;
+                assert_eq!(encoded, reference);
+                let exhaustive = matches!(
+                    (k, m),
+                    (2, 1) | (2, 2) | (4, 2) | (5, 1) | (6, 3) | (10, 2) | (15, 3) | (20, 4)
+                );
+                for losses in 1..=m {
+                    let mut absent: Vec<_> = (0..losses).collect();
+                    let mut cases = 0;
+                    loop {
+                        let mut shards: Vec<_> = encoded.iter().cloned().map(Some).collect();
+                        for &slot in &absent {
+                            shards[slot] = None;
+                        }
+                        rs.reconstruct(&mut shards)?;
+                        assert!(
+                            shards
+                                .iter()
+                                .zip(&reference)
+                                .all(|(a, b)| a.as_ref() == Some(b))
+                        );
+                        cases += 1;
+                        let Some(i) = (0..losses).rev().find(|&i| absent[i] < k + m - losses + i)
+                        else {
+                            break;
+                        };
+                        if !exhaustive {
+                            break;
+                        }
+                        absent[i] += 1;
+                        for j in i + 1..losses {
+                            absent[j] = absent[j - 1] + 1;
+                        }
+                    }
+                    if losses == m && (k, m) == (15, 3) {
+                        assert_eq!(cases, 816);
+                    }
+                    if losses == m && (k, m) == (20, 4) {
+                        assert_eq!(cases, 10626);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn four_plus_two_restores_every_pair_and_range_slice() -> Result<()> {
         let layout = Layout {
             data_shards: 4,
