@@ -162,7 +162,7 @@ pub(super) async fn create(
         expected: None,
         project_id: input.project_id,
         name: input.name.trim().to_owned(),
-        connection: input.connection,
+        connection: input.connection.directory(),
         enabled: true,
         access_encrypted: codec::protect(
             input.access_key.as_bytes(),
@@ -202,7 +202,10 @@ pub(super) async fn update(
             .name
             .map(|v| v.trim().to_owned())
             .unwrap_or(current.bucket.name),
-        connection: input.connection.unwrap_or(current.bucket.connection),
+        connection: input
+            .connection
+            .map(|c| c.directory())
+            .unwrap_or(current.bucket.connection),
         enabled: input.enabled.unwrap_or(current.bucket.enabled),
         access_encrypted: current.access_encrypted,
         secret_encrypted: current.secret_encrypted,

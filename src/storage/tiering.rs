@@ -27,8 +27,12 @@ const PART: u64 = Progress::PART_BYTES;
 pub(crate) struct Site<'a> {
     backend: Arc<dyn ObjectStore>,
     path: Path,
-    streaming: &'a super::s3::Streaming,
-    multipart: &'a dyn MultipartStore,
+    upload: Upload<'a>,
+}
+
+enum Upload<'a> {
+    S3(&'a super::s3::Streaming, &'a dyn MultipartStore),
+    Native(&'a super::native::store::Store),
 }
 
 impl<'a> Site<'a> {
@@ -37,19 +41,21 @@ impl<'a> Site<'a> {
         backend: Arc<dyn ObjectStore>,
         streaming: Option<&'a super::s3::Streaming>,
         multipart: Option<&'a dyn MultipartStore>,
+        native: Option<&'a super::native::store::Store>,
     ) -> Result<Self> {
         let address = value.address();
         ensure!(!address.is_nil(), "missing tier address");
-        let path = match value {
-            PhysicalSource::Chunk(_) => crate::storage::location::Layout::S3.chunk(address),
-            PhysicalSource::Pack(_) => crate::storage::location::Layout::S3.pack(address),
-            PhysicalSource::Raw(_) => super::raw::remote_path(address),
-        };
+        let path = value.shared_path();
         Ok(Self {
             backend,
             path,
-            streaming: streaming.context("tiering requires an S3 backend")?,
-            multipart: multipart.context("missing tier multipart connection")?,
+            upload: match native {
+                Some(store) => Upload::Native(store),
+                None => Upload::S3(
+                    streaming.context("missing tier streaming connection")?,
+                    multipart.context("missing tier multipart connection")?,
+                ),
+            },
         })
     }
 
@@ -96,10 +102,12 @@ impl<'a> Site<'a> {
         Ok((md5.finalize().into(), *digest.finalize().as_bytes()))
     }
     async fn remove(&self) -> Result<()> {
-        let (pending, more) = self.streaming.pending_multipart(&self.path).await?;
-        ensure!(!more, "too many tier uploads");
-        for id in pending {
-            self.multipart.abort_multipart(&self.path, &id).await?;
+        if let Upload::S3(streaming, multipart) = self.upload {
+            let (pending, more) = streaming.pending_multipart(&self.path).await?;
+            ensure!(!more, "too many tier uploads");
+            for id in pending {
+                multipart.abort_multipart(&self.path, &id).await?;
+            }
         }
         match self.backend.delete(&self.path).await {
             Ok(()) | Err(object_store::Error::NotFound { .. }) => Ok(()),
@@ -197,6 +205,36 @@ async fn raw(
             digest: b.1,
         });
     }
+    if let Upload::Native(store) = target.upload {
+        let verified = std::sync::OnceLock::new();
+        let output = &verified;
+        store.stage_copy(&target.path, size, || Box::pin(async_stream::try_stream! {
+            let started = Instant::now();
+            let mut input = source.read(0, size);
+            let (mut md5_hash, mut hash) = (Md5::new(), blake3::Hasher::new());
+            let mut sent = 0;
+            while let Some(bytes) = input.next().await {
+                let bytes = bytes?;
+                md5_hash.update(&bytes);
+                hash.update(&bytes);
+                sent += bytes.len() as u64;
+                pace(started, sent, rate).await;
+                yield bytes;
+            }
+            let digest = *hash.finalize().as_bytes();
+            if md5_hash.finalize().as_slice() != md5 || output.get_or_init(|| digest) != &digest { Err(codec::IntegrityError::Hash)?; }
+        })).await?;
+        let digest = verified
+            .into_inner()
+            .context("native tier source was not fully read")?;
+        if target.digests(0, size).await? != (md5.try_into()?, digest) {
+            return Ok(Outcome::Discard);
+        }
+        return Ok(Outcome::Verified {
+            target: to.clone(),
+            digest,
+        });
+    }
     let part = Progress::raw_part_size(size);
     let count = u16::try_from(size.div_ceil(part))?;
     if size <= PART {
@@ -224,8 +262,9 @@ async fn raw(
         progress.parts <= count && part <= 5 * 1024 * 1024 * 1024,
         "invalid tier checkpoint"
     );
-    let streaming = target.streaming;
-    let parts = target.multipart;
+    let Upload::S3(streaming, parts) = target.upload else {
+        unreachable!()
+    };
     let Some(upload) = &progress.upload else {
         let (mut existing, more) = streaming.pending_multipart(&target.path).await?;
         ensure!(!more, "too many tier uploads");
@@ -396,10 +435,24 @@ pub(crate) async fn execute(
         }
     } else {
         pace(started, length, *rate).await;
-        destination
-            .backend
-            .put(&destination.path, Bytes::from(data).into())
-            .await?;
+        let bytes = Bytes::from(data);
+        match destination.upload {
+            Upload::Native(store) => {
+                store
+                    .stage_copy(&destination.path, length, || {
+                        Box::pin(futures_util::stream::once(std::future::ready(Ok(
+                            bytes.clone()
+                        ))))
+                    })
+                    .await?
+            }
+            Upload::S3(..) => {
+                destination
+                    .backend
+                    .put(&destination.path, bytes.into())
+                    .await?;
+            }
+        }
     }
     if destination.size().await? != Some(length)
         || destination.digests(0, length).await?.1 != digest
@@ -441,6 +494,7 @@ impl super::Storage {
                 s.backend.clone(),
                 s.streaming.as_ref(),
                 s.multipart.as_deref(),
+                s.native.as_deref(),
             )
         }
         let memory = self.pack_work(work.memory()?).await?;

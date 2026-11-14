@@ -417,6 +417,11 @@ impl App {
         .flatten();
         let destination = if let Some(root) = &target.raw_root {
             Target::Local(root.join(crate::storage::chunk_name(plan.target.location_id)))
+        } else if let Some(store) = &target.native {
+            Target::Native {
+                scratch: &self.storage.disk.root,
+                store,
+            }
         } else {
             Target::Remote {
                 scratch: &self.storage.disk.root,

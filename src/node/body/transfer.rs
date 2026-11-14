@@ -88,19 +88,27 @@ impl Reader {
         .ok()
         .and_then(Result::ok)
         .flatten();
-        let destination = crate::storage::transfer::Target::Remote {
-            scratch: &self.files.disk.root,
-            backend: target.store.backend.clone(),
-            streaming: target
-                .store
-                .streaming
-                .as_ref()
-                .context("S3 streaming backend missing")?,
-            multipart: target
-                .store
-                .multipart
-                .as_deref()
-                .context("S3 multipart backend missing")?,
+        use crate::storage::transfer::Target;
+        let destination = if let Some(store) = &target.store.native {
+            Target::Native {
+                scratch: &self.files.disk.root,
+                store,
+            }
+        } else {
+            Target::Remote {
+                scratch: &self.files.disk.root,
+                backend: target.store.backend.clone(),
+                streaming: target
+                    .store
+                    .streaming
+                    .as_ref()
+                    .context("S3 streaming backend missing")?,
+                multipart: target
+                    .store
+                    .multipart
+                    .as_deref()
+                    .context("S3 multipart backend missing")?,
+            }
         };
         crate::storage::transfer::copy(
             destination,

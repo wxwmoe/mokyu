@@ -896,8 +896,9 @@ pub(in super::super) async fn raw_progress(
                     .is_none_or(|expected| expected == digest),
                 Error::SourceUnavailable
             );
+            let native = super::super::storage_native::published_raw_copy(db, &plan.target).await?;
             ensure!(
-                plan.parts.is_empty() || unit.written_bytes == plan.target.size,
+                native || plan.parts.is_empty() || unit.written_bytes == plan.target.size,
                 Error::OperationAborted
             );
             ensure!(

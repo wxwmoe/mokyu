@@ -68,7 +68,10 @@ async fn locations(
         let location = Location::storage(&row)?;
         ensure!(
             matches!(location, Location::Remote { .. }),
-            s3s::s3_error!(InvalidArgument, "tiering requires two internal S3 backends")
+            s3s::s3_error!(
+                InvalidArgument,
+                "tiering requires two shared storage backends"
+            )
         );
         Ok((id, row.revision, location))
     }

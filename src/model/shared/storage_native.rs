@@ -183,6 +183,24 @@ pub(super) async fn publish_carrier(
     publish_at(tx, namespace, &prefix, path, owner, bytes).await
 }
 
+pub(super) async fn published_raw_copy(
+    tx: &mut physical::Tx<'_>,
+    target: &crate::model::raw::RawSource,
+) -> Result<bool> {
+    if let Some((operation, _)) =
+        source(&mut **tx, target.storage_id, "raw", target.address()).await?
+    {
+        let value = storage_payload::current(tx, operation).await?;
+        ensure!(
+            value.intent.total == u64::try_from(target.size)?,
+            ModelError::OperationAborted
+        );
+        require_protection(tx, operation).await?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 pub(super) async fn publish_staged(
     tx: &mut physical::Tx<'_>,
     storage: Option<Uuid>,
@@ -406,13 +424,20 @@ async fn publish_at(
     } else {
         format!("{prefix}/{path}")
     };
-    let object = q::object(
-        namespace,
-        crate::model::storage_native::path(&name)?.to_vec(),
-    )
-    .fetch_optional(&mut **tx)
-    .await?
-    .ok_or(ModelError::StorageObjectMissing)?;
+    publish_named(tx, namespace, &name, owner, bytes).await
+}
+
+async fn publish_named(
+    tx: &mut physical::Tx<'_>,
+    namespace: Uuid,
+    name: &str,
+    owner: Uuid,
+    bytes: u64,
+) -> Result<()> {
+    let object = q::object(namespace, path(name)?.to_vec())
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(ModelError::StorageObjectMissing)?;
     ensure!(object.1 == name, "native carrier path digest collision");
     let operation = object.3.or(object.2).ok_or(ModelError::OperationAborted)?;
     let payload = storage_payload::current(tx, operation).await?;
@@ -673,6 +698,27 @@ impl NativeObjects for Backend {
             .await?
             .ok_or_else(|| s3s::s3_error!(AccessDenied))?;
         let values = match &request.action {
+            MaintenanceAction::StageCopy { path, size } => {
+                let input = access::Upload {
+                    operation: request.operation,
+                    work: true,
+                    batch: None,
+                    storage: request.storage,
+                    path: path.clone(),
+                    size: *size,
+                };
+                ensure!(
+                    matches!(
+                        plan,
+                        crate::model::node_work::Plan::Tier { .. }
+                            | crate::model::node_work::Plan::RawTransfer { .. }
+                    ),
+                    s3s::s3_error!(AccessDenied)
+                );
+                let owner = input.for_work(&prefix, &plan)?;
+                publish_named(&mut tx, request.storage, path, owner, *size).await?;
+                Vec::new()
+            }
             MaintenanceAction::Collect { payload } => {
                 let crate::model::node_work::Plan::Collect { storage, items, .. } = &plan else {
                     anyhow::bail!(s3s::s3_error!(AccessDenied));

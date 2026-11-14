@@ -350,7 +350,7 @@ export default {
   tierHint: "アクセスの少ないチャンク、パック、raw ファイルを別のストレージへ移動し、読み出しは昇格を待たずに行います",
   tierHot: "ホットストレージ",
   tierCold: "コールドストレージ",
-  tierNoStorage: "ホット層とコールド層には有効な内部 S3 バックエンドが 2 つ必要です",
+  tierNoStorage: "ホット層とコールド層には、独立した S3 または Mokyu ストレージを選んでください",
   tier_cool_after_seconds: "コールドへ移すまでの無アクセス期間",
   tier_observation_seconds: "コールドからの読み出しを数える期間",
   tier_residency_seconds: "各階層の最短滞在時間",

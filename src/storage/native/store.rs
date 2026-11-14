@@ -116,6 +116,53 @@ impl Store {
             .await
     }
 
+    // The transfer owns this address; the user-visible reference switches only after readback.
+    pub(crate) async fn stage_copy<'a>(
+        &self,
+        path: &Path,
+        size: u64,
+        body: impl Fn() -> BoxStream<'a, Result<Bytes>>,
+    ) -> Result<()> {
+        ensure!(
+            matches!(
+                self.authority,
+                Authority::Control(_) | Authority::Work { .. }
+            ),
+            "copy requires work authority"
+        );
+        let result = self.write(path, size, body(), PutMode::Create.into()).await;
+        let intent = if result.as_ref().err().and_then(crate::model::error)
+            == Some(crate::model::Error::StorageForwardFailed)
+        {
+            let mut direct = self.clone();
+            direct.region = None;
+            direct
+                .write(path, size, body(), PutMode::Create.into())
+                .await?
+        } else {
+            result?
+        };
+        if let Authority::Control(control) = &self.authority {
+            let (_, name) = path
+                .as_ref()
+                .split_once('/')
+                .context("missing copy address")?;
+            let owner = crate::storage::location::Layout::S3
+                .parse_name(name)
+                .context("invalid copy address")?;
+            control
+                .publish(self.namespace, intent.payload, owner)
+                .await?;
+        } else {
+            self.maintain(access::MaintenanceAction::StageCopy {
+                path: self.path(path),
+                size,
+            })
+            .await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn reclaim_blocks(&self, operation: Uuid) -> Result<bool> {
         if let Authority::Control(control) = &self.authority {
             return control

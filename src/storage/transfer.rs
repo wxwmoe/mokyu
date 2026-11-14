@@ -13,6 +13,10 @@ use tokio::{
 
 pub(crate) enum Target<'a> {
     Local(PathBuf),
+    Native {
+        scratch: &'a std::path::Path,
+        store: &'a super::native::store::Store,
+    },
     Remote {
         scratch: &'a std::path::Path,
         backend: Arc<dyn ObjectStore>,
@@ -288,6 +292,21 @@ where
                 verify_local(&partial, size, &digest, &checkpoint, disk).await?;
                 tokio::fs::rename(&partial, &destination).await?;
                 super::raw::sync_directory(parent).await?;
+            }
+        }
+        Target::Native { scratch, store } => {
+            let key = super::raw::remote_path(plan.target.address());
+            if !verify_remote(scratch, store, &key, size, &digest, fill, &checkpoint, disk).await? {
+                store
+                    .stage_copy(&key, size, || replay(&input, 0, size, digest))
+                    .await?;
+                copied.bytes = size;
+                copied.requests = 1;
+                ensure!(
+                    verify_remote(scratch, store, &key, size, &digest, fill, &checkpoint, disk)
+                        .await?,
+                    "native transfer missing after write"
+                );
             }
         }
         Target::Remote {

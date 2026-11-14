@@ -393,6 +393,7 @@ impl Worker {
                                     b.store.backend.clone(),
                                     b.store.streaming.as_ref(),
                                     b.store.multipart.as_deref(),
+                                    b.store.native.as_deref(),
                                 )
                             }
                             let source = resolve(work.source().storage()?)?;

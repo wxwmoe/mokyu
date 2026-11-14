@@ -55,6 +55,13 @@ pub(crate) struct Connection {
 }
 
 impl Connection {
+    pub(crate) fn directory(mut self) -> Self {
+        if self.prefix.len() > 1 && self.prefix.ends_with('/') {
+            self.prefix.pop();
+        }
+        self
+    }
+
     pub(crate) fn object_address(&self, key: &str) -> Result<String> {
         let mut connection = self.clone();
         connection.virtual_hosted = false;
@@ -553,6 +560,23 @@ mod tests {
         }
         value.prefix.clear();
         value.validate().unwrap();
+        for prefix in ["", "imports", "imports/"] {
+            value.prefix = prefix.into();
+            let scope = value.clone().directory();
+            scope.validate().unwrap();
+            assert_eq!(scope.prefix, prefix.trim_end_matches('/'));
+            assert_eq!(
+                scope.object_address("photoscat").unwrap(),
+                format!(
+                    "http://backend:8333/photos/{}photoscat",
+                    if prefix.is_empty() { "" } else { "imports/" }
+                )
+            );
+        }
+        for prefix in ["/", "imports//", "/imports/", "a/../b/"] {
+            value.prefix = prefix.into();
+            assert!(value.clone().directory().validate().is_err());
+        }
     }
 
     #[test]

@@ -21,7 +21,8 @@ pub(crate) fn deletion(
 ) -> Result<Option<i64>> {
     use crate::model::node_work::Physical;
     ensure!(
-        plan.storage() == Some(namespace),
+        plan.storage() == Some(namespace)
+            || matches!(plan, Plan::Tier { work, .. } if matches!(work.as_ref(), crate::model::tiering::Work::Remove { source } if source.storage().ok() == Some(namespace))),
         s3s::s3_error!(AccessDenied)
     );
     let matches = |path: Path| {
@@ -73,13 +74,8 @@ pub(crate) fn deletion(
         }
         Plan::Tier { work, .. } => {
             if let crate::model::tiering::Work::Remove { source } = work.as_ref() {
-                let path = match source {
-                    PhysicalSource::Chunk(value) => Layout::S3.chunk(value.address()),
-                    PhysicalSource::Pack(value) => Layout::S3.pack(value.address()),
-                    PhysicalSource::Raw(value) => Layout::S3.object(value.address()),
-                };
                 ensure!(
-                    source.storage()? == namespace && matches(path),
+                    source.storage()? == namespace && matches(source.shared_path()),
                     s3s::s3_error!(AccessDenied)
                 );
                 return Ok(None);
@@ -122,15 +118,10 @@ impl Read {
         source: &PhysicalSource,
         ranges: &mut Vec<Range<u64>>,
     ) -> Result<()> {
-        let path = match source {
-            PhysicalSource::Chunk(value) => Layout::S3.chunk(value.address()),
-            PhysicalSource::Pack(value) => Layout::S3.pack(value.address()),
-            PhysicalSource::Raw(value) => Layout::S3.object(value.address()),
-        };
         self.carrier(
             prefix,
             Some(source.storage()?),
-            path,
+            source.shared_path(),
             source.bytes()?.try_into()?,
             ranges,
         )
@@ -249,7 +240,16 @@ impl Read {
                 self.input(prefix, &transfer.input, ranges)?;
                 self.packing(prefix, batch, ranges)?;
             }
-            Plan::RawTransfer { transfer, .. } => self.input(prefix, &transfer.input, ranges)?,
+            Plan::RawTransfer { transfer, .. } => {
+                self.input(prefix, &transfer.input, ranges)?;
+                self.carrier(
+                    prefix,
+                    Some(transfer.target.storage_id),
+                    Layout::S3.object(transfer.target.address()),
+                    transfer.target.size.try_into()?,
+                    ranges,
+                )?;
+            }
             Plan::Rewrite { items, .. } => {
                 for item in items {
                     match item {
@@ -343,6 +343,39 @@ mod tests {
         assert!(input.for_work("scope", &upload).is_err());
         input.size -= 1;
         assert!(input.for_work("other", &upload).is_err());
+        let mut target = source.clone();
+        target.storage_id = Uuid::now_v7();
+        target.address = Some(Uuid::now_v7());
+        let to = PhysicalSource::Raw(target.clone());
+        let copy = Plan::Tier {
+            storage: target.storage_id,
+            work: Box::new(crate::model::tiering::Work::Copy {
+                source: PhysicalSource::Raw(source.clone()),
+                target: to.clone(),
+                rate: 1024,
+                recode: false,
+                progress: Default::default(),
+            }),
+            source_permits: [storage, target.storage_id],
+        };
+        assert!(input.for_work("scope", &copy).is_err());
+        let mut output = input.clone();
+        output.storage = target.storage_id;
+        output.path = format!("scope/{}", to.shared_path());
+        assert_eq!(output.for_work("scope", &copy)?, target.address());
+        output.size += 1;
+        assert!(output.for_work("scope", &copy).is_err());
+        assert!(deletion(&copy, storage, "scope", &input.path).is_err());
+        let retire = Plan::Tier {
+            storage: target.storage_id,
+            work: Box::new(crate::model::tiering::Work::Remove {
+                source: PhysicalSource::Raw(source.clone()),
+            }),
+            source_permits: [storage, target.storage_id],
+        };
+        assert_eq!(deletion(&retire, storage, "scope", &input.path)?, None);
+        assert!(deletion(&retire, target.storage_id, "scope", &input.path).is_err());
+        assert!(deletion(&retire, storage, "scope", &output.path).is_err());
         let hash = Plan::HashRaw {
             storage,
             items: vec![crate::model::node_work::RawHash { source, hash: None }],
@@ -441,14 +474,9 @@ impl Upload {
             }
             Plan::Tier { work, .. } => {
                 if let Some(target) = work.target() {
-                    let path = match target {
-                        PhysicalSource::Chunk(value) => Layout::S3.chunk(value.address()),
-                        PhysicalSource::Pack(value) => Layout::S3.pack(value.address()),
-                        PhysicalSource::Raw(value) => Layout::S3.object(value.address()),
-                    };
                     ensure!(
                         target.storage()? == self.storage
-                            && self.matches(prefix, path)?
+                            && self.matches(prefix, target.shared_path())?
                             && self.size == u64::try_from(target.bytes()?)?,
                         s3s::s3_error!(AccessDenied)
                     );

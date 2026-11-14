@@ -350,7 +350,7 @@ export default {
   tierHint: "将长期未访问的区块、区块包和原始整文件移到另一后端，读取无需等待回热",
   tierHot: "热层后端",
   tierCold: "冷层后端",
-  tierNoStorage: "热层和冷层需要两个已启用的内部 S3 后端",
+  tierNoStorage: "热层和冷层需要两个独立的后端，可选择 S3 或 Mokyu 存储群集",
   tier_cool_after_seconds: "多长时间未读后转冷",
   tier_observation_seconds: "冷端回源次数的统计窗口",
   tier_residency_seconds: "最短驻留时间",

@@ -84,6 +84,7 @@ pub(crate) enum MaintenanceAction {
     List { after: Option<String> },
     Delete { path: String },
     Collect { payload: Uuid },
+    StageCopy { path: String, size: u64 },
 }
 
 impl Maintenance {
@@ -97,6 +98,10 @@ impl Maintenance {
                 if let Some(path) = after {
                     super::path(path)?;
                 }
+            }
+            MaintenanceAction::StageCopy { path, size } => {
+                super::path(path)?;
+                ensure!(*size <= 5 * 1024_u64.pow(4), "invalid native copy length");
             }
             MaintenanceAction::Delete { path } => {
                 super::path(path)?;

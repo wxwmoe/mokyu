@@ -89,6 +89,15 @@ impl PhysicalSource {
         }
     }
 
+    pub(crate) fn shared_path(&self) -> object_store::path::Path {
+        let layout = crate::storage::location::Layout::S3;
+        match self {
+            Self::Chunk(c) => layout.chunk(c.address()),
+            Self::Pack(p) => layout.pack(p.address()),
+            Self::Raw(r) => layout.object(r.address()),
+        }
+    }
+
     pub(crate) fn storage(&self) -> Result<Uuid> {
         use anyhow::Context;
         match self {

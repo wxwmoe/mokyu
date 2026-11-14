@@ -32,6 +32,14 @@ impl Location {
                     .into(),
                 prefix: record.prefix.clone(),
             }),
+            "mokyu" => {
+                let cluster = record.cluster_id.context("storage cluster is missing")?;
+                let root = format!("mokyu-storage://{cluster}/");
+                Ok(Self::Remote {
+                    path: format!("{root}{}/", record.id),
+                    root,
+                })
+            }
             "s3" => Self::remote(
                 &crate::storage::external::Connection {
                     endpoint_url: record.endpoint.clone().context("S3 endpoint is missing")?,
@@ -409,6 +417,34 @@ pub(crate) trait RedundancyStore: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn native_namespaces_share_their_clusters_failure_domain() -> Result<()> {
+        let record = |cluster| crate::model::storage::StorageRecord {
+            id: Uuid::now_v7(),
+            store_type: "mokyu".into(),
+            cluster_id: Some(cluster),
+            path: None,
+            endpoint: None,
+            bucket: None,
+            region: None,
+            prefix: String::new(),
+            access: None,
+            secret: None,
+            identity_marker: serde_json::Value::Null,
+            revision: 1,
+        };
+        let a = Uuid::now_v7();
+        let one = Location::storage(&record(a))?.resolve().await?;
+        let two = Location::storage(&record(a))?.resolve().await?;
+        let other = Location::storage(&record(Uuid::now_v7()))?
+            .resolve()
+            .await?;
+        assert_ne!(one.path, two.path);
+        assert!(!one.independent(&two.domain, &two.path));
+        assert!(one.independent(&other.domain, &other.path));
+        Ok(())
+    }
 
     #[tokio::test]
     async fn storage_domains_and_external_prefixes_use_opaque_object_keys() {

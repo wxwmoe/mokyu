@@ -167,6 +167,12 @@ async fn template(
                 first,
                 allow_compression,
             )?;
+            let last = &index.entries.last().context("empty tier pack")?.position;
+            p.stored_size = Some(
+                i64::try_from(last.offset)?
+                    .checked_add(i64::from(last.encoding.stored_size))
+                    .context("tier pack size overflow")?,
+            );
         }
         p.tier_index = Some(Box::new(index));
         return Ok(Some(out));
@@ -184,6 +190,19 @@ async fn template(
     );
 
     if *key != cfg.1 || algorithm != alg || *compressed && !allow_compression {
+        let payload = if *compressed && allow_compression {
+            c.stored_size
+                .context("missing chunk length")?
+                .checked_sub(if key.is_some() { 16 } else { 0 })
+                .context("invalid encoded chunk size")?
+        } else {
+            c.raw_size
+        };
+        c.stored_size = Some(
+            payload
+                .checked_add(if cfg.1.is_some() { 16 } else { 0 })
+                .context("tier chunk size overflow")?,
+        );
         *key = cfg.1;
         *algorithm = alg.into();
         *compressed &= allow_compression;
@@ -417,7 +436,7 @@ pub(super) async fn step(
         work: None,
         switched: false,
     };
-    let available: i64 = sqlx::query_scalar(q::S3_PAIR)
+    let available: i64 = sqlx::query_scalar(q::SHARED_PAIR)
         .bind(movement.source_material.storage()?)
         .bind(movement.target_storage)
         .fetch_one(&mut **db)
@@ -656,6 +675,7 @@ pub(super) async fn finish(db: &mut q::Tx<'_>, task: Execution, outcome: &Outcom
                 m.phase == "copying"
                     && m.source_material.same_content(target)
                     && target.unit() == Unit::movable(m.unit)?
+                    && target.bytes()? == prepared.bytes()?
                     && target.address() == m.target_address
                     && target.storage()? == m.target_storage
                     && match (&prepared.0, target) {
