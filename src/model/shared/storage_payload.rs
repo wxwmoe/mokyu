@@ -73,10 +73,10 @@ async fn reclaimable(tx: &mut q::Tx<'_>, value: &Payload) -> Result<()> {
             .await?,
         Error::OperationAborted
     );
-    recovery_clear(tx, value).await
+    recovery_clear(tx, value, None).await
 }
 
-async fn recovery_clear(tx: &mut q::Tx<'_>, value: &Payload) -> Result<()> {
+async fn recovery_clear(tx: &mut q::Tx<'_>, value: &Payload, fragment: Option<Uuid>) -> Result<()> {
     ensure!(
         super::queries::journal_restore::native_pending(value.intent.namespace)
             .fetch_optional(&mut **tx)
@@ -84,16 +84,24 @@ async fn recovery_clear(tx: &mut q::Tx<'_>, value: &Payload) -> Result<()> {
             .is_none(),
         Error::OperationAborted
     );
-    for proof in super::queries::storage_journal::roots(value.intent.namespace)
-        .fetch_all(&mut **tx)
-        .await?
-    {
+    let proofs = if fragment.is_some() {
+        super::queries::storage_journal::protected_roots(value.intent.namespace)
+            .fetch_all(&mut **tx)
+            .await?
+    } else {
+        super::queries::storage_journal::roots(value.intent.namespace)
+            .fetch_all(&mut **tx)
+            .await?
+    };
+    for proof in proofs {
         ensure!(
             proof
                 .publication
                 .root
                 .as_ref()
-                .is_none_or(|root| root.intent.operation != value.intent.operation),
+                .is_none_or(|root| root.intent.operation != value.intent.operation
+                    || fragment
+                        .is_some_and(|f| root.receipts.iter().all(|r| r.header.fragment != f))),
             Error::OperationAborted
         );
     }
@@ -107,11 +115,23 @@ async fn recovery_clear(tx: &mut q::Tx<'_>, value: &Payload) -> Result<()> {
 }
 
 async fn repair_reclaimable(tx: &mut q::Tx<'_>, value: &Payload) -> Result<()> {
+    ensure!(value.state == "published", Error::OperationAborted);
     ensure!(
-        value.state == "published" && value.intent.area == crate::content::fragment::Area::Blocks,
+        !super::queries::storage_backup::pending(value.intent.operation)
+            .fetch_one(&mut **tx)
+            .await?,
         Error::OperationAborted
     );
-    recovery_clear(tx, value).await?;
+    ensure!(
+        super::queries::journal_restore::native_pending(value.intent.namespace)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_none()
+            && !super::queries::journal_snapshots::pinned(value.intent.namespace)
+                .fetch_one(&mut **tx)
+                .await?,
+        Error::OperationAborted
+    );
     ensure!(
         super::queries::storage_repair::handoff(value.intent.operation)
             .fetch_one(&mut **tx)
@@ -355,6 +375,19 @@ pub(super) async fn receipts_in(
                 .context("fragment was not prepared")?,
         )?;
         ensure!(!existing.deleted, Error::OperationAborted);
+        if existing.receipt.is_none()
+            && let Some(row) = super::queries::storage_repair::row(receipt.header.fragment)
+                .fetch_optional(&mut **tx)
+                .await?
+        {
+            ensure!(
+                !matches!(
+                    row.0.0,
+                    crate::model::storage_repair::Origin::Planned { .. }
+                ),
+                Error::OperationAborted
+            );
+        }
         let mut expected = receipt.header.clone();
         if existing.header.digest == [0; 32] {
             expected.digest = [0; 32];
@@ -650,12 +683,21 @@ impl StoragePayloads for Backend {
             .await?
             {
                 let repair = super::storage_repair::decode(row)?;
-                super::queries::storage_repair::collecting(repair.original.header.fragment)
+                match recovery_clear(&mut tx, &value, Some(repair.original.header().fragment)).await
+                {
+                    Err(e)
+                        if matches!(e.downcast_ref::<Error>(), Some(Error::OperationAborted)) =>
+                    {
+                        continue;
+                    }
+                    outcome => outcome?,
+                }
+                super::queries::storage_repair::collecting(repair.original.header().fragment)
                     .execute(&mut *tx)
                     .await?;
                 result.push(Mapping {
-                    header: repair.original.header.clone(),
-                    receipt: Some(repair.original),
+                    header: repair.original.header().clone(),
+                    receipt: repair.original.receipt().cloned(),
                     deleted: false,
                 });
             }
@@ -700,7 +742,7 @@ impl StoragePayloads for Backend {
             for id in fragments {
                 let repair = super::storage_repair::current(&mut tx, *id).await?;
                 ensure!(
-                    repair.original.header.operation == operation
+                    repair.original.header().operation == operation
                         && repair.state == "installed"
                         && repair.collecting,
                     Error::OperationAborted

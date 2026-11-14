@@ -202,24 +202,24 @@ pub(in super::super) async fn authenticate_rpc_node(
 }
 
 async fn node_snapshot(
-    db: &mut PgConnection,
+    tx: &mut queries::storage_cluster::Tx<'_>,
     node: Uuid,
 ) -> Result<crate::model::session::Snapshot> {
-    let settings = queries::node_settings().fetch_all(&mut *db).await?;
-    let native_pending = queries::native::pending(node).fetch_one(&mut *db).await?;
-    let work_pending = queries::work::pending(node).fetch_one(&mut *db).await?;
+    let settings = queries::node_settings().fetch_all(&mut **tx).await?;
+    let native_pending = queries::native::pending(node).fetch_one(&mut **tx).await?;
+    let work_pending = queries::work::pending(node).fetch_one(&mut **tx).await?;
     let (boot, fence, epoch, valid_for_ms, maintenance, draining, mode, mode_revision) =
         queries::node_session_status(node)
-            .fetch_optional(&mut *db)
+            .fetch_optional(&mut **tx)
             .await?
             .ok_or(crate::model::Error::NodeInactive)?;
     let handoff = queries::node_handoff::row(node)
-        .fetch_optional(&mut *db)
+        .fetch_optional(&mut **tx)
         .await?;
     let draining = draining || handoff.as_ref().is_some_and(|row| row.state != "serving");
     let pending_uploads = if draining {
         queries::node_upload_backlog(Some(node))
-            .fetch_one(db)
+            .fetch_one(&mut **tx)
             .await?
             .0
     } else {
@@ -233,6 +233,21 @@ async fn node_snapshot(
         valid_for_ms,
         maintenance,
         draining,
+        storage_closed: if let Some(h) = &handoff {
+            if matches!(h.state.as_str(), "offline_ready" | "resuming") {
+                true
+            } else if h.state == "preparing"
+                && queries::node_handoff::row_storage(node)
+                    .fetch_one(&mut **tx)
+                    .await?
+            {
+                super::super::node_handoff::storage(tx, node).await?.empty()
+            } else {
+                false
+            }
+        } else {
+            false
+        },
         handoff_revision: handoff.map_or(0, |row| row.revision),
         settings,
         grants: Vec::new(),

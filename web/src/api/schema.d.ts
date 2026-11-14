@@ -1920,6 +1920,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storage-clusters/{id}/moves": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_move"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/moves/{job}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["storage_cluster_move_state"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storage-clusters/{id}/recovery-sources": {
         parameters: {
             query?: never;
@@ -1928,6 +1960,54 @@ export interface paths {
             cookie?: never;
         };
         get: operations["storage_cluster_recovery_sources"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_start_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/runs/{job}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_cancel_run"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/space": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_cluster_space"];
         put?: never;
         post?: never;
         delete?: never;
@@ -3030,6 +3110,7 @@ export interface components {
             /** Format: int64 */
             revision: number;
             state: string;
+            storage?: components["schemas"]["StorageDrain"] | null;
         };
         /** @enum {string} */
         HandoffAction: "prepare" | "cancel" | "resume";
@@ -3582,6 +3663,11 @@ export interface components {
         ModeInput: {
             /** @example cluster */
             mode: string;
+        };
+        MoveState: {
+            action: string;
+            /** Format: int64 */
+            revision: number;
         };
         NodeConfig: {
             fields: components["schemas"]["ConfigField"][];
@@ -4453,6 +4539,7 @@ export interface components {
             id: string;
             layout: components["schemas"]["StorageClusterLayout"];
             members: string[];
+            replacing?: components["schemas"]["StorageClusterReplacement"] | null;
         };
         StorageClusterLayout: {
             /** Format: int32 */
@@ -4496,6 +4583,21 @@ export interface components {
             state: string;
             topology: components["schemas"]["StorageClusterTopology"];
         };
+        StorageClusterMemberMove: {
+            /** Format: int64 */
+            bytes_per_second: number;
+            /** Format: uuid */
+            cluster: string;
+            /** Format: uuid */
+            group: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            source: string;
+            state: string;
+            /** Format: uuid */
+            target: string;
+        };
         StorageClusterMemberState: {
             /** Format: int64 */
             revision: number;
@@ -4506,11 +4608,23 @@ export interface components {
             /** Format: int64 */
             revision: number;
         };
+        StorageClusterMoveInput: {
+            /** Format: int64 */
+            bytes_per_second?: number | null;
+            /** Format: int64 */
+            revision: number;
+            /** Format: uuid */
+            source: string;
+            /** Format: uuid */
+            target?: string | null;
+        };
         StorageClusterOverview: {
             backups: components["schemas"]["StorageClusterBackupGroup"][];
             clusters: components["schemas"]["StorageClusterCluster"][];
             defaults: components["schemas"]["StorageClusterPolicy"];
             devices: components["schemas"]["StorageClusterDevice"][];
+            member_moves: components["schemas"]["StorageClusterMemberMove"][];
+            runs: components["schemas"]["StorageClusterRun"][];
         };
         StorageClusterPolicy: {
             /** @default all */
@@ -4552,6 +4666,50 @@ export interface components {
             /** @default different_region */
             replica_regions: string;
         };
+        StorageClusterReplacement: {
+            /** Format: uuid */
+            source: string;
+            /** Format: uuid */
+            target: string;
+        };
+        StorageClusterRun: {
+            backup_group?: string | null;
+            /** Format: int64 */
+            byte_count: number;
+            /** Format: int64 */
+            bytes_per_second: number;
+            /** Format: int64 */
+            checked: number;
+            /** Format: uuid */
+            cluster: string;
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            last_error?: string | null;
+            /** Format: uuid */
+            media_id?: string | null;
+            /** Format: int64 */
+            revision: number;
+            state: string;
+        };
+        StorageClusterRunInput: {
+            backup_group?: string | null;
+            /** Format: int64 */
+            bytes_per_second?: number | null;
+            kind: string;
+            /** Format: uuid */
+            media_id?: string | null;
+            /** Format: int64 */
+            revision: number;
+        };
+        StorageClusterSpace: {
+            groups: number;
+            /** Format: int64 */
+            logical_bytes: number;
+            /** Format: int64 */
+            primary_used_bytes: number;
+            writable_groups: number;
+        };
         StorageClusterTakeover: {
             media_ids: string[];
             name: string;
@@ -4574,6 +4732,18 @@ export interface components {
             admitting: number;
             /** Format: int32 */
             slots: number;
+        };
+        StorageDrain: {
+            /** Format: int64 */
+            fragments: number;
+            /** Format: int64 */
+            groups: number;
+            /** Format: int64 */
+            moves: number;
+            /** Format: int64 */
+            recovery_heads: number;
+            /** Format: int64 */
+            reservations: number;
         };
         StorageInput: {
             access_key?: string | null;
@@ -8732,6 +8902,57 @@ export interface operations {
             };
         };
     };
+    storage_cluster_move: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterMoveInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterMemberMove"];
+                };
+            };
+        };
+    };
+    storage_cluster_move_state: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MoveState"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterMemberMove"];
+                };
+            };
+        };
+    };
     storage_cluster_recovery_sources: {
         parameters: {
             query: {
@@ -8752,6 +8973,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StorageRecoverySources"];
+                };
+            };
+        };
+    };
+    storage_cluster_start_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterRunInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterRun"];
+                };
+            };
+        };
+    };
+    storage_cluster_cancel_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                job: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerifyBackups"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterRun"];
+                };
+            };
+        };
+    };
+    storage_cluster_space: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterSpace"];
                 };
             };
         };

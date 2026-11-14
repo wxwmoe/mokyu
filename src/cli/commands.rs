@@ -811,6 +811,7 @@ impl Command {
             | Self::StorageCluster(
                 StorageClusters::List
                 | StorageClusters::Sources { .. }
+                | StorageClusters::Space { .. }
                 | StorageClusters::Backups { .. },
             ) => None,
             Self::Bucket(_) => Some("bucket.change"),
@@ -972,6 +973,56 @@ pub struct StyleExport {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum StorageClusters {
     List,
+    Space {
+        id: Uuid,
+    },
+    Rebuild {
+        id: Uuid,
+        #[arg(long)]
+        revision: i64,
+        #[arg(long)]
+        backup_group: Option<String>,
+        #[arg(long)]
+        bytes_per_second: Option<i64>,
+    },
+    Sync {
+        id: Uuid,
+        media: Uuid,
+        #[arg(long)]
+        revision: i64,
+        #[arg(long)]
+        bytes_per_second: Option<i64>,
+    },
+    Scrub {
+        id: Uuid,
+        #[arg(long)]
+        revision: i64,
+        #[arg(long)]
+        bytes_per_second: Option<i64>,
+    },
+    CancelRun {
+        id: Uuid,
+        job: Uuid,
+        #[arg(long)]
+        revision: i64,
+    },
+    Replace {
+        id: Uuid,
+        source: Uuid,
+        target: Option<Uuid>,
+        #[arg(long)]
+        revision: i64,
+        #[arg(long)]
+        bytes_per_second: Option<i64>,
+    },
+    Move {
+        id: Uuid,
+        job: Uuid,
+        #[arg(value_parser=["pause","resume","cancel"])]
+        action: String,
+        #[arg(long)]
+        revision: i64,
+    },
     Backups {
         id: Uuid,
         #[arg(long)]

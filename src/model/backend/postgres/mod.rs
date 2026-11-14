@@ -16,6 +16,8 @@ mod storage_payload;
 mod storage_recovery;
 #[path = "../../shared/storage_repair.rs"]
 mod storage_repair;
+#[path = "../../shared/storage_runs.rs"]
+mod storage_runs;
 #[path = "../../shared/upload_staging.rs"]
 mod upload_staging;
 pub(crate) const USER_LOCK: i64 = 734922709851002;

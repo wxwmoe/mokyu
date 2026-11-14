@@ -19,8 +19,17 @@ pub(super) fn decode(row: q::Row) -> Result<Repair> {
     row.0.validate()?;
     if let Some(candidate) = &row.1 {
         candidate.validate()?;
-        let mut expected = row.0.header.clone();
+        let mut expected = row.0.header().clone();
         expected.fragment = candidate.fragment;
+        expected.digest = row.0.evidence().header.digest;
+        ensure!(
+            candidate.layout_revision >= expected.layout_revision
+                && (expected.media == candidate.media
+                    || candidate.layout_revision > expected.layout_revision),
+            "repair placement revision is invalid"
+        );
+        expected.media = candidate.media;
+        expected.layout_revision = candidate.layout_revision;
         expected.generation = expected
             .generation
             .checked_add(1)
@@ -57,7 +66,7 @@ pub(super) async fn plan(
     let operation = q::operation(id).fetch_one(&mut **tx).await?;
     let value = storage_payload::current(tx, operation).await?;
     let repair = current(tx, id).await?;
-    let header = &repair.original.header;
+    let header = repair.original.header();
     if value.state != "published" || matches!(repair.state.as_str(), "installed" | "healthy") {
         return Ok(None);
     }
@@ -87,11 +96,11 @@ pub(super) async fn garbage(
         let repair = decode(row)?;
         if repair.state == "installed"
             && !repair.original_removed
-            && repair.original.header.fragment > after
+            && repair.original.header().fragment > after
         {
             result.push(crate::model::storage_payload::Mapping {
-                header: repair.original.header.clone(),
-                receipt: Some(repair.original),
+                header: repair.original.header().clone(),
+                receipt: repair.original.receipt().cloned(),
                 deleted: false,
             });
         } else if repair.state == "writing"
@@ -138,7 +147,7 @@ impl Repairs for Backend {
         if let Some(row) = q::row(fragment).fetch_optional(&mut *tx).await? {
             let repair = decode(row)?;
             ensure!(
-                repair.original.header.operation == operation,
+                repair.original.header().operation == operation,
                 Error::OperationAborted
             );
             if repair.state == "healthy" {
@@ -158,7 +167,9 @@ impl Repairs for Backend {
                     && original.header.layout.parity_shards == 0,
                 "unsupported repair layout"
             );
-            q::create(&original).execute(&mut *tx).await?;
+            q::create(&crate::model::storage_repair::Origin::Durable(original))
+                .execute(&mut *tx)
+                .await?;
             p::enqueue_fill(fragment, value.intent.namespace)
                 .execute(&mut *tx)
                 .await?;
@@ -176,14 +187,28 @@ impl Repairs for Backend {
 
     async fn prepare_repair(&self, id: Uuid, damaged: bool) -> Result<Repair> {
         let observed = self.repair(id).await?;
-        let header = &observed.original.header;
+        let header = observed.original.header();
         let mut tx = p::begin(self).await?;
         let allocation = super::storage_capacity::lock(self, &mut tx, header.cluster).await?;
         let payload = storage_payload::current(&mut tx, header.operation).await?;
+        ensure!(
+            super::queries::journal_restore::native_pending(payload.intent.namespace)
+                .fetch_optional(&mut *tx)
+                .await?
+                .is_none(),
+            Error::OperationAborted
+        );
         ensure!(payload.state == "published", Error::OperationAborted);
         let mut repair = current(&mut tx, id).await?;
         ensure!(
             repair.original == observed.original,
+            Error::OperationAborted
+        );
+        let movement = super::queries::storage_move::assigned(header.cluster, header.media)
+            .fetch_optional(&mut *tx)
+            .await?;
+        ensure!(
+            movement.as_ref().is_none_or(|job| job.5 != "paused"),
             Error::OperationAborted
         );
         if repair.state == "queued" {
@@ -193,16 +218,30 @@ impl Repairs for Backend {
                     .await?,
             )?;
             ensure!(
-                mapped.receipt.as_ref() == Some(&repair.original) && !mapped.deleted,
+                mapped.header == *repair.original.header()
+                    && mapped.receipt.as_ref() == repair.original.receipt()
+                    && !mapped.deleted,
                 Error::OperationAborted
             );
-            if damaged {
+            if damaged || movement.is_some() {
                 let mut candidate = header.clone();
+                candidate.digest = repair.original.evidence().header.digest;
                 candidate.fragment = Uuid::now_v7();
                 candidate.generation = candidate
                     .generation
                     .checked_add(1)
                     .context("fragment generation exhausted")?;
+                if let Some(job) = &movement {
+                    ensure!(job.2 == header.group, Error::OperationAborted);
+                    candidate.media = job.4;
+                    candidate.layout_revision = allocation.cluster.revision as u64;
+                    let origin = p::manifest(header.cluster, payload.intent.layout_revision)
+                        .fetch_one(&mut *tx)
+                        .await?;
+                    payload
+                        .intent
+                        .placement(&candidate, &origin, &allocation.cluster.manifest)?;
+                }
                 candidate.validate()?;
                 allocation.reserve_repair(&mut tx, &candidate).await?;
                 q::prepare(id, &candidate).execute(&mut *tx).await?;
@@ -243,7 +282,8 @@ impl Repairs for Backend {
             return Ok(None);
         }
         ensure!(
-            !repair.original_removed
+            repair.original.receipt().is_some()
+                && !repair.original_removed
                 && !repair.collecting
                 && repair.protected_until > now
                 && (payload.state == "published" || payload.protected_until > now),
@@ -253,8 +293,8 @@ impl Repairs for Backend {
         p::protect(operation, until).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(Some(crate::model::storage_payload::Mapping {
-            header: repair.original.header.clone(),
-            receipt: Some(repair.original),
+            header: repair.original.header().clone(),
+            receipt: repair.original.receipt().cloned(),
             deleted: false,
         }))
     }
@@ -279,8 +319,8 @@ impl Repairs for Backend {
         let repair = current(&mut tx, id).await?;
         ensure!(
             repair.candidate.as_ref() == Some(header)
-                && receipt.root == repair.original.root
-                && header.digest == repair.original.header.digest,
+                && receipt.root == repair.original.evidence().root
+                && header.digest == repair.original.evidence().header.digest,
             "repair bytes differ from the original receipt"
         );
         if repair.state == "installed" {
@@ -288,13 +328,28 @@ impl Repairs for Backend {
             return Ok(());
         }
         ensure!(repair.state == "writing", Error::OperationAborted);
+        let source = repair.original.header().media;
+        if source != header.media {
+            let job = super::queries::storage_move::assigned(header.cluster, source)
+                .fetch_optional(&mut *tx)
+                .await?;
+            // A candidate already written before cancellation can finish, then be moved back.
+            let allowed = job.is_some_and(|j| j.4 == header.media && j.5 != "paused")
+                || super::queries::storage_move::assigned(header.cluster, header.media)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .is_some_and(|j| j.5 == "reverting" && j.4 == source);
+            ensure!(allowed, Error::OperationAborted);
+        }
         let mapped = storage_payload::mapping(
             p::fragment(id, header.operation)
                 .fetch_one(&mut *tx)
                 .await?,
         )?;
         ensure!(
-            mapped.receipt.as_ref() == Some(&repair.original) && !mapped.deleted,
+            mapped.header == *repair.original.header()
+                && mapped.receipt.as_ref() == repair.original.receipt()
+                && !mapped.deleted,
             Error::OperationAborted
         );
         ensure!(
@@ -308,6 +363,16 @@ impl Repairs for Backend {
         q::installed(id, header, payload.protected_until)
             .execute(&mut *tx)
             .await?;
+        if repair.original.header().media != header.media {
+            if let Some(path) = super::queries::storage_move::root_path(header.operation)
+                .fetch_optional(&mut *tx)
+                .await?
+            {
+                super::queries::storage_journal::track(header.operation, header.namespace, &path)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
         super::queries::storage_journal::dirty(header.operation)
             .execute(&mut *tx)
             .await?;

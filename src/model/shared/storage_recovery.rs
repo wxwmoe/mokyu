@@ -154,17 +154,25 @@ async fn restore_receipt(
     catalog: Option<Uuid>,
     tx: &mut q::Tx<'_>,
     intent: &crate::model::storage_payload::Intent,
-    members: &[Uuid],
+    origin: &crate::model::storage_cluster::Manifest,
+    through_layout: i64,
     receipt: &crate::model::storage_payload::Receipt,
 ) -> Result<()> {
     use super::queries::storage_payload as physical;
     let operation = intent.operation;
     let h = &receipt.header;
-    intent.accepts(h)?;
     ensure!(
-        members.get(usize::from(h.copy)) == Some(&h.media),
-        "recovered fragment differs from its historical member"
+        h.layout_revision <= through_layout as u64,
+        "fragment exceeds the verified placement history"
     );
+    if h.layout_revision == intent.layout_revision {
+        intent.placement(h, origin, origin)?;
+    } else {
+        let placed = physical::manifest(intent.cluster, h.layout_revision)
+            .fetch_one(&mut **tx)
+            .await?;
+        intent.placement(h, origin, &placed)?;
+    }
     if let Some(id) = catalog {
         use super::queries::storage_backup as backup;
         if let Some(old) = backup::shard(id, receipt).fetch_optional(&mut **tx).await?
@@ -421,7 +429,7 @@ impl RecoveryCatalog for Backend {
             .iter()
             .find(|g| g.id == intent.group)
             .context("physical recovery group missing")?;
-        let members = intent.members(group)?;
+        intent.members(group)?;
         if let Some(root) = root {
             root.validate(namespace, anchor.cluster_id)?;
             root.validate_layout(&historical)?;
@@ -503,7 +511,15 @@ impl RecoveryCatalog for Backend {
         if published {
             if let Some(root) = root {
                 for receipt in &root.receipts {
-                    restore_receipt(recovery_catalog, &mut tx, &intent, members, receipt).await?;
+                    restore_receipt(
+                        recovery_catalog,
+                        &mut tx,
+                        &intent,
+                        &historical,
+                        anchor.revision,
+                        receipt,
+                    )
+                    .await?;
                 }
             }
             let mut after = None;
@@ -529,7 +545,15 @@ impl RecoveryCatalog for Backend {
                         CatalogEntry::Fragment(receipt) if file.is_some() => receipt,
                         _ => anyhow::bail!("invalid recovered fragment record"),
                     };
-                    restore_receipt(recovery_catalog, &mut tx, &intent, members, &receipt).await?;
+                    restore_receipt(
+                        recovery_catalog,
+                        &mut tx,
+                        &intent,
+                        &historical,
+                        anchor.revision,
+                        &receipt,
+                    )
+                    .await?;
                 }
                 match page.after {
                     Some(next) => after = Some(next),

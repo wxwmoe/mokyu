@@ -5,7 +5,7 @@ use sqlx::types::Json;
 use uuid::Uuid;
 
 pub(in super::super) type Row = (
-    Json<Receipt>,
+    Json<crate::model::storage_repair::Origin>,
     Option<Json<Header>>,
     String,
     bool,
@@ -23,9 +23,9 @@ pub(in super::super) fn locate(id: Uuid) -> Scalar<'static, Uuid> {
     sqlx::query_scalar("SELECT operation FROM storage_fragments WHERE id=? AND root IS NOT NULL AND NOT deleted UNION SELECT operation FROM storage_repairs WHERE id=? LIMIT 1").bind(id).bind(id)
 }
 
-pub(in super::super) fn create(original: &Receipt) -> Statement<'_> {
+pub(in super::super) fn create(original: &crate::model::storage_repair::Origin) -> Statement<'_> {
     sqlx::query("INSERT INTO storage_repairs(id,operation,sequence,original_receipt) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
-        .bind(original.header.fragment).bind(original.header.operation).bind(i64::from(original.header.sequence)).bind(Json(original))
+        .bind(original.header().fragment).bind(original.header().operation).bind(i64::from(original.header().sequence)).bind(Json(original))
 }
 
 pub(in super::super) fn prepare(id: Uuid, candidate: &Header) -> Statement<'_> {
@@ -50,13 +50,13 @@ pub(in super::super) fn replace(
     receipt: &Receipt,
     encoded: Vec<u8>,
 ) -> Statement<'static> {
-    sqlx::query("UPDATE storage_fragments SET id=?,header=?,root=?,commitment=? WHERE id=? AND operation=? AND NOT deleted")
-        .bind(receipt.header.fragment).bind(encoded)
+    sqlx::query("UPDATE storage_fragments SET id=?,media_id=?,header=?,root=?,commitment=? WHERE id=? AND operation=? AND NOT deleted")
+        .bind(receipt.header.fragment).bind(receipt.header.media).bind(encoded)
         .bind(receipt.root.to_vec()).bind(receipt.commitment.to_vec()).bind(original).bind(receipt.header.operation)
 }
 
 pub(in super::super) fn pending(operation: Uuid, first: u32, end: u64) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT id FROM storage_repairs WHERE operation=? AND sequence>=? AND sequence<? AND state='writing' ORDER BY id LIMIT 256")
+    sqlx::query_scalar("SELECT id FROM storage_repairs WHERE operation=? AND sequence>=? AND sequence<? AND state='writing' AND json_extract(candidate,'$.media')=json_extract(original_receipt,'$.header.media') ORDER BY id LIMIT 256")
         .bind(operation).bind(i64::from(first)).bind(end as i64)
 }
 

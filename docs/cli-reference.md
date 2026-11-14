@@ -211,6 +211,8 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 
 `storage-cluster repair CLUSTER_UUID FRAGMENT_UUID` 创建或续接指定分片的核验与修复任务，返回 `task_id`。健康片保持原样；确认丢失或损坏后，从有效主副本写入新片，验证完整回执后切换映射。网络或权限错误不会被当作损坏，不从备份来源读取。可通过 `task` 命令查看进度。
 
+`storage-cluster space` 查看逐组容量；`replace/move` 管理换盘，`sync/scrub/rebuild/cancel-run` 管理同步、巡检和重建，参数和停机条件见[扩容和成员维护](storage-clusters.md#扩容和成员维护)。
+
 `storage-cluster takeover NAME MEDIA_UUID...` 核对所选介质的原群集清单与历史后接管，不要求 storage 提供部署 key。`storage-cluster sources CLUSTER_UUID MEDIA_UUID [--after UUID]` 分页列出介质上可识别的恢复命名空间，返回 `entries` 和 `next`。业务目录恢复仍须核对完整发布证据，通过后端恢复入口解锁和导入，见[存储群集](storage-clusters.md#身份和恢复边界)。
 
 | 命令 | 作用与返回 |

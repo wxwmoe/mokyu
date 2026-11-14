@@ -170,6 +170,7 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
     anchor.revision = 2;
     anchor.previous = Some(first.digest()?);
     anchor.groups.push(Group {
+        replacing: None,
         id: group,
         layout: Layout::default(),
         members: anchor.members.iter().map(|m| m.media_id).collect(),

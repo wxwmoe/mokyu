@@ -56,6 +56,7 @@ impl TestNode {
             writes: Arc::new(Semaphore::new(1)),
             active_writes: Mutex::new(vec![]),
             backup_reads: Default::default(),
+            streams: Default::default(),
             client: Client::new("https://localhost:1", state.clone())?,
             files,
             boot: run.boot,
@@ -70,6 +71,9 @@ impl TestNode {
                 mode: Some("single_control".into()),
                 mode_revision: 1,
                 maintenance: false,
+                draining: false,
+                handoff_revision: 0,
+                storage_closed: false,
                 error: None,
                 peer: None,
                 control_id: None,
@@ -489,6 +493,7 @@ async fn native_forwarding_binds_destinations_and_cancels_both_writers() -> Resu
             })
             .collect::<Result<_>>()?,
         groups: vec![Group {
+            replacing: None,
             id: first.group,
             layout: first.layout.clone(),
             members: nodes
@@ -714,6 +719,7 @@ async fn native_transport_checks_receipts_streams_and_cancellation() -> Result<(
             },
         ],
         groups: vec![Group {
+            replacing: None,
             id: planned.group,
             layout: planned.layout.clone(),
             members: vec![planned.media, second],
@@ -740,6 +746,7 @@ async fn native_transport_checks_receipts_streams_and_cancellation() -> Result<(
         writes: Arc::new(Semaphore::new(1)),
         active_writes: Mutex::new(vec![]),
         backup_reads: Default::default(),
+        streams: Default::default(),
         budget,
         client: Client::new("https://localhost:1", state)?,
         files,
@@ -752,6 +759,9 @@ async fn native_transport_checks_receipts_streams_and_cancellation() -> Result<(
             mode: Some("single_control".into()),
             mode_revision: 1,
             maintenance: false,
+            draining: false,
+            handoff_revision: 0,
+            storage_closed: false,
             error: None,
             peer: None,
             control_id: None,

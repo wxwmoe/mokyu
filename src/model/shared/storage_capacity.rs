@@ -56,7 +56,28 @@ pub(super) async fn lock(
         .await?
         .into_iter()
         .collect();
-    let status = targets
+    let status = observations(tx, &cluster, &targets, &reserved, now).await?;
+    Ok(Allocation {
+        cluster,
+        targets,
+        status,
+        cursor,
+    })
+}
+
+pub(super) async fn observations(
+    tx: &mut storage_payload::Tx<'_>,
+    cluster: &Cluster,
+    targets: &[Target],
+    reserved: &HashMap<Uuid, i64>,
+    now: i64,
+) -> Result<HashMap<Uuid, Status>> {
+    let excluded: std::collections::HashSet<_> = super::queries::storage_move::excluded(cluster.id)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .collect();
+    Ok(targets
         .iter()
         .map(|target| {
             let announcement = &target.device.announcement;
@@ -69,11 +90,12 @@ pub(super) async fn lock(
             (
                 target.device.media_id,
                 Status {
+                    draining: excluded.contains(&target.device.media_id),
                     online: current
                         && target.expires > now
                         && now - target.device.observed_at < 15_000_000
                         && announcement.manifest.as_ref().is_some_and(|head| {
-                            head.cluster_id == id && head.revision == cluster.revision
+                            head.cluster_id == cluster.id && head.revision == cluster.revision
                         }),
                     free: announcement.capacity.writable().saturating_sub(
                         reserved
@@ -91,13 +113,7 @@ pub(super) async fn lock(
                 },
             )
         })
-        .collect();
-    Ok(Allocation {
-        cluster,
-        targets,
-        status,
-        cursor,
-    })
+        .collect())
 }
 
 // Includes file headers, proofs, footers and the writer's allocation allowance.
@@ -131,7 +147,18 @@ impl Allocation {
                 .manifest
                 .members
                 .iter()
-                .any(|member| member.media_id == header.media && member.state == "available")
+                .any(|member| member.media_id == header.media
+                    && (member.state == "available"
+                        || member.state == "spare"
+                            && self
+                                .cluster
+                                .manifest
+                                .groups
+                                .iter()
+                                .any(|g| g.id == header.group
+                                    && g.replacing
+                                        .as_ref()
+                                        .is_some_and(|r| r.target == header.media))))
                 && self
                     .status
                     .get(&header.media)
@@ -151,7 +178,7 @@ impl Allocation {
         .await?;
         Ok(())
     }
-    pub fn select(&self, intent: &mut Intent, region: Option<&str>) -> Result<()> {
+    pub fn select(&self, intent: &mut Intent, region: Option<&str>, rebuild: bool) -> Result<()> {
         ensure!(
             self.cluster.manifest.revision as u64 == intent.layout_revision
                 && self.cluster.manifest.takeover_epoch == intent.takeover_epoch
@@ -159,7 +186,7 @@ impl Allocation {
             Error::OperationAborted
         );
         let recovery;
-        let cluster = if intent.area == crate::content::fragment::Area::Recovery {
+        let cluster = if rebuild || intent.area == crate::content::fragment::Area::Recovery {
             recovery = Cluster {
                 policy: crate::model::storage_cluster::Policy {
                     acknowledgement: crate::model::storage_cluster::Acknowledgement::All,

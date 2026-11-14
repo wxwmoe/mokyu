@@ -49,6 +49,7 @@ pub(crate) fn error(error: anyhow::Error) -> s3s::S3Error {
                 "NoSuchKey" => s3s::S3ErrorCode::NoSuchKey,
                 "NoSuchUpload" => s3s::S3ErrorCode::NoSuchUpload,
                 "NotImplemented" => s3s::S3ErrorCode::NotImplemented,
+                "ServiceUnavailable" => s3s::S3ErrorCode::ServiceUnavailable,
                 "SlowDown" => s3s::S3ErrorCode::SlowDown,
                 "InvalidBucketState" => s3s::S3ErrorCode::InvalidBucketState,
                 "OperationAborted" => s3s::S3ErrorCode::OperationAborted,

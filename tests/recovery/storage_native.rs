@@ -49,6 +49,29 @@ async fn native_takeover_requires_complete_history_and_preserves_layout() -> Res
     let node = TestNode::new(state, run).await?;
     let report = node.announcement()?;
     let media = report.media.media_id;
+    let second_state = backend
+        .provision_node(
+            &principal,
+            &format!("late-{}", Uuid::now_v7()),
+            "storage",
+            key,
+        )
+        .await?;
+    let second_run = backend
+        .open_session(
+            &second_state,
+            key,
+            Open {
+                boot: Uuid::now_v7(),
+                connection: Uuid::now_v7(),
+                previous_epoch: 0,
+            },
+        )
+        .await?
+        .run;
+    let second = TestNode::new(second_state, second_run).await?;
+    let second_report = second.announcement()?;
+    let second_media = second_report.media.media_id;
     let old_key = crate::content::codec::Key::new("aes-256-gcm", [74; 32])?;
     let id = Uuid::now_v7();
     let initial = Manifest {
@@ -76,12 +99,12 @@ async fn native_takeover_requires_complete_history_and_preserves_layout() -> Res
         topology: report.topology.clone(),
     });
     members.members.push(Member {
-        media_id: Uuid::now_v7(),
+        media_id: second_media,
         node_id: Uuid::now_v7(),
         state: "available".into(),
         topology: crate::model::storage_cluster::Topology {
-            storage_group: "missing-member".into(),
-            ..report.topology
+            url: "https://old-location.invalid:9443".into(),
+            ..second_report.topology
         },
     });
     let mut head = Manifest {
@@ -91,10 +114,17 @@ async fn native_takeover_requires_complete_history_and_preserves_layout() -> Res
         ..members.clone()
     };
     head.groups.push(Group {
+        replacing: None,
         id: Uuid::now_v7(),
         layout: Default::default(),
         members: head.members.iter().map(|m| m.media_id).collect(),
     });
+    second
+        .historical_layout(
+            head.clone(),
+            vec![initial.clone(), members.clone(), head.clone()],
+        )
+        .await?;
     node.historical_layout(head.clone(), vec![initial.clone(), members, head.clone()])
         .await?;
     node.apply(
@@ -150,6 +180,37 @@ async fn native_takeover_requires_complete_history_and_preserves_layout() -> Res
             .await?,
     )
     .await?;
+    second
+        .apply(
+            backend
+                .announce(&second.state, key, second_run, second.announcement()?)
+                .await?,
+        )
+        .await?;
+    let both = || Takeover {
+        name: format!("recovered-{id}"),
+        media_ids: vec![media, second_media],
+    };
+    let extended =
+        crate::storage::native::recovery::takeover(&backend, &principal, key, both()).await?;
+    assert_eq!(
+        extended.manifest.takeover_epoch,
+        adopted.manifest.takeover_epoch
+    );
+    assert_eq!(extended.revision, adopted.revision + 1);
+    assert_eq!(extended.manifest.groups, head.groups);
+    let late = &extended.manifest.members[1];
+    assert_eq!(
+        (late.media_id, late.node_id),
+        (second_media, second.state.node_id)
+    );
+    assert_eq!(late.topology.url, second.url);
+    assert_eq!(
+        crate::storage::native::recovery::takeover(&backend, &principal, key, both())
+            .await?
+            .manifest,
+        extended.manifest
+    );
     Ok(())
 }
 
@@ -2055,7 +2116,7 @@ async fn repair_generations(logged: bool) -> Result<()> {
         .await?;
         let repair = backend.repair(id).await?;
         assert_eq!(repair.state, "installed");
-        assert_eq!(&repair.original, source.receipt.as_ref().unwrap());
+        assert_eq!(repair.original.receipt(), source.receipt.as_ref());
         assert!(!repair.original_removed);
         assert!(backend.next_fill(id).await?.is_none());
         let mappings = resumed.read_window(operation, 0, 1).await?;

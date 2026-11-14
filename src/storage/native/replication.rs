@@ -169,22 +169,8 @@ impl Worker {
                 );
                 let result = async {
                     let body = pool.read(source.clone(), self.clone()).await?;
-                    if rate==0 {
-                        pool.write(target.clone(),body,self.as_ref()).await
-                    } else {
-                        use futures_util::{StreamExt,TryStreamExt};
-                        let started=tokio::time::Instant::now();
-                        let paced=async_stream::try_stream! {
-                            let mut source=body;
-                            let mut sent=0u64;
-                            while let Some(bytes)=source.try_next().await? {
-                                sent+=bytes.len() as u64;
-                                tokio::time::sleep_until(started+std::time::Duration::from_secs_f64(sent as f64/rate as f64)).await;
-                                yield bytes;
-                            }
-                        };
-                        pool.write(target.clone(),paced.boxed(),self.as_ref()).await
-                    }
+                    pool.write(target.clone(), paced(body, rate), self.as_ref())
+                        .await
                 }
                 .await;
                 match result {
@@ -217,6 +203,26 @@ impl Worker {
         }
         Ok(())
     }
+}
+
+pub(super) fn paced(
+    body: futures_util::stream::BoxStream<'static, Result<bytes::Bytes>>,
+    rate: u64,
+) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes>> {
+    use futures_util::{StreamExt, TryStreamExt};
+    if rate == 0 {
+        return body;
+    }
+    let started = tokio::time::Instant::now();
+    async_stream::try_stream!{
+        let mut source=body;
+        let mut sent=0u64;
+        while let Some(bytes)=source.try_next().await? {
+            sent+=bytes.len() as u64;
+            tokio::time::sleep_until(started+std::time::Duration::from_secs_f64(sent as f64/rate as f64)).await;
+            yield bytes;
+        }
+    }.boxed()
 }
 
 #[async_trait::async_trait]

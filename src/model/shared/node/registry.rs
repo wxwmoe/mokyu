@@ -287,6 +287,21 @@ async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease, node: Uuid) -> Result<Snaps
         valid_for_ms: (lease.expires - Utc::now()).num_milliseconds().max(0),
         maintenance,
         draining: lease.draining || handoff.as_ref().is_some_and(|row| row.state != "serving"),
+        storage_closed: if let Some(h) = &handoff {
+            if matches!(h.state.as_str(), "offline_ready" | "resuming") {
+                true
+            } else if h.state == "preparing"
+                && super::queries::node_handoff::row_storage(node)
+                    .fetch_one(&mut **tx)
+                    .await?
+            {
+                super::node_handoff::storage(tx, node).await?.empty()
+            } else {
+                false
+            }
+        } else {
+            false
+        },
         handoff_revision: handoff.map_or(0, |row| row.revision),
         settings,
         grants: Vec::new(),

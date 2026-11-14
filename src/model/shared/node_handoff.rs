@@ -29,7 +29,7 @@ pub(super) async fn manage(
         .await?
         .ok_or(Error::NodeInactive)?;
     ensure!(
-        enabled && matches!(role.as_str(), "data" | "worker" | "node"),
+        enabled && matches!(role.as_str(), "data" | "worker" | "node" | "storage"),
         Error::NodeInactive
     );
     let mut row = q::row(node).fetch_optional(&mut *tx).await?;
@@ -60,7 +60,7 @@ pub(super) async fn manage(
             } else {
                 q::insert(node, operation, next).execute(&mut *tx).await?;
             }
-            if next == "preparing" {
+            if next == "preparing" && role != "storage" {
                 q::tails(node).execute(&mut *tx).await?;
             }
             row = q::row(node).fetch_optional(&mut *tx).await?;
@@ -70,7 +70,7 @@ pub(super) async fn manage(
         || ("serving".into(), None, 0),
         |row| (row.state, Some(row.operation), row.revision),
     );
-    let (pending, (pending_bytes, damaged_tails)) = if state == "preparing" {
+    let (pending, (pending_bytes, damaged_tails)) = if state == "preparing" && role != "storage" {
         (
             q::counts(&mut tx, node).await?,
             q::details(node).fetch_one(&mut *tx).await?,
@@ -78,7 +78,13 @@ pub(super) async fn manage(
     } else {
         (NodeDrain::default(), (0, 0))
     };
+    let storage = if role == "storage" && state == "preparing" {
+        Some(storage(&mut tx, node).await?)
+    } else {
+        None
+    };
     let view = Handoff {
+        storage,
         state,
         operation,
         revision,
@@ -88,6 +94,35 @@ pub(super) async fn manage(
     };
     tx.commit().await?;
     Ok(view)
+}
+
+pub(super) async fn storage(
+    tx: &mut Tx<'_>,
+    node: Uuid,
+) -> Result<crate::model::node::StorageDrain> {
+    use crate::model::node::StorageDrain;
+    let Some((c, media)) = super::storage_cluster::draining_source(tx, node).await? else {
+        return Ok(StorageDrain::default());
+    };
+    let (fragments, moves, reservations, recovery_heads) =
+        super::queries::storage_move::status(media)
+            .fetch_one(&mut **tx)
+            .await?;
+    Ok(StorageDrain {
+        groups: c
+            .manifest
+            .groups
+            .iter()
+            .filter(|g| {
+                g.members.contains(&media)
+                    || g.replacing.as_ref().is_some_and(|r| r.target == media)
+            })
+            .count() as i64,
+        fragments,
+        moves,
+        reservations,
+        recovery_heads,
+    })
 }
 
 pub(super) async fn observed(tx: &mut Tx<'_>, node: Uuid, report: &NodeReport) -> Result<()> {
@@ -106,8 +141,18 @@ pub(super) async fn observed(tx: &mut Tx<'_>, node: Uuid, report: &NodeReport) -
     if row.revision != revision {
         return Ok(());
     }
+    let (role, _) = q::role(node).fetch_one(&mut **tx).await?;
     let next = match row.state.as_str() {
         "resuming" => "serving",
+        "preparing" if role == "storage" => {
+            if report.status["storage_admission_closed"] != true
+                || report.status["storage_streams"].as_u64() != Some(0)
+                || !storage(tx, node).await?.empty()
+            {
+                return Ok(());
+            }
+            "offline_ready"
+        }
         "preparing" => {
             q::tails(node).execute(&mut **tx).await?;
             if ["s3", "web"]

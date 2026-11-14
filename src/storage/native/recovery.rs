@@ -25,24 +25,25 @@ pub(crate) async fn takeover(
     let targets = clusters
         .takeover_targets(principal, &input.media_ids)
         .await?;
-    if let Some(assigned) = targets.first().and_then(|t| t.device.cluster_id) {
+    if let Some(assigned) = targets.iter().find_map(|t| t.device.cluster_id) {
         ensure!(
             targets
                 .iter()
-                .all(|t| t.device.cluster_id == Some(assigned)),
-            "selected storage includes already assigned members"
+                .all(|t| t.device.cluster_id.is_none_or(|id| id == assigned)),
+            "selected storage belongs to different clusters"
         );
         let (value, _) = clusters.placement_snapshot(assigned).await?;
         ensure!(
             value.name == input.name,
             "storage cluster is already registered under another name"
         );
-        return Ok(value);
+        if targets
+            .iter()
+            .all(|t| t.device.cluster_id == Some(assigned))
+        {
+            return Ok(value);
+        }
     }
-    ensure!(
-        targets.iter().all(|t| t.device.cluster_id.is_none()),
-        "selected storage includes already assigned members"
-    );
     let anchor = targets
         .iter()
         .filter_map(|t| t.device.announcement.manifest.as_ref())

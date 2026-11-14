@@ -40,7 +40,7 @@ pub(crate) fn choose<'a>(
                 && member.topology.storage_group == group
                 && status
                     .get(&member.media_id)
-                    .is_some_and(|s| s.online && s.free >= bytes)
+                    .is_some_and(|s| s.online && !s.draining && s.free >= bytes)
         })
         .max_by_key(|member| {
             (
@@ -85,6 +85,7 @@ mod tests {
                     m.media_id,
                     Status {
                         online: true,
+                        draining: false,
                         free: *free,
                         requests: None,
                     },

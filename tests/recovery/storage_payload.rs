@@ -25,6 +25,7 @@ pub(crate) async fn fixture() -> Result<(Backend, Cluster)> {
         })
         .collect();
     let group = Group {
+        replacing: None,
         id: Uuid::now_v7(),
         layout: Layout::default(),
         members: members.iter().map(|m| m.media_id).collect(),

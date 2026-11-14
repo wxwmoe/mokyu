@@ -199,6 +199,101 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let clusters = &app.storage_clusters;
             Ok(match command {
                 StorageClusters::List => serde_json::to_value(clusters.overview().await?)?,
+                StorageClusters::Rebuild {
+                    id,
+                    revision,
+                    backup_group,
+                    bytes_per_second,
+                } => serde_json::to_value(
+                    clusters
+                        .start_run(
+                            principal,
+                            id,
+                            c::RunInput {
+                                revision,
+                                kind: "rebuild".into(),
+                                backup_group,
+                                media_id: None,
+                                bytes_per_second,
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::Scrub {
+                    id,
+                    revision,
+                    bytes_per_second,
+                } => serde_json::to_value(
+                    clusters
+                        .start_run(
+                            principal,
+                            id,
+                            c::RunInput {
+                                revision,
+                                kind: "scrub".into(),
+                                backup_group: None,
+                                media_id: None,
+                                bytes_per_second,
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::Sync {
+                    id,
+                    media,
+                    revision,
+                    bytes_per_second,
+                } => serde_json::to_value(
+                    clusters
+                        .start_run(
+                            principal,
+                            id,
+                            c::RunInput {
+                                revision,
+                                kind: "sync".into(),
+                                backup_group: None,
+                                media_id: Some(media),
+                                bytes_per_second,
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::CancelRun { id, job, revision } => {
+                    serde_json::to_value(clusters.cancel_run(principal, id, job, revision).await?)?
+                }
+                StorageClusters::Replace {
+                    id,
+                    source,
+                    target,
+                    revision,
+                    bytes_per_second,
+                } => serde_json::to_value(
+                    clusters
+                        .start_move(
+                            principal,
+                            id,
+                            c::MoveInput {
+                                source,
+                                target,
+                                revision,
+                                bytes_per_second,
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::Move {
+                    id,
+                    job,
+                    action,
+                    revision,
+                } => serde_json::to_value(
+                    clusters
+                        .move_state(principal, id, job, revision, &action)
+                        .await?,
+                )?,
+                StorageClusters::Space { id } => {
+                    serde_json::to_value(clusters.space(principal, id).await?)?
+                }
                 StorageClusters::Backups { id, after } => {
                     serde_json::to_value(clusters.backup_points(principal, id, after).await?)?
                 }

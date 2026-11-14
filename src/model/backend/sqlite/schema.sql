@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261114135600.
+-- Generated from the complete sqlite migration chain through 20261114160500.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -1581,6 +1581,19 @@ CREATE TABLE storage_backup_files (
     CONSTRAINT storage_backup_file_slot FOREIGN KEY(backup_id) REFERENCES storage_backups(id)
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE storage_backup_moves (
+    job_id BLOB NOT NULL,
+    backup_id BLOB NOT NULL,
+    sequence INTEGER NOT NULL,
+    shard INTEGER NOT NULL,
+    receipt TEXT NOT NULL CHECK(json_valid(receipt)),
+    copied INTEGER NOT NULL DEFAULT FALSE,
+    removed INTEGER NOT NULL DEFAULT FALSE,
+    PRIMARY KEY(job_id,backup_id,sequence,shard),
+    CONSTRAINT storage_backup_move_job FOREIGN KEY(job_id) REFERENCES storage_member_moves(id),
+    CONSTRAINT storage_backup_move_slot FOREIGN KEY(backup_id) REFERENCES storage_backups(id)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE storage_backup_scans (
     cluster_id BLOB NOT NULL PRIMARY KEY,
     after_id BLOB NOT NULL,
@@ -1611,6 +1624,28 @@ CREATE TABLE storage_cluster_history (
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE storage_cluster_lock (id INTEGER PRIMARY KEY CHECK(id=1)) STRICT;
+
+CREATE TABLE storage_cluster_runs (
+    id BLOB NOT NULL PRIMARY KEY,
+    cluster_id BLOB NOT NULL,
+    media_id BLOB,
+    revision INTEGER NOT NULL,
+    layout TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    state TEXT NOT NULL,
+    cursor_id BLOB NOT NULL,
+    ceiling BLOB NOT NULL,
+    check_token BLOB,
+    lease_until INTEGER NOT NULL DEFAULT 0,
+    checked INTEGER NOT NULL DEFAULT 0,
+    byte_count INTEGER NOT NULL DEFAULT 0,
+    bytes_per_second INTEGER NOT NULL,
+    last_error TEXT,
+    backup_group TEXT,
+    CONSTRAINT storage_run_cluster FOREIGN KEY(cluster_id) REFERENCES storage_clusters(id),
+    CONSTRAINT storage_run_kind CHECK(kind IN ('rebuild','scrub','sync')),
+    CONSTRAINT storage_run_state CHECK(state IN ('objects','snapshots','completed','cancelled'))
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE storage_clusters (
     id BLOB PRIMARY KEY CHECK(length(id)=16),
@@ -1694,6 +1729,21 @@ CREATE TABLE storage_maintenance (
     last_scheduled_at INTEGER NOT NULL,
     PRIMARY KEY(storage_id,policy)
 ) STRICT;
+
+CREATE TABLE storage_member_moves (
+    id BLOB NOT NULL PRIMARY KEY,
+    cluster_id BLOB NOT NULL,
+    group_id BLOB NOT NULL,
+    source_media BLOB NOT NULL,
+    target_media BLOB NOT NULL,
+    state TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    checked_at INTEGER NOT NULL DEFAULT 0,
+    bytes_per_second INTEGER NOT NULL,
+    CONSTRAINT storage_move_cluster FOREIGN KEY(cluster_id) REFERENCES storage_clusters(id),
+    CONSTRAINT storage_move_state CHECK(state IN ('moving','paused','reverting','cleaning','undo_cleanup','completed','cancelled')),
+    CONSTRAINT storage_move_members CHECK(source_media<>target_media AND bytes_per_second>0)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE storage_object_writes (
     operation BLOB NOT NULL PRIMARY KEY REFERENCES storage_payloads(operation),
@@ -1917,6 +1967,14 @@ CREATE TABLE storage_reservations (
     PRIMARY KEY(operation,media_id),
     CONSTRAINT storage_reservation_payload FOREIGN KEY(operation) REFERENCES storage_payloads(operation),
     CONSTRAINT storage_reservation_cluster FOREIGN KEY(cluster_id) REFERENCES storage_clusters(id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE storage_run_snapshots (
+    run_id BLOB NOT NULL,
+    storage_id BLOB NOT NULL,
+    snapshot_id BLOB NOT NULL,
+    PRIMARY KEY(run_id,storage_id),
+    CONSTRAINT storage_run_snapshot_job FOREIGN KEY(run_id) REFERENCES storage_cluster_runs(id)
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE "storages" (
@@ -2651,6 +2709,12 @@ CREATE INDEX storage_fragment_reclaim ON storage_fragments(operation,deleted,id)
 
 CREATE INDEX storage_journal_pending ON storage_journal_sources(namespace_id,allocated_revision,revision,operation);
 
+CREATE INDEX storage_move_due ON storage_member_moves(state,checked_at,id);
+
+CREATE INDEX storage_move_source ON storage_member_moves(cluster_id,source_media,state);
+
+CREATE INDEX storage_move_target ON storage_member_moves(cluster_id,target_media,state);
+
 CREATE INDEX storage_objects_listing ON storage_objects(namespace_id,path) WHERE head IS NOT NULL;
 
 CREATE INDEX storage_payload_collection ON storage_payloads(namespace_id,state,collect_after,operation);
@@ -2666,6 +2730,10 @@ CREATE INDEX storage_repair_operation ON storage_repairs(operation,state,id);
 CREATE INDEX storage_reservation_settlement ON storage_reservations(media_id,complete,accounting_boot,accounting_revision);
 
 CREATE INDEX storage_reservation_totals ON storage_reservations(cluster_id,media_id);
+
+CREATE INDEX storage_run_cluster ON storage_cluster_runs(cluster_id,state);
+
+CREATE INDEX storage_run_due ON storage_cluster_runs(state,lease_until,id);
 
 CREATE INDEX storages_block_key ON storages(block_key_id);
 

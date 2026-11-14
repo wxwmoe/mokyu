@@ -533,6 +533,16 @@ pub(super) async fn publish_in(
     payload: Uuid,
     owner: Uuid,
 ) -> Result<()> {
+    publish_with(tx, namespace, payload, owner, None).await
+}
+
+pub(super) async fn publish_with(
+    tx: &mut physical::Tx<'_>,
+    namespace: Uuid,
+    payload: Uuid,
+    owner: Uuid,
+    token: Option<Uuid>,
+) -> Result<()> {
     if let Some(job) = super::queries::journal_restore::native_pending(namespace)
         .fetch_optional(&mut **tx)
         .await?
@@ -563,6 +573,18 @@ pub(super) async fn publish_in(
         ModelError::OperationAborted
     );
     binding.1.check(object.2)?;
+    if matches!(*binding.1, Condition::Rebuild(_)) {
+        ensure!(
+            super::queries::storage_runs::lease(
+                owner,
+                token.ok_or(ModelError::OperationAborted)?,
+                chrono::Utc::now().timestamp_micros()
+            )
+            .fetch_one(&mut **tx)
+            .await?,
+            ModelError::OperationAborted
+        );
+    }
     storage_payload::publish_in(tx, operation).await?;
     ensure!(
         q::publish(
@@ -987,8 +1009,11 @@ impl NativeObjects for Backend {
         input.condition.check(object.2)?;
         if let Some(operation) = object.3 {
             let old = storage_payload::current(&mut tx, operation).await?;
+            let other = q::binding(operation).fetch_one(&mut *tx).await?;
             ensure!(
-                old.write_until <= chrono::Utc::now().timestamp_micros(),
+                old.write_until <= chrono::Utc::now().timestamp_micros()
+                    || matches!(*other.1, Condition::Rebuild(_))
+                        && !matches!(input.condition, Condition::Rebuild(_)),
                 ModelError::OperationAborted
             );
             physical::retire(operation).execute(&mut *tx).await?;
@@ -1009,7 +1034,23 @@ impl NativeObjects for Backend {
                     && identity.revision == intent.revision),
             "recovery write revision changed"
         );
-        allocation.select(&mut intent, input.region.as_deref())?;
+        let rebuild = matches!(input.condition, Condition::Rebuild(_));
+        if rebuild {
+            let job = super::queries::storage_runs::job(input.owner)
+                .fetch_one(&mut *tx)
+                .await?;
+            let (_, _, layout) = super::queries::storage_runs::position(input.owner)
+                .fetch_one(&mut *tx)
+                .await?;
+            ensure!(
+                job.cluster == intent.cluster
+                    && job.state == "objects"
+                    && job.kind == "rebuild"
+                    && *layout == allocation.cluster.policy.layout,
+                ModelError::OperationAborted
+            );
+        }
+        allocation.select(&mut intent, input.region.as_deref(), rebuild)?;
         if input.path == "mokyu.json" {
             intent.acknowledgement = crate::model::storage_cluster::Acknowledgement::All;
         }

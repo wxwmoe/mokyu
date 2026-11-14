@@ -762,6 +762,7 @@ message NodeState {
   string deployment_mode = 7;
   uint64 mode_revision = 8;
   uint64 handoff_revision = 9;
+  bool storage_closed = 10;
 }
 
 message Welcome {

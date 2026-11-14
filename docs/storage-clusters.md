@@ -64,6 +64,27 @@ data 使用 HTTP/2 直接访问 storage，分范围并行读取并按对象顺�
 
 使用 `storage-cluster repair CLUSTER_UUID FRAGMENT_UUID` 核验并修复分片。健康片保持不变；确认损坏或缺失后，从健康主副本生成新片，完整校验后切换映射。读租约、共享引用、任务和元数据恢复点仍使用旧来源时不会回收它。网络错误不会被当作磁盘损坏。
 
+## 扩容和成员维护
+
+新增主盘可以先加入群集。凑够一组再启用；已有盘扩容后，有效容量按组内剩余空间最少的盘计算。用 `mokyu cli storage-cluster space CLUSTER_UUID` 查看完整组数、当前可写组数、逻辑可写量和主盘物理占用。
+
+- **换盘**：选择在用主盘和同群集尚未分配的主盘。目标也可选已标为热备的成员；不指定目标时须先确认源盘已暂停或离线。替换期间依旧可从健康副本读取，新的普通写入只用其他完整组。备份盘只能迁到相同存储分组的另一块备份盘。
+- **准备下线**：在群集节点详情发起。没有合格目标时会保留引用并等待。待分片、恢复载荷、发布证据、预留空间和在途读取都交接完毕，节点关闭新请求入口后，才可停止容器。恢复服务保留已发布的布局，不会把数据反向搬回。
+- **立即同步与巡检**：立即同步核验指定主盘；巡检逐对象读取所有主片。遇到缺片或损坏时从健康主片修复，无法验证的内容保留为待处理。普通读取和巡检均不从独立备份取数。
+- **重建群集**：按当前布局重新写入现有载荷。校验新落盘的所有副本后，只有源仍是当前版本才切换；并发覆盖或删除优先。启用元数据日志的后端会另外发布新的恢复快照。任务保留检查点，停止任务不会撤销已经确认的迁移。
+
+```sh
+mokyu cli storage-cluster replace CLUSTER_UUID SOURCE_MEDIA TARGET_MEDIA --revision N
+mokyu cli storage-cluster move CLUSTER_UUID JOB_UUID pause --revision N
+mokyu cli storage-cluster move CLUSTER_UUID JOB_UUID resume --revision N
+mokyu cli storage-cluster sync CLUSTER_UUID MEDIA_UUID --revision N
+mokyu cli storage-cluster scrub CLUSTER_UUID --revision N
+mokyu cli storage-cluster rebuild CLUSTER_UUID --revision N --bytes-per-second 16777216
+mokyu cli storage-cluster cancel-run CLUSTER_UUID JOB_UUID --revision N
+```
+
+群集修订和任务 ID 从 `storage-cluster list` 读取。指定盘迁移进入清理阶段前可以取消；已经发布的替换要等旧读者释放后才清理旧分片。原数据库丢失时，可先接管已找到的介质，再以同一群集名称补充迟到的成员，更新 URL 后仍按介质 UUID 匹配。只有已登记的主侧实际持有所需来源时，接管后才有可读取的数据。
+
 ## 独立备份
 
 在“存储群集”里将用途为 `backup` 的成员加入群集，然后设置备份份数。每份备份使用不同的 `storage_group`；同组可以有多块盘，恢复这一份时需找回持有相应文件的成员。份数默认为 0。调高份数时后台也会补齐先前已发布的载荷。限速按单次传输生效。备份盘断线或已满时，主写仍按正常或降级确认档返回，欠账保留。
@@ -82,6 +103,8 @@ mokyu cli storage-cluster verify-backups CLUSTER_UUID --revision N
 每个介质有稳定的 `media.json` UUID。已发布群集清单为 `cluster.json`，不可变历史放在 `cluster/history/<群集 UUID>/<记录 UUID>.json`。记录包含修订、记录 UUID 和前序摘要。同步先持久保存 `cluster.json.part`，逐批核对并保存历史后再原子发布清单；中断重启后继续同步。缺失或损坏的身份和清单不会被当成空盘重新初始化。
 
 control 的物理映射与 storage 文件字段分别见[数据库结构](database-schema.md#存储群集)和[原生分片格式](storage-fragments.md)。
+
+原数据库仍在且原主盘已失效时，先在同一群集启用一个完整、可写的新主盘组，再在「群集重建」选择已核验的备份组；CLI 对应 `storage-cluster rebuild CLUSTER --revision REV --backup-group GROUP`。任务仅从指定备份组恢复当前载荷，逐对象校验后切换。原桶、权限与未开启元数据日志的对象都保留。某个备份缺片时任务停在该载荷，普通读取不会改走备份盘。
 
 更换新部署签发的 `node.json` 后，storage 可以向新 control 登记，无需原部署 key。现存清单和历史保留并标为待核对，不会自动覆盖，也不能直接加入新的布局。停止旧群集后，在新 control 使用 `storage-cluster takeover NAME MEDIA_UUID...` 核对历史并接管所选介质；介质 UUID 与已存载荷保持不变。一个目录只能有一个进程持有运行锁，control 也限制同一身份的有效会话与介质绑定。
 

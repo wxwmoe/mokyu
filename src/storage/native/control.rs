@@ -13,6 +13,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{sync::Mutex, time::Instant};
 use uuid::Uuid;
 
+mod maintenance;
+
 struct Snapshot {
     cluster: Cluster,
     targets: Vec<Target>,
@@ -50,6 +52,148 @@ fn until() -> i64 {
 }
 
 impl Control {
+    async fn maintain_member(
+        self: &Arc<Self>,
+        app: &crate::app::App,
+        pool: &super::transport::Pool,
+    ) -> Result<bool> {
+        use crate::model::storage_cluster::MoveStep;
+        let Some(step) = self.clusters.advance_move().await? else {
+            return Ok(false);
+        };
+        match step {
+            MoveStep::Advanced => (),
+            MoveStep::Evidence {
+                job,
+                media,
+                namespace,
+                after,
+                through,
+            } => {
+                for (proof, manifest) in app
+                    .journal
+                    .native_history(namespace, after, through)
+                    .await?
+                {
+                    let target = self.publication_target(&proof, &manifest, media).await?;
+                    pool.publish(&target).await?;
+                    self.clusters.move_evidence(job, namespace, &proof).await?;
+                }
+            }
+            MoveStep::Backup {
+                job,
+                slot,
+                receipt,
+                remove,
+            } => {
+                let snap = self.snapshot(job.cluster).await?;
+                let find = |media| {
+                    snap.targets
+                        .iter()
+                        .find(|t| t.device.media_id == media)
+                        .context("backup replacement member is unavailable")
+                };
+                let h = &receipt.header;
+                if remove {
+                    pool.remove(&self.sign(
+                        &snap,
+                        find(job.source)?,
+                        Action::BackupRemove {
+                            receipt: receipt.clone(),
+                        },
+                        None,
+                    )?)
+                    .await?;
+                    self.clusters
+                        .moved_backup(&self.secrets.credential_key, job.id, slot, &receipt, None)
+                        .await?;
+                } else {
+                    let source = self.sign(
+                        &snap,
+                        find(job.source)?,
+                        Action::BackupRead {
+                            receipt: receipt.clone(),
+                            offset: 0,
+                            length: h.shard_bytes,
+                        },
+                        None,
+                    )?;
+                    let target = self.sign(
+                        &snap,
+                        find(job.target)?,
+                        Action::Backup { header: h.clone() },
+                        None,
+                    )?;
+                    let renewal = Arc::new(MoveRenewal {
+                        control: self.clone(),
+                        job: job.clone(),
+                        receipt: receipt.clone(),
+                    });
+                    let body = pool.read(source, renewal.clone()).await?;
+                    pool.write(
+                        target,
+                        super::replication::paced(body, job.bytes_per_second as u64),
+                        renewal.as_ref(),
+                    )
+                    .await?;
+                    let evidence = if h.area == Area::Recovery {
+                        Some(self.payloads.backup_link(slot).await?)
+                    } else {
+                        None
+                    };
+                    let check = self.sign(
+                        &snap,
+                        find(job.target)?,
+                        Action::BackupCheck {
+                            receipt: receipt.clone(),
+                            evidence,
+                        },
+                        None,
+                    )?;
+                    let proof = pool.check_backup(&check).await?;
+                    self.clusters
+                        .moved_backup(
+                            &self.secrets.credential_key,
+                            job.id,
+                            slot,
+                            &receipt,
+                            Some(&proof),
+                        )
+                        .await?;
+                }
+            }
+            MoveStep::Collect {
+                namespace,
+                operation,
+                area,
+            } => {
+                self.reclaim(namespace, operation, area, pool).await?;
+            }
+        }
+        Ok(true)
+    }
+
+    pub async fn maintain_members(self: &Arc<Self>, app: &crate::app::App) -> Result<()> {
+        let pool = Arc::new(super::transport::Pool::new(Duration::from_secs(30)));
+        let members = async {
+            loop {
+                let mut delay = Duration::from_secs(2);
+                if app.writable().is_ok() {
+                    match self.maintain_member(app, &pool).await {
+                        Ok(true) => {
+                            app.wake_tasks.notify_waiters();
+                            delay = Duration::from_millis(150);
+                        }
+                        Ok(false) => (),
+                        Err(error) => tracing::warn!(%error,"member maintenance will retry"),
+                    }
+                }
+                tokio::time::sleep(delay).await;
+            }
+        };
+        tokio::select! { _=members=>Ok(()), result=self.maintain_runs(app,pool.clone())=>result }
+    }
+
     pub async fn maintain_backups(&self, app: &crate::app::App) -> Result<()> {
         loop {
             let delay = if app.writable().is_ok() {
@@ -476,7 +620,7 @@ impl Control {
     ) -> Result<super::replication::Reply> {
         use super::replication::{Operation, Reply};
         let repair = self.payloads.repair(id).await?;
-        let original = &repair.original.header;
+        let original = repair.original.header();
         ensure!(
             original.operation == plan.operation
                 && original.namespace == plan.storage
@@ -532,18 +676,26 @@ impl Control {
         }
         let repair = self.payloads.repair(id).await?;
         let snapshot = self.snapshot(original.cluster).await?;
-        let target = snapshot
-            .targets
-            .iter()
-            .find(|target| target.device.media_id == original.media)
-            .context("repair target is offline")?;
-        if repair.state == "queued" {
+        let movement = self
+            .clusters
+            .move_rate(original.cluster, original.media)
+            .await?;
+        if repair.state == "queued" && movement.is_none() {
+            let target = snapshot
+                .targets
+                .iter()
+                .find(|t| t.device.media_id == original.media)
+                .context("repair target is offline")?;
             return Ok(Reply::Check {
                 target: self.sign_until(
                     &snapshot,
                     target,
                     Action::Read {
-                        receipt: repair.original,
+                        receipt: repair
+                            .original
+                            .receipt()
+                            .context("unwritten replica requires a replacement")?
+                            .clone(),
                         offset: 0,
                         length: original.shard_bytes,
                     },
@@ -561,13 +713,18 @@ impl Control {
         }
         let repair = self.payloads.prepare_repair(id, true).await?;
         let header = repair.candidate.context("repair candidate is missing")?;
+        let target = snapshot
+            .targets
+            .iter()
+            .find(|t| t.device.media_id == header.media)
+            .context("repair target is offline")?;
         let mut sources = Vec::new();
         for mapping in self.read_window(plan.operation, plan.sequence, 1).await? {
             let Some(receipt) = mapping.receipt else {
                 continue;
             };
             if mapping.deleted
-                || receipt.header.fragment == id
+                || (receipt.header.fragment == id && header.media == original.media)
                 || receipt.header.shard != header.shard
             {
                 continue;
@@ -596,7 +753,7 @@ impl Control {
             "no verified primary copy is available for repair"
         );
         Ok(Reply::Window {
-            rate: 0,
+            rate: movement.unwrap_or(0),
             sources,
             targets: vec![self.sign_until(
                 &snapshot,
@@ -713,11 +870,12 @@ impl Control {
         }
         let snapshot = self.snapshot(request.cluster).await?;
         let cluster = &snapshot.cluster;
-        let group = cluster
-            .manifest
-            .groups
-            .first()
-            .context("storage cluster has no enabled layout group")?;
+        let group = cluster.manifest.groups.first().ok_or_else(|| {
+            s3s::s3_error!(
+                ServiceUnavailable,
+                "storage cluster has no enabled layout group"
+            )
+        })?;
         let payload = recovery.map_or_else(Uuid::now_v7, |identity| identity.payload);
         self.payloads
             .reserve_object(
@@ -1285,6 +1443,24 @@ impl Control {
             "storage node lease is expiring"
         );
         let manifest = &snapshot.cluster.manifest;
+        let mut revision = manifest.revision as u64;
+        if matches!(action, Action::Read { .. }) && previous.is_none() {
+            let member = manifest
+                .members
+                .iter()
+                .find(|m| m.media_id == target.device.media_id)
+                .context("storage member is missing")?;
+            ensure!(member.state != "paused", "storage member is paused");
+            // An unrelated topology edit must not interrupt reads from the last acknowledged layout.
+            if let Some(announced) = &target.device.announcement.manifest {
+                ensure!(
+                    announced.takeover_epoch == manifest.takeover_epoch
+                        && announced.deployment_id == manifest.deployment_id,
+                    "storage read membership is stale"
+                );
+                revision = revision.min(announced.revision as u64);
+            }
+        }
         let grant = Grant {
             id: previous.map_or_else(Uuid::now_v7, |grant| grant.id),
             deployment: manifest.deployment_id,
@@ -1294,8 +1470,7 @@ impl Control {
             fence: run.fence,
             cluster: manifest.cluster_id,
             takeover_epoch: manifest.takeover_epoch,
-            manifest_revision: previous
-                .map_or(manifest.revision as u64, |grant| grant.manifest_revision),
+            manifest_revision: previous.map_or(revision, |grant| grant.manifest_revision),
             issued: now,
             expires,
             action,
@@ -1377,6 +1552,39 @@ impl Control {
                 Some(grant),
                 expires,
             )?
+            .authorization)
+    }
+}
+
+struct MoveRenewal {
+    control: Arc<Control>,
+    job: crate::model::storage_cluster::MemberMove,
+    receipt: crate::model::storage_payload::Receipt,
+}
+#[async_trait::async_trait]
+impl super::transport::Renewal for MoveRenewal {
+    async fn renew(&self, signed: &SignedGrant) -> Result<SignedGrant> {
+        let g = &signed.grant;
+        let snap = self.control.snapshot(self.job.cluster).await?;
+        signed.verify(&snap.cluster.manifest)?;
+        ensure!(
+            self.control
+                .clusters
+                .move_live(self.job.id, self.job.source, self.job.target)
+                .await?
+                && g.expires > chrono::Utc::now().timestamp()
+                && (matches!(&g.action,Action::BackupRead{receipt,offset:0,length} if g.media==self.job.source && receipt==&self.receipt && *length==receipt.header.shard_bytes)
+                    || matches!(&g.action,Action::Backup{header} if g.media==self.job.target && *header==self.receipt.header)),
+            "backup move lease is no longer active"
+        );
+        let target = snap
+            .targets
+            .iter()
+            .find(|t| t.device.media_id == g.media)
+            .context("backup move member is offline")?;
+        Ok(self
+            .control
+            .sign(&snap, target, g.action.clone(), Some(g))?
             .authorization)
     }
 }

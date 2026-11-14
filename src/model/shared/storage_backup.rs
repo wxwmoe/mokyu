@@ -410,6 +410,20 @@ impl Backups for Backend {
                     .fetch_one(&mut *tx)
                     .await?;
                 ensure!(after >= desired, "backup evidence chain has a gap");
+                if let Action::BackupCheck { evidence, .. } = &proof.authorization.grant.action {
+                    let (published, manifest) = super::queries::storage_journal::history(
+                        h.namespace,
+                        (desired - 1).try_into()?,
+                        desired.try_into()?,
+                    )
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    published.verify(&manifest)?;
+                    ensure!(
+                        Some(published.link()?) == *evidence,
+                        "backup verification used another recovery publication"
+                    );
+                }
             }
             ensure!(
                 q::checked(

@@ -65,3 +65,7 @@ pub(in super::super) fn tails(id: Uuid) -> Statement<'static> {
 pub(in super::super) fn blockers(id: Uuid) -> Rows<'static, (i64, i64)> {
     sqlx::query_as("SELECT (SELECT count(*) FROM multipart_tails t JOIN uploads u ON u.id=t.upload_id WHERE t.node_id=? AND u.state IN ('active','completing') AND EXISTS(SELECT 1 FROM extents e JOIN parts p ON p.stream_id=e.stream_id WHERE p.upload_id=t.upload_id AND e.fragment_id=t.fragment_id)),(SELECT count(*) FROM tasks t WHERE (t.source_node=? AND t.state IN ('queued','running','paused','failed')) OR (t.state='running' AND EXISTS(SELECT 1 FROM node_work w WHERE w.node_id=? AND w.task_id=t.id AND w.result_hash IS NULL AND w.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))))").bind(id).bind(id).bind(id)
 }
+
+pub(in super::super) fn row_storage(id: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND role='storage')").bind(id)
+}

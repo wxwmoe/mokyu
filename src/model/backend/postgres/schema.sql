@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261114135600.
+-- Generated from the complete postgres migration chain through 20261114160500.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2542,6 +2542,16 @@ CREATE TABLE public.storage_backup_files (
     verified_at bigint
 );
 
+CREATE TABLE public.storage_backup_moves (
+    job_id uuid NOT NULL,
+    backup_id uuid NOT NULL,
+    sequence integer NOT NULL,
+    shard integer NOT NULL,
+    receipt jsonb NOT NULL,
+    copied boolean DEFAULT false NOT NULL,
+    removed boolean DEFAULT false NOT NULL
+);
+
 CREATE TABLE public.storage_backup_scans (
     cluster_id uuid NOT NULL,
     after_id uuid NOT NULL,
@@ -2571,6 +2581,27 @@ CREATE TABLE public.storage_cluster_history (
 CREATE TABLE public.storage_cluster_lock (
     id integer NOT NULL,
     CONSTRAINT storage_cluster_lock_id_check CHECK ((id = 1))
+);
+
+CREATE TABLE public.storage_cluster_runs (
+    id uuid NOT NULL,
+    cluster_id uuid NOT NULL,
+    media_id uuid,
+    revision bigint NOT NULL,
+    layout jsonb NOT NULL,
+    kind text NOT NULL,
+    state text NOT NULL,
+    cursor_id uuid NOT NULL,
+    ceiling uuid NOT NULL,
+    check_token uuid,
+    lease_until bigint DEFAULT 0 NOT NULL,
+    checked bigint DEFAULT 0 NOT NULL,
+    byte_count bigint DEFAULT 0 NOT NULL,
+    bytes_per_second bigint NOT NULL,
+    last_error text,
+    backup_group text,
+    CONSTRAINT storage_run_kind CHECK ((kind = ANY (ARRAY['rebuild'::text, 'scrub'::text, 'sync'::text]))),
+    CONSTRAINT storage_run_state CHECK ((state = ANY (ARRAY['objects'::text, 'snapshots'::text, 'completed'::text, 'cancelled'::text])))
 );
 
 CREATE TABLE public.storage_clusters (
@@ -2650,6 +2681,20 @@ CREATE TABLE public.storage_maintenance (
     storage_id uuid NOT NULL,
     policy text NOT NULL,
     last_scheduled_at timestamp with time zone NOT NULL
+);
+
+CREATE TABLE public.storage_member_moves (
+    id uuid NOT NULL,
+    cluster_id uuid NOT NULL,
+    group_id uuid NOT NULL,
+    source_media uuid NOT NULL,
+    target_media uuid NOT NULL,
+    state text NOT NULL,
+    created_at bigint NOT NULL,
+    checked_at bigint DEFAULT 0 NOT NULL,
+    bytes_per_second bigint NOT NULL,
+    CONSTRAINT storage_move_members CHECK (((source_media <> target_media) AND (bytes_per_second > 0))),
+    CONSTRAINT storage_move_state CHECK ((state = ANY (ARRAY['moving'::text, 'paused'::text, 'reverting'::text, 'cleaning'::text, 'undo_cleanup'::text, 'completed'::text, 'cancelled'::text])))
 );
 
 CREATE TABLE public.storage_object_writes (
@@ -2906,6 +2951,12 @@ CREATE TABLE public.storage_reservations (
     complete boolean DEFAULT false NOT NULL,
     CONSTRAINT storage_reservations_accounting_revision_check CHECK ((accounting_revision >= 0)),
     CONSTRAINT storage_reservations_bytes_check CHECK ((bytes > 0))
+);
+
+CREATE TABLE public.storage_run_snapshots (
+    run_id uuid NOT NULL,
+    storage_id uuid NOT NULL,
+    snapshot_id uuid NOT NULL
 );
 
 CREATE TABLE public.storages (
@@ -3875,6 +3926,9 @@ ALTER TABLE ONLY public.storage_backups
 ALTER TABLE ONLY public.storage_backup_files
     ADD CONSTRAINT storage_backup_files_pkey PRIMARY KEY (backup_id, sequence, shard);
 
+ALTER TABLE ONLY public.storage_backup_moves
+    ADD CONSTRAINT storage_backup_moves_pkey PRIMARY KEY (job_id, backup_id, sequence, shard);
+
 ALTER TABLE ONLY public.storage_backups
     ADD CONSTRAINT storage_backup_ordinal UNIQUE (operation, ordinal);
 
@@ -3889,6 +3943,9 @@ ALTER TABLE ONLY public.storage_cluster_history
 
 ALTER TABLE ONLY public.storage_cluster_lock
     ADD CONSTRAINT storage_cluster_lock_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.storage_cluster_runs
+    ADD CONSTRAINT storage_cluster_runs_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.storage_clusters
     ADD CONSTRAINT storage_clusters_name_key UNIQUE (name);
@@ -3928,6 +3985,9 @@ ALTER TABLE ONLY public.storage_journal_sources
 
 ALTER TABLE ONLY public.storage_maintenance
     ADD CONSTRAINT storage_maintenance_pkey PRIMARY KEY (storage_id, policy);
+
+ALTER TABLE ONLY public.storage_member_moves
+    ADD CONSTRAINT storage_member_moves_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.storage_object_writes
     ADD CONSTRAINT storage_object_writes_pkey PRIMARY KEY (operation);
@@ -3973,6 +4033,9 @@ ALTER TABLE ONLY public.storage_repairs
 
 ALTER TABLE ONLY public.storage_reservations
     ADD CONSTRAINT storage_reservations_pkey PRIMARY KEY (operation, media_id);
+
+ALTER TABLE ONLY public.storage_run_snapshots
+    ADD CONSTRAINT storage_run_snapshots_pkey PRIMARY KEY (run_id, storage_id);
 
 ALTER TABLE ONLY public.storages
     ADD CONSTRAINT storage_targets_name_key UNIQUE (name);
@@ -4385,6 +4448,12 @@ CREATE INDEX storage_fragment_reclaim ON public.storage_fragments USING btree (o
 
 CREATE INDEX storage_journal_pending ON public.storage_journal_sources USING btree (namespace_id, allocated_revision, revision, operation);
 
+CREATE INDEX storage_move_due ON public.storage_member_moves USING btree (state, checked_at, id);
+
+CREATE INDEX storage_move_source ON public.storage_member_moves USING btree (cluster_id, source_media, state);
+
+CREATE INDEX storage_move_target ON public.storage_member_moves USING btree (cluster_id, target_media, state);
+
 CREATE INDEX storage_objects_listing ON public.storage_objects USING btree (namespace_id, path COLLATE "C") WHERE (head IS NOT NULL);
 
 CREATE INDEX storage_payload_collection ON public.storage_payloads USING btree (namespace_id, state, collect_after, operation);
@@ -4400,6 +4469,10 @@ CREATE INDEX storage_repair_operation ON public.storage_repairs USING btree (ope
 CREATE INDEX storage_reservation_settlement ON public.storage_reservations USING btree (media_id, complete, accounting_boot, accounting_revision);
 
 CREATE INDEX storage_reservation_totals ON public.storage_reservations USING btree (cluster_id, media_id);
+
+CREATE INDEX storage_run_cluster ON public.storage_cluster_runs USING btree (cluster_id, state);
+
+CREATE INDEX storage_run_due ON public.storage_cluster_runs USING btree (state, lease_until, id);
 
 CREATE INDEX storages_cluster ON public.storages USING btree (cluster_id);
 
@@ -5169,6 +5242,12 @@ ALTER TABLE ONLY public.staging_objects
 ALTER TABLE ONLY public.storage_backup_files
     ADD CONSTRAINT storage_backup_file_slot FOREIGN KEY (backup_id) REFERENCES public.storage_backups(id);
 
+ALTER TABLE ONLY public.storage_backup_moves
+    ADD CONSTRAINT storage_backup_move_job FOREIGN KEY (job_id) REFERENCES public.storage_member_moves(id);
+
+ALTER TABLE ONLY public.storage_backup_moves
+    ADD CONSTRAINT storage_backup_move_slot FOREIGN KEY (backup_id) REFERENCES public.storage_backups(id);
+
 ALTER TABLE ONLY public.storage_backups
     ADD CONSTRAINT storage_backup_payload FOREIGN KEY (operation) REFERENCES public.storage_payloads(operation);
 
@@ -5198,6 +5277,9 @@ ALTER TABLE ONLY public.storage_journal_sources
 
 ALTER TABLE ONLY public.storage_maintenance
     ADD CONSTRAINT storage_maintenance_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.storage_member_moves
+    ADD CONSTRAINT storage_move_cluster FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);
 
 ALTER TABLE ONLY public.storage_object_writes
     ADD CONSTRAINT storage_object_writes_operation_fkey FOREIGN KEY (operation) REFERENCES public.storage_payloads(operation);
@@ -5243,6 +5325,12 @@ ALTER TABLE ONLY public.storage_reservations
 
 ALTER TABLE ONLY public.storage_reservations
     ADD CONSTRAINT storage_reservation_payload FOREIGN KEY (operation) REFERENCES public.storage_payloads(operation);
+
+ALTER TABLE ONLY public.storage_cluster_runs
+    ADD CONSTRAINT storage_run_cluster FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);
+
+ALTER TABLE ONLY public.storage_run_snapshots
+    ADD CONSTRAINT storage_run_snapshot_job FOREIGN KEY (run_id) REFERENCES public.storage_cluster_runs(id);
 
 ALTER TABLE ONLY public.storages
     ADD CONSTRAINT storages_cluster_id_fkey FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);

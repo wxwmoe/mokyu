@@ -187,10 +187,15 @@ pub(crate) fn verify(actual: &Value, expected: &Value) -> Result<()> {
     let left = identity(actual)?;
     let right = identity(expected)?;
     ensure!(
-        left.deployment_id == right.deployment_id
-            && left.storage_id == right.storage_id
-            && journal(actual)? == journal(expected)?,
+        left.deployment_id == right.deployment_id && left.storage_id == right.storage_id,
         "storage mokyu.json does not match this store"
+    );
+    ensure!(
+        journal(actual)? == journal(expected)?,
+        s3s::s3_error!(
+            ServiceUnavailable,
+            "storage journal marker changed; retry after the backend profile refreshes"
+        )
     );
     Ok(())
 }
@@ -405,6 +410,11 @@ mod tests {
         let current = Document::probe(&store).await.unwrap().unwrap();
         let mut next = current.set_journal(&store, &journal).await.unwrap();
         assert_eq!(next["future"], marker["future"]);
+        let stale_profile = verify(&next, &marker).unwrap_err();
+        assert_eq!(
+            stale_profile.downcast_ref::<s3s::S3Error>().unwrap().code(),
+            &s3s::S3ErrorCode::ServiceUnavailable
+        );
         assert!(stale.set_journal(&store, &journal).await.is_err());
         next["metadata_journal"]["future"] = json!(["retained"]);
         put(&store, "mokyu.json", &next).await;

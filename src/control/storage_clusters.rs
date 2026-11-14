@@ -26,6 +26,84 @@ pub(super) async fn repair(
     }))
 }
 
+#[utoipa::path(get, operation_id="storage_cluster_space", path="/api/v1/storage-clusters/{id}/space", params(("id"=Uuid,Path)), responses((status=200,body=crate::model::storage_cluster::Space)))]
+pub(super) async fn space(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::model::storage_cluster::Space>, HttpError> {
+    Ok(Json(
+        app.storage_clusters.space(&actor.principal, id).await?,
+    ))
+}
+
+#[utoipa::path(post, operation_id="storage_cluster_move", path="/api/v1/storage-clusters/{id}/moves", params(("id"=Uuid,Path)), request_body=crate::model::storage_cluster::MoveInput, responses((status=200,body=crate::model::storage_cluster::MemberMove)))]
+pub(super) async fn start_move(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::model::storage_cluster::MoveInput>,
+) -> Result<Json<crate::model::storage_cluster::MemberMove>, HttpError> {
+    actor.recent(&app).await?;
+    Ok(Json(
+        app.storage_clusters
+            .start_move(&actor.principal, id, input)
+            .await?,
+    ))
+}
+
+#[utoipa::path(post, operation_id="storage_cluster_start_run", path="/api/v1/storage-clusters/{id}/runs", params(("id"=Uuid,Path)), request_body=crate::model::storage_cluster::RunInput,responses((status=200,body=crate::model::storage_cluster::ClusterRun)))]
+pub(super) async fn start_run(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<crate::model::storage_cluster::RunInput>,
+) -> Result<Json<crate::model::storage_cluster::ClusterRun>, HttpError> {
+    actor.recent(&app).await?;
+    Ok(Json(
+        app.storage_clusters
+            .start_run(&actor.principal, id, input)
+            .await?,
+    ))
+}
+
+#[utoipa::path(post, operation_id="storage_cluster_cancel_run", path="/api/v1/storage-clusters/{id}/runs/{job}/cancel", params(("id"=Uuid,Path),("job"=Uuid,Path)),request_body=VerifyBackups,responses((status=200,body=crate::model::storage_cluster::ClusterRun)))]
+pub(super) async fn cancel_run(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path((id, job)): Path<(Uuid, Uuid)>,
+    Json(input): Json<VerifyBackups>,
+) -> Result<Json<crate::model::storage_cluster::ClusterRun>, HttpError> {
+    actor.recent(&app).await?;
+    Ok(Json(
+        app.storage_clusters
+            .cancel_run(&actor.principal, id, job, input.revision)
+            .await?,
+    ))
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MoveState {
+    revision: i64,
+    action: String,
+}
+
+#[utoipa::path(put, operation_id="storage_cluster_move_state", path="/api/v1/storage-clusters/{id}/moves/{job}", params(("id"=Uuid,Path),("job"=Uuid,Path)), request_body=MoveState, responses((status=200,body=crate::model::storage_cluster::MemberMove)))]
+pub(super) async fn move_state(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path((id, job)): Path<(Uuid, Uuid)>,
+    Json(input): Json<MoveState>,
+) -> Result<Json<crate::model::storage_cluster::MemberMove>, HttpError> {
+    actor.recent(&app).await?;
+    Ok(Json(
+        app.storage_clusters
+            .move_state(&actor.principal, id, job, input.revision, &input.action)
+            .await?,
+    ))
+}
+
 #[derive(serde::Deserialize, utoipa::IntoParams)]
 pub(super) struct BackupQuery {
     after: Option<Uuid>,

@@ -248,6 +248,16 @@ pub(crate) struct Group {
     pub id: Uuid,
     pub layout: Layout,
     pub members: Vec<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacing: Option<Replacement>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = StorageClusterReplacement)]
+pub(crate) struct Replacement {
+    pub source: Uuid,
+    pub target: Uuid,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -267,6 +277,62 @@ pub(crate) struct Manifest {
 }
 
 impl Manifest {
+    pub fn begin_replacement(&mut self, source: Uuid, target: Uuid) -> Result<Uuid> {
+        ensure!(
+            !self.groups.iter().any(|g| g
+                .replacing
+                .as_ref()
+                .is_some_and(|r| r.source == source || r.target == target)),
+            "storage already has an active replacement"
+        );
+        let group = self
+            .groups
+            .iter_mut()
+            .find(|g| g.members.contains(&source))
+            .ok_or_else(|| s3s::s3_error!(InvalidRequest, "source has no active layout slot"))?;
+        ensure!(
+            group.replacing.is_none(),
+            "layout group already has a replacement"
+        );
+        let id = group.id;
+        group.replacing = Some(Replacement { source, target });
+        self.validate()?;
+        Ok(id)
+    }
+
+    pub fn finish_replacement(
+        &mut self,
+        group: Uuid,
+        source: Uuid,
+        target: Uuid,
+        activate: bool,
+    ) -> Result<()> {
+        let slot = self
+            .groups
+            .iter_mut()
+            .find(|g| g.id == group)
+            .ok_or_else(|| anyhow::anyhow!("replacement group is missing"))?;
+        ensure!(
+            slot.replacing.as_ref() == Some(&Replacement { source, target }),
+            "replacement slot changed"
+        );
+        if activate {
+            *slot
+                .members
+                .iter_mut()
+                .find(|m| **m == source)
+                .ok_or_else(|| anyhow::anyhow!("replacement source is missing"))? = target;
+            let new = self
+                .members
+                .iter_mut()
+                .find(|m| m.media_id == target)
+                .ok_or_else(|| anyhow::anyhow!("replacement target is missing"))?;
+            new.state = "available".into();
+        }
+        slot.replacing = None;
+        self.validate()
+    }
+
     pub fn follows(&self, previous: &Self) -> Result<()> {
         self.validate()?;
         previous.validate()?;
@@ -347,6 +413,33 @@ impl Manifest {
                         || group.layout.parity_shards == 0 && group.layout.extra_copies == 0,
                     "layout requires independent storage groups"
                 );
+            }
+        }
+        for group in &self.groups {
+            if let Some(swap) = &group.replacing {
+                let target = self
+                    .members
+                    .iter()
+                    .find(|m| m.media_id == swap.target)
+                    .ok_or_else(|| anyhow::anyhow!("replacement member is missing"))?;
+                ensure!(
+                    group.members.contains(&swap.source)
+                        && assigned.insert(swap.target)
+                        && target.topology.purpose == "primary"
+                        && matches!(target.state.as_str(), "available" | "spare"),
+                    "replacement requires an unassigned primary member"
+                );
+                if group.layout.parity_shards > 0 || group.layout.extra_copies > 0 {
+                    ensure!(
+                        group
+                            .members
+                            .iter()
+                            .filter(|id| **id != swap.source)
+                            .all(|id| self.members.iter().any(|m| m.media_id == *id
+                                && m.topology.storage_group != target.topology.storage_group)),
+                        "replacement would reuse a failure domain"
+                    );
+                }
             }
         }
         ensure!(
@@ -500,8 +593,132 @@ pub(crate) struct Takeover {
 pub(crate) struct Overview {
     pub defaults: Policy,
     pub backups: Vec<BackupGroup>,
+    pub member_moves: Vec<MemberMove>,
+    pub runs: Vec<ClusterRun>,
     pub clusters: Vec<Cluster>,
     pub devices: Vec<Device>,
+}
+
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageClusterRun)]
+#[derive(sqlx::FromRow)]
+pub(crate) struct ClusterRun {
+    pub id: Uuid,
+    pub cluster: Uuid,
+    pub revision: i64,
+    pub backup_group: Option<String>,
+    pub media_id: Option<Uuid>,
+    pub kind: String,
+    pub state: String,
+    pub checked: i64,
+    pub byte_count: i64,
+    pub bytes_per_second: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = StorageClusterRunInput)]
+pub(crate) struct RunInput {
+    pub revision: i64,
+    pub backup_group: Option<String>,
+    pub media_id: Option<Uuid>,
+    pub kind: String,
+    pub bytes_per_second: Option<i64>,
+}
+
+pub(crate) struct RunObject {
+    pub job: ClusterRun,
+    pub token: Uuid,
+    pub intent: super::storage_payload::Intent,
+    pub path: String,
+}
+
+#[async_trait::async_trait]
+pub(crate) trait ClusterRuns: Send + Sync {
+    async fn start_run(
+        &self,
+        principal: &Principal,
+        cluster: Uuid,
+        input: RunInput,
+    ) -> Result<ClusterRun>;
+    async fn cancel_run(
+        &self,
+        principal: &Principal,
+        cluster: Uuid,
+        id: Uuid,
+        revision: i64,
+    ) -> Result<ClusterRun>;
+    async fn next_run(&self) -> Result<Option<RunObject>>;
+    async fn rebuild_source(
+        &self,
+        run: Uuid,
+        token: Uuid,
+        op: Uuid,
+        sequence: u32,
+        shard: u16,
+    ) -> Result<(Uuid, super::storage_payload::Receipt)>;
+    async fn renew_run(&self, id: Uuid, token: Uuid) -> Result<()>;
+    async fn run_error(&self, id: Uuid, token: Uuid, error: &str) -> Result<()>;
+    async fn finish_run_object(&self, item: &RunObject, replacement: Option<Uuid>) -> Result<()>;
+    async fn scrub_damage(
+        &self,
+        item: &RunObject,
+        mapping: &super::storage_payload::Mapping,
+    ) -> Result<()>;
+}
+
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageClusterMemberMove)]
+pub(crate) struct MemberMove {
+    pub id: Uuid,
+    pub cluster: Uuid,
+    pub group: Uuid,
+    pub source: Uuid,
+    pub target: Uuid,
+    pub state: String,
+    pub bytes_per_second: i64,
+}
+
+pub(crate) enum MoveStep {
+    Advanced,
+    Backup {
+        job: MemberMove,
+        slot: Uuid,
+        receipt: super::storage_payload::Receipt,
+        remove: bool,
+    },
+    Evidence {
+        job: Uuid,
+        media: Uuid,
+        namespace: Uuid,
+        after: u64,
+        through: u64,
+    },
+    Collect {
+        namespace: Uuid,
+        operation: Uuid,
+        area: crate::content::fragment::Area,
+    },
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+#[schema(as = StorageClusterMoveInput)]
+pub(crate) struct MoveInput {
+    pub revision: i64,
+    pub source: Uuid,
+    pub target: Option<Uuid>,
+    pub bytes_per_second: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageClusterSpace)]
+pub(crate) struct Space {
+    pub groups: usize,
+    pub writable_groups: usize,
+    pub logical_bytes: u64,
+    pub primary_used_bytes: u64,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -538,7 +755,7 @@ pub(crate) struct BackupPoint {
 
 #[async_trait::async_trait]
 pub(crate) trait StorageClusters:
-    super::storage_recovery::RecoveryCatalog + Send + Sync
+    super::storage_recovery::RecoveryCatalog + ClusterRuns + Send + Sync
 {
     async fn takeover_targets(&self, principal: &Principal, media: &[Uuid]) -> Result<Vec<Target>>;
     async fn takeover(
@@ -558,6 +775,38 @@ pub(crate) trait StorageClusters:
     ) -> Result<BackupPoints>;
     async fn verify_backups(&self, principal: &Principal, id: Uuid, revision: i64) -> Result<()>;
     async fn placement_snapshot(&self, id: Uuid) -> Result<(Cluster, Vec<Target>)>;
+    async fn space(&self, principal: &Principal, id: Uuid) -> Result<Space>;
+    async fn start_move(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        input: MoveInput,
+    ) -> Result<MemberMove>;
+    async fn move_state(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        job: Uuid,
+        revision: i64,
+        action: &str,
+    ) -> Result<MemberMove>;
+    async fn advance_move(&self) -> Result<Option<MoveStep>>;
+    async fn move_rate(&self, cluster: Uuid, source: Uuid) -> Result<Option<u64>>;
+    async fn move_live(&self, id: Uuid, source: Uuid, target: Uuid) -> Result<bool>;
+    async fn moved_backup(
+        &self,
+        key: &crate::content::codec::Key,
+        job: Uuid,
+        slot: Uuid,
+        receipt: &super::storage_payload::Receipt,
+        completion: Option<&super::storage_transfer::Completion>,
+    ) -> Result<()>;
+    async fn move_evidence(
+        &self,
+        id: Uuid,
+        namespace: Uuid,
+        proof: &super::storage_recovery::Proof,
+    ) -> Result<()>;
     async fn create(&self, principal: &Principal, key: &Key, input: Create) -> Result<Cluster>;
     async fn update(&self, principal: &Principal, id: Uuid, input: Update) -> Result<Cluster>;
     async fn add_members(&self, principal: &Principal, id: Uuid, input: Members)
@@ -614,6 +863,7 @@ mod tests {
             revision: 1,
             previous: None,
             groups: vec![Group {
+                replacing: None,
                 id: Uuid::new_v4(),
                 layout: Layout::default(),
                 members: members.iter().map(|m| m.media_id).collect(),
@@ -623,6 +873,23 @@ mod tests {
         assert!(manifest.validate().is_err());
         manifest.members[1].topology.storage_group = "host-2".into();
         assert!(manifest.validate().is_ok());
+        let mut swap = manifest.clone();
+        let from = swap.members[0].media_id;
+        let mut spare = swap.members[0].clone();
+        spare.media_id = Uuid::now_v7();
+        spare.node_id = Uuid::now_v7();
+        spare.state = "spare".into();
+        let to = spare.media_id;
+        swap.members.push(spare);
+        assert!(
+            swap.clone()
+                .begin_replacement(from, swap.members[1].media_id)
+                .is_err()
+        );
+        let id = swap.begin_replacement(from, to).unwrap();
+        assert!(swap.clone().begin_replacement(from, to).is_err());
+        swap.finish_replacement(id, from, to, true).unwrap();
+        assert_eq!(swap.groups[0].members[0], to);
         manifest.members[1].topology.storage_group = "host".into();
         manifest.groups[0].layout.data_shards = 2;
         manifest.groups[0].layout.extra_copies = 0;

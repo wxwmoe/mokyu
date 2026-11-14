@@ -493,7 +493,9 @@ impl Root {
         for receipt in &self.receipts {
             let h = &receipt.header;
             ensure!(
-                members.get(usize::from(h.copy) * width + usize::from(h.shard)) == Some(&h.media),
+                h.generation > 0 && h.layout_revision > self.intent.layout_revision
+                    || members.get(usize::from(h.copy) * width + usize::from(h.shard))
+                        == Some(&h.media),
                 "recovery root is on another historical member"
             );
         }

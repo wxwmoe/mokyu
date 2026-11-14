@@ -7,10 +7,12 @@ pub(super) mod storage_backup;
 pub(super) mod storage_capacity;
 pub(super) mod storage_cluster;
 pub(super) mod storage_journal;
+pub(super) mod storage_move;
 pub(super) mod storage_native;
 pub(super) mod storage_payload;
 pub(super) mod storage_recovery;
 pub(super) mod storage_repair;
+pub(super) mod storage_runs;
 
 use super::{Backend, transactions};
 use crate::authorization::{Action, Principal};

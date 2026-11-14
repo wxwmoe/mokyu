@@ -51,6 +51,21 @@ pub(crate) struct Handoff {
     pub pending: NodeDrain,
     pub pending_bytes: i64,
     pub damaged_tails: i64,
+    pub storage: Option<StorageDrain>,
+}
+
+#[derive(Default, Serialize, ToSchema)]
+pub(crate) struct StorageDrain {
+    pub groups: i64,
+    pub fragments: i64,
+    pub moves: i64,
+    pub reservations: i64,
+    pub recovery_heads: i64,
+}
+impl StorageDrain {
+    pub fn empty(&self) -> bool {
+        self.groups + self.fragments + self.moves + self.reservations + self.recovery_heads == 0
+    }
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize, ToSchema, clap::ValueEnum)]

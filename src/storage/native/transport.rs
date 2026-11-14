@@ -394,7 +394,7 @@ impl Pool {
         ensure!(
             matches!(
                 target.authorization.grant.action,
-                Action::Remove { .. } | Action::Discard { .. }
+                Action::Remove { .. } | Action::BackupRemove { .. } | Action::Discard { .. }
             ),
             "remove plan required"
         );

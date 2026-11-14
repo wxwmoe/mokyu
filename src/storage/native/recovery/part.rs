@@ -72,15 +72,8 @@ impl Scanner {
             return Ok(summary);
         }
         let starts_complete = decoder.complete();
-        let historical = verify::layout(
-            self.clusters.as_ref(),
-            catalog,
-            &self.anchor,
-            part.intent.layout_revision,
-        )
-        .await?;
         let receipts =
-            verify::fragments(self.clusters.as_ref(), catalog, part, &historical).await?;
+            verify::fragments(self.clusters.as_ref(), catalog, part, &self.anchor).await?;
         ensure!(
             part.intent.layout.data_shards == 1 && part.intent.layout.parity_shards == 0,
             "unsupported recovery fragment layout"

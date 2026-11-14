@@ -61,6 +61,8 @@ mod storage_payload;
 mod storage_recovery;
 #[path = "../../shared/storage_repair.rs"]
 mod storage_repair;
+#[path = "../../shared/storage_runs.rs"]
+mod storage_runs;
 #[path = "../../shared/tier_access.rs"]
 mod tier_access;
 #[path = "../../shared/tier_moves.rs"]

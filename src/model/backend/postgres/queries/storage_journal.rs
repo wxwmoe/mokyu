@@ -160,6 +160,12 @@ pub(in super::super) fn restore_identity(
         .bind(sqlx::types::Json(identity))
         .bind(storage)
 }
+pub(in super::super) fn protected_roots(
+    storage: Uuid,
+) -> Scalar<'static, sqlx::types::Json<crate::model::storage_recovery::Proof>> {
+    sqlx::query_scalar("SELECT proof FROM storage_journal_publications WHERE namespace_id=$1 AND (NOT settled OR revision=(SELECT MAX(revision) FROM storage_journal_publications WHERE namespace_id=$2 AND settled)) ORDER BY revision DESC").bind(storage).bind(storage)
+}
+
 pub(in super::super) fn roots(
     storage: Uuid,
 ) -> Scalar<'static, sqlx::types::Json<crate::model::storage_recovery::Proof>> {

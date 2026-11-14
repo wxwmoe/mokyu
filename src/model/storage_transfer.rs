@@ -74,6 +74,9 @@ pub(crate) enum Action {
         receipt: Receipt,
         evidence: Option<super::storage_recovery::Link>,
     },
+    BackupRemove {
+        receipt: Receipt,
+    },
     BackupRead {
         receipt: Receipt,
         offset: u64,
@@ -210,7 +213,9 @@ impl Grant {
                 );
                 Some(&receipt.header)
             }
-            Action::Remove { receipt } | Action::BackupCheck { receipt, .. } => {
+            Action::Remove { receipt }
+            | Action::BackupRemove { receipt }
+            | Action::BackupCheck { receipt, .. } => {
                 receipt.validate()?;
                 Some(&receipt.header)
             }
@@ -243,6 +248,7 @@ impl Grant {
                         self.action,
                         Action::Backup { .. }
                             | Action::BackupRead { .. }
+                            | Action::BackupRemove { .. }
                             | Action::BackupCheck { .. }
                     ))
                     && header.cluster == self.cluster
@@ -319,6 +325,9 @@ impl SignedGrant {
             .is_some_and(|m| m.topology.purpose == "backup");
         match &grant.action {
             Action::Backup { header }
+            | Action::BackupRemove {
+                receipt: Receipt { header, .. },
+            }
             | Action::BackupRead {
                 receipt: Receipt { header, .. },
                 ..

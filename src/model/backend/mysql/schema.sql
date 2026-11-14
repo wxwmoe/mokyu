@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261114135600.
+-- Generated from the complete mysql migration chain through 20261114160500.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -2048,6 +2048,20 @@ CREATE TABLE `storage_backup_files` (
   CONSTRAINT `storage_backup_file_slot` FOREIGN KEY (`backup_id`) REFERENCES `storage_backups` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `storage_backup_moves` (
+  `job_id` binary(16) NOT NULL,
+  `backup_id` binary(16) NOT NULL,
+  `sequence` int NOT NULL,
+  `shard` int NOT NULL,
+  `receipt` json NOT NULL,
+  `copied` tinyint(1) NOT NULL DEFAULT '0',
+  `removed` tinyint(1) NOT NULL DEFAULT '0',
+  PRIMARY KEY (`job_id`,`backup_id`,`sequence`,`shard`),
+  KEY `storage_backup_move_slot` (`backup_id`),
+  CONSTRAINT `storage_backup_move_job` FOREIGN KEY (`job_id`) REFERENCES `storage_member_moves` (`id`),
+  CONSTRAINT `storage_backup_move_slot` FOREIGN KEY (`backup_id`) REFERENCES `storage_backups` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `storage_backup_scans` (
   `cluster_id` binary(16) NOT NULL,
   `after_id` binary(16) NOT NULL,
@@ -2086,6 +2100,31 @@ CREATE TABLE `storage_cluster_lock` (
   `id` int NOT NULL,
   PRIMARY KEY (`id`),
   CONSTRAINT `storage_cluster_lock_singleton` CHECK ((`id` = 1))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_cluster_runs` (
+  `id` binary(16) NOT NULL,
+  `cluster_id` binary(16) NOT NULL,
+  `media_id` binary(16) DEFAULT NULL,
+  `revision` bigint NOT NULL,
+  `layout` json NOT NULL,
+  `kind` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `state` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `cursor_id` binary(16) NOT NULL,
+  `ceiling` binary(16) NOT NULL,
+  `check_token` binary(16) DEFAULT NULL,
+  `lease_until` bigint NOT NULL DEFAULT '0',
+  `checked` bigint NOT NULL DEFAULT '0',
+  `byte_count` bigint NOT NULL DEFAULT '0',
+  `bytes_per_second` bigint NOT NULL,
+  `last_error` text COLLATE utf8mb4_bin,
+  `backup_group` varchar(128) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `storage_run_due` (`state`,`lease_until`,`id`),
+  KEY `storage_run_cluster` (`cluster_id`,`state`),
+  CONSTRAINT `storage_run_cluster` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`),
+  CONSTRAINT `storage_run_kind` CHECK ((`kind` in (_utf8mb4'rebuild',_utf8mb4'scrub',_utf8mb4'sync'))),
+  CONSTRAINT `storage_run_state` CHECK ((`state` in (_utf8mb4'objects',_utf8mb4'snapshots',_utf8mb4'completed',_utf8mb4'cancelled')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storage_clusters` (
@@ -2193,6 +2232,25 @@ CREATE TABLE `storage_maintenance` (
   `last_scheduled_at` datetime(6) NOT NULL,
   PRIMARY KEY (`storage_id`,`policy`),
   CONSTRAINT `storage_maintenance_storage_fk` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_member_moves` (
+  `id` binary(16) NOT NULL,
+  `cluster_id` binary(16) NOT NULL,
+  `group_id` binary(16) NOT NULL,
+  `source_media` binary(16) NOT NULL,
+  `target_media` binary(16) NOT NULL,
+  `state` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  `created_at` bigint NOT NULL,
+  `checked_at` bigint NOT NULL DEFAULT '0',
+  `bytes_per_second` bigint NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `storage_move_due` (`state`,`checked_at`,`id`),
+  KEY `storage_move_source` (`cluster_id`,`source_media`,`state`),
+  KEY `storage_move_target` (`cluster_id`,`target_media`,`state`),
+  CONSTRAINT `storage_move_cluster` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`),
+  CONSTRAINT `storage_move_members` CHECK (((`source_media` <> `target_media`) and (`bytes_per_second` > 0))),
+  CONSTRAINT `storage_move_state` CHECK ((`state` in (_utf8mb4'moving',_utf8mb4'paused',_utf8mb4'reverting',_utf8mb4'cleaning',_utf8mb4'undo_cleanup',_utf8mb4'completed',_utf8mb4'cancelled')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storage_object_writes` (
@@ -2476,6 +2534,14 @@ CREATE TABLE `storage_reservations` (
   CONSTRAINT `storage_reservation_payload` FOREIGN KEY (`operation`) REFERENCES `storage_payloads` (`operation`),
   CONSTRAINT `storage_reservations_chk_1` CHECK ((`bytes` > 0)),
   CONSTRAINT `storage_reservations_chk_2` CHECK ((`accounting_revision` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_run_snapshots` (
+  `run_id` binary(16) NOT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `snapshot_id` binary(16) NOT NULL,
+  PRIMARY KEY (`run_id`,`storage_id`),
+  CONSTRAINT `storage_run_snapshot_job` FOREIGN KEY (`run_id`) REFERENCES `storage_cluster_runs` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storages` (

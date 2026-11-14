@@ -55,6 +55,10 @@ PostgreSQL 的区块、物理编码、区块包、审计事件和巡检问题采
 | `storage_repairs` | `id`、`operation` 为 UUID；`sequence` 为整数；`original_receipt` JSON；`candidate_id` 可空 UUID，`candidate` 可空 JSON；`state` 文本默认 queued；`original_removed`、`candidate_removed`、`collecting` 布尔默认 false；`protected_until` 非负微秒整数默认 0 | 原片 UUID 主键、载荷操作外键；其余字段非空且无默认值；状态限 queued/healthy/writing/installed；按操作/状态/原片索引。保留原回执和新片候选，切换只更新原物理槽位 |
 | `storage_backups` | `id`、`operation` 为 UUID；`ordinal` 为 0–255；`storage_group` 可空；`created_at`、`verify_since`、可空 `verified_at` 为微秒整数 | 备份任务主键，载荷外键；操作内序号唯一、已分配的组唯一。核验起点默认 0，其余字段无默认值。按完成时间和建立时间查询欠账 |
 | `storage_backup_files` | `backup_id`、`media_id` 为 UUID，`sequence`、`shard` 为整数，`receipt` JSON，`verified_at` 可空微秒整数 | 备份任务/序号/分片联合主键、任务外键，其他字段均非空且无默认值。独立保存备份实际介质和原始分片回执，支持按介质查找与按时间复核 |
+| `storage_member_moves` | 群集、盘组、源介质、目标介质、状态、限速与检查时间 | 一次迁移独占两个端点；按群集和状态查找可续跑任务，切换后旧片仍受读取租约与恢复点保护 |
+| `storage_backup_moves` | 迁移任务、备份、序号、分片、原回执和复制/清除标记 | 任务/备份/序号/分片联合主键；逐片核对后才切换同一备份组的介质，保留回滚和清理进度 |
+| `storage_cluster_runs` | 群集、布局修订、操作、扫描上界与游标、操作租约、限速及已核验字节；成员和灾后读取的备份组可空 | 保存重建、巡检和同步进度；只有指定备份组的在任重建任务可以读取已核验的备份片 |
+| `storage_run_snapshots` | 任务、后端和快照 UUID | 任务/后端联合主键；重建逐后端等待新的恢复点确认，中断后可继续 |
 | `storage_backup_scans` | `cluster_id`、`after_id` 为 UUID，`verify_since` 为微秒整数默认 0 | 全部非空；群集主键与级联删除外键。记录补齐或重新核验的游标，重启后续跑 |
 | `storage_recovery_objects` | `catalog` UUID，`path_hash` 二进制，`path` 文本，`revision` 整数，`published` 布尔，`intent` JSON | 全部非空且无默认值；恢复目录/路径摘要联合主键，目录外键级联删除。保留完整路径以核对摘要碰撞；不发布为在线映射 |
 | `storage_recovery_shards` | `catalog`、`operation` 为 UUID，`sequence`、`copy_index`、`shard_index` 为整数，`receipt` JSON | 全部非空且无默认值；目录/操作/序号/分片/套号联合主键，目录外键级联删除。还原指定来源的候选回执 |

@@ -308,9 +308,14 @@ async fn walk(
         }
         current.verify(&trusted)?;
         if let Some(root) = &current.publication.root {
-            root.validate_layout(
-                &layout(catalog, id, &trusted, root.intent.layout_revision).await?,
-            )?;
+            let origin = layout(catalog, id, &trusted, root.intent.layout_revision).await?;
+            root.validate_layout(&origin)?;
+            for r in &root.receipts {
+                if r.header.layout_revision != root.intent.layout_revision {
+                    let placed = layout(catalog, id, &trusted, r.header.layout_revision).await?;
+                    root.intent.placement(&r.header, &origin, &placed)?;
+                }
+            }
         }
         for part in &current.publication.parts {
             part.validate_layout(
@@ -347,14 +352,20 @@ pub(crate) async fn fragments(
     manifest: &Manifest,
 ) -> Result<Vec<Receipt>> {
     part.validate(part.intent.namespace)?;
-    part.validate_layout(manifest)?;
-    let group = manifest
+    let origin = if manifest.revision as u64 == part.intent.layout_revision {
+        manifest.clone()
+    } else {
+        layout(catalog, id, manifest, part.intent.layout_revision).await?
+    };
+    part.validate_layout(&origin)?;
+    let group = origin
         .groups
         .iter()
         .find(|g| g.id == part.intent.group)
         .context("recovery group is missing")?;
     let width = usize::from(group.layout.data_shards + group.layout.parity_shards);
-    let members = part.intent.members(group)?;
+    let mut placements =
+        std::collections::BTreeMap::from([(part.intent.layout_revision, origin.clone())]);
     let mut slots = vec![None; group.layout.width()];
     let mut after = None;
     loop {
@@ -372,10 +383,13 @@ pub(crate) async fn fragments(
                 "recovery part exceeds one file sequence"
             );
             let slot = usize::from(header.copy) * width + usize::from(header.shard);
-            ensure!(
-                members.get(slot) == Some(&header.media),
-                "recovery fragment is on another historical member"
-            );
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                placements.entry(header.layout_revision)
+            {
+                entry.insert(layout(catalog, id, manifest, header.layout_revision).await?);
+            }
+            part.intent
+                .placement(header, &origin, &placements[&header.layout_revision])?;
             if slots[slot]
                 .as_ref()
                 .map(|old| receipt.newer_than(old))

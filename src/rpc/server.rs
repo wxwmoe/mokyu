@@ -512,9 +512,10 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::NotImplemented => {
                     Status::unimplemented("operation is unsupported")
                 }
-                s3s::S3ErrorCode::SlowDown => {
-                    Status::resource_exhausted("multipart admission is busy")
+                s3s::S3ErrorCode::ServiceUnavailable => {
+                    Status::unavailable("storage is temporarily unavailable")
                 }
+                s3s::S3ErrorCode::SlowDown => Status::resource_exhausted("write admission is busy"),
                 s3s::S3ErrorCode::InvalidBucketState => {
                     Status::failed_precondition("bucket cannot accept writes")
                 }
@@ -572,6 +573,7 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
                 s3s::S3ErrorCode::IncompleteBody => Some("IncompleteBody"),
                 s3s::S3ErrorCode::NoSuchUpload => Some("NoSuchUpload"),
                 s3s::S3ErrorCode::NotImplemented => Some("NotImplemented"),
+                s3s::S3ErrorCode::ServiceUnavailable => Some("ServiceUnavailable"),
                 s3s::S3ErrorCode::SlowDown => Some("SlowDown"),
                 s3s::S3ErrorCode::InvalidArgument => Some("InvalidArgument"),
                 s3s::S3ErrorCode::InvalidRequest => Some("InvalidRequest"),
@@ -1153,6 +1155,7 @@ fn state(snapshot: &session::Snapshot) -> wire::NodeState {
         deployment_mode: snapshot.mode.clone(),
         mode_revision: snapshot.mode_revision as u64,
         handoff_revision: snapshot.handoff_revision as u64,
+        storage_closed: snapshot.storage_closed,
         maintenance: snapshot.maintenance,
         native_pending: snapshot.native_pending,
         work_pending: snapshot.work_pending,

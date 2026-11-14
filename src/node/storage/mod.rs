@@ -45,6 +45,9 @@ struct Connection {
     mode: Option<String>,
     mode_revision: u64,
     maintenance: bool,
+    draining: bool,
+    handoff_revision: u64,
+    storage_closed: bool,
     error: Option<String>,
     peer: Option<std::net::Ipv4Addr>,
     control_id: Option<Uuid>,
@@ -61,6 +64,7 @@ pub(super) struct Node {
     connection: Mutex<Connection>,
     writes: Arc<Semaphore>,
     active_writes: Mutex<Vec<Uuid>>,
+    streams: std::sync::atomic::AtomicUsize,
     backup_reads: std::sync::atomic::AtomicU64,
 }
 
@@ -100,7 +104,8 @@ impl Node {
             "region": self.config.instance.region, "storage_url": self.config.instance.storage_url,
             "storage_group": self.config.instance.storage_group, "storage_purpose": self.config.instance.storage_purpose.as_deref().unwrap_or("primary"),
             "backup_reads": self.backup_reads.load(std::sync::atomic::Ordering::Relaxed),
-            "data_directory": self.files.capacity(self.boot)?, "write_load": self.write_load(), "maintenance": state.maintenance, "draining": false,
+            "data_directory": self.files.capacity(self.boot)?, "write_load": self.write_load(), "maintenance": state.maintenance, "draining": state.draining,
+            "handoff_revision":state.handoff_revision,"handoff_reconciled":true,"storage_admission_closed":state.storage_closed,"storage_streams":self.streams.load(std::sync::atomic::Ordering::Acquire),
             "work": if foreign { "recovery" } else if ready { "normal" } else { "starting" },
             "cluster_id": manifest.as_ref().map(|m| m.cluster_id), "cluster_revision": manifest.as_ref().map(|m| m.revision),
             "recovery_pending": foreign, "control": { "url": self.config.instance.control_url, "peer": state.peer, "id": state.control_id, "epoch": state.epoch, "last_error": state.error },
@@ -194,6 +199,9 @@ impl Node {
                 current.mode = Some(state.deployment_mode);
                 current.mode_revision = state.mode_revision;
                 current.maintenance = state.maintenance;
+                current.draining = state.draining;
+                current.handoff_revision = state.handoff_revision;
+                current.storage_closed = state.storage_closed;
                 current.phase = "registered";
                 current.error = None;
             }
@@ -335,6 +343,7 @@ pub(crate) async fn run(config: NodeConfig, budget: Budget) -> Result<()> {
         writes: Arc::new(Semaphore::new(budget.storage_upload_slots)),
         active_writes: Mutex::new(Vec::new()),
         backup_reads: Default::default(),
+        streams: Default::default(),
         budget,
         client,
         files,
@@ -347,6 +356,9 @@ pub(crate) async fn run(config: NodeConfig, budget: Budget) -> Result<()> {
             mode: None,
             mode_revision: 0,
             maintenance: true,
+            draining: false,
+            handoff_revision: 0,
+            storage_closed: false,
             error: None,
             peer: None,
             control_id: None,

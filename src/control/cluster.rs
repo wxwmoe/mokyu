@@ -135,15 +135,16 @@ pub(crate) async fn node_status(
     let mut tasks = cluster.node_tasks(id).await?;
     let more_tasks = tasks.len() > 20;
     tasks.truncate(20);
-    let handoff = if node.enabled && matches!(node.role.as_str(), "data" | "worker" | "node") {
-        Some(
-            app.node_sessions
-                .handoff(&actor.principal, id, None)
-                .await?,
-        )
-    } else {
-        None
-    };
+    let handoff =
+        if node.enabled && matches!(node.role.as_str(), "data" | "worker" | "node" | "storage") {
+            Some(
+                app.node_sessions
+                    .handoff(&actor.principal, id, None)
+                    .await?,
+            )
+        } else {
+            None
+        };
     Ok(Json(NodeStatus {
         node,
         handoff,

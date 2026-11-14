@@ -34,7 +34,7 @@ type Snapshot = { work?: string; runtime?: { started_at: string; uptime_seconds:
 const snapshot = computed(() => detail.data.value?.status as Snapshot | null)
 const connection = computed(() => detail.data.value?.connection)
 const handoff = computed(() => detail.data.value?.handoff), changing = ref(false)
-const responsibilities = computed(() => Object.entries(handoff.value?.pending || {}).filter(([, count]) => Number(count) > 0))
+const responsibilities = computed(() => Object.entries(handoff.value?.storage || handoff.value?.pending || {}).filter(([, count]) => Number(count) > 0))
 async function changeHandoff(action: 'prepare' | 'cancel' | 'resume') {
   const node = selected.value, current = handoff.value
   if (!node || !current || changing.value) return
@@ -94,6 +94,7 @@ function refresh() { void overview.refetch(); void nodes.refetch(); void runtime
         <p class="field-help">{{ t('handoffHint_' + handoff.state) }}</p>
         <p v-if="handoff.damaged_tails" class="error">{{ t('handoffDamaged', { count: handoff.damaged_tails }) }}</p>
         <p v-if="handoff.state === 'preparing' && handoff.pending_bytes" class="field-help">{{ t('handoffBytes', { size: bytes(handoff.pending_bytes) }) }}</p>
+        <RouterLink v-if="handoff.storage" to="/storage-clusters">{{ t('scMaintenance') }}</RouterLink>
         <dl v-if="responsibilities.length" class="facts"><template v-for="[key, count] in responsibilities" :key="key"><dt>{{ t('handoffCount_' + key) }}</dt><dd>{{ count }}</dd></template></dl>
         <p v-if="handoff.state !== 'serving' && overview.data.value" class="field-help">{{ t('handoffAvailable', { data: overview.data.value.ready_data, workers: overview.data.value.ready_workers }) }}</p>
         <p v-if="singleControl && handoff.state !== 'serving' && overview.data.value?.remote_work && !overview.data.value.ready_workers" class="field-help">{{ t('singleControlWaiting') }}</p>

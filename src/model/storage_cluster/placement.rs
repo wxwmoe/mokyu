@@ -3,8 +3,10 @@ use anyhow::{Result, ensure};
 use std::{cmp::Ordering, collections::HashMap};
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub(crate) struct Status {
     pub online: bool,
+    pub draining: bool,
     pub free: u64,
     // Includes dispatched requests absent from the current storage sample, once each.
     pub requests: Option<(u64, u32)>,
@@ -31,6 +33,54 @@ struct Candidate {
     sticky: bool,
 }
 
+pub(crate) fn space(
+    manifest: &super::Manifest,
+    layout: &super::Layout,
+    status: &HashMap<Uuid, Status>,
+    primary_used_bytes: u64,
+) -> super::Space {
+    let mut space = super::Space {
+        groups: 0,
+        writable_groups: 0,
+        logical_bytes: 0,
+        primary_used_bytes,
+    };
+    for group in &manifest.groups {
+        if &group.layout != layout {
+            continue;
+        }
+        space.groups += 1;
+        if group.replacing.is_some() {
+            continue;
+        }
+        let free = group
+            .members
+            .iter()
+            .map(|id| {
+                status
+                    .get(id)
+                    .filter(|s| {
+                        s.online
+                            && !s.draining
+                            && manifest
+                                .members
+                                .iter()
+                                .any(|m| m.media_id == *id && m.state == "available")
+                    })
+                    .map_or(0, |s| s.free)
+            })
+            .min()
+            .unwrap_or(0);
+        if free >= u64::from(layout.stripe_bytes) {
+            space.writable_groups += 1;
+            space.logical_bytes = space
+                .logical_bytes
+                .saturating_add(free.saturating_mul(u64::from(layout.data_shards)));
+        }
+    }
+    space
+}
+
 impl Table {
     pub fn new(cluster: &Cluster) -> Result<Self> {
         cluster.manifest.validate()?;
@@ -42,7 +92,7 @@ impl Table {
         );
         let mut groups = Vec::new();
         for group in &cluster.manifest.groups {
-            if group.layout != *layout {
+            if group.layout != *layout || group.replacing.is_some() {
                 continue;
             }
             let mut members: Vec<_> = group
@@ -64,7 +114,10 @@ impl Table {
         groups.sort_by_key(|(id, _)| *id);
         ensure!(
             !groups.is_empty(),
-            "storage cluster has no enabled layout group"
+            s3s::s3_error!(
+                ServiceUnavailable,
+                "storage cluster has no enabled layout group"
+            )
         );
         Ok(Self {
             policy: cluster.policy.clone(),
@@ -85,6 +138,12 @@ impl Table {
         let mut best: Option<Candidate> = None;
         for step in 0..self.groups.len() {
             let (group, members) = &self.groups[(start + step) % self.groups.len()];
+            if members
+                .iter()
+                .any(|m| status.get(&m.media_id).is_some_and(|s| s.draining))
+            {
+                continue;
+            }
             // Simple mode keeps cached roles and does not rank telemetry or regions.
             for reverse in 0..if simple { 1 } else { 2 } {
                 let ordered = [&members[reverse], &members[1 - reverse]];
@@ -156,7 +215,11 @@ impl Table {
             }
         }
         best.map(|value| value.selection).ok_or_else(|| {
-            anyhow::anyhow!("no storage group can satisfy the write acknowledgement and capacity")
+            s3s::s3_error!(
+                SlowDown,
+                "no storage group can satisfy the write acknowledgement and capacity"
+            )
+            .into()
         })
     }
 
@@ -209,6 +272,7 @@ mod tests {
             .chunks(2)
             .enumerate()
             .map(|(i, pair)| Group {
+                replacing: None,
                 id: Uuid::from_u128(i as u128 + 30),
                 layout: Layout::default(),
                 members: pair.iter().map(|m| m.media_id).collect(),
@@ -221,6 +285,7 @@ mod tests {
                     m.media_id,
                     Status {
                         online: true,
+                        draining: false,
                         free: 1000,
                         requests: Some((0, 2)),
                     },
@@ -252,6 +317,28 @@ mod tests {
     }
 
     #[test]
+    fn capacity_only_grows_when_the_bottleneck_grows() {
+        let (mut cluster, mut status) = fixture();
+        let member = cluster.manifest.groups[0].members[0];
+        let other = cluster.manifest.groups[0].members[1];
+        let stripe = u64::from(cluster.policy.layout.stripe_bytes);
+        cluster.manifest.groups.truncate(1);
+        for s in status.values_mut() {
+            s.free = 5 * stripe;
+        }
+        let free = |s: &HashMap<_, _>| {
+            space(&cluster.manifest, &cluster.policy.layout, s, 0).logical_bytes
+        };
+        assert_eq!(free(&status), 5 * stripe);
+        status.get_mut(&member).unwrap().free *= 2;
+        assert_eq!(free(&status), 5 * stripe);
+        status.get_mut(&other).unwrap().free += stripe;
+        assert_eq!(free(&status), 6 * stripe);
+        status.get_mut(&other).unwrap().online = false;
+        assert_eq!(free(&status), 0);
+    }
+
+    #[test]
     fn roles_regions_and_degraded_acknowledgement_are_fixed_by_selection() -> Result<()> {
         let (mut cluster, mut status) = fixture();
         let object = Uuid::from_u128(100);
@@ -275,6 +362,32 @@ mod tests {
             Table::new(&cluster)?
                 .select(object, None, 100, &status, None)
                 .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn preparing_member_blocks_new_objects_even_if_degraded_writes_are_allowed() -> Result<()> {
+        let (mut cluster, mut status) = fixture();
+        cluster.manifest.groups.truncate(1);
+        cluster.policy.degraded_acknowledgement = Some(Acknowledgement::Data);
+        let member = cluster.manifest.groups[0].members[1];
+        status.get_mut(&member).unwrap().draining = true;
+        let table = Table::new(&cluster)?;
+        assert!(
+            table
+                .select(Uuid::now_v7(), None, 100, &status, None)
+                .is_err()
+        );
+        assert_eq!(
+            space(&cluster.manifest, &cluster.policy.layout, &status, 0).writable_groups,
+            0
+        );
+        status.get_mut(&member).unwrap().draining = false;
+        assert!(
+            table
+                .select(Uuid::now_v7(), None, 100, &status, None)
+                .is_ok()
         );
         Ok(())
     }

@@ -164,6 +164,58 @@ impl Intent {
             }
     }
 
+    pub fn placement(
+        &self,
+        header: &Header,
+        origin: &crate::model::storage_cluster::Manifest,
+        placed: &crate::model::storage_cluster::Manifest,
+    ) -> Result<()> {
+        self.accepts(header)?;
+        ensure!(
+            self.cluster == origin.cluster_id
+                && self.layout_revision == origin.revision as u64
+                && self.takeover_epoch == origin.takeover_epoch
+                && placed.cluster_id == self.cluster
+                && header.layout_revision == placed.revision as u64
+                && placed.takeover_epoch >= origin.takeover_epoch,
+            "fragment placement uses another layout"
+        );
+        let original = origin
+            .groups
+            .iter()
+            .find(|g| g.id == self.group)
+            .context("missing historical fragment group")?;
+        let current = placed
+            .groups
+            .iter()
+            .find(|g| g.id == self.group && g.layout == self.layout)
+            .context("missing fragment placement group")?;
+        let width = usize::from(self.layout.data_shards + self.layout.parity_shards);
+        let expected = self
+            .members(original)?
+            .get(usize::from(header.copy) * width + usize::from(header.shard))
+            .context("invalid historical slot")?;
+        let slot = original
+            .members
+            .iter()
+            .position(|id| id == expected)
+            .context("invalid original placement")?;
+        let assigned = current
+            .members
+            .get(slot)
+            .context("missing placement slot")?;
+        ensure!(
+            header.media == *assigned
+                || header.generation > 0
+                    && current
+                        .replacing
+                        .as_ref()
+                        .is_some_and(|r| r.source == *assigned && r.target == header.media),
+            "fragment is outside its historical slot"
+        );
+        Ok(())
+    }
+
     pub fn accepts(&self, header: &Header) -> Result<()> {
         header.validate()?;
         let offset = u64::from(header.sequence)
@@ -175,7 +227,8 @@ impl Intent {
                 && header.payload == self.payload
                 && header.revision == self.revision
                 && header.cluster == self.cluster
-                && header.layout_revision == self.layout_revision
+                && (header.layout_revision == self.layout_revision
+                    || header.generation > 0 && header.layout_revision > self.layout_revision)
                 && header.takeover_epoch == self.takeover_epoch
                 && header.group == self.group
                 && header.layout == self.layout
@@ -205,6 +258,22 @@ impl Receipt {
         let mut expected = previous.header.clone();
         expected.fragment = self.header.fragment;
         expected.generation = self.header.generation;
+        if self.header.generation != previous.header.generation {
+            ensure!(
+                (self.header.generation > previous.header.generation
+                    && self.header.layout_revision >= previous.header.layout_revision)
+                    || (self.header.generation < previous.header.generation
+                        && self.header.layout_revision <= previous.header.layout_revision),
+                "fragment placement revision runs backwards"
+            );
+            ensure!(
+                self.header.media == previous.header.media
+                    || self.header.layout_revision != previous.header.layout_revision,
+                "fragment moved without a placement revision"
+            );
+            expected.layout_revision = self.header.layout_revision;
+            expected.media = self.header.media;
+        }
         ensure!(
             expected == self.header && self.root == previous.root,
             "fragment generation changed its content or placement"

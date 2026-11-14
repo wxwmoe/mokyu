@@ -59,8 +59,28 @@ fn monitored(mut output: Output, check: Check) -> Output {
     })
 }
 
+struct ActiveStream(Arc<Node>);
+
+impl ActiveStream {
+    fn open(node: &Arc<Node>) -> Result<Self> {
+        let state = node.connection.lock().unwrap();
+        ensure!(
+            !state.storage_closed,
+            Status::unavailable("storage is ready to go offline")
+        );
+        node.streams.fetch_add(1, Ordering::AcqRel);
+        Ok(Self(node.clone()))
+    }
+}
+impl Drop for ActiveStream {
+    fn drop(&mut self) {
+        self.0.streams.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 pub(super) struct Authorization {
     node: Arc<Node>,
+    _stream: ActiveStream,
     grant: Mutex<(Grant, tokio::time::Instant)>,
     key: [u8; 32],
     cancelled: AtomicBool,
@@ -99,6 +119,7 @@ impl Authorization {
             .map_err(|_| Status::permission_denied("invalid storage grant authority"))?;
         let deadline = deadline(&signed.grant)?;
         let value = Arc::new(Self {
+            _stream: ActiveStream::open(&node)?,
             node,
             grant: Mutex::new((signed.grant, deadline)),
             key: manifest.publication_key,
@@ -367,6 +388,7 @@ pub(super) async fn layouts(
     run: wire::Run,
     digest: String,
 ) -> Result<Output> {
+    let stream = ActiveStream::open(&node)?;
     let manifest = node
         .files
         .manifest
@@ -401,6 +423,7 @@ pub(super) async fn layouts(
     let checking = check.clone();
     Ok(monitored(
         Box::pin(async_stream::try_stream! {
+            let _stream=stream;
             let _permit = permit;
             let mut scan = scan;
             let mut number = 0;

@@ -16,13 +16,14 @@ pub(crate) enum Condition {
     Create,
     Overwrite,
     Match(Uuid),
+    Rebuild(Uuid),
 }
 
 impl Condition {
     pub fn check(&self, current: Option<Uuid>) -> Result<()> {
         match self {
             Self::Create => ensure!(current.is_none(), Error::ObjectAlreadyExists),
-            Self::Match(id) => ensure!(
+            Self::Match(id) | Self::Rebuild(id) => ensure!(
                 !id.is_nil() && current == Some(*id),
                 Error::StorageObjectChanged
             ),

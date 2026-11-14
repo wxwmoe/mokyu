@@ -240,7 +240,7 @@ impl StorageNode for Service {
         let auth = self.authorize(request.into_inner())?;
         let _cancel = Cancel(auth.clone());
         let removed = match auth.value().action {
-            Action::Remove { receipt } => {
+            Action::Remove { receipt } | Action::BackupRemove { receipt } => {
                 fragments::remove(&self.node.files, receipt, auth.checking()).await
             }
             Action::Discard { header } => {
