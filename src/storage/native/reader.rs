@@ -23,6 +23,16 @@ pub(crate) fn part_length(layout: &Layout) -> u64 {
     }
 }
 
+// Leave room for an unaligned first part and the largest signed destination URL.
+pub(crate) fn window(layout: &Layout) -> u64 {
+    let slots = if layout.parity_shards == 0 {
+        usize::from(layout.extra_copies) + 1
+    } else {
+        layout.width()
+    };
+    WINDOW.min(part_length(layout) * (256usize / slots.max(1)).saturating_sub(1).max(1) as u64)
+}
+
 pub(crate) use crate::model::storage_native::Metadata;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -41,6 +51,7 @@ pub(crate) struct Plan {
     pub range: Option<Range<u64>>,
     pub parts: Vec<Part>,
     pub parallelism: u16,
+    pub window: u64,
 }
 
 impl Plan {
@@ -52,7 +63,8 @@ impl Plan {
             "native read lease differs from its metadata"
         );
         ensure!(
-            !self.object.version.is_nil()
+            (crate::content::fragment::UNIT as u64..=WINDOW).contains(&self.window)
+                && !self.object.version.is_nil()
                 && self.parts.len() <= 1 + WINDOW as usize / crate::content::fragment::UNIT
                 && (1..=MEMBER_LIMIT).contains(&usize::from(self.parallelism)),
             "invalid native read plan"
@@ -64,7 +76,7 @@ impl Plan {
         ensure!(
             range.start <= range.end
                 && range.end <= self.object.size
-                && range.end - range.start <= WINDOW,
+                && range.end - range.start <= self.window,
             "invalid native read range"
         );
         let mut offset = range.start;

@@ -1158,6 +1158,7 @@ impl Control {
             range,
             parts: Vec::new(),
             parallelism: 1,
+            window: super::reader::window(&intent.layout),
         };
         let Some(range) = &plan.range else {
             return Ok(plan);
@@ -1165,7 +1166,7 @@ impl Control {
         ensure!(
             range.start <= range.end
                 && range.end <= intent.total
-                && range.end - range.start <= super::reader::WINDOW,
+                && range.end - range.start <= plan.window,
             "invalid native read range"
         );
         if range.is_empty() {

@@ -517,6 +517,7 @@ impl Store {
             .unwrap_or(0..meta.size);
         let store = self.clone();
         let requested = range.clone();
+        let window = plan.window;
         let version = plan.object.version;
         let lease = plan.lease;
         let path = path.clone();
@@ -524,7 +525,7 @@ impl Store {
         let body = async_stream::try_stream! {
             let mut offset = requested.start;
             while !head && offset < requested.end {
-                let end = requested.end.min(offset + reader::WINDOW);
+                let end = requested.end.min(offset.saturating_add(window));
                 let (plan, renewal) = store.plan(&name, Some(offset..end), Some(version), Some(&lease)).await.map_err(|error| failure(&path, error))?;
                 let mut body = reader::read(store.pool.clone(), renewal, plan, crate::model::storage_cluster::MEMBER_LIMIT).map_err(|error| failure(&path, error))?;
                 while let Some(bytes) = body.try_next().await.map_err(|error| failure(&path, error))? { yield bytes; }

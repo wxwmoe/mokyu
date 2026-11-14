@@ -172,13 +172,12 @@ impl StorageNode for Service {
             .unwrap()
             .push(header.fragment);
         let _writing = Writing(self.node.clone(), header.fragment);
-        let (local, remote) = forward::write(&self.node, &self.forwarding, input, auth, targets)
-            .await
-            .map_err(transfer::error)?;
-        result_json(&vec![
-            self.receipt(grant.id, local).map_err(transfer::error)?,
-            remote,
-        ])
+        let (local, mut remote) =
+            forward::write(&self.node, &self.forwarding, input, auth, targets)
+                .await
+                .map_err(transfer::error)?;
+        remote.insert(0, self.receipt(grant.id, local).map_err(transfer::error)?);
+        result_json(&remote)
     }
 
     type ReadStream = transfer::Output;

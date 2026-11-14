@@ -43,11 +43,12 @@ pub(crate) struct Preset {
 }
 
 impl Layout {
+    pub const PLAN_MEMBERS: usize = 24;
+
     pub fn supported(&self) -> bool {
-        matches!(
-            (self.data_shards, self.parity_shards, self.extra_copies),
-            (1, 0, 1) | (4, 2, 0)
-        )
+        self.width() <= Self::PLAN_MEMBERS
+            && ((1..=8).contains(&self.data_shards) && self.parity_shards == 0
+                || (self.data_shards, self.parity_shards, self.extra_copies) == (4, 2, 0))
     }
 
     fn preset(&self, featured: bool) -> Preset {
@@ -64,16 +65,26 @@ impl Layout {
     }
 
     pub fn catalog() -> Vec<Preset> {
-        vec![
-            Self::default().preset(true),
-            Self {
-                data_shards: 4,
-                parity_shards: 2,
-                extra_copies: 0,
-                ..Self::default()
+        let mut presets = Vec::new();
+        for data in 1..=8 {
+            for parity in 0..=2 {
+                for copies in 0..Self::PLAN_MEMBERS as u16 {
+                    let layout = Self {
+                        data_shards: data,
+                        parity_shards: parity,
+                        extra_copies: copies,
+                        ..Self::default()
+                    };
+                    if layout.supported() {
+                        presets.push(layout.preset(matches!(
+                            (data, parity, copies),
+                            (1, 0, 1..=2) | (4, 0, 0) | (4, 2, 0)
+                        )));
+                    }
+                }
             }
-            .preset(true),
-        ]
+        }
+        presets
     }
 
     pub fn width(&self) -> usize {
@@ -923,6 +934,33 @@ pub(crate) trait StorageClusters:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_matches_admission_and_guaranteed_tolerance() {
+        let rows = Layout::catalog();
+        let unique: std::collections::HashSet<_> =
+            rows.iter().map(|p| (p.data, p.parity, p.copies)).collect();
+        assert_eq!(rows.len(), unique.len());
+        for k in 0..=25 {
+            for m in 0..=6 {
+                for e in 0..=25 {
+                    let layout = Layout {
+                        data_shards: k,
+                        parity_shards: m,
+                        extra_copies: e,
+                        ..Layout::default()
+                    };
+                    assert_eq!(layout.supported(), unique.contains(&(k, m, e)));
+                }
+            }
+        }
+        for p in rows {
+            assert!(p.members as usize <= Layout::PLAN_MEMBERS);
+            assert_eq!(p.members, (p.data + p.parity) * (p.copies + 1));
+            assert_eq!(p.tolerance, (p.parity + 1) * (p.copies + 1) - 1);
+        }
+        assert!(unique.contains(&(1, 0, 23)) && !unique.contains(&(1, 0, 24)));
+    }
 
     #[test]
     fn region_names_do_not_create_failure_domains() {

@@ -118,17 +118,8 @@ pub(crate) async fn write(
             pieces.len() == intent.layout.width(),
             "native write plan is incomplete"
         );
-        let forwarding = region.is_some()
-            && intent.layout.data_shards == 1
-            && intent.layout.parity_shards == 0
-            && pieces.len() == 2
-            && pieces[0].region.is_some()
-            && pieces[0].region == pieces[1].region
-            && pieces[0].region.as_deref() != region
-            && pieces.iter().all(|piece| {
-                intent.required(piece.mapping.header.copy, piece.mapping.header.shard)
-            });
-        let mut targets = Vec::new();
+        let mut groups: Vec<Vec<_>> = Vec::new();
+        let mut routes = std::collections::HashMap::new();
         let mut senders = Vec::new();
         let mut writes = Vec::new();
         let length = intent
@@ -149,13 +140,22 @@ pub(crate) async fn write(
                 crate::model::storage_transfer::Action::Write { header: authorized } if authorized == header),
                 "native destination differs from its mapping"
             );
-            targets.push(target);
+            let route = piece
+                .region
+                .filter(|r| region.is_some() && Some(r.as_str()) != region);
+            let slot = route
+                .map(|r| {
+                    *routes.entry((header.shard, r)).or_insert_with(|| {
+                        groups.push(Vec::new());
+                        groups.len() - 1
+                    })
+                })
+                .unwrap_or_else(|| {
+                    groups.push(Vec::new());
+                    groups.len() - 1
+                });
+            groups[slot].push(target);
         }
-        let groups = if forwarding {
-            vec![targets]
-        } else {
-            targets.into_iter().map(|target| vec![target]).collect()
-        };
         for mut targets in groups {
             let (send, receive) = mpsc::channel::<Bytes>(2);
             let shard = targets[0]

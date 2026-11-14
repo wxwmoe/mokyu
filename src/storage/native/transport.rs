@@ -185,8 +185,8 @@ impl Pool {
         renewal: &dyn Renewal,
     ) -> Result<Vec<Completion>> {
         ensure!(
-            targets.len() == 2,
-            "forwarding requires two storage destinations"
+            (2..=crate::model::storage_cluster::Layout::PLAN_MEMBERS).contains(&targets.len()),
+            "invalid number of forwarding destinations"
         );
         self.write_many(targets, body, renewal).await
     }

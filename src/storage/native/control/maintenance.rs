@@ -188,7 +188,7 @@ impl Control {
             let mut start=0;
             while start<intent.total {
                 let (end,body) = if let Some(plan) = &source_plan {
-                    let end=intent.total.min(start+reader::WINDOW);
+                    let end=intent.total.min(start.saturating_add(plan.window));
                     let plan=self.plan_read(intent.namespace,&item.path,Some(intent.operation),Some(&plan.lease),Some(start..end),None,until()).await?;
                     (end,reader::read(pool.clone(),self.clone(),plan,crate::model::storage_cluster::MEMBER_LIMIT)?)
                 } else {

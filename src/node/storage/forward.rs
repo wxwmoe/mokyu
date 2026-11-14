@@ -23,7 +23,12 @@ pub(super) fn plan(node: &Node, bytes: &[u8]) -> Result<Vec<Destination>> {
         "invalid forwarding plan size"
     );
     let targets: Vec<Destination> = serde_json::from_slice(bytes)?;
-    ensure!(targets.len() == 2, "forwarding requires two destinations");
+    ensure!(
+        (2..=crate::model::storage_cluster::Layout::PLAN_MEMBERS).contains(&targets.len()),
+        "invalid number of forwarding destinations"
+    );
+    let mut media = std::collections::HashSet::new();
+    let mut copies = std::collections::HashSet::new();
     let manifest = node
         .files
         .manifest
@@ -48,15 +53,15 @@ pub(super) fn plan(node: &Node, bytes: &[u8]) -> Result<Vec<Destination>> {
             member.state == "available" && target.url == member.topology.url,
             "forwarding destination differs from its membership"
         );
+        ensure!(
+            media.insert(header.media) && copies.insert(header.copy),
+            "duplicate replica destination"
+        );
         if index == 0 {
             ensure!(
                 grant.node == node.client.identity.node_id
                     && grant.media == node.files.media.media_id,
                 "forwarding starts at another storage"
-            );
-            ensure!(
-                header.layout.data_shards == 1 && header.layout.parity_shards == 0,
-                "forwarding requires identical replica bytes"
             );
             region = Some(
                 member
@@ -93,14 +98,22 @@ pub(super) fn plan(node: &Node, bytes: &[u8]) -> Result<Vec<Destination>> {
 
 struct Grants {
     auth: Arc<Authorization>,
-    peer: Mutex<Destination>,
+    peers: Mutex<Vec<Destination>>,
 }
 
 #[async_trait::async_trait]
 impl Renewal for Grants {
     async fn renew(&self, grant: &SignedGrant) -> Result<SignedGrant> {
         self.auth.check()?;
-        let next = self.peer.lock().unwrap().authorization.clone();
+        let next = self
+            .peers
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|p| p.authorization.grant.id == grant.grant.id)
+            .context("forwarding grant is not in this plan")?
+            .authorization
+            .clone();
         grant.grant.renewal(&next.grant)?;
         ensure!(
             next.grant.expires > chrono::Utc::now().timestamp(),
@@ -116,16 +129,26 @@ pub(super) async fn write(
     mut input: tonic::Streaming<wire::StorageInput>,
     auth: Arc<Authorization>,
     targets: Vec<Destination>,
-) -> Result<(Receipt, SignedReceipt)> {
+) -> Result<(Receipt, Vec<SignedReceipt>)> {
     let Action::Write { header } = auth.value().action else {
         anyhow::bail!("forwarding requires a write grant");
     };
     let grants = Grants {
         auth: auth.clone(),
-        peer: Mutex::new(targets[1].clone()),
+        peers: Mutex::new(targets[1..].to_vec()),
     };
     let (local, receiver) = mpsc::channel(2);
-    let (peer, remote) = mpsc::channel::<Bytes>(2);
+    let mut peers = Vec::new();
+    let mut writes = Vec::new();
+    for target in targets.into_iter().skip(1) {
+        let (peer, remote) = mpsc::channel::<Bytes>(2);
+        peers.push(peer);
+        let body = futures_util::stream::unfold(remote, |mut receiver| async move {
+            receiver.recv().await.map(|bytes| (Ok(bytes), receiver))
+        })
+        .boxed();
+        writes.push(pool.write(target, body, &grants));
+    }
     let feed_auth = auth.clone();
     let feed_grants = &grants;
     let feeding = async move {
@@ -139,16 +162,19 @@ pub(super) async fn write(
                 );
                 let next = plan(node, &message.grant_json)?;
                 feed_auth.renew(&serde_json::to_vec(&next[0].authorization)?)?;
-                let mut current = feed_grants.peer.lock().unwrap();
+                let mut current = feed_grants.peers.lock().unwrap();
                 ensure!(
-                    current.url == next[1].url,
-                    "forwarding renewal changed its destination"
+                    next.len() == current.len() + 1,
+                    "forwarding renewal changed its size"
                 );
-                current
-                    .authorization
-                    .grant
-                    .renewal(&next[1].authorization.grant)?;
-                *current = next[1].clone();
+                for (old, new) in current.iter().zip(&next[1..]) {
+                    ensure!(
+                        old.url == new.url,
+                        "forwarding renewal changed its destination"
+                    );
+                    old.authorization.grant.renewal(&new.authorization.grant)?;
+                }
+                current.clone_from_slice(&next[1..]);
             } else if message.complete {
                 ensure!(
                     message.data.is_empty(),
@@ -169,20 +195,20 @@ pub(super) async fn write(
                     .send(fragments::Input::Data(data.clone()))
                     .await
                     .context("local writer stopped")?;
-                peer.send(data).await.context("forwarding writer stopped")?;
+                for peer in &peers {
+                    peer.send(data.clone())
+                        .await
+                        .context("forwarding writer stopped")?;
+                }
             }
         }
     };
-    let body = futures_util::stream::unfold(remote, |mut receiver| async move {
-        receiver.recv().await.map(|bytes| (Ok(bytes), receiver))
-    })
-    .boxed();
     let writing = async {
         let (local, remote) = tokio::try_join!(
             fragments::write(&node.files, header, receiver, auth.checking()),
-            pool.write(targets[1].clone(), body, &grants),
+            futures_util::future::try_join_all(writes),
         )?;
-        Ok::<_, anyhow::Error>((local, remote.receipt))
+        Ok::<_, anyhow::Error>((local, remote.into_iter().map(|c| c.receipt).collect()))
     };
     tokio::pin!(feeding, writing);
     tokio::select! {
