@@ -312,6 +312,7 @@ impl NodeContext {
             current.mode_revision = Some(state.mode_revision);
             current.maintenance = state.maintenance;
             current.work_pending = state.work_pending;
+            current.handoff_revision = state.handoff_revision;
             current.pending_uploads = state.draining.then_some(state.pending_uploads);
             current.draining = state.draining || *self.mode.borrow() != Mode::Running;
             current.phase = if current.draining {

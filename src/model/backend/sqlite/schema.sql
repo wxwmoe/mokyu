@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261114063300.
+-- Generated from the complete sqlite migration chain through 20261114113200.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -767,6 +767,15 @@ CREATE TABLE mokyu_meta (
     CHECK (deployment_mode IN ('single', 'single_control')), deployment_mode_revision INTEGER NOT NULL DEFAULT 1
     CHECK (deployment_mode_revision > 0), control_epoch INTEGER NOT NULL DEFAULT 0 CHECK (control_epoch >= 0), remote_work INTEGER NOT NULL DEFAULT 0 CHECK(remote_work IN (0,1))) STRICT;
 
+CREATE TABLE multipart_carriers (
+    location_id BLOB NOT NULL PRIMARY KEY,
+    upload_id BLOB REFERENCES uploads(id) ON DELETE SET NULL,
+    stream_id INTEGER REFERENCES streams(id) ON DELETE SET NULL,
+    storage_id BLOB NOT NULL REFERENCES storages(id),
+    created_at INTEGER NOT NULL,
+    UNIQUE(upload_id,stream_id)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE multipart_files (
     id BLOB NOT NULL PRIMARY KEY CHECK (length(id)=16),
     upload_id BLOB REFERENCES uploads(id) ON DELETE SET NULL,
@@ -775,6 +784,21 @@ CREATE TABLE multipart_files (
     reclaim_pending INTEGER NOT NULL DEFAULT 0 CHECK (reclaim_pending IN (0,1)),
     state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','sealed','deleting'))
 , node_id BLOB, part_stream INTEGER, request_hash BLOB) STRICT, WITHOUT ROWID;
+
+CREATE TABLE multipart_tails (
+    fragment_id INTEGER NOT NULL PRIMARY KEY,
+    upload_id BLOB NOT NULL,
+    node_id BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    object_key TEXT NOT NULL UNIQUE,
+    requested INTEGER NOT NULL DEFAULT FALSE,
+    token BLOB,
+    retry_at INTEGER NOT NULL DEFAULT 0,
+    source_error TEXT,
+    FOREIGN KEY (fragment_id) REFERENCES fragments(id) ON DELETE CASCADE,
+    FOREIGN KEY (upload_id) REFERENCES uploads(id) ON DELETE CASCADE,
+    FOREIGN KEY (node_id) REFERENCES nodes(id)
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE native_part_reads (
     token BLOB NOT NULL PRIMARY KEY,
@@ -838,6 +862,14 @@ CREATE TABLE node_completions (
     conditions TEXT NOT NULL,
     summary TEXT NOT NULL,
     FOREIGN KEY (upload_id) REFERENCES uploads(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE node_handoffs (
+    node_id BLOB PRIMARY KEY,
+    operation BLOB NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision>0),
+    state TEXT NOT NULL CHECK(state IN ('serving','preparing','offline_ready','resuming')),
+    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
 CREATE TABLE node_native_work (
@@ -2128,6 +2160,14 @@ CREATE TABLE transfer_subscriptions (
     active BOOLEAN NOT NULL DEFAULT TRUE
 );
 
+CREATE TABLE upload_staging (
+    upload_id BLOB NOT NULL PRIMARY KEY REFERENCES uploads(id) ON DELETE CASCADE,
+    storage_id BLOB REFERENCES storages(id),
+    policy_revision INTEGER NOT NULL CHECK(policy_revision>0),
+    tail_upload TEXT NOT NULL CHECK(tail_upload IN ('immediate','on_demand_timeout','on_demand')),
+    tail_wait_seconds INTEGER NOT NULL CHECK(tail_wait_seconds>0)
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE uploads (
     id BLOB CHECK (id IS NULL OR length(id)=16) NOT NULL PRIMARY KEY,
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
@@ -2369,6 +2409,10 @@ CREATE INDEX member_grants_member ON member_bucket_grants(user_id,project_id);
 
 CREATE UNIQUE INDEX mirroring_keys_task_idx ON mirroring_keys(task_id);
 
+CREATE INDEX multipart_carriers_storage ON multipart_carriers(storage_id,created_at);
+
+CREATE INDEX multipart_carriers_stream ON multipart_carriers(stream_id);
+
 CREATE INDEX multipart_files_node ON multipart_files(node_id,state,id);
 
 CREATE UNIQUE INDEX multipart_files_part ON multipart_files(part_stream);
@@ -2376,6 +2420,10 @@ CREATE UNIQUE INDEX multipart_files_part ON multipart_files(part_stream);
 CREATE INDEX multipart_files_reclaim ON multipart_files(storage_id,id) WHERE reclaim_pending;
 
 CREATE INDEX multipart_files_upload ON multipart_files(upload_id,state);
+
+CREATE INDEX multipart_tails_owner ON multipart_tails(node_id,requested,retry_at,created_at);
+
+CREATE INDEX multipart_tails_upload ON multipart_tails(upload_id);
 
 CREATE INDEX native_part_reads_expiry ON native_part_reads(expires_at);
 
@@ -2626,6 +2674,8 @@ CREATE INDEX transfer_sources_raw ON transfer_sources(source_raw);
 CREATE INDEX transfer_sources_work ON transfer_sources(task_id,state,id);
 
 CREATE INDEX transfer_subscriptions_bucket ON transfer_subscriptions(bucket_id) WHERE active;
+
+CREATE INDEX upload_staging_storage ON upload_staging(storage_id);
 
 CREATE INDEX uploads_cleanup ON uploads(state,touched_at,id);
 

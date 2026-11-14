@@ -23,6 +23,14 @@ pub struct Upload {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub(crate) struct Staging {
+    pub storage_id: Option<Uuid>,
+    pub policy_revision: i64,
+    pub tail_upload: String,
+    pub tail_wait_seconds: i64,
+}
+
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
 pub(crate) struct UploadSummary {
     pub id: Uuid,
@@ -186,6 +194,20 @@ pub(crate) struct Completion<'a> {
 
 #[async_trait]
 pub(crate) trait MultipartStore: Send + Sync {
+    async fn claim_tail(&self, node: Uuid, token: Uuid)
+    -> Result<Option<super::node_native::Work>>;
+    async fn finish_tail(
+        &self,
+        work: &super::node_native::Work,
+        token: Uuid,
+        result: &super::node_native::ResultValue,
+    ) -> Result<()>;
+    async fn request_tails(
+        &self,
+        upload: Uuid,
+        local: Option<Uuid>,
+        numbers: &[i32],
+    ) -> Result<Vec<Uuid>>;
     async fn file(&self, upload: Uuid, node: Option<Uuid>) -> Result<Uuid>;
     async fn seal_files(&self, upload: Uuid) -> Result<()>;
     async fn local_ranges(&self, stream: Id, after: i64) -> Result<Vec<LocalPartRange>>;
@@ -209,6 +231,7 @@ pub(crate) trait MultipartStore: Send + Sync {
     async fn remove_file(&self, id: Uuid) -> Result<()>;
     async fn upload(&self, id: Uuid, bucket: Uuid, key: &str, access: &str) -> Result<Upload>;
     async fn create(&self, input: MultipartCreate<'_>) -> Result<(Uuid, bool)>;
+    async fn staging(&self, upload: Uuid) -> Result<Staging>;
     async fn begin_part(
         &self,
         authority: &Permit,
@@ -285,6 +308,8 @@ pub(crate) struct RemoteUpload {
 
 #[derive(sqlx::FromRow)]
 pub(crate) struct RemotePart {
+    #[sqlx(default)]
+    pub file: Option<Uuid>,
     #[sqlx(flatten)]
     pub upload: RemoteUpload,
     #[sqlx(flatten)]

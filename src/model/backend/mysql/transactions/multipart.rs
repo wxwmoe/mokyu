@@ -25,12 +25,6 @@ pub(in super::super) async fn create_multipart_in(
         .fetch_one(&mut **tx)
         .await?;
     ensure!(state == "active", crate::model::Error::OperationAborted);
-    ensure!(
-        !queries::native_multipart(input.bucket)
-            .fetch_one(&mut **tx)
-            .await?,
-        s3s::s3_error!(NotImplemented, "native storage Multipart is unavailable")
-    );
     let expected = if let Some(web) = &input.web {
         if let Some((id, hash)) = queries::web_upload_identity(web.user, web.client_id)
             .fetch_optional(&mut **tx)
@@ -65,6 +59,7 @@ pub(in super::super) async fn create_multipart_in(
     queries::insert_multipart(id, &input)
         .execute(&mut **tx)
         .await?;
+    super::super::upload_staging::pin(tx, id, input.bucket).await?;
     if let Some(web) = input.web {
         queries::insert_web_upload(id, &web, expected)
             .execute(&mut **tx)

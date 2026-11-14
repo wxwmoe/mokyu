@@ -1283,22 +1283,12 @@ impl Storage {
             .copied()
             .collect()
     }
-    fn shared_staging_id(&self) -> Result<Uuid> {
-        ensure!(
-            self.staging.is_some(),
-            "shared staging requires a node deployment"
-        );
-        let id = self
-            .staging_storage_id
-            .context("cluster mode requires uploads.staging_storage_id")?;
-        let target = self.store_backend(id)?;
-        ensure!(
-            !target.is_local,
-            "cluster staging storage must be S3-compatible"
-        );
-        Ok(id)
-    }
-    async fn claim_staging(&self, storage_id: Uuid, key: &str, bytes: u64) -> Result<()> {
+    pub(crate) async fn claim_staging(
+        &self,
+        storage_id: Uuid,
+        key: &str,
+        bytes: u64,
+    ) -> Result<()> {
         self.staging
             .as_ref()
             .context("shared staging requires a node deployment")?
@@ -1319,19 +1309,39 @@ impl Storage {
         Ok(())
     }
     async fn put_staged(&self, storage_id: Uuid, key: &str, data: Bytes) -> Result<()> {
-        self.ensure_storage_verified(storage_id).await?;
         self.claim_staging(storage_id, key, data.len() as u64)
             .await?;
-        let target = self.store_backend(storage_id)?;
-        let result = target
-            .backend
-            .put(&Path::from(key), data.into())
-            .await
-            .inspect_err(|e| self.diagnostics.backend(e));
-        if let Err(error) = result {
+        let result = self.put_reserved_tail(storage_id, key, data).await;
+        if result.is_err() {
             let _ = self.release_staging(storage_id, key).await;
-            return Err(error.into());
         }
+        result
+    }
+    pub(crate) async fn put_reserved_tail(
+        &self,
+        storage_id: Uuid,
+        key: &str,
+        data: Bytes,
+    ) -> Result<()> {
+        self.ensure_storage_verified(storage_id).await?;
+        let target = self.store_backend(storage_id)?;
+        let mut options = object_store::PutOptions::default();
+        if target.native.is_some() {
+            let owner = Uuid::parse_str(
+                key.strip_prefix(STAGING_PREFIX)
+                    .context("invalid staging key")?,
+            )?;
+            options.mode = object_store::PutMode::Create;
+            options.extensions.insert(native::store::Publication {
+                owner,
+                area: crate::content::fragment::Area::Blocks,
+            });
+        }
+        target
+            .backend
+            .put_opts(&Path::from(key), data.into(), options)
+            .await
+            .inspect_err(|e| self.diagnostics.backend(e))?;
         Ok(())
     }
     async fn read_staged(&self, storage_id: Uuid, key: &str, bound: usize) -> Result<Vec<u8>> {
@@ -1359,26 +1369,41 @@ impl Storage {
         self.release_staging(storage_id, key).await
     }
     pub(crate) async fn shared_staging_ready(&self) -> Result<()> {
-        let id = self.shared_staging_id()?;
         ensure!(
             self.staging_bytes_limit.is_none_or(|n| n > 0),
             "uploads.staging_bytes_limit must be positive"
         );
-        let target = self.store_backend(id)?;
-        if let Some(native) = &target.native {
-            native.probe().await?;
+        let ids = match self.staging_storage_id {
+            Some(id) => vec![id],
+            None => self.targets.read().unwrap().keys().copied().collect(),
+        };
+        for id in ids {
+            let target = self.store_backend(id)?;
+            ensure!(
+                !target.is_local,
+                "cluster staging requires a shared backend"
+            );
+            self.ensure_storage_verified(id).await?;
+            if let Some(native) = &target.native {
+                native.probe().await?;
+            }
         }
         Ok(())
     }
     pub(crate) async fn write_fragment(
         &self,
         id: Uuid,
+        staging_storage_id: Option<Uuid>,
         data: &[u8],
     ) -> Result<(Option<Uuid>, Option<String>, Option<Fragment>)> {
         if self.staging.is_none() {
             return Ok((None, None, Some(self.disk.write_fragment(id, data).await?)));
         }
-        let storage_id = self.shared_staging_id()?;
+        let storage_id = staging_storage_id.context("upload has no shared staging backend")?;
+        ensure!(
+            !self.store_backend(storage_id)?.is_local,
+            "cluster staging requires a shared backend"
+        );
         let key = fragment_key(id);
         self.put_staged(storage_id, &key, Bytes::copy_from_slice(data))
             .await?;

@@ -2,6 +2,15 @@ use super::{node_read, session::Run};
 use anyhow::{Result, ensure};
 use uuid::Uuid;
 
+#[derive(Debug)]
+pub(crate) struct Pending(pub Vec<Uuid>);
+impl std::fmt::Display for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("multipart tails are waiting for their owner")
+    }
+}
+impl std::error::Error for Pending {}
+
 pub(crate) struct Prepare {
     pub run: Run,
     pub operation: Uuid,
@@ -38,6 +47,7 @@ pub(crate) struct Prepared {
     pub object_key: String,
     pub end: i64,
     pub committed: bool,
+    pub local: bool,
     pub materials: Vec<node_read::Material>,
     pub storage: Option<node_read::Version>,
     pub grants: Vec<node_read::Grant>,

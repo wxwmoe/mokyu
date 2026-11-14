@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261114063300.
+-- Generated from the complete mysql migration chain through 20261114113200.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -988,6 +988,21 @@ CREATE TABLE `mokyu_meta` (
   CONSTRAINT `mokyu_meta_singleton` CHECK ((`id` = 1))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `multipart_carriers` (
+  `location_id` binary(16) NOT NULL,
+  `upload_id` binary(16) DEFAULT NULL,
+  `stream_id` bigint DEFAULT NULL,
+  `storage_id` binary(16) NOT NULL,
+  `created_at` bigint NOT NULL,
+  PRIMARY KEY (`location_id`),
+  UNIQUE KEY `upload_id` (`upload_id`,`stream_id`),
+  KEY `multipart_carriers_storage` (`storage_id`,`created_at`),
+  KEY `multipart_carriers_stream` (`stream_id`),
+  CONSTRAINT `multipart_carriers_ibfk_1` FOREIGN KEY (`upload_id`) REFERENCES `uploads` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `multipart_carriers_ibfk_2` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`) ON DELETE SET NULL,
+  CONSTRAINT `multipart_carriers_ibfk_3` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `multipart_files` (
   `id` binary(16) NOT NULL,
   `upload_id` binary(16) DEFAULT NULL,
@@ -1009,6 +1024,25 @@ CREATE TABLE `multipart_files` (
   CONSTRAINT `multipart_files_ibfk_2` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
   CONSTRAINT `multipart_files_source` FOREIGN KEY (`source_id`) REFERENCES `raw_sources` (`id`),
   CONSTRAINT `multipart_files_chk_1` CHECK ((`state` in (_ascii'open',_ascii'sealed',_ascii'deleting')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `multipart_tails` (
+  `fragment_id` bigint NOT NULL,
+  `upload_id` binary(16) NOT NULL,
+  `node_id` binary(16) NOT NULL,
+  `created_at` bigint NOT NULL,
+  `object_key` varchar(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `requested` tinyint(1) NOT NULL DEFAULT '0',
+  `token` binary(16) DEFAULT NULL,
+  `retry_at` bigint NOT NULL DEFAULT '0',
+  `source_error` varchar(32) COLLATE utf8mb4_bin DEFAULT NULL,
+  PRIMARY KEY (`fragment_id`),
+  UNIQUE KEY `object_key` (`object_key`),
+  KEY `multipart_tails_owner` (`node_id`,`requested`,`retry_at`,`created_at`),
+  KEY `multipart_tails_upload` (`upload_id`),
+  CONSTRAINT `multipart_tails_ibfk_1` FOREIGN KEY (`fragment_id`) REFERENCES `fragments` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `multipart_tails_ibfk_2` FOREIGN KEY (`upload_id`) REFERENCES `uploads` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `multipart_tails_ibfk_3` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `native_part_reads` (
@@ -1083,6 +1117,17 @@ CREATE TABLE `node_completions` (
   `summary` json NOT NULL,
   PRIMARY KEY (`upload_id`),
   CONSTRAINT `node_completions_ibfk_1` FOREIGN KEY (`upload_id`) REFERENCES `uploads` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `node_handoffs` (
+  `node_id` binary(16) NOT NULL,
+  `operation` binary(16) NOT NULL,
+  `revision` bigint NOT NULL,
+  `state` varchar(16) COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`node_id`),
+  CONSTRAINT `node_handoffs_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `node_handoffs_chk_1` CHECK ((`revision` > 0)),
+  CONSTRAINT `node_handoffs_chk_2` CHECK ((`state` in (_utf8mb4'serving',_utf8mb4'preparing',_utf8mb4'offline_ready',_utf8mb4'resuming')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `node_native_work` (
@@ -2787,6 +2832,21 @@ CREATE TABLE `transfer_subscriptions` (
   KEY `transfer_subscriptions_bucket` (`bucket_id`,`active`),
   CONSTRAINT `transfer_subscriptions_ibfk_1` FOREIGN KEY (`task_id`) REFERENCES `transfer_runs` (`task_id`) ON DELETE CASCADE,
   CONSTRAINT `transfer_subscriptions_ibfk_2` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `upload_staging` (
+  `upload_id` binary(16) NOT NULL,
+  `storage_id` binary(16) DEFAULT NULL,
+  `policy_revision` bigint NOT NULL,
+  `tail_upload` varchar(24) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+  `tail_wait_seconds` bigint NOT NULL,
+  PRIMARY KEY (`upload_id`),
+  KEY `upload_staging_storage` (`storage_id`),
+  CONSTRAINT `upload_staging_ibfk_1` FOREIGN KEY (`upload_id`) REFERENCES `uploads` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `upload_staging_ibfk_2` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT `upload_staging_chk_1` CHECK ((`policy_revision` > 0)),
+  CONSTRAINT `upload_staging_chk_2` CHECK ((`tail_upload` in (_utf8mb4'immediate',_utf8mb4'on_demand_timeout',_utf8mb4'on_demand'))),
+  CONSTRAINT `upload_staging_chk_3` CHECK ((`tail_wait_seconds` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `uploads` (

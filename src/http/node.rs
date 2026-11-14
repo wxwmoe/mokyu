@@ -699,7 +699,7 @@ impl Gateway {
         let mut alias = false;
         let result: Result<s3s::HttpResponse> = async {
             super::transport::authority(&mut request)?;
-            self.reads.node.snapshot()?;
+            let snapshot = self.reads.node.snapshot()?;
             let target = s3::Target::new(&request, &self.settings)?;
             let image_uri = request.uri().clone();
             let route = s3::read_route(
@@ -885,13 +885,7 @@ impl Gateway {
                 post && target.query.iter().any(|name| name == "delete"),
                 post && target.query.iter().any(|name| name == "uploadId"),
                 std::time::Duration::from_secs(crate::config::seconds(
-                    &self
-                        .reads
-                        .node
-                        .snapshot()?
-                        .runtime()
-                        .uploads
-                        .client_idle_timeout,
+                    &snapshot.runtime().uploads.client_idle_timeout,
                 )?),
             )
             .await?;

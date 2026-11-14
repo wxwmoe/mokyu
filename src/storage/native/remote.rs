@@ -17,6 +17,19 @@ pub(crate) struct Reader {
     pub region: Option<String>,
 }
 
+fn read_error(status: tonic::Status) -> anyhow::Error {
+    if status.code() == tonic::Code::NotFound
+        && status
+            .metadata()
+            .get("mokyu-storage")
+            .is_some_and(|value| value == "object-missing")
+    {
+        anyhow::Error::from(status).context(crate::model::Error::StorageObjectMissing)
+    } else {
+        status.into()
+    }
+}
+
 impl Reader {
     pub async fn plan(
         &self,
@@ -34,7 +47,8 @@ impl Reader {
                     region: self.region.clone(),
                 })?,
             })
-            .await?;
+            .await
+            .map_err(read_error)?;
         let plan: Plan = serde_json::from_slice(&reply.plan_json)?;
         plan.validate()?;
         anyhow::ensure!(
@@ -142,5 +156,23 @@ impl Renewal for Writer {
         let next: SignedGrant = serde_json::from_slice(&reply.grant_json)?;
         grant.grant.renewal(&next.grant)?;
         Ok(next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_carrier_is_distinct_from_an_expired_operation() {
+        let mut status = tonic::Status::not_found("missing");
+        assert_eq!(crate::model::error(&read_error(status.clone())), None);
+        status
+            .metadata_mut()
+            .insert("mokyu-storage", "object-missing".parse().unwrap());
+        assert_eq!(
+            crate::model::error(&read_error(status)),
+            Some(crate::model::Error::StorageObjectMissing)
+        );
     }
 }

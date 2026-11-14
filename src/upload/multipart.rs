@@ -280,7 +280,7 @@ impl App {
         drop(_permits);
         if remote.is_some() {
             self.wake_raw_uploads.notify_one();
-            if !cached {
+            if !cached || self.storage.is_native(storage)? {
                 self.wait_remote_part(u.id, id).await?;
             }
         }
@@ -529,6 +529,29 @@ impl App {
             })
             .collect();
         let summary = specification.select(&u, &selected_metadata)?;
+        if self.deployment_mode() != "single"
+            && self.multipart.staging(u.id).await?.tail_upload != "immediate"
+        {
+            let numbers: Vec<_> = manifest.iter().map(|p| p.number).collect();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+            loop {
+                let owners = self
+                    .multipart
+                    .request_tails(u.id, self.node.get().map(|n| n.node_id), &numbers)
+                    .await?;
+                if owners.is_empty() {
+                    break;
+                }
+                for owner in owners {
+                    self.notifications
+                        .hint(&crate::model::notification::Signal::Work(Some(owner)));
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    return Err(tail_pending().into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        }
         let total = summary.size;
         let etag = summary.etag;
         self.multipart.seal_files(u.id).await?;
@@ -1194,10 +1217,20 @@ pub(crate) fn completion_retry() -> s3s::S3Error {
 }
 
 pub(crate) fn completion_busy() -> s3s::S3Error {
-    let mut error = s3_error!(
+    retry_in_one_minute(s3_error!(
         SlowDown,
         "multipart completion capacity is full; retry later"
-    );
+    ))
+}
+
+pub(crate) fn tail_pending() -> s3s::S3Error {
+    retry_in_one_minute(s3_error!(
+        ServiceUnavailable,
+        "A selected part is waiting for its node; retry or upload that part again."
+    ))
+}
+
+fn retry_in_one_minute(mut error: s3s::S3Error) -> s3s::S3Error {
     let mut headers = hyper::HeaderMap::new();
     headers.insert(
         hyper::header::RETRY_AFTER,

@@ -6,26 +6,67 @@ use serde_json::{Value, json};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, ToSchema, Default)]
 pub(crate) struct NodeDrain {
     pub(crate) chunks: i64,
     pub(crate) raw: i64,
     pub(crate) parts: i64,
     pub(crate) writes: i64,
     pub(crate) reads: i64,
+    pub(crate) tails: i64,
+    pub(crate) tasks: i64,
 }
 
 impl std::fmt::Display for NodeDrain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "resume and drain the node before release ({} pending chunks, {} raw files, {} multipart parts, {} active writes, {} protected reads)",
-            self.chunks, self.raw, self.parts, self.writes, self.reads
+            "resume and drain the node before release ({} pending chunks, {} raw files, {} multipart parts, {} active writes, {} protected reads, {} local tails, {} tasks)",
+            self.chunks, self.raw, self.parts, self.writes, self.reads, self.tails, self.tasks
         )
     }
 }
 
 impl std::error::Error for NodeDrain {}
+
+impl NodeDrain {
+    pub fn empty(&self) -> bool {
+        self.chunks + self.raw + self.parts + self.writes + self.reads + self.tails + self.tasks
+            == 0
+    }
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct HandoffRow {
+    pub operation: Uuid,
+    pub revision: i64,
+    pub state: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub(crate) struct Handoff {
+    pub operation: Option<Uuid>,
+    pub revision: i64,
+    pub state: String,
+    pub pending: NodeDrain,
+    pub pending_bytes: i64,
+    pub damaged_tails: i64,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize, ToSchema, clap::ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum HandoffAction {
+    Prepare,
+    Cancel,
+    Resume,
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct HandoffInput {
+    pub revision: i64,
+    pub action: HandoffAction,
+}
 
 pub(crate) const REPORT_FORMAT: u32 = 1;
 pub(crate) const CONTACT_SECONDS: i64 = 30;
@@ -203,6 +244,7 @@ impl NodeReport {
 #[derive(Serialize, ToSchema)]
 pub(crate) struct NodeStatus {
     pub node: super::cluster::NodeView,
+    pub handoff: Option<Handoff>,
     pub boot_id: Option<Uuid>,
     pub started_at: Option<DateTime<Utc>>,
     pub status: Option<Value>,

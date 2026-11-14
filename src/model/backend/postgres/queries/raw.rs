@@ -354,7 +354,7 @@ impl RawStore for Backend {
         Ok(sqlx::query_scalar("SELECT source_id FROM multipart_files m WHERE m.id=$1 AND source_id IS NOT NULL AND m.state<>'deleting' AND EXISTS(SELECT 1 FROM fragments WHERE file_id=m.id)").bind(location).fetch_optional(&self.pool).await?)
     }
     async fn cached_checkpoints(&self, after: Uuid) -> Result<Vec<(Uuid, Id)>> {
-        Ok(sqlx::query_as("SELECT m.id,m.source_id FROM multipart_files m JOIN storages s ON s.id=m.storage_id WHERE m.id>$1 AND s.type='s3' AND m.source_id IS NOT NULL AND m.state<>'deleting' AND EXISTS(SELECT 1 FROM fragments WHERE file_id=m.id) ORDER BY m.id LIMIT 128").bind(after).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT m.id,m.source_id FROM multipart_files m JOIN storages s ON s.id=m.storage_id WHERE m.id>$1 AND s.type IN ('s3','mokyu') AND m.source_id IS NOT NULL AND m.state<>'deleting' AND EXISTS(SELECT 1 FROM fragments WHERE file_id=m.id) ORDER BY m.id LIMIT 128").bind(after).fetch_all(&self.pool).await?)
     }
     async fn has_upload(&self, source: Id) -> Result<bool> {
         Ok(
@@ -958,7 +958,7 @@ pub(in super::super) fn insert_remote(
     storage: Uuid,
     revision: i64,
 ) -> Statement<'static> {
-    sqlx::query("WITH candidate AS (INSERT INTO raw_sources(storage_id,profile_revision,medium) SELECT b.storage_id,p.revision,'shared' FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=s.id WHERE u.id=$1 AND b.storage_id=$2 AND p.revision=$3 AND s.type='s3' AND NOT p.cdc_enabled AND NOT p.compression_enabled AND s.block_key_id IS NULL AND NOT p.pack_enabled AND s.enabled AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id AND stream_id IS NOT NULL) RETURNING id) UPDATE uploads SET raw_source_id=(SELECT id FROM candidate) WHERE id=$1 AND EXISTS(SELECT 1 FROM candidate)").bind(upload).bind(storage).bind(revision)
+    sqlx::query("WITH candidate AS (INSERT INTO raw_sources(storage_id,profile_revision,medium) SELECT b.storage_id,p.revision,'shared' FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=s.id WHERE u.id=$1 AND b.storage_id=$2 AND p.revision=$3 AND s.type IN ('s3','mokyu') AND NOT p.cdc_enabled AND NOT p.compression_enabled AND s.block_key_id IS NULL AND NOT p.pack_enabled AND s.enabled AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id AND stream_id IS NOT NULL) RETURNING id) UPDATE uploads SET raw_source_id=(SELECT id FROM candidate) WHERE id=$1 AND EXISTS(SELECT 1 FROM candidate)").bind(upload).bind(storage).bind(revision)
 }
 
 pub(in super::super) fn claim_remote(upload: Uuid, token: Uuid) -> Statement<'static> {

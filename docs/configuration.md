@@ -106,7 +106,11 @@ CORS 策略在节点内按内容共享，额度在运行设置中配置，确认
 
 写入内存从同一总预算划出，最多占进程内存四分之一，并保留 stream、响应缓存及默认 pack 的额度。raw 在已知长度且能一次领取完整额度时进入 RAM，未知或过大的长度沿用有界文件暂存；chunks 按完整区块领取。待上传唯一副本不参与淘汰，最后一个读取者释放正文后才返还内存，空对象至少计 `4KiB`。local、群集和 durable/buffered 不使用 RAM 提前确认；写内存为 `0B` 不影响既有流式工作区。
 
-四种数据库均可在单容器模式预先配置共享 S3 暂存，供后续切换使用。群集模式禁止 local storage。即使只有一个 data，也必须配置共享 S3/S3 兼容 storage 作为 `uploads.staging_storage_id`；仅未闭合的 CDC Multipart 尾块在保留前缀 `multipart/fragment/` 共享暂存；raw Multipart、raw/chunks 写缓存使用所属节点的 `instance.data_path`，最终载荷直接写目标 S3。单容器模式可使用 `/data/storage` 的 local storage。
+## Multipart 暂存
+
+单容器模式可使用本地存储。`single_control`、`cluster` 模式使用桶绑定的 S3 或 Mokyu 存储群集；`uploads.staging_storage_id` 可留空，或指定另一个启用的共享后端来保存 CDC Multipart 尾块。每个上传会话在创建时固定暂存目标和尾块策略。以后更改设置只影响新会话。
+
+`uploads.tail_upload` 默认为 `immediate`，尾块在后端持久保存后才确认 Part。`on_demand_timeout` 允许尾块先在所属节点落盘，其他节点实际需要时立即转存；没有活跃 Part 上传时，达到 `uploads.tail_upload_timeout`（默认 `600s`）也会转存。`on_demand` 只在实际需要或准备下线时转存。后两种模式下，未转存的尾块只有一份；节点离线时，依赖它的请求返回 `503` 和 `Retry-After: 60`。节点磁盘丢失后可重传对应 Part。完整对象仍需满足最终后端的持久确认条件。
 
 ## runtime 设置
 

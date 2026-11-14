@@ -476,6 +476,13 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
             Status::already_exists("node operation parameters changed")
         }
         Some(Error::NodeOperationMissing) => Status::not_found("node operation was not found"),
+        Some(Error::StorageObjectMissing) => {
+            let mut status = Status::not_found("native storage object was not found");
+            status
+                .metadata_mut()
+                .insert("mokyu-storage", "object-missing".parse().unwrap());
+            status
+        }
         Some(Error::RedundancyBacklog) => {
             Status::resource_exhausted("redundancy pending key limit reached")
         }
@@ -486,6 +493,13 @@ pub(super) fn failure(error: anyhow::Error) -> Status {
             status
                 .metadata_mut()
                 .insert("mokyu-retryable", "read-capacity".parse().unwrap());
+            status
+        }
+        _ if error.is::<crate::model::node_tail::Pending>() => {
+            let mut status = Status::failed_precondition("multipart tail is not shared yet");
+            status
+                .metadata_mut()
+                .insert("mokyu-retryable", "multipart-tail".parse().unwrap());
             status
         }
         _ if error.downcast_ref::<s3s::S3Error>().is_some() => {
@@ -1138,6 +1152,7 @@ fn state(snapshot: &session::Snapshot) -> wire::NodeState {
     wire::NodeState {
         deployment_mode: snapshot.mode.clone(),
         mode_revision: snapshot.mode_revision as u64,
+        handoff_revision: snapshot.handoff_revision as u64,
         maintenance: snapshot.maintenance,
         native_pending: snapshot.native_pending,
         work_pending: snapshot.work_pending,
@@ -1610,11 +1625,23 @@ impl NodeMultipart for Service {
     ) -> Result<Response<wire::WriteReply>, Status> {
         let node = data_identity(&request)?;
         let input = super::multipart::begin_complete(request.into_inner())?;
-        let reply = bounded(self.app.node_writes.begin_write(
-            &node,
-            &self.app.secrets.credential_key,
-            input,
-        ))
+        let reply = bounded(async {
+            let result = self
+                .app
+                .node_writes
+                .begin_write(&node, &self.app.secrets.credential_key, input)
+                .await;
+            if let Err(error) = &result
+                && let Some(pending) = error.downcast_ref::<crate::model::node_tail::Pending>()
+            {
+                for &owner in &pending.0 {
+                    self.app
+                        .notifications
+                        .hint(&crate::model::notification::Signal::Work(Some(owner)));
+                }
+            }
+            result
+        })
         .await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("node-completion-started").await;

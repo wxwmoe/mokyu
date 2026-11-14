@@ -1,0 +1,122 @@
+use super::{Rows, Scalar, Statement};
+use crate::{config::UploadSettings, model::multipart::Staging};
+use sqlx::types::Json;
+use uuid::Uuid;
+
+pub(in super::super) fn configuration(
+    bucket: Uuid,
+) -> Rows<'static, (String, Json<UploadSettings>, i64, Uuid)> {
+    sqlx::query_as("SELECT m.deployment_mode,r.value,r.revision,b.storage_id FROM buckets b CROSS JOIN mokyu_meta m JOIN runtime_settings r ON r.section='uploads' WHERE b.id=?").bind(bucket)
+}
+
+pub(in super::super) fn valid(storage: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND enabled AND type IN ('s3','mokyu'))",
+    )
+    .bind(storage)
+}
+
+pub(in super::super) fn insert(upload: Uuid, value: &Staging) -> Statement<'_> {
+    sqlx::query("INSERT INTO upload_staging(upload_id,storage_id,policy_revision,tail_upload,tail_wait_seconds) VALUES(?,?,?,?,?)").bind(upload).bind(value.storage_id).bind(value.policy_revision).bind(&value.tail_upload).bind(value.tail_wait_seconds)
+}
+
+pub(in super::super) fn load(upload: Uuid) -> Rows<'static, Staging> {
+    sqlx::query_as("SELECT storage_id,policy_revision,tail_upload,tail_wait_seconds FROM upload_staging WHERE upload_id=?").bind(upload)
+}
+
+pub(in super::super) fn add_tail(
+    fragment: crate::model::Id,
+    upload: Uuid,
+    node: Uuid,
+    path: &str,
+    now: i64,
+) -> Statement<'_> {
+    sqlx::query("INSERT INTO multipart_tails(fragment_id,upload_id,node_id,object_key,created_at) VALUES(?,?,?,?,?)").bind(fragment).bind(upload).bind(node).bind(path).bind(now)
+}
+
+pub(in super::super) fn due(
+    node: Uuid,
+    now: i64,
+) -> Rows<'static, (crate::model::Id, Uuid, Uuid, Uuid, i32, Vec<u8>)> {
+    sqlx::query_as("SELECT t.fragment_id,t.upload_id,j.storage_id,f.location_id,f.size,f.hash FROM multipart_tails t JOIN upload_staging j ON j.upload_id=t.upload_id JOIN uploads u ON u.id=t.upload_id JOIN fragments f ON f.id=t.fragment_id WHERE t.node_id=? AND f.sealed AND f.staging_storage_id IS NULL AND t.source_error IS NULL AND t.retry_at<=? AND u.state IN ('active','completing') AND EXISTS(SELECT 1 FROM extents e JOIN parts p ON p.stream_id=e.stream_id WHERE e.fragment_id=t.fragment_id AND p.upload_id=t.upload_id) AND NOT EXISTS(SELECT 1 FROM node_native_work w WHERE w.token=t.token AND w.result_hash IS NULL AND w.expires_at>UTC_TIMESTAMP(6)) AND (t.requested OR (j.tail_upload='on_demand_timeout' AND t.created_at+j.tail_wait_seconds*1000000<=? AND NOT EXISTS(SELECT 1 FROM parts a JOIN streams s ON s.id=a.write_token WHERE a.upload_id=t.upload_id AND s.state='writing' AND s.stream_type='part' AND s.touched_at>UTC_TIMESTAMP(6)-INTERVAL 2 MINUTE))) ORDER BY t.requested DESC,t.created_at,t.fragment_id LIMIT 1 FOR UPDATE").bind(node).bind(now).bind(now)
+}
+
+pub(in super::super) fn claim(
+    fragment: crate::model::Id,
+    token: Uuid,
+    until: i64,
+) -> Statement<'static> {
+    sqlx::query("UPDATE multipart_tails SET token=?,retry_at=? WHERE fragment_id=?")
+        .bind(token)
+        .bind(until)
+        .bind(fragment)
+}
+
+pub(in super::super) fn owners<'a>(
+    upload: Uuid,
+    node: Option<Uuid>,
+    numbers: &'a [i32],
+) -> Rows<'a, (crate::model::Id, Uuid)> {
+    sqlx::query_as("SELECT DISTINCT t.fragment_id,t.node_id FROM multipart_tails t JOIN extents e ON e.fragment_id=t.fragment_id JOIN parts p ON p.stream_id=e.stream_id AND p.upload_id=t.upload_id WHERE t.upload_id=? AND NOT (t.node_id <=> ?) AND p.part_number IN (SELECT n FROM JSON_TABLE(?, '$[*]' COLUMNS(n INT PATH '$')) AS selected)").bind(upload).bind(node).bind(Json(numbers))
+}
+
+pub(in super::super) fn request(id: crate::model::Id) -> Statement<'static> {
+    sqlx::query("UPDATE multipart_tails SET requested=TRUE WHERE fragment_id=? AND NOT requested")
+        .bind(id)
+}
+
+pub(in super::super) fn synced(
+    storage: Uuid,
+    path: &str,
+    id: crate::model::Id,
+    token: Uuid,
+) -> Statement<'_> {
+    sqlx::query("UPDATE fragments SET staging_storage_id=?,staging_object_key=? WHERE id=? AND sealed AND staging_storage_id IS NULL AND EXISTS(SELECT 1 FROM multipart_tails t JOIN uploads u ON u.id=t.upload_id WHERE t.fragment_id=fragments.id AND t.token=? AND u.state IN ('active','completing') AND EXISTS(SELECT 1 FROM extents e JOIN parts p ON p.stream_id=e.stream_id WHERE e.fragment_id=t.fragment_id AND p.upload_id=t.upload_id))").bind(storage).bind(path).bind(id).bind(token)
+}
+
+pub(in super::super) fn finish_tail(id: crate::model::Id, token: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM multipart_tails WHERE fragment_id=? AND token=?")
+        .bind(id)
+        .bind(token)
+}
+
+pub(in super::super) fn delay_tail<'a>(
+    error: Option<&'a str>,
+    next: i64,
+    id: crate::model::Id,
+    token: Uuid,
+) -> Statement<'a> {
+    sqlx::query("UPDATE multipart_tails SET token=NULL,source_error=?,retry_at=? WHERE fragment_id=? AND token=?").bind(error).bind(next).bind(id).bind(token)
+}
+
+#[cfg(test)]
+pub(in super::super) async fn fixture(
+    tx: &mut super::storage_cluster::Tx<'_>,
+) -> anyhow::Result<(Uuid, Uuid, Uuid, Uuid)> {
+    let a = Uuid::now_v7();
+    let b = Uuid::now_v7();
+    for id in [a, b] {
+        sqlx::query("INSERT INTO storages(id,name,type,endpoint_url,remote_bucket_name,region,access_key_encrypted,secret_key_encrypted,identity_marker) VALUES(?,?,'s3','http://fixture.invalid','stage','region',?,?,?)")
+            .bind(id).bind(format!("staging-{id}")).bind(vec![1u8;32]).bind(vec![2u8;32]).bind(Json(serde_json::json!({}))).execute(&mut **tx).await?;
+    }
+    let bucket =
+        super::storage_native::test_bucket(tx, crate::authorization::DEFAULT_PROJECT, a).await?;
+    let other =
+        super::storage_native::test_bucket(tx, crate::authorization::DEFAULT_PROJECT, b).await?;
+    Ok((bucket, other, a, b))
+}
+
+#[cfg(test)]
+pub(in super::super) fn configure(settings: &UploadSettings) -> Statement<'_> {
+    sqlx::query("UPDATE runtime_settings SET value=?,revision=revision+1 WHERE section='uploads'")
+        .bind(Json(settings))
+}
+
+#[cfg(test)]
+pub(in super::super) fn upload(id: Uuid, bucket: Uuid) -> Statement<'static> {
+    sqlx::query(
+        "INSERT INTO uploads(id,bucket_id,object_key,access_key) VALUES(?,?,'fixture','fixture')",
+    )
+    .bind(id)
+    .bind(bucket)
+}

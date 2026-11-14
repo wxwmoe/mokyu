@@ -78,8 +78,9 @@ pub(in super::super) fn configured_stage() -> Scalar<'static, Option<Uuid>> {
 
 pub(in super::super) fn valid_stage(id: Option<Uuid>) -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type IN ('s3','mokyu') AND enabled)",
+        "SELECT ? IS NULL OR EXISTS(SELECT 1 FROM storages WHERE id=? AND type IN ('s3','mokyu') AND enabled)",
     )
+    .bind(id)
     .bind(id)
 }
 

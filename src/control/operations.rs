@@ -316,6 +316,22 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             Cluster::Status => Ok(serde_json::to_value(
                 crate::control::cluster::overview(app).await?,
             )?),
+            Cluster::Handoff {
+                node,
+                action,
+                revision,
+            } => {
+                let input = match (action, revision) {
+                    (Some(action), Some(revision)) => {
+                        Some(crate::model::node::HandoffInput { action, revision })
+                    }
+                    (None, None) => None,
+                    _ => anyhow::bail!("handoff changes require an action and --revision"),
+                };
+                Ok(serde_json::to_value(
+                    super::cluster::handoff(app, principal, node, input).await?,
+                )?)
+            }
             Cluster::Mode { mode } => {
                 app.change_mode(principal, &mode).await?;
                 Ok(json!({"mode":mode}))

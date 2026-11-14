@@ -3,11 +3,11 @@ import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter } from 'vue-router'
 import { Network, HeartPulse, Settings2, ArrowUpRight, Copy, RefreshCw, Cloud } from 'lucide-vue-next'
-import { api, bytes, params } from '../api/client'
+import { api, bytes, params, write } from '../api/client'
 import type { components } from '../api/schema'
 import { useDeployment, nodeTone } from '../app/cluster'
 import { t, date } from '../app/i18n'
-import { copy } from '../app/feedback'
+import { copy, report } from '../app/feedback'
 import UiSelect from '../components/ui/UiSelect.vue'
 import UiListFooter from '../components/ui/UiListFooter.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
@@ -33,6 +33,16 @@ const nodeRequests = computed(() => (history.data.value?.history || []).map((p, 
 type Snapshot = { work?: string; runtime?: { started_at: string; uptime_seconds: number; http: Record<string, { active: number; started: number; failed: number }> }; process_memory?: { rss_bytes: number | null }; db_pool_idle?: number; db_pool_size?: number; cache?: Record<string, number>; response_cache?: Record<string, unknown>; compression?: Record<string, unknown>; read_replica?: Record<string, unknown> | null; io?: { backend_queues: Record<string, { running: number; limit: number; queued: Record<string, number>; oldest_wait_seconds: number }> } }
 const snapshot = computed(() => detail.data.value?.status as Snapshot | null)
 const connection = computed(() => detail.data.value?.connection)
+const handoff = computed(() => detail.data.value?.handoff), changing = ref(false)
+const responsibilities = computed(() => Object.entries(handoff.value?.pending || {}).filter(([, count]) => Number(count) > 0))
+async function changeHandoff(action: 'prepare' | 'cancel' | 'resume') {
+  const node = selected.value, current = handoff.value
+  if (!node || !current || changing.value) return
+  changing.value = true
+  try { await write(`/api/v1/cluster/nodes/${encodeURIComponent(node)}/handoff`, { action, revision: current.revision }) }
+  catch (error) { report(error) }
+  finally { if (selected.value === node) await detail.refetch(); changing.value = false }
+}
 const connectionPhase = computed(() => ['connecting', 'ready', 'recovering', 'draining', 'fenced', 'stopped'].includes(connection.value?.phase || '') ? t('nodePhase_' + connection.value!.phase) : t('nodeState_unknown'))
 const milliseconds = (value: number | null | undefined) => value == null ? '—' : `${value} ms`
 const counts = computed(() => overview.data.value?.nodes || [])
@@ -79,6 +89,19 @@ function refresh() { void overview.refetch(); void nodes.refetch(); void runtime
   <UiDialog v-model:open="open" drawer :title="detail.data.value?.node.name || t('clusterNode')" :description="t('clusterNodeDetailHint')">
     <ErrorNotice v-if="detail.error.value" :error="detail.error.value" /><template v-if="detail.data.value"><div class="node-detail-status"><span v-for="role in nodeRoles(detail.data.value.node.role)" :key="role" class="badge">{{ t('nodeRole_' + role) }}</span><span v-for="(state, index) in [detail.data.value.node.contact, detail.data.value.node.work, detail.data.value.node.configuration]" :key="index" class="badge node-state" :data-tone="nodeTone(state)">{{ t('nodeState_' + state) }}</span></div><p v-if="!detail.data.value.node.report_fresh" class="info-callout">{{ t('clusterReportStaleHint') }}</p>
       <dl class="facts"><dt>{{ t('clusterNodeId') }}</dt><dd class="technical-key">{{ detail.data.value.node.id }}</dd><dt>{{ t('startedAt') }}</dt><dd>{{ detail.data.value.started_at ? date(detail.data.value.started_at) : '—' }}</dd><dt>{{ t('clusterLastReport') }}</dt><dd>{{ detail.data.value.node.sampled_at ? date(detail.data.value.node.sampled_at) : '—' }}</dd><dt>{{ t('clusterReceivedAt') }}</dt><dd>{{ detail.data.value.node.received_at ? date(detail.data.value.node.received_at) : '—' }}</dd><dt>{{ t('processMemory') }}</dt><dd>{{ snapshot?.process_memory?.rss_bytes == null ? '—' : bytes(snapshot.process_memory.rss_bytes) }}</dd><dt>{{ t('databasePool') }}</dt><dd>{{ snapshot?.db_pool_idle ?? '—' }} / {{ snapshot?.db_pool_size ?? '—' }}</dd></dl>
+      <section v-if="handoff" class="node-detail-section node-handoff">
+        <h3>{{ t('nodeHandoff') }} <span class="badge node-state" role="status" :data-tone="nodeTone(handoff.state)">{{ t('handoff_' + handoff.state) }}</span></h3>
+        <p class="field-help">{{ t('handoffHint_' + handoff.state) }}</p>
+        <p v-if="handoff.damaged_tails" class="error">{{ t('handoffDamaged', { count: handoff.damaged_tails }) }}</p>
+        <p v-if="handoff.state === 'preparing' && handoff.pending_bytes" class="field-help">{{ t('handoffBytes', { size: bytes(handoff.pending_bytes) }) }}</p>
+        <dl v-if="responsibilities.length" class="facts"><template v-for="[key, count] in responsibilities" :key="key"><dt>{{ t('handoffCount_' + key) }}</dt><dd>{{ count }}</dd></template></dl>
+        <p v-if="handoff.state !== 'serving' && overview.data.value" class="field-help">{{ t('handoffAvailable', { data: overview.data.value.ready_data, workers: overview.data.value.ready_workers }) }}</p>
+        <p v-if="singleControl && handoff.state !== 'serving' && overview.data.value?.remote_work && !overview.data.value.ready_workers" class="field-help">{{ t('singleControlWaiting') }}</p>
+        <button v-if="handoff.state === 'serving'" :disabled="changing" @click="changeHandoff('prepare')">{{ t('handoffPrepare') }}</button>
+        <button v-else-if="handoff.state === 'preparing'" :disabled="changing" @click="changeHandoff('cancel')">{{ t('handoffCancel') }}</button>
+        <button v-else-if="handoff.state === 'offline_ready'" :disabled="changing" @click="changeHandoff('resume')">{{ t('handoffResume') }}</button>
+      </section>
+      <p v-if="singleControl && detail.data.value.node.role === 'control'" class="field-help">{{ t('handoffSoleControl') }}</p>
       <section v-if="connection" class="node-detail-section node-connection"><h3>{{ t('nodeConnection') }}</h3>
         <dl class="facts">
           <dt>{{ t('nodeConnectionState') }}</dt><dd><span class="badge node-state" :data-tone="nodeTone(connection.phase)">{{ connectionPhase }}</span></dd>

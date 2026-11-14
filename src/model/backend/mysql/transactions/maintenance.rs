@@ -125,11 +125,15 @@ pub(in super::super) async fn maintenance_mode(pool: &MySqlPool, enabled: bool) 
     let (_, mode) = queries::storage_mode_lock().fetch_one(&mut *tx).await?;
     if !enabled && mode != "single" {
         ensure!(
-            queries::active_staging()
-                .fetch_optional(&mut *tx)
+            queries::configured_stage()
+                .fetch_one(&mut *tx)
                 .await?
-                .is_some(),
-            "cluster mode requires an enabled shared staging backend"
+                .is_none()
+                || queries::active_staging()
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .is_some(),
+            "configured staging storage must be enabled"
         );
     }
     queries::set_maintenance_mode(enabled)

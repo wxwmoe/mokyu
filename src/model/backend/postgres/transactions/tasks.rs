@@ -44,7 +44,7 @@ pub(in super::super) async fn maintenance_mode(pool: &PgPool, enabled: bool) -> 
                 queries::cluster_staging_valid(staging)
                     .fetch_one(&mut *tx)
                     .await?,
-                "cluster mode requires an enabled shared staging backend"
+                "configured staging storage must be enabled"
             );
         }
         ensure!(

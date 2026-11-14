@@ -23,10 +23,10 @@ export function useDeployment(interval = 15_000) {
 }
 export function nodeTone(state: string) {
   if (['online', 'starting', 'equivalent', 'connecting'].includes(state)) return 'sky'
-  if (['normal', 'applied', 'ready'].includes(state)) return 'mint'
+  if (['normal', 'applied', 'ready', 'serving', 'offline_ready'].includes(state)) return 'mint'
   if (state === 'maintenance') return 'lilac'
   if (['unresponsive', 'recovery', 'recovering', 'fenced'].includes(state)) return 'rose'
-  if (['not_reported', 'restricted', 'restart_required', 'draining'].includes(state)) return 'cream'
+  if (['not_reported', 'restricted', 'restart_required', 'draining', 'preparing', 'resuming'].includes(state)) return 'cream'
   return 'gray'
 }
 export function rollout(overview: ClusterOverview | undefined, section: string) {

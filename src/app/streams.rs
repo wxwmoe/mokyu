@@ -112,29 +112,64 @@ impl App {
         }
         Ok(())
     }
-    pub async fn tail(&self, stream: Id, offset: i64, data: &[u8]) -> Result<()> {
+    pub async fn tail(&self, stream: Id, upload: Uuid, offset: i64, data: &[u8]) -> Result<()> {
         if data.is_empty() {
             return Ok(());
         }
         self.renew_write_lease(stream).await?;
+        let staging = self.multipart.staging(upload).await?;
         let id = Uuid::now_v7();
-        let (staging_storage_id, staging_object_key, _lease) =
-            self.storage.write_fragment(id, data).await.map_err(|e| {
-                tracing::warn!(error=%e,"multipart fragment could not be persisted");
-                s3_error!(SlowDown, "local multipart storage unavailable")
-            })?;
+        let owner = if staging.tail_upload == "immediate" {
+            None
+        } else {
+            Some((
+                upload,
+                self.node
+                    .get()
+                    .ok_or(crate::model::Error::NodeInactive)?
+                    .node_id,
+            ))
+        };
+        let (staging_storage_id, staging_object_key, _lease) = if owner.is_some() {
+            let target = staging
+                .storage_id
+                .ok_or(crate::model::Error::SourceUnavailable)?;
+            self.storage
+                .claim_staging(target, &crate::storage::fragment_key(id), data.len() as u64)
+                .await?;
+            (
+                None,
+                None,
+                Some(self.storage.disk.write_fragment(id, data).await?),
+            )
+        } else {
+            self.storage
+                .write_fragment(id, staging.storage_id, data)
+                .await
+                .map_err(|e| {
+                    tracing::warn!(error=%e,"multipart fragment could not be persisted");
+                    s3_error!(SlowDown, "local multipart storage unavailable")
+                })?
+        };
+        #[cfg(feature = "fault-injection")]
+        if owner.is_some() {
+            crate::faults::point("node-tail-local-synced").await;
+        }
         self.stream_store
-            .append_tail(crate::model::StreamTail {
-                fragment: id,
-                stream,
-                offset,
-                size: data.len() as i32,
-                hash: *blake3::hash(data).as_bytes(),
-                staging_storage: staging_storage_id,
-                staging_key: staging_object_key,
-                file: None,
-                file_offset: None,
-            })
+            .append_owned_tail(
+                crate::model::StreamTail {
+                    fragment: id,
+                    stream,
+                    offset,
+                    size: data.len() as i32,
+                    hash: *blake3::hash(data).as_bytes(),
+                    staging_storage: staging_storage_id,
+                    staging_key: staging_object_key,
+                    file: None,
+                    file_offset: None,
+                },
+                owner,
+            )
             .await
     }
 

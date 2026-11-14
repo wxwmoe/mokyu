@@ -191,7 +191,7 @@ async fn check_upload_stage(
                 || queries::staging_bootstrap_candidate(stage)
                     .fetch_one(&mut **tx)
                     .await?,
-            crate::model::runtime::ModeConflict("cluster mode requires shared staging storage")
+            crate::model::runtime::ModeConflict("configured staging storage must be enabled")
         );
     }
     Ok(())

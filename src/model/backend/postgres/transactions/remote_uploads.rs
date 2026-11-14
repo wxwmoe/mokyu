@@ -106,6 +106,14 @@ pub(in super::super) async fn claim_remote_part(
         .execute(&mut *tx)
         .await?;
     let mut value = queries::remote_part(&mut tx, upload, number).await?;
+    value.file = super::super::storage_native::part_carrier(
+        &mut tx,
+        upload,
+        value.stream.id,
+        value.upload.storage,
+        None,
+    )
+    .await?;
     value.read_lease = Some(create_read_lease(&mut tx, value.stream.id, 120).await?);
     tx.commit().await?;
     Ok(Some(value))
@@ -129,6 +137,17 @@ pub(in super::super) async fn finish_remote_part(
     .await?
     .rows_affected()
         == 1;
+    if changed && let Some(etag) = etag {
+        super::super::storage_native::part_receipt(
+            &mut tx,
+            work.upload.upload,
+            work.stream.id,
+            work.upload.storage,
+            work.stream.size,
+            etag,
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(changed)
 }

@@ -303,6 +303,7 @@ async fn raw_permit_order_cancellation_and_retry() -> Result<()> {
             parts.push(tokio::spawn(async move {
                 copy.send_remote_part(
                     &current,
+                    None,
                     number as i32,
                     input.len() as i64,
                     &Md5::digest(&input).into(),
@@ -346,6 +347,7 @@ async fn raw_permit_order_cancellation_and_retry() -> Result<()> {
                 if native {
                     copy.send_remote_part(
                         &current,
+                        None,
                         1,
                         input.len() as i64,
                         &Md5::digest(&input).into(),
@@ -386,6 +388,7 @@ async fn raw_permit_order_cancellation_and_retry() -> Result<()> {
     let tag = storage
         .send_remote_part(
             &upload,
+            None,
             1,
             data.len() as i64,
             &Md5::digest(&data).into(),

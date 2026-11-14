@@ -2,7 +2,7 @@
 
 `mokyu storage` 是由 control 登记的独立存储角色，仅限 `single_control` 和 `cluster`。storage 使用节点凭据注册，不连接元数据库，不配置部署 key。地区、地址和存储分组由 storage 的配置文件宣告；群集策略和成员归属保存在 control 的数据库中。
 
-原生后端支持双副本 PUT、GET、HEAD、Range、元数据日志与恢复，不依赖远端 S3。启用后端时会实际写入探针并读回；只有验证通过才能承接业务。原生后端尚不支持 Multipart，创建 Multipart 会返回 `NotImplemented`。
+原生后端支持双副本 PUT、GET、HEAD、Range、跨节点 Multipart、元数据日志与恢复，不依赖远端 S3。启用后端时会实际写入探针并读回；只有验证通过才能承接业务。
 
 ## 从空部署开始
 
@@ -52,7 +52,7 @@ mokyu cli storage update native --enabled true
 
 群集策略分别保存，更新必须携带当前修订；并发编辑冲突时重新加载后再核对。`storage-cluster update UUID --revision N --name NAME --policy JSON` 更新名称和策略；`state UUID MEDIA_UUID --revision N paused` 暂停成员，`available` 恢复，尚未分配的主存储可设为 `spare`。人工状态与节点连接状态分开保存。
 
-Mokyu 后端仅绑定群集 UUID，不绑定某个 storage 地址。管理 API 返回 `cluster_id` 与 `capabilities`；读取、写入和 Range 可用，Multipart 与共享分片暂存未开放。群集仍需显式设置 `uploads.staging_storage_id`，可选择已启用的原生后端，通过探针后退出维护。选择原生后端不会开放 Multipart。
+Mokyu 后端仅绑定群集 UUID，不绑定某个 storage 地址。管理 API 返回 `cluster_id` 与 `capabilities`。不同 data 可以上传、覆盖和完成同一会话的 Part。暂存默认使用存储桶的后端，也可选择独立的 S3 或 Mokyu 后端。参见[尾块上传方式](configuration.md#multipart-暂存)。
 
 ## 写入、读取与修复
 

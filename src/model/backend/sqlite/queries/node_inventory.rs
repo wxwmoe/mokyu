@@ -6,10 +6,10 @@ pub(in super::super) fn pool(b: &Backend) -> &sqlx::SqlitePool {
     &b.read
 }
 pub(in super::super) fn page(after: Option<Uuid>, limit: i64) -> Rows<'static, Observation> {
-    sqlx::query_as("SELECT id,name,role,enabled,last_seen_at AS last_seen,created_at AS created,reported_at AS received,report,run_state FROM nodes WHERE (? IS NULL OR id>?) ORDER BY id LIMIT ?").bind(after).bind(after).bind(limit)
+    sqlx::query_as("SELECT id,name,role,enabled,last_seen_at AS last_seen,created_at AS created,reported_at AS received,report,run_state,EXISTS(SELECT 1 FROM node_handoffs h WHERE h.node_id=nodes.id AND h.state<>'serving') AS handoff FROM nodes WHERE (? IS NULL OR id>?) ORDER BY id LIMIT ?").bind(after).bind(after).bind(limit)
 }
 pub(in super::super) fn node(id: Uuid) -> Rows<'static, Observation> {
-    sqlx::query_as("SELECT id,name,role,enabled,last_seen_at AS last_seen,created_at AS created,reported_at AS received,report,run_state FROM nodes WHERE id=?").bind(id)
+    sqlx::query_as("SELECT id,name,role,enabled,last_seen_at AS last_seen,created_at AS created,reported_at AS received,report,run_state,EXISTS(SELECT 1 FROM node_handoffs h WHERE h.node_id=nodes.id AND h.state<>'serving') AS handoff FROM nodes WHERE id=?").bind(id)
 }
 pub(in super::super) fn status() -> Rows<'static, (String, i64, bool, i64)> {
     sqlx::query_as(

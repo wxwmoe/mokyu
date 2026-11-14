@@ -270,7 +270,12 @@ pub(crate) async fn response(
             Some(memory.ok_or_else(|| s3s::s3_error!(ServiceUnavailable))?)
         };
         let idle = Duration::from_secs(crate::config::seconds(
-            &reads.node.snapshot()?.runtime().requests.read_idle_timeout,
+            &reads
+                .node
+                .background_snapshot()?
+                .runtime()
+                .requests
+                .read_idle_timeout,
         )?);
         let lease = prepared.run.clone();
         let mut events = reads.node.subscribe();

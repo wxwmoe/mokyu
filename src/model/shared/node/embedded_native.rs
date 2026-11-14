@@ -158,8 +158,12 @@ impl RemoteParts for Backend {
             Error::OperationAborted
         );
         q::pin(stream, token).execute(&mut *tx).await?;
+        let file =
+            super::storage_native::part_carrier(&mut tx, upload, stream, parent.storage, None)
+                .await?;
         tx.commit().await?;
         Ok(Some(RemotePart {
+            file,
             upload: parent,
             stream: version,
             part_number: number,
@@ -211,6 +215,17 @@ impl RemoteParts for Backend {
         .await?
         .rows_affected()
             == 1;
+        if changed {
+            super::storage_native::part_receipt(
+                &mut tx,
+                part.upload.upload,
+                part.stream.id,
+                part.upload.storage,
+                part.stream.size,
+                etag,
+            )
+            .await?;
+        }
         q::unpin(part.remote_token).execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(changed)

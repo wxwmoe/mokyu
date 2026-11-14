@@ -139,6 +139,31 @@ pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Resu
     ensure!(bytes.len() <= max, "local file exceeds bound");
     Ok(bytes)
 }
+
+pub(crate) async fn read_tail(path: &std::path::Path, size: i32, hash: &[u8]) -> Result<Vec<u8>> {
+    use crate::model::node_native::SourceError;
+    ensure!(
+        (1..MAX as i32).contains(&size) && hash.len() == 32,
+        "invalid tail work"
+    );
+    let meta = tokio::fs::symlink_metadata(path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            anyhow::Error::from(SourceError::Missing)
+        } else {
+            e.into()
+        }
+    })?;
+    ensure!(
+        meta.is_file() && meta.len() == size as u64,
+        SourceError::Corrupt
+    );
+    let bytes = read_bounded(path, size as usize).await?;
+    ensure!(
+        blake3::hash(&bytes).as_bytes().as_slice() == hash,
+        SourceError::Corrupt
+    );
+    Ok(bytes)
+}
 pub(crate) struct Usage {
     pub(crate) used: [u64; 3],
     pub(crate) upload: u64,
@@ -650,6 +675,9 @@ impl Disk {
                 Ok::<_, std::io::Error>(())
             })();
             if let Err(e) = result {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    return Err(e.into());
+                }
                 if std::fs::remove_file(&path).is_err() && path.try_exists().unwrap_or(true) {
                     ticket.commit_written(
                         std::fs::metadata(&path)

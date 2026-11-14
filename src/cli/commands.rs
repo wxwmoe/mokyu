@@ -604,6 +604,13 @@ pub enum Keys {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Cluster {
     Status,
+    Handoff {
+        node: Uuid,
+        #[arg(value_enum, requires = "revision")]
+        action: Option<crate::model::node::HandoffAction>,
+        #[arg(long, requires = "action")]
+        revision: Option<i64>,
+    },
     Create {
         name: String,
         #[arg(value_parser = ["data", "worker", "node", "storage"])]
@@ -795,7 +802,9 @@ impl Command {
             | Self::Settings(Settings::Control(ControlSettings::Show) | Settings::Get { .. })
             | Self::Keys(Keys::List | Keys::Replacement { .. })
             | Self::Setup(Setup::Token)
-            | Self::Cluster(Cluster::Status | Cluster::Nodes { .. })
+            | Self::Cluster(
+                Cluster::Status | Cluster::Nodes { .. } | Cluster::Handoff { action: None, .. },
+            )
             | Self::StorageCluster(StorageClusters::List | StorageClusters::Sources { .. }) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),

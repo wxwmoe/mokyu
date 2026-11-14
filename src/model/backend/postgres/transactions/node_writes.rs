@@ -121,8 +121,23 @@ pub(in super::super) async fn begin_node_write(
     authority.lock(&mut tx).await?;
     let mut completion = None;
     let upload = if let Some(manifest) = &input.intent.completion {
-        let (upload, summary, live) =
-            prepare_node_completion(&mut tx, &input, bucket.id, &authority, manifest).await?;
+        let result = prepare_node_completion(
+            &mut tx,
+            state.node_id,
+            &input,
+            bucket.id,
+            &authority,
+            manifest,
+        )
+        .await;
+        if result
+            .as_ref()
+            .is_err_and(|e| e.is::<crate::model::node_tail::Pending>())
+        {
+            tx.commit().await?;
+            return Err(result.err().unwrap());
+        }
+        let (upload, summary, live) = result?;
         if live || upload.state == "completed" {
             let reply = write::Reply {
                 operation: input.operation,
@@ -721,10 +736,15 @@ pub(in super::super) async fn authorize_storage_marker(
         Error::NodeExpired
     );
     require_node_write(tx, &row).await?;
-    ensure!(
-        row.storage_id == Some(storage),
-        s3s::s3_error!(AccessDenied)
-    );
+    if row.storage_id != Some(storage) {
+        ensure!(
+            queries::node_write_tail(node.node_id, operation)
+                .fetch_optional(&mut **tx)
+                .await?
+                .is_some_and(|tail| tail.storage_id == storage && !tail.committed),
+            s3s::s3_error!(AccessDenied)
+        );
+    }
     Ok(chrono::Utc::now().timestamp_micros() + row.valid_for_ms * 1000)
 }
 
@@ -746,6 +766,19 @@ pub(in super::super) async fn authorize_storage_upload(
         Error::NodeExpired
     );
     require_node_write(tx, &row).await?;
+    if input.batch.is_none()
+        && let Some(tail) = queries::node_write_tail(node.node_id, input.operation)
+            .fetch_optional(&mut **tx)
+            .await?
+        && tail.storage_id == input.storage
+        && input.matches(prefix, object_store::path::Path::from(tail.object_key))?
+    {
+        ensure!(!tail.committed, Error::NodeExpired);
+        return Ok((
+            input.tail(prefix, tail.fragment_id, tail.size)?,
+            chrono::Utc::now().timestamp_micros() + row.valid_for_ms * 1000,
+        ));
+    }
     ensure!(
         row.storage_id == Some(input.storage),
         s3s::s3_error!(AccessDenied)
@@ -760,6 +793,9 @@ pub(in super::super) async fn authorize_storage_upload(
             Error::NodeExpired
         );
         input.chunks(prefix, &batch.plan, batch.packing.as_deref())?
+    } else if row.completion_upload.is_some() {
+        let (plan, _) = super::native::storage_completion(tx, node, run, input.operation).await?;
+        input.raw(prefix, plan.upload.source, i64::try_from(plan.size()?)?)?
     } else {
         let raw = queries::node_raw_write(node.node_id, input.operation)
             .fetch_optional(&mut **tx)
@@ -1601,9 +1637,12 @@ pub(in super::super) async fn prepare_node_tail(
                 .await?;
         }
         let settings = queries::node_staging_settings().fetch_one(&mut *tx).await?;
-        let storage = settings
-            .staging_storage_id
-            .ok_or(Error::SourceUnavailable)?;
+        let upload = row.upload_id.ok_or(Error::NodeOperationConflict)?;
+        let staging = queries::upload_staging::load(upload)
+            .fetch_one(&mut *tx)
+            .await?;
+        let local = staging.tail_upload != "immediate";
+        let storage = staging.storage_id.ok_or(Error::SourceUnavailable)?;
         ensure!(
             queries::cluster_staging_valid(Some(storage))
                 .fetch_one(&mut *tx)
@@ -1625,13 +1664,24 @@ pub(in super::super) async fn prepare_node_tail(
             offset: input.offset,
             size: input.size,
             hash: input.hash,
-            staging_storage: Some(storage),
-            staging_key: Some(path.clone()),
+            staging_storage: (!local).then_some(storage),
+            staging_key: (!local).then(|| path.clone()),
             file: None,
             file_offset: None,
         })
         .execute(&mut *tx)
         .await?;
+        if local {
+            queries::upload_staging::add_tail(
+                fragment.into(),
+                upload,
+                node.node_id,
+                &path,
+                chrono::Utc::now().timestamp_micros(),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
         queries::insert_node_tail(node.node_id, &input, &hash, fragment, storage, &path)
             .execute(&mut *tx)
             .await?;
@@ -1640,7 +1690,7 @@ pub(in super::super) async fn prepare_node_tail(
             .await?
     };
     let mut reply = tail.reply();
-    if !tail.committed {
+    if !tail.committed && !tail.local {
         require_node_write(&mut tx, &row).await?;
         let record = queries::node_read_storages(&[tail.storage_id])
             .fetch_optional(&mut *tx)
@@ -1696,6 +1746,13 @@ pub(in super::super) async fn commit_node_tail(
             row.next_offset == tail.offset_bytes,
             Error::NodeOperationConflict
         );
+        super::super::storage_native::publish_staged(
+            &mut tx,
+            (!tail.local).then_some(tail.storage_id),
+            tail.fragment_id,
+            tail.size as u64,
+        )
+        .await?;
         ensure!(
             queries::seal_fragment(tail.fragment_id.into())
                 .execute(&mut *tx)

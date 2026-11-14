@@ -1,9 +1,5 @@
 use super::*;
 
-pub(in super::super) fn native_multipart(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=$1 AND s.type='mokyu') OR EXISTS(SELECT 1 FROM runtime_settings r JOIN storages s ON s.id=NULLIF(r.value->>'staging_storage_id','')::uuid WHERE r.section='uploads' AND s.type='mokyu')").bind(bucket)
-}
-
 pub(in super::super) fn multipart_upload<'q>(
     id: Uuid,
     bucket: Uuid,
@@ -312,6 +308,48 @@ pub(in super::super) fn upload_transfers(
 
 #[async_trait::async_trait]
 impl MultipartStore for Backend {
+    async fn claim_tail(
+        &self,
+        node: Uuid,
+        token: Uuid,
+    ) -> Result<Option<crate::model::node_native::Work>> {
+        let mut tx = super::storage_payload::begin(self).await?;
+        let work = super::super::upload_staging::claim_tail(&mut tx, node, token).await?;
+        tx.commit().await?;
+        Ok(work)
+    }
+    async fn finish_tail(
+        &self,
+        work: &crate::model::node_native::Work,
+        token: Uuid,
+        result: &crate::model::node_native::ResultValue,
+    ) -> Result<()> {
+        let mut tx = super::storage_payload::begin(self).await?;
+        super::super::storage_native::multipart_receipt(&mut tx, work, result.value.as_deref())
+            .await?;
+        anyhow::ensure!(
+            super::super::upload_staging::finish_tail(&mut tx, work, token, result).await? == 1,
+            crate::model::Error::NodeExpired
+        );
+        tx.commit().await?;
+        Ok(())
+    }
+    async fn request_tails(
+        &self,
+        upload: Uuid,
+        local: Option<Uuid>,
+        numbers: &[i32],
+    ) -> Result<Vec<Uuid>> {
+        let mut tx = super::storage_payload::begin(self).await?;
+        let owners = super::super::upload_staging::request(&mut tx, upload, local, numbers).await?;
+        tx.commit().await?;
+        Ok(owners)
+    }
+    async fn staging(&self, upload: Uuid) -> Result<crate::model::multipart::Staging> {
+        Ok(super::upload_staging::load(upload)
+            .fetch_one(&self.pool)
+            .await?)
+    }
     async fn pending_files(
         &self,
         storage: Option<Uuid>,

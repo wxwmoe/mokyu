@@ -212,8 +212,8 @@ impl StreamStore for Backend {
     async fn create(&self, input: StreamCreate) -> Result<Id> {
         transactions::create_stream(&self.write, input).await
     }
-    async fn append_tail(&self, tail: StreamTail) -> Result<()> {
-        transactions::append_tail(&self.write, tail).await
+    async fn append_owned_tail(&self, tail: StreamTail, owner: Option<(Uuid, Uuid)>) -> Result<()> {
+        transactions::append_tail(&self.write, tail, owner).await
     }
     async fn finish(&self, stream: Id, size: i64, etag: &str, checksums: Value) -> Result<bool> {
         Ok(sqlx::query("UPDATE streams SET size=?,etag=?,checksums=?,touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state='writing'").bind(size).bind(etag).bind(checksums).bind(stream).execute(&self.write).await?.rows_affected()==1)

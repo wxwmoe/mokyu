@@ -58,6 +58,7 @@ pub(in super::super) struct NodeTail {
     pub offset_bytes: i64,
     pub size: i32,
     pub committed: bool,
+    pub local: bool,
 }
 
 impl NodeTail {
@@ -67,6 +68,7 @@ impl NodeTail {
             object_key: self.object_key.clone(),
             end: self.offset_bytes + i64::from(self.size),
             committed: self.committed,
+            local: self.local,
             materials: Vec::new(),
             storage: None,
             grants: Vec::new(),
@@ -75,7 +77,7 @@ impl NodeTail {
 }
 
 pub(in super::super) fn node_write_tail(node: Uuid, operation: Uuid) -> Rows<'static, NodeTail> {
-    sqlx::query_as("SELECT * FROM node_write_tails WHERE node_id=$1 AND operation_id=$2")
+    sqlx::query_as("SELECT w.*,EXISTS(SELECT 1 FROM multipart_tails t WHERE t.fragment_id=w.fragment_id) AS local FROM node_write_tails w WHERE w.node_id=$1 AND w.operation_id=$2")
         .bind(node)
         .bind(operation)
 }

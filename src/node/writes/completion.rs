@@ -55,21 +55,35 @@ impl Writes {
             manifest_hash: manifest.hash()?,
         };
         let started = Instant::now();
-        let reply = self
-            .reads
-            .node
-            .client
-            .begin_complete(wire::BeginCompleteRequest {
-                run: status.run.clone(),
-                operation_id: id.clone(),
-                access_key: status.access_key.clone(),
-                credential_revision: status.credential_revision,
-                bucket: bucket.clone(),
-                key: key.clone(),
-                manifest_json: serde_json::to_vec(&manifest)?,
-                cached: reads::cached(&held),
-            })
-            .await?;
+        let input = wire::BeginCompleteRequest {
+            run: status.run.clone(),
+            operation_id: id.clone(),
+            access_key: status.access_key.clone(),
+            credential_revision: status.credential_revision,
+            bucket: bucket.clone(),
+            key: key.clone(),
+            manifest_json: serde_json::to_vec(&manifest)?,
+            cached: reads::cached(&held),
+        };
+        let deadline = started + Duration::from_secs(3);
+        let reply = loop {
+            request.run.check()?;
+            match self.reads.node.client.begin_complete(input.clone()).await {
+                Ok(reply) => break reply,
+                Err(status)
+                    if status
+                        .metadata()
+                        .get("mokyu-retryable")
+                        .is_some_and(|v| v == "multipart-tail") =>
+                {
+                    if Instant::now() >= deadline {
+                        return Err(multipart::tail_pending().into());
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(status) => return Err(status.into()),
+            }
+        };
         ensure!(reply.operation_id == id, "invalid completion identity");
         let value = summary(&reply)?;
         ensure!(

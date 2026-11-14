@@ -22,12 +22,6 @@ pub(super) async fn create_multipart_in(
     if state != "active" {
         return Err(s3s::s3_error!(OperationAborted).into());
     }
-    ensure!(
-        !queries::native_multipart(input.bucket)
-            .fetch_one(&mut **db)
-            .await?,
-        s3s::s3_error!(NotImplemented, "native storage Multipart is unavailable")
-    );
     let expected = if let Some(web) = &input.web {
         if let Some((id, hash)) = queries::web_upload_identity(web.user, web.client_id)
             .fetch_optional(&mut **db)
@@ -63,6 +57,7 @@ pub(super) async fn create_multipart_in(
     let id = queries::insert_multipart(&input)
         .fetch_one(&mut **db)
         .await?;
+    super::super::upload_staging::pin(db, id, input.bucket).await?;
     if let Some(web) = input.web {
         queries::insert_web_upload(id, &web, expected)
             .execute(&mut **db)

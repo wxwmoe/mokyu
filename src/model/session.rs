@@ -38,6 +38,7 @@ pub(crate) struct Snapshot {
     pub valid_for_ms: i64,
     pub maintenance: bool,
     pub draining: bool,
+    pub handoff_revision: i64,
     pub settings: Vec<(String, serde_json::Value, i64)>,
     pub grants: Vec<super::node_read::GrantResult>,
     pub native_pending: bool,

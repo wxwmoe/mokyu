@@ -383,9 +383,10 @@ impl Writes {
                 .await?;
             if !operation.backend.profile.cdc_enabled {
                 self.reads.node.native_work.notify_one();
-                if !operation
-                    .cached_upload
-                    .load(std::sync::atomic::Ordering::Acquire)
+                if operation.backend.store.native.is_some()
+                    || !operation
+                        .cached_upload
+                        .load(std::sync::atomic::Ordering::Acquire)
                 {
                     self.wait_native(&operation.stream).await?;
                 }
@@ -705,7 +706,48 @@ impl Writes {
                 && reply.object_key == crate::storage::fragment_key(fragment),
             "invalid tail plan"
         );
-        if !reply.committed {
+        if reply.local && !reply.committed {
+            ensure!(
+                reply.storage.is_none() && reply.grants.is_empty(),
+                "local tail has a remote grant"
+            );
+            let files = &self.reads.reader.files;
+            let disk = files.multipart().await?;
+            let _lock = files.local_lock(fragment).await;
+            let path = disk.fragment_path(fragment);
+            let _pin = match tokio::fs::symlink_metadata(&path).await {
+                Ok(meta) => {
+                    ensure!(
+                        meta.is_file() && meta.len() == size as u64,
+                        "local tail differs"
+                    );
+                    ensure!(
+                        crate::storage::local::read_bounded(&path, bytes.len()).await? == bytes,
+                        "local tail differs"
+                    );
+                    tokio::fs::File::open(&path).await?.sync_all().await?;
+                    crate::storage::raw::sync_directory(path.parent().unwrap()).await?;
+                    None
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Some(disk.write_fragment(fragment, &bytes).await?)
+                }
+                Err(error) => return Err(error.into()),
+            };
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("node-tail-local-synced").await;
+            operation.check()?;
+            let receipt = node.client.commit_tail(operation.lookup()).await?;
+            ensure!(
+                receipt.committed
+                    && receipt.local
+                    && receipt.fragment_id == reply.fragment_id
+                    && receipt.end == reply.end,
+                "invalid local tail receipt"
+            );
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("node-tail-registered").await;
+        } else if !reply.committed {
             let grants = node
                 .resources
                 .adopt(&operation.request.run, &reply.grants, started)?;
@@ -719,6 +761,7 @@ impl Writes {
                 reply.storage.as_ref().context("tail storage missing")?,
             )?;
             let backend = reads::backend(&materials, value.connection.id)?;
+            let backend = operation.scope(node, &backend, None, &grants)?;
             ensure!(
                 backend.profile.upload_concurrency.is_none()
                     || grants.iter().any(|grant| grant.reference.r#type

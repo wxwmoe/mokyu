@@ -219,6 +219,8 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 | `cluster status` | 返回模式和修订、已登记远端数、就绪 data/worker 数、共享任务归属及存储状态 |
 | `cluster mode single/single_control/cluster` | 在维护模式且工作已排空时切换数据库部署模式，随后必须重启；准备步骤见[模式切换](cluster-deployment.md#模式切换和恢复) |
 | `cluster nodes` | 列出节点 id、名称、角色、启用状态和最近 heartbeat |
+| `cluster handoff UUID` | 查看 data、worker 或 node 的下线状态、修订和剩余工作 |
+| `cluster handoff UUID prepare/cancel/resume --revision N` | 用查询所得修订准备下线、取消准备或恢复服务；只有状态为 `offline_ready` 才可安全下线 |
 | `cluster create NAME data/worker/node/storage` | 在群集模式预创建节点；仅本次返回完整 `node.json`，同名节点拒绝重复创建 |
 | `cluster rotate NAME --confirm` | 保留节点 UUID，递增凭据代次并返回新 `node.json`；旧凭据与会话立即失效，原任务租约被撤销 |
 | `cluster release NAME --confirm` | 安全释放节点身份并重新调度共享任务，唯一副本和受保护读取须先排空 |

@@ -80,7 +80,7 @@ pub(in super::super) fn node_read_pending(ids: &[Id]) -> Rows<'_, (Id, Option<Uu
 }
 
 pub(in super::super) fn node_read_fragments(ids: &[Id]) -> Rows<'_, NodeReadFragment> {
-    sqlx::query_as("SELECT f.id,f.id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source,m.node_id FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id=ANY($1) ORDER BY f.id FOR SHARE OF f")
+    sqlx::query_as("SELECT f.id,f.id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source,COALESCE((SELECT t.node_id FROM multipart_tails t WHERE t.fragment_id=f.id),m.node_id) AS node_id FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id=ANY($1) ORDER BY f.id FOR SHARE OF f")
         .bind(ids)
 }
 

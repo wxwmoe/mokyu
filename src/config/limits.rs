@@ -137,6 +137,7 @@ pub(crate) fn validate_runtime(instance: &Instance, runtime: &RuntimeSettings) -
     );
     for value in [
         &runtime.uploads.sweep_interval,
+        &runtime.uploads.tail_upload_timeout,
         &runtime.uploads.client_idle_timeout,
         &runtime.maintenance.interval,
         &runtime.maintenance.max_duration,
@@ -151,6 +152,13 @@ pub(crate) fn validate_runtime(instance: &Instance, runtime: &RuntimeSettings) -
         );
     }
     bytes(&instance.min_free_space)?;
+    ensure!(
+        matches!(
+            runtime.uploads.tail_upload.as_str(),
+            "immediate" | "on_demand_timeout" | "on_demand"
+        ) && seconds(&runtime.uploads.tail_upload_timeout)? > 0,
+        "invalid Multipart tail upload policy"
+    );
     if let Some(limit) = &instance.data_limit {
         bytes(limit).context("invalid instance.data_limit")?;
     }

@@ -592,12 +592,21 @@ impl StreamStore for Backend {
         create_stream(&self.pool, input, None).await
     }
 
-    async fn append_tail(&self, tail: StreamTail) -> Result<()> {
+    async fn append_owned_tail(&self, tail: StreamTail, owner: Option<(Uuid, Uuid)>) -> Result<()> {
         tail.validate_staging()?;
         queries::insert_fragment(&tail).execute(&self.pool).await?;
         let mut tx = self.pool.begin().await?;
         #[cfg(feature = "fault-injection")]
         crate::faults::point("fragment-persisted").await;
+        super::super::upload_staging::record_owner(&mut tx, &tail, tail.fragment.into(), owner)
+            .await?;
+        super::super::storage_native::publish_staged(
+            &mut tx,
+            tail.staging_storage,
+            tail.fragment,
+            tail.size as u64,
+        )
+        .await?;
         queries::seal_fragment(tail.fragment.into())
             .execute(&mut *tx)
             .await?;

@@ -65,6 +65,9 @@ impl Storage {
     pub(crate) async fn create_remote(&self, upload: &RemoteUpload) -> Result<String> {
         self.ensure_storage_verified(upload.storage).await?;
         let target = self.store_backend(upload.storage)?;
+        if target.native.is_some() {
+            return Ok(upload.source.to_string());
+        }
         ensure!(!target.is_local, "native multipart requires S3");
         let _global = self.controls.acquire().await?;
         let _permit = target.controls.acquire().await?;
@@ -77,6 +80,9 @@ impl Storage {
     }
     pub(crate) async fn abort_remote(&self, upload: &RemoteUpload, upstream: &str) -> Result<()> {
         let target = self.store_backend(upload.storage)?;
+        if target.native.is_some() {
+            return Ok(());
+        }
         let _global = self.controls.acquire().await?;
         let _permit = target.controls.acquire().await?;
         match target
@@ -93,6 +99,7 @@ impl Storage {
     pub(crate) async fn send_remote_part<'a>(
         &self,
         upload: &RemoteUpload,
+        file: Option<uuid::Uuid>,
         number: i32,
         size: i64,
         digest: &[u8; 16],
@@ -106,6 +113,15 @@ impl Storage {
         let target = self.store_backend(upload.storage)?;
         let _global = self.writes.acquire().await?;
         let _permit = target.writes.acquire().await?;
+        if let Some(store) = &target.native {
+            return super::native::multipart::write_part(
+                store,
+                file.context("native part identity is missing")?,
+                size as u64,
+                input,
+            )
+            .await;
+        }
         let part = target
             .streaming
             .as_ref()
@@ -135,6 +151,20 @@ impl Storage {
     ) -> Result<bool> {
         self.ensure_storage_verified(upload.storage).await?;
         let target = self.store_backend(upload.storage)?;
+        if let Some(store) = &target.native {
+            let _global = self.writes.acquire().await?;
+            let _permit = target.writes.acquire().await?;
+            let intent =
+                super::native::multipart::complete(store, upload.source, parts, size as u64)
+                    .await?;
+            let super::native::store::Authority::Control(control) = &store.authority else {
+                anyhow::bail!("embedded multipart requires control authority");
+            };
+            control
+                .publish(store.namespace, intent.payload, upload.source)
+                .await?;
+            return Ok(true);
+        }
         let _global = self.controls.acquire().await?;
         let _permit = target.controls.acquire().await?;
         let path = remote_path(upload.source);

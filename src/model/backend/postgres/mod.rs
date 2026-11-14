@@ -1,3 +1,5 @@
+#[path = "../../shared/node_handoff.rs"]
+mod node_handoff;
 #[path = "../../shared/storage_capacity.rs"]
 mod storage_capacity;
 #[path = "../../shared/storage_cluster.rs"]
@@ -12,6 +14,8 @@ mod storage_payload;
 mod storage_recovery;
 #[path = "../../shared/storage_repair.rs"]
 mod storage_repair;
+#[path = "../../shared/upload_staging.rs"]
+mod upload_staging;
 pub(crate) const USER_LOCK: i64 = 734922709851002;
 
 mod connection;

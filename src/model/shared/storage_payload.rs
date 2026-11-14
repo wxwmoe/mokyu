@@ -150,6 +150,7 @@ pub(super) async fn collect_in(
     if limit == 0 {
         return Ok(selected);
     }
+    super::storage_native::collect_parts(tx, namespace, limit).await?;
     let now = chrono::Utc::now().timestamp_micros();
     for operation in q::collect_candidates(namespace, now)
         .fetch_all(&mut **tx)

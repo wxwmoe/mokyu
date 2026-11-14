@@ -1,4 +1,5 @@
 pub(crate) mod control;
+pub(crate) mod multipart;
 pub(crate) mod raw;
 pub(crate) mod reader;
 pub(crate) mod recovery;

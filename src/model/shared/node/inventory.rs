@@ -35,6 +35,7 @@ pub(super) struct Observation {
     received: Option<i64>,
     report: Option<Json<Value>>,
     run_state: Option<Json<Value>>,
+    handoff: bool,
 }
 fn date(n: i64) -> Result<DateTime<Utc>> {
     DateTime::from_timestamp_micros(n).context("invalid node timestamp")
@@ -53,6 +54,7 @@ impl Observation {
             .as_str()
             .and_then(|s| s.parse::<DateTime<Utc>>().ok());
         Ok(self.enabled
+            && !self.handoff
             && self.role != "control"
             && run["closed"] == false
             && run["draining"] == false

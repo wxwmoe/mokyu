@@ -32,13 +32,37 @@ pub(crate) enum Action {
         size: i64,
         etag: String,
     },
+    Tail {
+        fragment: super::Id,
+        size: i32,
+        hash: Vec<u8>,
+    },
     Abort,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct Target {
+    pub upload: Uuid,
+    pub storage: Uuid,
+    pub source: Uuid,
+    pub upstream: Option<String>,
+}
+
+impl From<super::multipart::RemoteUpload> for Target {
+    fn from(value: super::multipart::RemoteUpload) -> Self {
+        Self {
+            upload: value.upload,
+            storage: value.storage,
+            source: value.source,
+            upstream: value.upstream,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Work {
-    pub upload: super::multipart::RemoteUpload,
+    pub upload: Target,
     pub action: Action,
 }
 
@@ -139,6 +163,24 @@ pub(crate) struct Completion {
 pub(crate) struct PreparedCompletion {
     pub value: Completion,
     pub grants: Vec<node_read::Grant>,
+}
+
+impl Completion {
+    pub fn size(&self) -> Result<u64> {
+        ensure!(
+            self.upload.upstream.is_some() && !self.parts.is_empty() && self.parts.len() <= 10000,
+            super::Error::SourceUnavailable
+        );
+        self.parts.iter().try_fold(0u64, |total, part| {
+            ensure!(
+                part.size >= 0 && part.remote_etag.is_some(),
+                super::Error::SourceUnavailable
+            );
+            total
+                .checked_add(part.size as u64)
+                .ok_or_else(|| super::Error::NodeOperationConflict.into())
+        })
+    }
 }
 
 pub(crate) struct Pages {

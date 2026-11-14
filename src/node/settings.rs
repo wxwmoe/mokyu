@@ -141,6 +141,7 @@ mod tests {
                 deployment_mode: "cluster".into(),
                 mode_revision: 1,
                 native_pending: false,
+                handoff_revision: 0,
                 work_pending: false,
                 pending_uploads: 0,
                 maintenance: false,

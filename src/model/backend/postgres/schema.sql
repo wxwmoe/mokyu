@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261114065416.
+-- Generated from the complete postgres migration chain through 20261114113200.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -449,6 +449,25 @@ BEGIN
     END IF;
     RETURN NULL;
 END
+$$;
+
+CREATE FUNCTION public.notify_multipart_tail() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM pg_notify('mokyu_tasks','work:'||NEW.node_id::text);
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION public.notify_node_handoff() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    PERFORM pg_notify('mokyu_tasks','node-state');
+    PERFORM pg_notify('mokyu_tasks','work:'||NEW.node_id::text);
+    RETURN NEW;
+END;
 $$;
 
 CREATE FUNCTION public.prevent_bucket_store_change() RETURNS trigger
@@ -1607,6 +1626,14 @@ CREATE TABLE public.mokyu_meta (
     CONSTRAINT mokyu_meta_singleton_check CHECK (singleton)
 );
 
+CREATE TABLE public.multipart_carriers (
+    location_id uuid NOT NULL,
+    upload_id uuid,
+    stream_id uuid,
+    storage_id uuid NOT NULL,
+    created_at bigint NOT NULL
+);
+
 CREATE TABLE public.multipart_files (
     id uuid DEFAULT uuidv7() NOT NULL,
     upload_id uuid,
@@ -1616,6 +1643,18 @@ CREATE TABLE public.multipart_files (
     state text DEFAULT 'open'::text NOT NULL,
     node_id uuid,
     CONSTRAINT multipart_files_state_check CHECK ((state = ANY (ARRAY['open'::text, 'sealed'::text, 'deleting'::text])))
+);
+
+CREATE TABLE public.multipart_tails (
+    fragment_id uuid NOT NULL,
+    upload_id uuid NOT NULL,
+    node_id uuid NOT NULL,
+    created_at bigint NOT NULL,
+    object_key text NOT NULL,
+    requested boolean DEFAULT false NOT NULL,
+    token uuid,
+    retry_at bigint DEFAULT 0 NOT NULL,
+    source_error text
 );
 
 CREATE TABLE public.node_access (
@@ -1656,6 +1695,15 @@ CREATE TABLE public.node_completions (
     manifest_hash text NOT NULL,
     conditions jsonb NOT NULL,
     summary jsonb NOT NULL
+);
+
+CREATE TABLE public.node_handoffs (
+    node_id uuid NOT NULL,
+    operation uuid NOT NULL,
+    revision bigint NOT NULL,
+    state text NOT NULL,
+    CONSTRAINT node_handoffs_revision_check CHECK ((revision > 0)),
+    CONSTRAINT node_handoffs_state_check CHECK ((state = ANY (ARRAY['serving'::text, 'preparing'::text, 'offline_ready'::text, 'resuming'::text])))
 );
 
 CREATE TABLE public.node_multipart_operations (
@@ -3210,6 +3258,17 @@ CREATE TABLE public.transfer_subscriptions (
     active boolean DEFAULT true NOT NULL
 );
 
+CREATE TABLE public.upload_staging (
+    upload_id uuid NOT NULL,
+    storage_id uuid,
+    policy_revision bigint NOT NULL,
+    tail_upload text NOT NULL,
+    tail_wait_seconds bigint NOT NULL,
+    CONSTRAINT upload_staging_policy_revision_check CHECK ((policy_revision > 0)),
+    CONSTRAINT upload_staging_tail_upload_check CHECK ((tail_upload = ANY (ARRAY['immediate'::text, 'on_demand_timeout'::text, 'on_demand'::text]))),
+    CONSTRAINT upload_staging_tail_wait_seconds_check CHECK ((tail_wait_seconds > 0))
+);
+
 CREATE TABLE public.uploads (
     id uuid DEFAULT uuidv7() NOT NULL,
     bucket_id uuid NOT NULL,
@@ -3502,11 +3561,23 @@ ALTER TABLE ONLY public.mirroring_keys
 ALTER TABLE ONLY public.mokyu_meta
     ADD CONSTRAINT mokyu_meta_pkey PRIMARY KEY (singleton);
 
+ALTER TABLE ONLY public.multipart_carriers
+    ADD CONSTRAINT multipart_carriers_pkey PRIMARY KEY (location_id);
+
+ALTER TABLE ONLY public.multipart_carriers
+    ADD CONSTRAINT multipart_carriers_upload_id_stream_id_key UNIQUE (upload_id, stream_id);
+
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_pkey PRIMARY KEY (id);
 
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_source_id_key UNIQUE (source_id);
+
+ALTER TABLE ONLY public.multipart_tails
+    ADD CONSTRAINT multipart_tails_object_key_key UNIQUE (object_key);
+
+ALTER TABLE ONLY public.multipart_tails
+    ADD CONSTRAINT multipart_tails_pkey PRIMARY KEY (fragment_id);
 
 ALTER TABLE ONLY public.node_access
     ADD CONSTRAINT node_access_pkey PRIMARY KEY (node_id);
@@ -3522,6 +3593,9 @@ ALTER TABLE ONLY public.node_completion_parts
 
 ALTER TABLE ONLY public.node_completions
     ADD CONSTRAINT node_completions_pkey PRIMARY KEY (upload_id);
+
+ALTER TABLE ONLY public.node_handoffs
+    ADD CONSTRAINT node_handoffs_pkey PRIMARY KEY (node_id);
 
 ALTER TABLE ONLY public.node_multipart_operations
     ADD CONSTRAINT node_multipart_operations_pkey PRIMARY KEY (node_id, operation_id);
@@ -3922,6 +3996,9 @@ ALTER TABLE ONLY public.transfer_spans
 ALTER TABLE ONLY public.transfer_subscriptions
     ADD CONSTRAINT transfer_subscriptions_pkey PRIMARY KEY (task_id);
 
+ALTER TABLE ONLY public.upload_staging
+    ADD CONSTRAINT upload_staging_pkey PRIMARY KEY (upload_id);
+
 ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_pkey PRIMARY KEY (id);
 
@@ -4061,11 +4138,19 @@ CREATE INDEX member_external_membership ON public.member_external_grants USING b
 
 CREATE UNIQUE INDEX mirroring_keys_task_idx ON public.mirroring_keys USING btree (task_id);
 
+CREATE INDEX multipart_carriers_storage ON public.multipart_carriers USING btree (storage_id, created_at);
+
+CREATE INDEX multipart_carriers_stream ON public.multipart_carriers USING btree (stream_id);
+
 CREATE INDEX multipart_files_node ON public.multipart_files USING btree (node_id, id);
 
 CREATE INDEX multipart_files_reclaim ON public.multipart_files USING btree (storage_id, id) WHERE reclaim_pending;
 
 CREATE INDEX multipart_files_upload ON public.multipart_files USING btree (upload_id, state);
+
+CREATE INDEX multipart_tails_owner ON public.multipart_tails USING btree (node_id, requested, retry_at, created_at);
+
+CREATE INDEX multipart_tails_upload ON public.multipart_tails USING btree (upload_id);
 
 CREATE INDEX node_multipart_operations_expiry ON public.node_multipart_operations USING btree (node_id, created_at);
 
@@ -4323,6 +4408,8 @@ CREATE INDEX transfer_sources_work ON public.transfer_sources USING btree (task_
 
 CREATE INDEX transfer_subscriptions_bucket ON public.transfer_subscriptions USING btree (bucket_id) WHERE active;
 
+CREATE INDEX upload_staging_storage ON public.upload_staging USING btree (storage_id);
+
 CREATE INDEX uploads_bucket_transfers ON public.uploads USING btree (bucket_id, created_at DESC, id);
 
 CREATE INDEX uploads_expiry ON public.uploads USING btree (state, touched_at, id);
@@ -4384,6 +4471,10 @@ CREATE TRIGGER journal_stream AFTER UPDATE OF payload_revision, metadata, checks
 CREATE TRIGGER journal_update AFTER UPDATE ON public.objects FOR EACH ROW WHEN ((old.stream_id IS DISTINCT FROM new.stream_id)) EXECUTE FUNCTION public.journal_object_change();
 
 CREATE TRIGGER member_authorization AFTER INSERT OR DELETE OR UPDATE ON public.project_members FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
+
+CREATE TRIGGER multipart_tail_requested AFTER UPDATE OF requested ON public.multipart_tails FOR EACH ROW WHEN ((new.requested AND (NOT old.requested))) EXECUTE FUNCTION public.notify_multipart_tail();
+
+CREATE TRIGGER node_handoff_changed AFTER INSERT OR UPDATE ON public.node_handoffs FOR EACH ROW EXECUTE FUNCTION public.notify_node_handoff();
 
 CREATE TRIGGER objects_capture AFTER INSERT OR DELETE OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.mokyu_capture_object();
 
@@ -4672,6 +4763,15 @@ ALTER TABLE ONLY public.mirroring_keys
 ALTER TABLE ONLY public.mirroring_keys
     ADD CONSTRAINT mirroring_keys_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.tasks(id) ON DELETE SET NULL;
 
+ALTER TABLE ONLY public.multipart_carriers
+    ADD CONSTRAINT multipart_carriers_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.multipart_carriers
+    ADD CONSTRAINT multipart_carriers_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id) ON DELETE SET NULL;
+
+ALTER TABLE ONLY public.multipart_carriers
+    ADD CONSTRAINT multipart_carriers_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.uploads(id) ON DELETE SET NULL;
+
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
 
@@ -4684,6 +4784,15 @@ ALTER TABLE ONLY public.multipart_files
 ALTER TABLE ONLY public.multipart_files
     ADD CONSTRAINT multipart_files_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.uploads(id) ON DELETE SET NULL;
 
+ALTER TABLE ONLY public.multipart_tails
+    ADD CONSTRAINT multipart_tails_fragment_id_fkey FOREIGN KEY (fragment_id) REFERENCES public.fragments(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.multipart_tails
+    ADD CONSTRAINT multipart_tails_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id);
+
+ALTER TABLE ONLY public.multipart_tails
+    ADD CONSTRAINT multipart_tails_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.uploads(id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY public.node_access
     ADD CONSTRAINT node_access_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
@@ -4695,6 +4804,9 @@ ALTER TABLE ONLY public.node_completion_parts
 
 ALTER TABLE ONLY public.node_completions
     ADD CONSTRAINT node_completions_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.uploads(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.node_handoffs
+    ADD CONSTRAINT node_handoffs_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.node_multipart_operations
     ADD CONSTRAINT node_multipart_operations_node_id_fkey FOREIGN KEY (node_id) REFERENCES public.nodes(id) ON DELETE CASCADE;
@@ -5190,6 +5302,12 @@ ALTER TABLE ONLY public.transfer_subscriptions
 
 ALTER TABLE ONLY public.transfer_subscriptions
     ADD CONSTRAINT transfer_subscriptions_task_id_fkey FOREIGN KEY (task_id) REFERENCES public.transfer_runs(task_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.upload_staging
+    ADD CONSTRAINT upload_staging_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.upload_staging
+    ADD CONSTRAINT upload_staging_upload_id_fkey FOREIGN KEY (upload_id) REFERENCES public.uploads(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.uploads
     ADD CONSTRAINT uploads_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);

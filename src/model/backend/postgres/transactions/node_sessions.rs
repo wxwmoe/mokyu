@@ -213,6 +213,10 @@ async fn node_snapshot(
             .fetch_optional(&mut *db)
             .await?
             .ok_or(crate::model::Error::NodeInactive)?;
+    let handoff = queries::node_handoff::row(node)
+        .fetch_optional(&mut *db)
+        .await?;
+    let draining = draining || handoff.as_ref().is_some_and(|row| row.state != "serving");
     let pending_uploads = if draining {
         queries::node_upload_backlog(Some(node))
             .fetch_one(db)
@@ -229,6 +233,7 @@ async fn node_snapshot(
         valid_for_ms,
         maintenance,
         draining,
+        handoff_revision: handoff.map_or(0, |row| row.revision),
         settings,
         grants: Vec::new(),
         native_pending,
@@ -421,6 +426,7 @@ pub(in super::super) async fn report_node_session(
     if !written {
         return Ok(false);
     }
+    super::super::node_handoff::observed(&mut tx, state.node_id, report).await?;
     if let Some(sample) = &sample {
         queries::node_runtime_sample(state.node_id, sample)
             .execute(&mut *tx)
@@ -436,10 +442,15 @@ pub(in super::super) async fn require_node_run(
     run: crate::model::session::Run,
     exclusive: bool,
 ) -> Result<crate::model::session::Session> {
-    queries::active_node_session(state.node_id, state.credential_generation, run, exclusive)
-        .fetch_optional(db)
-        .await?
-        .ok_or_else(|| crate::model::Error::NodeExpired.into())
+    let mut session =
+        queries::active_node_session(state.node_id, state.credential_generation, run, exclusive)
+            .fetch_optional(&mut *db)
+            .await?
+            .ok_or(crate::model::Error::NodeExpired)?;
+    session.draining |= queries::node_handoff::gate(state.node_id)
+        .fetch_one(db)
+        .await?;
+    Ok(session)
 }
 
 pub(in super::super) async fn sync_node(

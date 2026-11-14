@@ -16,6 +16,8 @@ mod mirroring_transactions;
 mod native_parts;
 #[path = "../../shared/node/files.rs"]
 mod node_files;
+#[path = "../../shared/node_handoff.rs"]
+mod node_handoff;
 #[path = "../../shared/node/inventory.rs"]
 mod node_inventory;
 #[path = "../../shared/node/mutations.rs"]
@@ -64,6 +66,8 @@ mod tier_move_transactions;
 #[path = "../../shared/tier.rs"]
 mod tier_transactions;
 mod transactions;
+#[path = "../../shared/upload_staging.rs"]
+mod upload_staging;
 #[path = "../../shared/work/audit.rs"]
 mod work_audit;
 #[path = "../../shared/work/collect.rs"]

@@ -81,6 +81,8 @@ fn validate_value(configured: &crate::config::Config, section: &str, value: &Val
                 "max_active_uploads",
                 "staging_storage_id",
                 "staging_bytes_limit",
+                "tail_upload",
+                "tail_upload_timeout",
             ],
             "metrics" => &[
                 "scope_limit",

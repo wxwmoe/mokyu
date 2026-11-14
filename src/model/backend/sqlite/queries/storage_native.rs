@@ -1,3 +1,5 @@
+pub(in super::super) use super::super::native_parts::storage_completion as multipart_completion;
+pub(in super::super) use super::super::native_parts::storage_work as multipart_work;
 pub(in super::super) use super::super::node_work::storage_plan;
 pub(in super::super) use super::super::node_writes::authorize_storage_marker as authorize_marker;
 pub(in super::super) use super::super::node_writes::authorize_storage_upload as authorize_upload;
@@ -6,6 +8,33 @@ use crate::model::storage_native::Condition;
 use crate::model::storage_payload::Intent;
 use sqlx::types::Json;
 use uuid::Uuid;
+
+pub(in super::super) fn part_carrier(
+    upload: Uuid,
+    stream: crate::model::Id,
+    storage: Uuid,
+) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT location_id FROM multipart_carriers WHERE upload_id=? AND stream_id=? AND storage_id=?").bind(upload).bind(stream).bind(storage)
+}
+pub(in super::super) fn add_part_carrier(
+    location: Uuid,
+    upload: Uuid,
+    stream: crate::model::Id,
+    storage: Uuid,
+    now: i64,
+) -> Statement<'static> {
+    sqlx::query("INSERT INTO multipart_carriers(location_id,upload_id,stream_id,storage_id,created_at) VALUES(?,?,?,?,?) ON CONFLICT(upload_id,stream_id) DO NOTHING").bind(location).bind(upload).bind(stream).bind(storage).bind(now)
+}
+pub(in super::super) fn unused_parts(
+    storage: Uuid,
+    before: i64,
+    limit: i64,
+) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT c.location_id FROM multipart_carriers c LEFT JOIN uploads u ON u.id=c.upload_id WHERE c.storage_id=? AND c.created_at<? AND (u.id IS NULL OR u.state NOT IN ('active','completing') OR NOT EXISTS(SELECT 1 FROM parts p WHERE p.upload_id=c.upload_id AND p.stream_id=c.stream_id)) ORDER BY c.created_at,c.location_id LIMIT ?").bind(storage).bind(before).bind(limit)
+}
+pub(in super::super) fn remove_part_carrier(location: Uuid) -> Statement<'static> {
+    sqlx::query("DELETE FROM multipart_carriers WHERE location_id=?").bind(location)
+}
 
 #[cfg(test)]
 pub(in super::super) async fn test_execution(

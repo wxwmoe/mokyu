@@ -715,11 +715,11 @@ impl NodeWork for Backend {
         {
             super::work_raw::schedule(&mut tx, input.max_items).await?;
         }
-        let next = if active && input.max_items > 0 {
+        let next = if input.max_items > 0 {
             q::next_task(
                 input.class,
                 node.node_id,
-                matches!(node.role.as_str(), "worker" | "node"),
+                active && matches!(node.role.as_str(), "worker" | "node"),
             )
             .fetch_optional(&mut *tx)
             .await?

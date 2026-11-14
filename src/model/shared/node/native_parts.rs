@@ -88,6 +88,29 @@ impl Offer {
         })
     }
 }
+
+pub(super) async fn storage_work(
+    tx: &mut registry::Tx<'_>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+) -> Result<Option<(native::Work, i64)>> {
+    let Some(offer) = q::work(node.node_id, operation)
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(None);
+    };
+    offer.own(node, run)?;
+    ensure!(
+        offer.remaining > 0 && offer.result_hash.is_none(),
+        Error::NodeExpired
+    );
+    Ok(Some((
+        offer.work.0,
+        chrono::Utc::now().timestamp_micros() + offer.remaining * 1000,
+    )))
+}
 fn ready(input: &native::Claim, ready: bool) -> native::Reply {
     native::Reply {
         operation: input.operation,
@@ -138,6 +161,8 @@ pub(super) async fn publish_part(
         state == "sealed" && hash.is_some() && row.next_offset == size,
         s3s::s3_error!(IncompleteBody)
     );
+    super::storage_native::part_carrier(tx, part.upload, stream, row.storage_id, Some(file))
+        .await?;
     q::queue(
         part.upload,
         part.number,
@@ -237,6 +262,20 @@ pub(super) async fn candidate(
         Error::OperationAborted
     );
     Ok(id)
+}
+pub(super) async fn storage_completion(
+    tx: &mut registry::Tx<'_>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+) -> Result<(native::Completion, i64)> {
+    let row = writes::lookup(tx, node.node_id, operation).await?;
+    let (_, plan) = completion(tx, &row, node, run).await?;
+    plan.size()?;
+    Ok((
+        plan,
+        chrono::Utc::now().timestamp_micros() + row.remaining * 1000,
+    ))
 }
 pub(super) async fn attach(
     tx: &mut registry::Tx<'_>,
@@ -425,7 +464,15 @@ impl NativeParts for Backend {
                     etag,
                 }
             };
-            native::Work { upload, action }
+            native::Work {
+                upload: upload.into(),
+                action,
+            }
+        } else if input.stream.is_none()
+            && let Some(tail) =
+                super::upload_staging::claim_tail(&mut tx, node.node_id, token).await?
+        {
+            tail
         } else if input.stream.is_none()
             && let Some(id) = q::abort_due().fetch_optional(&mut *tx).await?
         {
@@ -438,7 +485,7 @@ impl NativeParts for Backend {
                 Error::OperationAborted
             );
             native::Work {
-                upload: q::upload(id).fetch_one(&mut *tx).await?,
+                upload: q::upload(id).fetch_one(&mut *tx).await?.into(),
                 action: native::Action::Abort,
             }
         } else {
@@ -491,10 +538,15 @@ impl NativeParts for Backend {
         let result = &input.result;
         let task = &offer.work;
         ensure!(
-            result.source_error.is_none() || matches!(task.action, native::Action::Part { .. }),
+            result.source_error.is_none()
+                || matches!(
+                    task.action,
+                    native::Action::Part { .. } | native::Action::Tail { .. }
+                ),
             Error::NodeOperationConflict
         );
         let value = result.value.as_deref();
+        super::storage_native::multipart_receipt(&mut tx, task, value).await?;
         ensure!(
             result.source_error.is_none() || result.retry,
             Error::NodeOperationConflict
@@ -537,6 +589,9 @@ impl NativeParts for Backend {
                 .execute(&mut *tx)
                 .await?
                 .rows_affected()
+            }
+            native::Action::Tail { .. } => {
+                super::upload_staging::finish_tail(&mut tx, task, offer.token, result).await?
             }
             native::Action::Abort => {
                 ensure!(value.is_none(), Error::NodeOperationConflict);
@@ -637,7 +692,7 @@ impl NativeParts for Backend {
     ) -> Result<native::PreparedCompletion> {
         let mut tx = start(self, node, key, input.run).await?;
         let row = writes::lookup(&mut tx, node.node_id, input.operation).await?;
-        let (_, mut value) = completion(&mut tx, &row, node, input.run).await?;
+        let (stream, mut value) = completion(&mut tx, &row, node, input.run).await?;
         if input.resend {
             q::retry_parts(value.upload.upload)
                 .execute(&mut *tx)
@@ -659,6 +714,8 @@ impl NativeParts for Backend {
         )
         .await?;
         if ready {
+            candidate(&mut tx, stream, &value.upload).await?;
+            super::storage_native::multipart_candidate(&mut tx, &value).await?;
             let current = queries::storage_profile(row.storage_id)
                 .fetch_one(&mut *tx)
                 .await?;

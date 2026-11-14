@@ -282,7 +282,7 @@ pub(in super::super) fn rebind(source: Id, stream: Id) -> Statement<'static> {
 }
 
 pub(in super::super) fn unknown_file(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fragments WHERE location_id=?)").bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fragments f WHERE f.location_id=? AND (f.staging_storage_id IS NULL OR EXISTS(SELECT 1 FROM node_read_sources nr JOIN node_read_windows v ON v.id=nr.window_id JOIN node_reads r ON r.read_id=v.read_id WHERE nr.source_type='fragment' AND nr.location_id=f.location_id AND r.expires_at>UTC_TIMESTAMP(6))))").bind(id)
 }
 pub(in super::super) fn forget_file(id: Uuid, node: Uuid) -> Statement<'static> {
     sqlx::query("DELETE FROM multipart_files WHERE id=? AND node_id=? AND source_id IS NULL AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=multipart_files.id) AND NOT EXISTS(SELECT 1 FROM parts WHERE stream_id=multipart_files.part_stream) AND NOT EXISTS(SELECT 1 FROM native_part_reads pr WHERE pr.stream_id=multipart_files.part_stream AND pr.expires_at>UTC_TIMESTAMP(6)) AND NOT EXISTS(SELECT 1 FROM node_writes w WHERE w.stream_id=multipart_files.part_stream AND w.phase='active' AND w.expires_at>UTC_TIMESTAMP(6))").bind(id).bind(node)

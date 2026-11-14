@@ -95,6 +95,32 @@ impl Writes {
             );
             inventory.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
+                let revision = {
+                    let view = state.borrow();
+                    if view.draining {
+                        view.handoff_revision
+                    } else {
+                        0
+                    }
+                };
+                if revision > 0
+                    && node
+                        .handoff_checked
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        != revision
+                {
+                    let Some(current) = writes.upgrade() else {
+                        return;
+                    };
+                    match current.reads.reader.files.reclaim_local(&node, false).await {
+                        Ok(()) => {
+                            node.handoff_checked
+                                .store(revision, std::sync::atomic::Ordering::Release);
+                            node.native_work.notify_one();
+                        }
+                        Err(error) => tracing::debug!(%error, "node handoff inventory postponed"),
+                    }
+                }
                 if recover {
                     let Some(current) = writes.upgrade() else {
                         return;
@@ -112,7 +138,6 @@ impl Writes {
                     _=inventory.tick()=>{
                         let Some(current)=writes.upgrade() else {return;};
                         if let Err(error)=current.reads.reader.files.reclaim_local(&node, false).await {tracing::debug!(%error,"local upload inventory postponed");}
-                        continue;
                     },
                     result=state.changed()=>{
                         if result.is_err() || state.borrow().phase==super::super::Phase::Stopped {return;}
@@ -189,11 +214,23 @@ impl Writes {
                 .cache
                 .apply(node.client.identity.deployment_id, held, plan.materials)?;
         let backend = reads::backend(&materials, work.upload.storage)?;
+        let backend = backend.scoped(
+            crate::storage::native::store::Authority::Work {
+                client: node.client.clone(),
+                run: snapshot.lease.clone(),
+                grants: grants.clone(),
+                operation: Uuid::parse_str(&id)?,
+            },
+            node.config.instance.region.clone(),
+        )?;
         let path = crate::storage::raw::remote_path(work.upload.source);
         let future = async {
             backend.store.ensure_verified().await?;
             match &work.action {
                 Action::Initialize => {
+                    if backend.store.native.is_some() {
+                        return Ok(Some(work.upload.source.to_string()));
+                    }
                     #[cfg(feature = "fault-injection")]
                     crate::faults::point("node-native-before-initialize").await;
                     let (pending, _) = backend
@@ -233,6 +270,29 @@ impl Writes {
                     let disk = self.reads.reader.files.multipart().await?;
                     let local = disk.candidate_path(*file);
                     let _lock = self.reads.reader.files.local_lock(*file).await;
+                    if let Some(store) = &backend.store.native {
+                        let value = crate::storage::native::multipart::write_part(
+                            store,
+                            *file,
+                            *size as u64,
+                            || {
+                                replay(local.clone(), *size, etag.clone())
+                                    .map_ok(|bytes| {
+                                        Bytes::from_owner(Upload {
+                                            bytes,
+                                            _memory: io.clone(),
+                                            _io: io.clone(),
+                                            _grants: grants.clone(),
+                                        })
+                                    })
+                                    .boxed()
+                            },
+                        )
+                        .await?;
+                        #[cfg(feature = "fault-injection")]
+                        crate::faults::point("node-native-part-uploaded").await;
+                        return Ok(Some(value));
+                    }
                     let value = backend
                         .store
                         .streaming
@@ -266,6 +326,9 @@ impl Writes {
                     Ok(Some(value.content_id))
                 }
                 Action::Abort => {
+                    if backend.store.native.is_some() {
+                        return Ok(None);
+                    }
                     let (pending, more) = backend
                         .store
                         .streaming
@@ -288,6 +351,25 @@ impl Writes {
                     }
                     ensure!(!more, "native upload cleanup has another batch");
                     Ok(None)
+                }
+                Action::Tail { size, hash, .. } => {
+                    let file = work.upload.source;
+                    let disk = self.reads.reader.files.multipart().await?;
+                    let _guard = self.reads.reader.files.local_lock(file).await;
+                    let bytes =
+                        crate::storage::local::read_tail(&disk.fragment_path(file), *size, hash)
+                            .await?;
+                    backend
+                        .store
+                        .backend
+                        .put(
+                            &Path::from(crate::storage::fragment_key(file)),
+                            Bytes::from(bytes).into(),
+                        )
+                        .await?;
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("node-tail-shared").await;
+                    Ok(Some(file.to_string()))
                 }
             }
         };
@@ -325,6 +407,10 @@ impl Writes {
         };
         node.client.finish_native(report).await?;
         result?;
+        #[cfg(feature = "fault-injection")]
+        if matches!(work.action, Action::Tail { .. }) {
+            crate::faults::point("node-tail-receipt").await;
+        }
         if let Action::Part { file, .. } = &work.action {
             self.reads.reader.files.release_part(*file);
         }
@@ -376,7 +462,11 @@ impl Writes {
         let mut buffer = Vec::with_capacity(codec::MAX);
         let mut size = 0u64;
         let idle = Duration::from_secs(crate::config::seconds(
-            &node.snapshot()?.runtime().uploads.client_idle_timeout,
+            &node
+                .background_snapshot()?
+                .runtime()
+                .uploads
+                .client_idle_timeout,
         )?);
         loop {
             let data = tokio::time::timeout(idle, body.next())
@@ -491,7 +581,7 @@ impl Writes {
                 .resources
                 .adopt(&operation.request.run, &reply.grants, started)?;
             let path = crate::storage::raw::remote_path(plan.upload.source);
-            let backend = &operation.backend;
+            let backend = operation.scope(node, &operation.backend, None, &grants)?;
             let completed = operation
                 .guard(node, &grants, async {
                     backend.store.ensure_verified().await?;
@@ -511,6 +601,23 @@ impl Writes {
                         .iter()
                         .map(|part| (part.number, part.remote_etag.clone().unwrap()))
                         .collect();
+                    if let Some(store) = &backend.store.native {
+                        crate::storage::native::multipart::complete(
+                            store,
+                            plan.upload.source,
+                            &parts,
+                            value.size as u64,
+                        )
+                        .await?;
+                        node.client
+                            .prepare_native_complete(wire::NativeCompleteRequest {
+                                run: Some(operation.request.run.run.clone()),
+                                operation_id: operation.id.clone(),
+                                resend: false,
+                            })
+                            .await?;
+                        return Ok(true);
+                    }
                     let result = backend
                         .store
                         .streaming

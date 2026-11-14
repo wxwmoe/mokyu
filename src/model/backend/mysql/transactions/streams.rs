@@ -252,7 +252,11 @@ pub(in super::super) async fn create_stream_in(
     Ok(id)
 }
 
-pub(in super::super) async fn append_tail(pool: &sqlx::MySqlPool, tail: StreamTail) -> Result<()> {
+pub(in super::super) async fn append_tail(
+    pool: &sqlx::MySqlPool,
+    tail: StreamTail,
+    owner: Option<(Uuid, Uuid)>,
+) -> Result<()> {
     tail.validate_staging()?;
     let fragment = Id::try_from(
         queries::insert_fragment(&tail)
@@ -264,6 +268,14 @@ pub(in super::super) async fn append_tail(pool: &sqlx::MySqlPool, tail: StreamTa
     #[cfg(feature = "fault-injection")]
     crate::faults::point("fragment-persisted").await;
     writing_stream(&mut tx, tail.stream).await?;
+    super::super::upload_staging::record_owner(&mut tx, &tail, fragment, owner).await?;
+    super::super::storage_native::publish_staged(
+        &mut tx,
+        tail.staging_storage,
+        tail.fragment,
+        tail.size as u64,
+    )
+    .await?;
     queries::seal_fragment(fragment).execute(&mut *tx).await?;
     queries::insert_fragment_extent(&tail, fragment)
         .execute(&mut *tx)

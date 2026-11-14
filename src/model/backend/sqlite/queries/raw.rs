@@ -350,7 +350,7 @@ impl RawStore for Backend {
         Ok(sqlx::query_scalar("SELECT source_id FROM multipart_files m WHERE m.id=? AND source_id IS NOT NULL AND m.state<>'deleting' AND EXISTS(SELECT 1 FROM fragments WHERE file_id=m.id)").bind(location).fetch_optional(&self.read).await?)
     }
     async fn cached_checkpoints(&self, after: Uuid) -> Result<Vec<(Uuid, Id)>> {
-        Ok(sqlx::query_as("SELECT m.id,m.source_id FROM multipart_files m JOIN storages s ON s.id=m.storage_id WHERE m.id>? AND s.type='s3' AND m.source_id IS NOT NULL AND m.state<>'deleting' AND EXISTS(SELECT 1 FROM fragments WHERE file_id=m.id) ORDER BY m.id LIMIT 128").bind(after).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT m.id,m.source_id FROM multipart_files m JOIN storages s ON s.id=m.storage_id WHERE m.id>? AND s.type IN ('s3','mokyu') AND m.source_id IS NOT NULL AND m.state<>'deleting' AND EXISTS(SELECT 1 FROM fragments WHERE file_id=m.id) ORDER BY m.id LIMIT 128").bind(after).fetch_all(&self.read).await?)
     }
     async fn has_upload(&self, source: Id) -> Result<bool> {
         Ok(

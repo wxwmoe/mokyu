@@ -416,7 +416,7 @@ runtime settings 首次从空数据库启动时由当前配置生成，之后由
 | `POST /api/v1/cluster/nodes/{name}/release` | 释放节点、撤销凭据并重新排队其任务 |
 | `POST /api/v1/cluster/recover` | 使用 deployment key 确认恢复模式并释放待恢复节点；仅 control 可调用 |
 
-单主控群集与多控制节点群集均提供部署和节点只读查询。`remote_nodes` 排除主控和已释放身份，`ready_data`、`ready_workers` 统计就绪的远端能力，单主控的 `remote_work` 记录是否已交出共享任务。单主控的模式切换、节点登记、轮换及释放使用本机 CLI。所有受支持的数据库均可预先配置共享 S3 暂存。
+单主控群集与多控制节点群集均提供部署和节点只读查询。`remote_nodes` 排除主控和已释放身份，`ready_data`、`ready_workers` 统计就绪的远端能力，单主控的 `remote_work` 记录是否已交出共享任务。单主控的模式切换、节点登记、轮换及释放使用本机 CLI。`GET /api/v1/cluster/nodes/{id}/status` 的 `handoff` 显示 data、worker、node 的临时下线状态、当前修订及阻塞计数。对同一节点 `POST /api/v1/cluster/nodes/{id}/handoff`，提交 `{"action":"prepare","revision":0}`（修订取自当次查询）；`cancel` 取消准备，`resume` 恢复服务。修订过期返回冲突，应重新查询。离线节点需要重新连接并核对后才能完成交接。
 
 节点丢失 `node.json` 时先释放旧节点，再重启对应角色完成本机注册。节点凭据不会出现在 URL、列表或普通 API 响应中。
 

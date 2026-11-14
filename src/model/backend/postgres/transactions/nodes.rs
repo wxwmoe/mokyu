@@ -35,9 +35,7 @@ pub(in super::super) async fn set_deployment_mode(
                 || queries::empty_storage_bootstrap()
                     .fetch_one(&mut *tx)
                     .await?,
-            ModeConflict(
-                "cluster mode requires shared staging storage or an empty maintenance deployment"
-            )
+            ModeConflict("configured staging storage must be enabled or awaiting bootstrap")
         );
     }
     if mode == "single" {
@@ -108,22 +106,13 @@ pub(in super::super) async fn release_node(
             .await?,
         "remove storage membership before releasing its node identity"
     );
+    let pending = queries::node_handoff::counts(&mut tx, id).await?;
+    ensure!(pending.empty(), pending);
     if backend.control_epoch.is_some() {
-        let (role, chunks, raw, parts, writes, reads) =
-            queries::retirement(id).fetch_one(&mut *tx).await?;
+        let (role, _) = queries::node_handoff::role(id).fetch_one(&mut *tx).await?;
         ensure!(
             role != "control",
             crate::model::runtime::ModeConflict("the embedded control cannot be released")
-        );
-        ensure!(
-            chunks + raw + parts + writes + reads == 0,
-            crate::model::node::NodeDrain {
-                chunks,
-                raw,
-                parts,
-                writes,
-                reads
-            }
         );
         queries::release_handoff().execute(&mut *tx).await?;
     }

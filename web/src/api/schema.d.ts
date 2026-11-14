@@ -928,6 +928,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/cluster/nodes/{id}/handoff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["cluster_node_handoff"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/cluster/nodes/{id}/runtime": {
         parameters: {
             query?: never;
@@ -2971,6 +2987,25 @@ export interface components {
         Fit: "contain" | "cover";
         /** @enum {string} */
         Format: "source" | "jpeg" | "png" | "webp" | "jxl" | "avif" | "auto";
+        Handoff: {
+            /** Format: int64 */
+            damaged_tails: number;
+            /** Format: uuid */
+            operation?: string | null;
+            pending: components["schemas"]["NodeDrain"];
+            /** Format: int64 */
+            pending_bytes: number;
+            /** Format: int64 */
+            revision: number;
+            state: string;
+        };
+        /** @enum {string} */
+        HandoffAction: "prepare" | "cancel" | "resume";
+        HandoffInput: {
+            action: components["schemas"]["HandoffAction"];
+            /** Format: int64 */
+            revision: number;
+        };
         Id: string;
         ImageExport: {
             after?: string | null;
@@ -3541,6 +3576,22 @@ export interface components {
             role: string;
             work: string;
         };
+        NodeDrain: {
+            /** Format: int64 */
+            chunks: number;
+            /** Format: int64 */
+            parts: number;
+            /** Format: int64 */
+            raw: number;
+            /** Format: int64 */
+            reads: number;
+            /** Format: int64 */
+            tails: number;
+            /** Format: int64 */
+            tasks: number;
+            /** Format: int64 */
+            writes: number;
+        };
         NodePage: {
             items: components["schemas"]["NodeView"][];
             next_cursor?: string | null;
@@ -3607,6 +3658,7 @@ export interface components {
             /** Format: uuid */
             boot_id?: string | null;
             connection?: components["schemas"]["NodeConnection"] | null;
+            handoff?: components["schemas"]["Handoff"] | null;
             more_tasks: boolean;
             node: components["schemas"]["NodeView"];
             /** Format: date-time */
@@ -6764,6 +6816,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NodeConfig"];
+                };
+            };
+        };
+    };
+    cluster_node_handoff: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HandoffInput"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Handoff"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };

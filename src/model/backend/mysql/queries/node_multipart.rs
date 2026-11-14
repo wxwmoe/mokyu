@@ -9,7 +9,7 @@ pub(in super::super) fn settings() -> Scalar<'static, Json<crate::config::Upload
     )
 }
 pub(in super::super) fn tail(node: Uuid, op: Uuid) -> Rows<'static, Tail> {
-    sqlx::query_as("SELECT * FROM node_write_tails WHERE node_id=? AND operation_id=?")
+    sqlx::query_as("SELECT w.*,EXISTS(SELECT 1 FROM multipart_tails t WHERE t.fragment_id=w.fragment_id) AS local FROM node_write_tails w WHERE w.node_id=? AND w.operation_id=?")
         .bind(node)
         .bind(op)
 }
@@ -26,8 +26,10 @@ pub(in super::super) fn add_tail<'a>(
     hash: &'a [u8],
     fragment: Id,
     tail: &'a StreamTail,
+    storage: Uuid,
+    path: &'a str,
 ) -> Statement<'a> {
-    sqlx::query("INSERT INTO node_write_tails(node_id,operation_id,request_hash,fragment_id,location_id,storage_id,object_key,offset_bytes,size) VALUES(?,?,?,?,?,?,?,?,?)").bind(node).bind(op).bind(hash).bind(fragment).bind(tail.fragment).bind(tail.staging_storage).bind(&tail.staging_key).bind(tail.offset).bind(tail.size)
+    sqlx::query("INSERT INTO node_write_tails(node_id,operation_id,request_hash,fragment_id,location_id,storage_id,object_key,offset_bytes,size) VALUES(?,?,?,?,?,?,?,?,?)").bind(node).bind(op).bind(hash).bind(fragment).bind(tail.fragment).bind(storage).bind(path).bind(tail.offset).bind(tail.size)
 }
 pub(in super::super) fn finish_tail(node: Uuid, op: Uuid) -> Statement<'static> {
     sqlx::query("UPDATE node_write_tails SET committed=TRUE WHERE node_id=? AND operation_id=?")

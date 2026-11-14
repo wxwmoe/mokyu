@@ -430,6 +430,18 @@ mod tests {
             }
             restored.uploads.staging_bytes_limit = Some("1GiB".into());
             assert!(restored.validate().is_ok());
+            for mode in ["immediate", "on_demand_timeout", "on_demand"] {
+                restored.uploads.tail_upload = mode.into();
+                assert!(restored.validate().is_ok());
+            }
+            restored.uploads.tail_upload = "unknown".into();
+            assert!(restored.validate().is_err());
+            restored.uploads.tail_upload = "immediate".into();
+            for timeout in ["0s", "bad", "18446744073709551615d"] {
+                restored.uploads.tail_upload_timeout = timeout.into();
+                assert!(restored.validate().is_err());
+            }
+            restored.uploads.tail_upload_timeout = "600s".into();
             for role in ["control", "worker", "data", "node"] {
                 assert_eq!(
                     backend.validate_role(role).is_ok(),

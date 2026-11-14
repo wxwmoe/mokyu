@@ -196,6 +196,7 @@ pub(in super::super) async fn node_complete_sources(
 
 pub(super) async fn prepare_node_completion(
     tx: &mut Transaction<'_, Postgres>,
+    node: Uuid,
     input: &write::Begin,
     bucket: Uuid,
     authority: &Permit,
@@ -253,6 +254,11 @@ pub(super) async fn prepare_node_completion(
             .fetch_all(&mut **tx)
             .await?;
         let summary = manifest.select(&upload, &selected)?;
+        let owners =
+            super::super::upload_staging::request(tx, upload.id, Some(node), &numbers).await?;
+        if !owners.is_empty() {
+            return Err(crate::model::node_tail::Pending(owners).into());
+        }
         let conditions = Conditions {
             if_match: manifest.if_match.clone(),
             if_none: manifest.if_none.clone(),

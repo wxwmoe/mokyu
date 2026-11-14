@@ -12,7 +12,8 @@ use utoipa::ToSchema;
 
 pub(crate) use crate::model::cluster::ClusterStatus;
 use crate::model::node::{
-    ClusterOverview, NodeConfig, NodeFilter, NodePage, NodeStatus, SettingCount,
+    ClusterOverview, Handoff, HandoffInput, NodeConfig, NodeFilter, NodePage, NodeStatus,
+    SettingCount,
 };
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -134,8 +135,18 @@ pub(crate) async fn node_status(
     let mut tasks = cluster.node_tasks(id).await?;
     let more_tasks = tasks.len() > 20;
     tasks.truncate(20);
+    let handoff = if node.enabled && matches!(node.role.as_str(), "data" | "worker" | "node") {
+        Some(
+            app.node_sessions
+                .handoff(&actor.principal, id, None)
+                .await?,
+        )
+    } else {
+        None
+    };
     Ok(Json(NodeStatus {
         node,
+        handoff,
         boot_id: report.as_ref().map(|r| r.boot_id),
         started_at: report.as_ref().map(|r| r.started_at),
         connection: report.as_ref().and_then(|report| {
@@ -150,6 +161,35 @@ pub(crate) async fn node_status(
         more_tasks,
     }))
 }
+pub(super) async fn handoff(
+    app: &App,
+    principal: &crate::authorization::Principal,
+    id: Uuid,
+    input: Option<HandoffInput>,
+) -> Result<Handoff> {
+    let changed = input.is_some();
+    let view = app.node_sessions.handoff(principal, id, input).await?;
+    if changed {
+        use crate::model::notification::Signal;
+        app.notifications.hint(&Signal::State);
+        app.notifications.hint(&Signal::Work(Some(id)));
+    }
+    Ok(view)
+}
+
+#[utoipa::path(post, operation_id = "cluster_node_handoff", path = "/api/v1/cluster/nodes/{id}/handoff", params(("id"=Uuid,Path)), request_body=HandoffInput, responses((status=200,body=Handoff),(status=409,body=crate::control::contract::ErrorBody)))]
+pub(crate) async fn node_handoff(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<HandoffInput>,
+) -> Result<Json<Handoff>, HttpError> {
+    admin(&actor, &app).await?;
+    Ok(Json(
+        handoff(&app, &actor.principal, id, Some(input)).await?,
+    ))
+}
+
 #[utoipa::path(get, operation_id = "cluster_node_config", path = "/api/v1/cluster/nodes/{id}/config", params(("id"=Uuid,Path)), responses((status=200,body=NodeConfig)))]
 pub(crate) async fn node_config(
     State(app): State<Arc<App>>,
@@ -249,7 +289,7 @@ pub(crate) async fn recover(
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreateNodeInput {
     name: String,
-    #[schema(example = "data", pattern = "^(data|worker|node)$")]
+    #[schema(example = "data", pattern = "^(data|worker|node|storage)$")]
     role: String,
 }
 

@@ -74,8 +74,8 @@ impl StorageCapabilities {
             read: available,
             write: available,
             range: available,
-            multipart: matches!(kind, "local" | "s3"),
-            shared_staging: kind == "s3",
+            multipart: available,
+            shared_staging: matches!(kind, "s3" | "mokyu"),
         }
     }
 }

@@ -314,10 +314,6 @@ impl Store {
                     grant.check()?;
                 }
                 let work = matches!(&self.authority, Authority::Work { .. });
-                ensure!(
-                    work || path == self.path(&Path::from("mokyu.json")),
-                    "native upload cannot read another carrier"
-                );
                 let reader = Arc::new(remote::Reader {
                     client: client.clone(),
                     run: run.run.clone(),

@@ -500,7 +500,8 @@ impl App {
                 self.raw_tail(stream, upload.unwrap().0, offset, &window)
                     .await?;
             } else {
-                self.tail(stream, offset, &window[prefix..]).await?;
+                self.tail(stream, upload.unwrap().0, offset, &window[prefix..])
+                    .await?;
             }
         } else {
             while !window.is_empty() {

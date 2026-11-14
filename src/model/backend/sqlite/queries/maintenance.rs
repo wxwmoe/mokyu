@@ -428,14 +428,14 @@ impl MaintenanceStore for Backend {
     }
     async fn fragment_exists(&self, id: Uuid) -> Result<bool> {
         Ok(
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fragments WHERE location_id=?) OR EXISTS(SELECT 1 FROM multipart_files WHERE id=?)")
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fragments f WHERE f.location_id=? AND (f.staging_storage_id IS NULL OR EXISTS(SELECT 1 FROM node_read_sources nr JOIN node_read_windows v ON v.id=nr.window_id JOIN node_reads r ON r.read_id=v.read_id WHERE nr.source_type='fragment' AND nr.location_id=f.location_id AND r.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)))) OR EXISTS(SELECT 1 FROM multipart_files WHERE id=?)")
                 .bind(id).bind(id)
                 .fetch_one(&self.read)
                 .await?,
         )
     }
     async fn recovery_fragments(&self, after: Id) -> Result<Vec<RecoveryFragment>> {
-        Ok(sqlx::query_as("SELECT f.id,f.location_id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>? AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT f.id,f.location_id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>? AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) AND NOT EXISTS(SELECT 1 FROM multipart_tails t WHERE t.fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after).fetch_all(&self.read).await?)
     }
     async fn fragment_uploads(&self, id: Id) -> Result<Vec<Uuid>> {
         Ok(sqlx::query_scalar("SELECT DISTINCT p.upload_id FROM parts p JOIN extents e ON e.stream_id=p.stream_id WHERE e.fragment_id=?").bind(id).fetch_all(&self.read).await?)

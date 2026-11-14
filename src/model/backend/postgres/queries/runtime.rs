@@ -328,7 +328,7 @@ pub(in super::super) fn cluster_staging_id() -> Scalar<'static, Option<Uuid>> {
 
 pub(in super::super) fn cluster_staging_valid(id: Option<Uuid>) -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM storages WHERE id=$1 AND enabled AND type IN ('s3','mokyu'))",
+        "SELECT $1::uuid IS NULL OR EXISTS(SELECT 1 FROM storages WHERE id=$1 AND enabled AND type IN ('s3','mokyu'))",
     )
     .bind(id)
 }
@@ -386,7 +386,7 @@ pub(in super::super) fn update_deployment_mode<'q>(mode: &'q str) -> Statement<'
 }
 
 pub(in super::super) fn retirement(id: Uuid) -> Rows<'static, (String, i64, i64, i64, i64, i64)> {
-    sqlx::query_as("SELECT role,(SELECT count(*) FROM pending_uploads WHERE node_id=$1 AND staging_storage_id IS NULL),(SELECT count(*) FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.node_id=$1 AND r.pending_upload AND r.medium IN ('local','memory')),(SELECT count(*) FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.remote_node_id=$1 AND u.state IN ('active','completing')),(SELECT count(*) FROM node_writes w WHERE node_id=$1 AND state='active' AND (EXISTS(SELECT 1 FROM stream_leases l WHERE l.id=w.lease_id AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM replica_publications p WHERE p.source_pin=w.stream_id AND p.phase='preparing') OR EXISTS(SELECT 1 FROM replica_targets t WHERE t.candidate=w.stream_id AND t.phase IN ('preparing','prepared')))) ,(SELECT count(*) FROM node_reads r JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND l.expires_at>clock_timestamp()) FROM nodes WHERE id=$1").bind(id)
+    sqlx::query_as("SELECT role,(SELECT count(*) FROM pending_uploads WHERE node_id=$1 AND staging_storage_id IS NULL),(SELECT count(*) FROM raw_uploads u JOIN raw_sources r ON r.id=u.source_id WHERE u.node_id=$1 AND r.pending_upload AND r.medium IN ('local','memory')),(SELECT count(*) FROM parts p JOIN uploads u ON u.id=p.upload_id WHERE p.remote_node_id=$1 AND p.remote_etag IS NULL AND u.state IN ('active','completing')),(SELECT count(*) FROM node_writes w WHERE node_id=$1 AND state='active' AND (EXISTS(SELECT 1 FROM stream_leases l WHERE l.id=w.lease_id AND l.expires_at>clock_timestamp()) OR EXISTS(SELECT 1 FROM replica_publications p WHERE p.source_pin=w.stream_id AND p.phase='preparing') OR EXISTS(SELECT 1 FROM replica_targets t WHERE t.candidate=w.stream_id AND t.phase IN ('preparing','prepared')))) ,(SELECT count(*) FROM node_reads r JOIN stream_leases l ON l.id=r.read_id WHERE r.node_id=$1 AND l.expires_at>clock_timestamp()) FROM nodes WHERE id=$1").bind(id)
 }
 
 pub(in super::super) fn release_node_name<'q>(name: &'q str) -> Scalar<'q, Uuid> {

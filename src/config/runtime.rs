@@ -422,6 +422,8 @@ impl Default for RequestSettings {
 pub struct UploadSettings {
     pub staging_storage_id: Option<uuid::Uuid>,
     pub staging_bytes_limit: Option<String>,
+    pub tail_upload: String,
+    pub tail_upload_timeout: String,
     pub sweep_interval: String,
     pub client_idle_timeout: String,
     pub max_active_uploads: Option<i64>,
@@ -431,6 +433,8 @@ impl Default for UploadSettings {
         Self {
             staging_storage_id: None,
             staging_bytes_limit: None,
+            tail_upload: "immediate".into(),
+            tail_upload_timeout: "600s".into(),
             sweep_interval: "5m".into(),
             client_idle_timeout: "120s".into(),
             max_active_uploads: None,

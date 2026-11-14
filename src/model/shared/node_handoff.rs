@@ -1,0 +1,128 @@
+use super::{
+    Backend,
+    queries::{
+        node_handoff as q,
+        storage_cluster::{Tx, admin},
+        storage_payload::begin,
+    },
+};
+use crate::{
+    authorization::Principal,
+    model::{
+        Error,
+        node::{Handoff, HandoffAction, HandoffInput, NodeDrain, NodeReport},
+    },
+};
+use anyhow::{Result, ensure};
+use uuid::Uuid;
+
+pub(super) async fn manage(
+    backend: &Backend,
+    principal: &Principal,
+    node: Uuid,
+    input: Option<HandoffInput>,
+) -> Result<Handoff> {
+    let mut tx = begin(backend).await?;
+    admin(&mut tx, principal).await?;
+    let (role, enabled) = q::role(node)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(Error::NodeInactive)?;
+    ensure!(
+        enabled && matches!(role.as_str(), "data" | "worker" | "node"),
+        Error::NodeInactive
+    );
+    let mut row = q::row(node).fetch_optional(&mut *tx).await?;
+    if let Some(input) = input {
+        let current = row.as_ref().map_or("serving", |r| r.state.as_str());
+        let revision = row.as_ref().map_or(0, |r| r.revision);
+        ensure!(revision == input.revision, Error::OperationAborted);
+        let next = match (current, input.action) {
+            ("serving", HandoffAction::Prepare) => "preparing",
+            ("preparing", HandoffAction::Cancel) | ("offline_ready", HandoffAction::Resume) => {
+                "resuming"
+            }
+            ("preparing", HandoffAction::Prepare)
+            | ("resuming", HandoffAction::Cancel | HandoffAction::Resume) => current,
+            _ => return Err(Error::OperationAborted.into()),
+        };
+        if next != current {
+            let operation = Uuid::now_v7();
+            if row.is_some() {
+                ensure!(
+                    q::update(node, revision, operation, next)
+                        .execute(&mut *tx)
+                        .await?
+                        .rows_affected()
+                        == 1,
+                    Error::OperationAborted
+                );
+            } else {
+                q::insert(node, operation, next).execute(&mut *tx).await?;
+            }
+            if next == "preparing" {
+                q::tails(node).execute(&mut *tx).await?;
+            }
+            row = q::row(node).fetch_optional(&mut *tx).await?;
+        }
+    }
+    let (state, operation, revision) = row.map_or_else(
+        || ("serving".into(), None, 0),
+        |row| (row.state, Some(row.operation), row.revision),
+    );
+    let (pending, (pending_bytes, damaged_tails)) = if state == "preparing" {
+        (
+            q::counts(&mut tx, node).await?,
+            q::details(node).fetch_one(&mut *tx).await?,
+        )
+    } else {
+        (NodeDrain::default(), (0, 0))
+    };
+    let view = Handoff {
+        state,
+        operation,
+        revision,
+        pending,
+        pending_bytes,
+        damaged_tails,
+    };
+    tx.commit().await?;
+    Ok(view)
+}
+
+pub(super) async fn observed(tx: &mut Tx<'_>, node: Uuid, report: &NodeReport) -> Result<()> {
+    let Some(revision) = report.status["handoff_revision"]
+        .as_i64()
+        .filter(|v| *v > 0)
+    else {
+        return Ok(());
+    };
+    if report.status["draining"] != true || report.status["handoff_reconciled"] != true {
+        return Ok(());
+    }
+    let Some(row) = q::row(node).fetch_optional(&mut **tx).await? else {
+        return Ok(());
+    };
+    if row.revision != revision {
+        return Ok(());
+    }
+    let next = match row.state.as_str() {
+        "resuming" => "serving",
+        "preparing" => {
+            q::tails(node).execute(&mut **tx).await?;
+            if ["s3", "web"]
+                .iter()
+                .any(|key| report.status["runtime"]["http"][*key]["active"].as_u64() != Some(0))
+            {
+                return Ok(());
+            }
+            if !q::counts(tx, node).await?.empty() {
+                return Ok(());
+            }
+            "offline_ready"
+        }
+        _ => return Ok(()),
+    };
+    q::advance(node, revision, next).execute(&mut **tx).await?;
+    Ok(())
+}

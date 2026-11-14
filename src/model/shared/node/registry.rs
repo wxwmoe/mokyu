@@ -205,7 +205,10 @@ pub(super) async fn require_work(
         q::epoch(backend)?,
         run,
     )?;
-    Ok(!lease.draining)
+    Ok(!lease.draining
+        && !super::queries::node_handoff::gate(state.node_id)
+            .fetch_one(&mut **tx)
+            .await?)
 }
 
 fn valid_name(name: &str) -> Result<()> {
@@ -263,6 +266,9 @@ async fn identity(
 }
 
 async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease, node: Uuid) -> Result<Snapshot> {
+    let handoff = super::queries::node_handoff::row(node)
+        .fetch_optional(&mut **tx)
+        .await?;
     let (maintenance, mode, mode_revision, work_pending) = q::mode().fetch_one(&mut **tx).await?;
     let work_pending = work_pending
         || (!maintenance
@@ -280,7 +286,8 @@ async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease, node: Uuid) -> Result<Snaps
         epoch: lease.epoch,
         valid_for_ms: (lease.expires - Utc::now()).num_milliseconds().max(0),
         maintenance,
-        draining: lease.draining,
+        draining: lease.draining || handoff.as_ref().is_some_and(|row| row.state != "serving"),
+        handoff_revision: handoff.map_or(0, |row| row.revision),
         settings,
         grants: Vec::new(),
         native_pending: false,
@@ -291,6 +298,14 @@ async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease, node: Uuid) -> Result<Snaps
 
 #[async_trait::async_trait]
 impl NodeSessions for Backend {
+    async fn handoff(
+        &self,
+        principal: &Principal,
+        node: Uuid,
+        input: Option<crate::model::node::HandoffInput>,
+    ) -> Result<crate::model::node::Handoff> {
+        super::node_handoff::manage(self, principal, node, input).await
+    }
     async fn register(
         &self,
         name: &str,
@@ -396,18 +411,8 @@ impl NodeSessions for Backend {
                 .await?,
             "remove storage membership before releasing its node identity"
         );
-        let (chunks, raw, parts, writes, reads) =
-            q::pending_files(row.id).fetch_one(&mut *tx).await?;
-        ensure!(
-            chunks + raw + parts + writes + reads == 0,
-            crate::model::node::NodeDrain {
-                chunks,
-                raw,
-                parts,
-                writes,
-                reads
-            }
-        );
+        let pending = super::queries::node_handoff::counts(&mut tx, row.id).await?;
+        ensure!(pending.empty(), pending);
         super::queries::work::drop_node_lanes(row.id)
             .execute(&mut *tx)
             .await?;
@@ -577,6 +582,7 @@ impl NodeSessions for Backend {
             return Ok(false);
         }
         lease.report_sequence = report.sequence;
+        super::node_handoff::observed(&mut tx, state.node_id, report).await?;
 
         let previous = q::report(state.node_id).fetch_one(&mut *tx).await?;
         let value = super::node_inventory::merge(

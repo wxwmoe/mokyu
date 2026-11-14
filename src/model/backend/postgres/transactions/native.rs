@@ -128,6 +128,66 @@ fn owned(node: &NodeState, run: Run, row: &q::Work) -> Result<()> {
     Ok(())
 }
 
+pub(in super::super) async fn storage_work(
+    tx: &mut Transaction<'_, Postgres>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+) -> Result<Option<(native::Work, i64)>> {
+    let Some(row) = q::work(node.node_id, operation)
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(None);
+    };
+    owned(node, run, &row)?;
+    ensure!(
+        row.valid_for_ms > 0 && row.result_hash.is_none(),
+        Error::NodeExpired
+    );
+    Ok(Some((
+        row.work.0,
+        chrono::Utc::now().timestamp_micros() + row.valid_for_ms * 1000,
+    )))
+}
+
+pub(in super::super) async fn storage_completion(
+    tx: &mut Transaction<'_, Postgres>,
+    node: &NodeState,
+    run: Run,
+    operation: Uuid,
+) -> Result<(native::Completion, i64)> {
+    let row = queries::node_write(node.node_id, operation)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(Error::NodeOperationMissing)?;
+    ensure!(
+        row.credential_generation == node.credential_generation
+            && row.boot_id == run.boot
+            && row.fence == run.fence,
+        Error::NodeExpired
+    );
+    require_node_write(tx, &row).await?;
+    let upload = row.completion_upload.ok_or(Error::NodeOperationConflict)?;
+    let record = queries::node_completion(upload)
+        .fetch_one(&mut **tx)
+        .await?;
+    let plan = native::Completion {
+        upload: queries::remote_upload(upload).fetch_one(&mut **tx).await?,
+        parts: q::completion_parts(upload).fetch_all(&mut **tx).await?,
+    };
+    ensure!(
+        plan.upload.manifest.as_deref() == Some(record.manifest_hash.as_str())
+            && plan.parts.len() == record.summary.parts
+            && plan.size()? == record.summary.size as u64,
+        Error::NodeOperationConflict
+    );
+    Ok((
+        plan,
+        chrono::Utc::now().timestamp_micros() + row.valid_for_ms * 1000,
+    ))
+}
+
 async fn authorize(db: &mut PgConnection, node: &NodeState, key: &Key, run: Run) -> Result<()> {
     authenticate_rpc_node(db, node, key, false).await?;
     ensure!(
@@ -258,7 +318,10 @@ pub(crate) async fn claim(
             Error::OperationAborted
         );
         Some(native::Work {
-            upload: queries::remote_upload(upload).fetch_one(&mut *tx).await?,
+            upload: queries::remote_upload(upload)
+                .fetch_one(&mut *tx)
+                .await?
+                .into(),
             action: native::Action::Initialize,
         })
     } else if let Some((upload, number)) =
@@ -273,13 +336,21 @@ pub(crate) async fn claim(
         let file = q::part_file(part.stream.id, node.node_id)
             .fetch_one(&mut *tx)
             .await?;
+        super::super::storage_native::part_carrier(
+            &mut tx,
+            upload,
+            part.stream.id,
+            part.upload.storage,
+            Some(file),
+        )
+        .await?;
         lease = Some(
             queries::create_read_lease(part.stream.id, 60)
                 .fetch_one(&mut *tx)
                 .await?,
         );
         Some(native::Work {
-            upload: part.upload,
+            upload: part.upload.into(),
             action: native::Action::Part {
                 stream: part.stream.id,
                 file,
@@ -288,6 +359,11 @@ pub(crate) async fn claim(
                 etag: part.stream.etag,
             },
         })
+    } else if input.stream.is_none()
+        && let Some(tail) =
+            super::super::upload_staging::claim_tail(&mut tx, node.node_id, token).await?
+    {
+        Some(tail)
     } else if input.stream.is_none() {
         if let Some(upload) = queries::remote_cleanup_due()
             .fetch_optional(&mut *tx)
@@ -297,7 +373,10 @@ pub(crate) async fn claim(
                 .execute(&mut *tx)
                 .await?;
             Some(native::Work {
-                upload: queries::remote_upload(upload).fetch_one(&mut *tx).await?,
+                upload: queries::remote_upload(upload)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .into(),
                 action: native::Action::Abort,
             })
         } else {
@@ -372,8 +451,14 @@ pub(crate) async fn finish(
     }
     ensure!(row.valid_for_ms > 0, Error::NodeExpired);
     let work = &row.work;
+    super::super::storage_native::multipart_receipt(&mut tx, work, input.result.value.as_deref())
+        .await?;
     ensure!(
-        input.result.source_error.is_none() || matches!(work.action, native::Action::Part { .. }),
+        input.result.source_error.is_none()
+            || matches!(
+                work.action,
+                native::Action::Part { .. } | native::Action::Tail { .. }
+            ),
         Error::NodeOperationConflict
     );
     match &work.action {
@@ -418,6 +503,14 @@ pub(crate) async fn finish(
                 .execute(&mut *tx)
                 .await?
                 .rows_affected()
+                    == 1,
+                Error::NodeExpired
+            );
+        }
+        native::Action::Tail { .. } => {
+            ensure!(
+                super::super::upload_staging::finish_tail(&mut tx, work, row.token, &input.result)
+                    .await?
                     == 1,
                 Error::NodeExpired
             );
@@ -536,6 +629,9 @@ pub(crate) async fn complete(
     };
     let ready = value.upload.upstream.is_some()
         && value.parts.iter().all(|part| part.remote_etag.is_some());
+    if ready {
+        super::super::storage_native::multipart_candidate(&mut tx, &value).await?;
+    }
     let mut grants = node_write_permits(
         &mut tx,
         node.node_id,

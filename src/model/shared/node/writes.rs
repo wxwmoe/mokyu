@@ -54,6 +54,7 @@ pub(super) struct Tail {
     offset_bytes: i64,
     size: i32,
     committed: bool,
+    local: bool,
 }
 impl Tail {
     pub(super) fn reply(&self) -> crate::model::node_tail::Prepared {
@@ -62,6 +63,7 @@ impl Tail {
             object_key: self.object_key.clone(),
             end: self.offset_bytes + i64::from(self.size),
             committed: self.committed,
+            local: self.local,
             materials: Vec::new(),
             storage: None,
             grants: Vec::new(),
@@ -76,6 +78,7 @@ pub(super) struct Completion {
 }
 async fn completion(
     tx: &mut registry::Tx<'_>,
+    node: Uuid,
     input: &write::Begin,
     bucket: Uuid,
     authority: &Permit,
@@ -117,6 +120,10 @@ async fn completion(
             .fetch_all(&mut **tx)
             .await?;
         let summary = manifest.select(&upload, &selected)?;
+        let owners = super::upload_staging::request(tx, upload.id, Some(node), &numbers).await?;
+        if !owners.is_empty() {
+            return Err(crate::model::node_tail::Pending(owners).into());
+        }
         let conditions = complete::Conditions {
             if_match: manifest.if_match.clone(),
             if_none: manifest.if_none.clone(),
@@ -338,7 +345,15 @@ pub(super) async fn authorize_storage_marker(
 ) -> Result<i64> {
     let row = lookup(tx, node.node_id, operation).await?;
     row.active(tx, node, run).await?;
-    ensure!(row.storage_id == storage, s3s::s3_error!(AccessDenied));
+    if row.storage_id != storage {
+        ensure!(
+            mp::tail(node.node_id, operation)
+                .fetch_optional(&mut **tx)
+                .await?
+                .is_some_and(|tail| tail.storage_id == storage && !tail.committed),
+            s3s::s3_error!(AccessDenied)
+        );
+    }
     Ok(chrono::Utc::now().timestamp_micros() + row.remaining * 1000)
 }
 
@@ -351,6 +366,19 @@ pub(super) async fn authorize_storage_upload(
 ) -> Result<(Uuid, i64)> {
     let row = lookup(tx, node.node_id, input.operation).await?;
     row.active(tx, node, run).await?;
+    if input.batch.is_none()
+        && let Some(tail) = mp::tail(node.node_id, input.operation)
+            .fetch_optional(&mut **tx)
+            .await?
+        && tail.storage_id == input.storage
+        && input.matches(prefix, object_store::path::Path::from(tail.object_key))?
+    {
+        ensure!(!tail.committed, Error::NodeExpired);
+        return Ok((
+            input.tail(prefix, tail.location_id, tail.size)?,
+            chrono::Utc::now().timestamp_micros() + row.remaining * 1000,
+        ));
+    }
     ensure!(
         row.storage_id == input.storage,
         s3s::s3_error!(AccessDenied)
@@ -365,6 +393,10 @@ pub(super) async fn authorize_storage_upload(
             Error::NodeExpired
         );
         input.chunks(prefix, &batch.plan, batch.packing.as_deref())?
+    } else if row.intent.completion.is_some() {
+        let (plan, _) =
+            super::native_parts::storage_completion(tx, node, run, input.operation).await?;
+        input.raw(prefix, plan.upload.source, i64::try_from(plan.size()?)?)?
     } else {
         let raw = q::raw(node.node_id, input.operation)
             .fetch_optional(&mut **tx)
@@ -530,9 +562,11 @@ impl NodeWrites for Backend {
                 .await?;
             }
             let settings = mp::settings().fetch_one(&mut *tx).await?;
-            let storage = settings
-                .staging_storage_id
-                .ok_or(Error::SourceUnavailable)?;
+            let staging = queries::upload_staging::load(part.upload)
+                .fetch_one(&mut *tx)
+                .await?;
+            let local = staging.tail_upload != "immediate";
+            let storage = staging.storage_id.ok_or(Error::SourceUnavailable)?;
             let limit = settings
                 .staging_bytes_limit
                 .as_deref()
@@ -548,21 +582,40 @@ impl NodeWrites for Backend {
                 offset: input.offset,
                 size: input.size,
                 hash: input.hash,
-                staging_storage: Some(storage),
-                staging_key: Some(path),
+                staging_storage: (!local).then_some(storage),
+                staging_key: (!local).then(|| path.clone()),
                 file: None,
                 file_offset: None,
             };
             let fragment = mp::fragment(&mut tx, &value).await?;
-            mp::add_tail(node.node_id, input.operation, &hash, fragment, &value)
+            if local {
+                queries::upload_staging::add_tail(
+                    fragment,
+                    part.upload,
+                    node.node_id,
+                    &path,
+                    chrono::Utc::now().timestamp_micros(),
+                )
                 .execute(&mut *tx)
                 .await?;
+            }
+            mp::add_tail(
+                node.node_id,
+                input.operation,
+                &hash,
+                fragment,
+                &value,
+                storage,
+                &path,
+            )
+            .execute(&mut *tx)
+            .await?;
             mp::tail(node.node_id, input.operation)
                 .fetch_one(&mut *tx)
                 .await?
         };
         let mut reply = tail.reply();
-        if !tail.committed {
+        if !tail.committed && !tail.local {
             row.active(&mut tx, node, input.run).await?;
             let record = queries::work::storage(tail.storage_id)
                 .fetch_one(&mut *tx)
@@ -617,6 +670,13 @@ impl NodeWrites for Backend {
                 row.next_offset == tail.offset_bytes,
                 Error::NodeOperationConflict
             );
+            super::storage_native::publish_staged(
+                &mut tx,
+                (!tail.local).then_some(tail.storage_id),
+                tail.location_id,
+                tail.size as u64,
+            )
+            .await?;
             ensure!(
                 queries::seal_fragment(tail.fragment_id)
                     .execute(&mut *tx)
@@ -1486,8 +1546,23 @@ impl NodeWrites for Backend {
         let mut public = input.intent.public;
         let mut object_completion = None;
         if let Some(manifest) = &input.intent.completion {
-            let (upload, summary, live) =
-                completion(&mut tx, &input, bucket.id, &authority, manifest).await?;
+            let result = completion(
+                &mut tx,
+                node.node_id,
+                &input,
+                bucket.id,
+                &authority,
+                manifest,
+            )
+            .await;
+            if result
+                .as_ref()
+                .is_err_and(|e| e.is::<crate::model::node_tail::Pending>())
+            {
+                tx.commit().await?;
+                return Err(result.err().unwrap());
+            }
+            let (upload, summary, live) = result?;
             if live || upload.state == "completed" {
                 let reply = write::Reply {
                     operation: input.operation,

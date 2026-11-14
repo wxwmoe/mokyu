@@ -183,6 +183,215 @@ pub(super) async fn publish_carrier(
     publish_at(tx, namespace, &prefix, path, owner, bytes).await
 }
 
+pub(super) async fn publish_staged(
+    tx: &mut physical::Tx<'_>,
+    storage: Option<Uuid>,
+    fragment: Uuid,
+    bytes: u64,
+) -> Result<()> {
+    if let Some(storage) = storage
+        && let Some(prefix) = q::prefix(storage).fetch_optional(&mut **tx).await?
+    {
+        let path = object_store::path::Path::from(crate::storage::fragment_key(fragment));
+        publish_at(tx, storage, &prefix, &path, fragment, bytes).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn part_carrier(
+    tx: &mut physical::Tx<'_>,
+    upload: Uuid,
+    stream: crate::model::Id,
+    storage: Uuid,
+    expected: Option<Uuid>,
+) -> Result<Option<Uuid>> {
+    if q::prefix(storage)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let location = expected.unwrap_or_else(Uuid::now_v7);
+    q::add_part_carrier(
+        location,
+        upload,
+        stream,
+        storage,
+        chrono::Utc::now().timestamp_micros(),
+    )
+    .execute(&mut **tx)
+    .await?;
+    let saved = q::part_carrier(upload, stream, storage)
+        .fetch_one(&mut **tx)
+        .await?;
+    ensure!(
+        expected.is_none_or(|id| id == saved),
+        ModelError::NodeOperationConflict
+    );
+    Ok(Some(saved))
+}
+
+pub(super) async fn part_receipt(
+    tx: &mut physical::Tx<'_>,
+    upload: Uuid,
+    stream: crate::model::Id,
+    storage: Uuid,
+    size: i64,
+    value: &str,
+) -> Result<()> {
+    if q::prefix(storage)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let location = q::part_carrier(upload, stream, storage)
+        .fetch_optional(&mut **tx)
+        .await?
+        .ok_or(ModelError::NodeOperationConflict)?;
+    ensure!(
+        Uuid::parse_str(value)? == location && size >= 0,
+        ModelError::NodeOperationConflict
+    );
+    publish_staged(tx, Some(storage), location, size as u64).await
+}
+
+pub(super) async fn collect_parts(
+    tx: &mut physical::Tx<'_>,
+    storage: Uuid,
+    limit: usize,
+) -> Result<()> {
+    let Some(prefix) = q::prefix(storage).fetch_optional(&mut **tx).await? else {
+        return Ok(());
+    };
+    let prefix = object_store::path::Path::parse(prefix)?;
+    for location in q::unused_parts(
+        storage,
+        chrono::Utc::now().timestamp_micros() - 300_000_000,
+        limit as i64,
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    {
+        let path = crate::storage::fragment_key(location);
+        let path = if prefix.as_ref().is_empty() {
+            path
+        } else {
+            format!("{prefix}/{path}")
+        };
+        remove_in(tx, storage, &path, None, None).await?;
+        q::remove_part_carrier(location).execute(&mut **tx).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn multipart_candidate(
+    tx: &mut physical::Tx<'_>,
+    plan: &crate::model::node_native::Completion,
+) -> Result<()> {
+    let Some(prefix) = q::prefix(plan.upload.storage)
+        .fetch_optional(&mut **tx)
+        .await?
+    else {
+        return Ok(());
+    };
+    let path = crate::storage::location::Layout::S3.object(plan.upload.source);
+    let prefix_path = object_store::path::Path::parse(&prefix)?;
+    let name = if prefix_path.as_ref().is_empty() {
+        path.to_string()
+    } else {
+        format!("{prefix_path}/{path}")
+    };
+    if let Some(object) = q::object(
+        plan.upload.storage,
+        crate::model::storage_native::path(&name)?.to_vec(),
+    )
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        if let Some(operation) = object.3.or(object.2) {
+            let payload = storage_payload::current(tx, operation).await?;
+            if payload.state == "writing"
+                && physical::complete(operation).fetch_one(&mut **tx).await? as u64
+                    != payload.intent.required_files()
+            {
+                return Ok(());
+            }
+            publish_at(
+                tx,
+                plan.upload.storage,
+                &prefix,
+                &path,
+                plan.upload.source,
+                plan.size()?,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+pub(super) async fn multipart_receipt(
+    tx: &mut physical::Tx<'_>,
+    work: &crate::model::node_native::Work,
+    value: Option<&str>,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if q::prefix(work.upload.storage)
+        .fetch_optional(&mut **tx)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    match &work.action {
+        crate::model::node_native::Action::Initialize => {
+            ensure!(
+                Uuid::parse_str(value)? == work.upload.source,
+                ModelError::NodeOperationConflict
+            );
+        }
+        crate::model::node_native::Action::Part {
+            stream, file, size, ..
+        } => {
+            ensure!(
+                Uuid::parse_str(value)? == *file && *size >= 0,
+                ModelError::NodeOperationConflict
+            );
+            part_receipt(
+                tx,
+                work.upload.upload,
+                *stream,
+                work.upload.storage,
+                *size,
+                value,
+            )
+            .await?;
+        }
+        crate::model::node_native::Action::Tail { size, .. } => {
+            ensure!(
+                Uuid::parse_str(value)? == work.upload.source && *size > 0,
+                ModelError::NodeOperationConflict
+            );
+            publish_staged(
+                tx,
+                Some(work.upload.storage),
+                work.upload.source,
+                *size as u64,
+            )
+            .await?;
+        }
+        crate::model::node_native::Action::Abort => {
+            return Err(ModelError::NodeOperationConflict.into());
+        }
+    }
+    Ok(())
+}
+
 async fn publish_at(
     tx: &mut physical::Tx<'_>,
     namespace: Uuid,
@@ -545,8 +754,15 @@ impl NativeObjects for Backend {
             .ok_or_else(|| s3s::s3_error!(AccessDenied))?;
         let cluster = q::cluster(request.storage).fetch_one(&mut *tx).await?;
         let (owner, expires) = if request.work {
-            let (plan, expires) = q::storage_plan(&mut tx, node, run, request.operation).await?;
-            (request.for_work(&prefix, &plan)?, expires)
+            if let Some((plan, expires)) =
+                q::multipart_work(&mut tx, node, run, request.operation).await?
+            {
+                (request.multipart(&prefix, &plan)?, expires)
+            } else {
+                let (plan, expires) =
+                    q::storage_plan(&mut tx, node, run, request.operation).await?;
+                (request.for_work(&prefix, &plan)?, expires)
+            }
         } else {
             q::authorize_upload(&mut tx, node, run, request, &prefix).await?
         };
@@ -576,14 +792,31 @@ impl NativeObjects for Backend {
         let mut ranges = Vec::new();
         let mut expires = i64::MAX;
         if let Some(operation) = request.upload {
-            ensure!(request.marker(&prefix)?, s3s::s3_error!(AccessDenied));
-            expires = q::authorize_marker(&mut tx, node, run, operation, request.storage).await?;
-            ranges.push(0..crate::storage::marker::MAX_BYTES as u64);
+            if request.marker(&prefix)? {
+                expires =
+                    q::authorize_marker(&mut tx, node, run, operation, request.storage).await?;
+                ranges.push(0..crate::storage::marker::MAX_BYTES as u64);
+            } else {
+                let (plan, deadline) =
+                    q::multipart_completion(&mut tx, node, run, operation).await?;
+                expires = deadline;
+                request.include_completion(&prefix, &plan, &mut ranges)?;
+            }
         }
         if let Some(operation) = request.work {
-            let (plan, deadline) = q::storage_plan(&mut tx, node, run, operation).await?;
-            expires = deadline;
-            request.include_work(&prefix, &plan, &mut ranges)?;
+            if let Some((plan, deadline)) = q::multipart_work(&mut tx, node, run, operation).await?
+            {
+                ensure!(
+                    request.storage == plan.upload.storage && request.marker(&prefix)?,
+                    s3s::s3_error!(AccessDenied)
+                );
+                expires = deadline;
+                ranges.push(0..crate::storage::marker::MAX_BYTES as u64);
+            } else {
+                let (plan, deadline) = q::storage_plan(&mut tx, node, run, operation).await?;
+                expires = deadline;
+                request.include_work(&prefix, &plan, &mut ranges)?;
+            }
         }
         for window in &request.windows {
             let (mapping, deadline) = q::window(node, run, *window)

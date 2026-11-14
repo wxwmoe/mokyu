@@ -41,6 +41,8 @@ impl NodeContext {
             "region": self.config.instance.region,
             "deployment_mode": state.deployment_mode, "deployment_mode_revision": state.mode_revision, "ready": self.ready(), "phase": state.phase,
             "maintenance": state.maintenance, "draining": state.draining,
+            "handoff_revision": state.handoff_revision,
+            "handoff_reconciled": self.client.identity.role == "worker" || self.handoff_checked.load(std::sync::atomic::Ordering::Acquire) == state.handoff_revision,
             "node_id": self.client.identity.node_id, "boot_id": self.boot,
             "runtime": runtime, "resources": self.budget.get(),
             "image_processing": self.budget.get().map(|b| crate::processing::image::job::capacity(b.pack_memory_units)),

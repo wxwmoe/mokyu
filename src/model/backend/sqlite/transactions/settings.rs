@@ -100,16 +100,18 @@ pub(in super::super) async fn change_mode(
             )
         );
         ensure!(
-            queries::active_staging()
-                .fetch_optional(&mut **tx)
+            queries::configured_stage()
+                .fetch_one(&mut **tx)
                 .await?
-                .is_some()
+                .is_none()
+                || queries::active_staging()
+                    .fetch_optional(&mut **tx)
+                    .await?
+                    .is_some()
                 || queries::empty_storage_bootstrap()
                     .fetch_one(&mut **tx)
                     .await?,
-            ModeConflict(
-                "cluster mode requires shared staging storage or an empty maintenance deployment"
-            )
+            ModeConflict("configured staging storage must be enabled or awaiting bootstrap")
         );
     }
     if mode == "single" {

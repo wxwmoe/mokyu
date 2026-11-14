@@ -110,6 +110,28 @@ impl Maintenance {
 }
 
 impl Upload {
+    pub fn multipart(&self, prefix: &str, plan: &crate::model::node_native::Work) -> Result<Uuid> {
+        use crate::model::node_native::Action;
+        let (file, size) = match &plan.action {
+            Action::Part { file, size, .. } => (*file, *size),
+            Action::Tail { size, .. } => (plan.upload.source, i64::from(*size)),
+            _ => return Err(s3s::s3_error!(AccessDenied).into()),
+        };
+        ensure!(
+            self.work
+                && self.batch.is_none()
+                && self.storage == plan.upload.storage
+                && size >= 0
+                && self.size == size as u64
+                && self.matches(
+                    prefix,
+                    object_store::path::Path::from(crate::storage::fragment_key(file))
+                )?,
+            s3s::s3_error!(AccessDenied)
+        );
+        Ok(file)
+    }
+
     pub fn validate(&self) -> Result<()> {
         super::path(&self.path)?;
         ensure!(
@@ -141,6 +163,20 @@ impl Upload {
             s3s::s3_error!(AccessDenied)
         );
         Ok(location)
+    }
+
+    pub fn tail(&self, prefix: &str, fragment: Uuid, size: i32) -> Result<Uuid> {
+        ensure!(
+            size > 0
+                && size as usize <= codec::MAX
+                && self.size == size as u64
+                && self.matches(
+                    prefix,
+                    object_store::path::Path::from(crate::storage::fragment_key(fragment))
+                )?,
+            s3s::s3_error!(AccessDenied)
+        );
+        Ok(fragment)
     }
 
     pub fn chunks(
@@ -296,6 +332,44 @@ impl Read {
         Ok(())
     }
 
+    pub fn include_completion(
+        &self,
+        prefix: &str,
+        plan: &crate::model::node_native::Completion,
+        ranges: &mut Vec<Range<u64>>,
+    ) -> Result<()> {
+        ensure!(
+            self.upload.is_some() && self.storage == plan.upload.storage,
+            s3s::s3_error!(AccessDenied)
+        );
+        let total = plan.size()?;
+        let prefix = object_store::path::Path::parse(prefix)?;
+        let matches = |path: object_store::path::Path| {
+            self.path
+                == if prefix.as_ref().is_empty() {
+                    path.to_string()
+                } else {
+                    format!("{prefix}/{path}")
+                }
+        };
+        if matches(Layout::S3.object(plan.upload.source)) {
+            ranges.push(0..total);
+        }
+        for part in &plan.parts {
+            let file = Uuid::parse_str(
+                part.remote_etag
+                    .as_deref()
+                    .ok_or(Error::SourceUnavailable)?,
+            )?;
+            if matches(object_store::path::Path::from(
+                crate::storage::fragment_key(file),
+            )) {
+                ranges.push(0..part.size as u64);
+            }
+        }
+        Ok(())
+    }
+
     pub fn marker(&self, prefix: &str) -> Result<bool> {
         let prefix = object_store::path::Path::parse(prefix)?;
         Ok(self.path
@@ -329,6 +403,64 @@ impl Read {
 mod tests {
     use super::*;
     use crate::model::{Id, node_read::Segment, raw::RawSource};
+
+    #[test]
+    fn completion_reads_only_frozen_carriers() -> Result<()> {
+        let file = Uuid::now_v7();
+        let storage = Uuid::now_v7();
+        let mut plan = crate::model::node_native::Completion {
+            upload: crate::model::multipart::RemoteUpload {
+                upload: Uuid::now_v7(),
+                state: "completing".into(),
+                source: Uuid::now_v7(),
+                storage,
+                profile: 1,
+                upstream: Some("native".into()),
+                manifest: Some("frozen".into()),
+            },
+            parts: vec![crate::model::node_native::Part {
+                number: 1,
+                size: 17,
+                etag: "a".repeat(32),
+                remote_etag: Some(file.to_string()),
+            }],
+        };
+        let mut request = Read {
+            windows: vec![],
+            upload: Some(Uuid::now_v7()),
+            work: None,
+            storage,
+            path: format!("prefix/{}", crate::storage::fragment_key(file)),
+            range: Some(0..17),
+        };
+        let mut ranges = vec![];
+        request.include_completion("prefix", &plan, &mut ranges)?;
+        request.check(&mut ranges)?;
+        request.range = Some(0..18);
+        assert!(request.check(&mut ranges).is_err());
+        request.range = None;
+        request.path = format!("prefix/{}", crate::storage::fragment_key(Uuid::now_v7()));
+        ranges.clear();
+        request.include_completion("prefix", &plan, &mut ranges)?;
+        assert!(request.check(&mut ranges).is_err());
+        request.path = format!("prefix/{}", Layout::S3.object(plan.upload.source));
+        request.include_completion("prefix", &plan, &mut ranges)?;
+        request.check(&mut ranges)?;
+        request.storage = Uuid::now_v7();
+        assert!(
+            request
+                .include_completion("prefix", &plan, &mut vec![])
+                .is_err()
+        );
+        request.storage = storage;
+        plan.parts[0].remote_etag = None;
+        assert!(
+            request
+                .include_completion("prefix", &plan, &mut vec![])
+                .is_err()
+        );
+        Ok(())
+    }
 
     #[test]
     fn native_ranges_preserve_gaps_and_bind_storage_and_prefix() -> Result<()> {

@@ -38,9 +38,16 @@ async fn uploads(app: Arc<App>) -> Result<()> {
                     false
                 }
             };
+            let tail = match app.transfer_local_tail().await {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(%error, "multipart tail handoff will retry");
+                    false
+                }
+            };
             match tick(&app, None).await {
                 Ok(true) => continue,
-                Ok(false) if native => continue,
+                Ok(false) if native || tail => continue,
                 Ok(false) => {}
                 Err(error) => tracing::warn!(%error,"raw upload scan will retry"),
             }

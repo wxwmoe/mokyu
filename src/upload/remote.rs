@@ -19,6 +19,54 @@ use std::time::Duration;
 use uuid::Uuid;
 
 impl App {
+    pub(crate) async fn transfer_local_tail(&self) -> Result<bool> {
+        let Some(node) = self.node.get() else {
+            return Ok(false);
+        };
+        let token = Uuid::new_v4();
+        let Some(work) = self.multipart.claim_tail(node.node_id, token).await? else {
+            return Ok(false);
+        };
+        let crate::model::node_native::Action::Tail { size, hash, .. } = &work.action else {
+            anyhow::bail!("expected a tail claim");
+        };
+        let file = work.upload.source;
+        let result = async {
+            let bytes = crate::storage::local::read_tail(
+                &self.storage.disk.fragment_path(file),
+                *size,
+                hash,
+            )
+            .await?;
+            self.storage
+                .put_reserved_tail(
+                    work.upload.storage,
+                    &crate::storage::fragment_key(file),
+                    bytes.into(),
+                )
+                .await?;
+            Ok::<_, anyhow::Error>(file.to_string())
+        }
+        .await;
+        let receipt = crate::model::node_native::ResultValue {
+            value: result.as_ref().ok().cloned(),
+            retry: result.is_err(),
+            source_error: result
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<crate::model::node_native::SourceError>())
+                .copied(),
+        };
+        self.multipart.finish_tail(&work, token, &receipt).await?;
+        result?;
+        let _gate = self.storage.source_gate.write().await;
+        if !self.storage.disk.pending(file) && !self.maintenance_store.fragment_exists(file).await?
+        {
+            self.storage.disk.remove_fragment(file).await?;
+        }
+        Ok(true)
+    }
+
     pub(crate) async fn remote_multipart(
         &self,
         upload: Uuid,
@@ -116,6 +164,7 @@ impl App {
                 .storage
                 .send_remote_part(
                     &work.upload,
+                    work.file,
                     work.part_number,
                     work.stream.size,
                     &digest,
@@ -219,36 +268,6 @@ impl App {
         let cluster = self.node_writes.as_ref();
         let remote = cluster.freeze_remote(u.id, token, hash).await?;
         let selected: Vec<_> = parts.iter().map(|part| part.id).collect();
-        loop {
-            let rows = cluster.remote_parts(u.id, &selected).await?;
-            ensure!(
-                rows.len() == parts.len(),
-                crate::model::Error::OperationAborted
-            );
-            if rows.iter().all(|row| row.2.is_some()) {
-                let manifest = rows
-                    .into_iter()
-                    .map(|(_, number, etag)| (number, etag.unwrap()))
-                    .collect::<Vec<_>>();
-                #[cfg(feature = "fault-injection")]
-                crate::faults::point("remote-before-complete").await;
-                if self
-                    .storage
-                    .complete_remote(&remote, &manifest, total)
-                    .await?
-                {
-                    break;
-                }
-                // A late UploadPart can overwrite the same upstream number after losing its lease.
-                cluster.resend_remote(u.id, token, &selected).await?;
-            }
-            self.ensure_mode()?;
-            self.wake_raw_uploads.notify_one();
-            tokio::time::sleep(Duration::from_secs(3)).await;
-        }
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("remote-completed").await;
-        let slot = self.slots.clone().acquire_owned().await?;
         let (id, _pin) = self
             .new_stream(
                 authority,
@@ -262,10 +281,50 @@ impl App {
             )
             .await?;
         self.complete_quota(u.id, id, total).await?;
-        let mut full = Integrity::new(&hyper::HeaderMap::new(), u.checksum_algorithm.as_deref())?;
-        let mut content = blake3::Hasher::new();
         let mut pages =
             crate::model::raw::PageWrite::new(cluster.remote_source_id(u.id, id, token).await?);
+        let assembling = async {
+            loop {
+                let rows = cluster.remote_parts(u.id, &selected).await?;
+                ensure!(
+                    rows.len() == parts.len(),
+                    crate::model::Error::OperationAborted
+                );
+                if rows.iter().all(|row| row.2.is_some()) {
+                    let manifest = rows
+                        .into_iter()
+                        .map(|(_, number, etag)| (number, etag.unwrap()))
+                        .collect::<Vec<_>>();
+                    #[cfg(feature = "fault-injection")]
+                    crate::faults::point("remote-before-complete").await;
+                    if self
+                        .storage
+                        .complete_remote(&remote, &manifest, total)
+                        .await?
+                    {
+                        break;
+                    }
+                    // A late UploadPart can overwrite the same upstream number after losing its lease.
+                    cluster.resend_remote(u.id, token, &selected).await?;
+                }
+                self.ensure_mode()?;
+                self.wake_raw_uploads.notify_one();
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::pin!(assembling);
+        loop {
+            tokio::select! {
+                result = &mut assembling => { result?; break; }
+                _ = tokio::time::sleep(Duration::from_secs(3)) => self.renew_write_lease(id).await?,
+            }
+        }
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("remote-completed").await;
+        let slot = self.slots.clone().acquire_owned().await?;
+        let mut full = Integrity::new(&hyper::HeaderMap::new(), u.checksum_algorithm.as_deref())?;
+        let mut content = blake3::Hasher::new();
         let mut body = self.storage.remote_body(&remote);
         let mut rest = Bytes::new();
         let mut renew = tokio::time::Instant::now();

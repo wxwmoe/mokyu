@@ -217,6 +217,14 @@ impl ClusterStore for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeSessions for Backend {
+    async fn handoff(
+        &self,
+        principal: &Principal,
+        node: Uuid,
+        input: Option<crate::model::node::HandoffInput>,
+    ) -> Result<crate::model::node::Handoff> {
+        super::super::node_handoff::manage(self, principal, node, input).await
+    }
     async fn provision_node(
         &self,
         principal: &Principal,
@@ -598,7 +606,7 @@ impl crate::model::cluster::StagingStore for Backend {
         Ok(())
     }
     async fn stale_staging(&self, storage: Option<Uuid>) -> Result<Vec<(Uuid, String)>> {
-        Ok(sqlx::query_as("SELECT s.storage_id,s.object_key FROM staging_objects s WHERE ($1::uuid IS NULL OR s.storage_id=$1) AND s.created_at < now()-interval '5 minutes' AND NOT EXISTS (SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key) ORDER BY s.created_at LIMIT 128").bind(storage).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT s.storage_id,s.object_key FROM staging_objects s WHERE ($1::uuid IS NULL OR s.storage_id=$1) AND s.created_at < now()-interval '5 minutes' AND NOT EXISTS (SELECT 1 FROM pending_uploads p WHERE p.staging_storage_id=s.storage_id AND p.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM fragments f WHERE f.staging_storage_id=s.storage_id AND f.staging_object_key=s.object_key) AND NOT EXISTS (SELECT 1 FROM uploads u WHERE u.staging_storage_id=s.storage_id AND u.staging_object_key=s.object_key) AND NOT EXISTS(SELECT 1 FROM multipart_tails t JOIN upload_staging j ON j.upload_id=t.upload_id WHERE j.storage_id=s.storage_id AND t.object_key=s.object_key) ORDER BY s.created_at LIMIT 128").bind(storage).fetch_all(&self.pool).await?)
     }
 
     async fn claim_staging(&self, storage: Uuid, key: &str, bytes: u64, limit: u64) -> Result<()> {
@@ -821,7 +829,7 @@ impl crate::model::cluster::NodeInventory for Backend {
     }
     async fn status(&self) -> Result<ClusterStatus> {
         let (mode, mode_revision,remote_work,local_storages):(String,i64,bool,i64)=sqlx::query_as("SELECT deployment_mode,deployment_mode_revision,remote_work,(SELECT count(*) FROM storages WHERE type='local') FROM mokyu_meta").fetch_one(&self.pool).await?;
-        let (enabled_nodes,remote_nodes,ready_data,ready_workers):(i64,i64,i64,i64)=sqlx::query_as("SELECT count(*),count(*) FILTER(WHERE n.role<>'control'),count(*) FILTER(WHERE n.role IN ('data','node') AND ss.expires_at>now() AND NOT ss.draining AND ss.boot_id=r.boot_id AND ss.credential_generation=n.credential_generation AND r.status->>'ready'='true' AND r.status->>'draining'='false' AND r.received_at>=now()-interval '30 seconds' AND n.last_seen_at>=now()-interval '30 seconds' AND r.status->>'deployment_mode_revision'=$1),count(*) FILTER(WHERE n.role IN ('worker','node') AND ss.expires_at>now() AND NOT ss.draining AND ss.boot_id=r.boot_id AND ss.credential_generation=n.credential_generation AND r.status->>'ready'='true' AND r.status->>'draining'='false' AND r.received_at>=now()-interval '30 seconds' AND n.last_seen_at>=now()-interval '30 seconds' AND r.status->>'deployment_mode_revision'=$1) FROM nodes n LEFT JOIN node_reports r ON r.node_id=n.id LEFT JOIN node_sessions ss ON ss.node_id=n.id WHERE n.enabled").bind(mode_revision.to_string()).fetch_one(&self.pool).await?;
+        let (enabled_nodes,remote_nodes,ready_data,ready_workers):(i64,i64,i64,i64)=sqlx::query_as("SELECT count(*),count(*) FILTER(WHERE n.role<>'control'),count(*) FILTER(WHERE n.role IN ('data','node') AND COALESCE(h.state,'serving')='serving' AND ss.expires_at>now() AND NOT ss.draining AND ss.boot_id=r.boot_id AND ss.credential_generation=n.credential_generation AND r.status->>'ready'='true' AND r.status->>'draining'='false' AND r.received_at>=now()-interval '30 seconds' AND n.last_seen_at>=now()-interval '30 seconds' AND r.status->>'deployment_mode_revision'=$1),count(*) FILTER(WHERE n.role IN ('worker','node') AND COALESCE(h.state,'serving')='serving' AND ss.expires_at>now() AND NOT ss.draining AND ss.boot_id=r.boot_id AND ss.credential_generation=n.credential_generation AND r.status->>'ready'='true' AND r.status->>'draining'='false' AND r.received_at>=now()-interval '30 seconds' AND n.last_seen_at>=now()-interval '30 seconds' AND r.status->>'deployment_mode_revision'=$1) FROM nodes n LEFT JOIN node_reports r ON r.node_id=n.id LEFT JOIN node_sessions ss ON ss.node_id=n.id LEFT JOIN node_handoffs h ON h.node_id=n.id WHERE n.enabled").bind(mode_revision.to_string()).fetch_one(&self.pool).await?;
         Ok(ClusterStatus {
             mode,
             mode_revision,

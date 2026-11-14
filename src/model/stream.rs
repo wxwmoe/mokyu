@@ -178,7 +178,10 @@ pub(crate) trait StreamStore: Send + Sync {
     async fn current(&self, bucket: Uuid, key: &str) -> Result<StoredStream>;
     async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<CachedStream>>;
     async fn create(&self, input: StreamCreate) -> Result<Id>;
-    async fn append_tail(&self, tail: StreamTail) -> Result<()>;
+    async fn append_tail(&self, tail: StreamTail) -> Result<()> {
+        self.append_owned_tail(tail, None).await
+    }
+    async fn append_owned_tail(&self, tail: StreamTail, owner: Option<(Uuid, Uuid)>) -> Result<()>;
     async fn finish(&self, stream: Id, size: i64, etag: &str, checksums: Value) -> Result<bool>;
     async fn learn_compression(
         &self,

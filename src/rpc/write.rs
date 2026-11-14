@@ -33,6 +33,7 @@ pub(super) fn tail(value: crate::model::node_tail::Prepared) -> wire::PreparedTa
         object_key: value.object_key,
         end: value.end as u64,
         committed: value.committed,
+        local: value.local,
         materials: value.materials.into_iter().map(read::material).collect(),
         storage: value.storage.map(read::version),
         grants: value.grants.into_iter().map(read::grant).collect(),

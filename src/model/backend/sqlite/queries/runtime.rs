@@ -189,14 +189,15 @@ pub(in super::super) fn guard_stage_mode() -> Scalar<'static, String> {
 
 pub(in super::super) fn configured_stage() -> Scalar<'static, Option<Uuid>> {
     sqlx::query_scalar(
-        "SELECT s.id FROM storages s JOIN runtime_settings r ON r.section='uploads' AND lower(hex(s.id))=replace(lower(json_extract(r.value,'$.staging_storage_id')),'-','')",
+        "SELECT unhex(replace(json_extract(value,'$.staging_storage_id'),'-','')) FROM runtime_settings WHERE section='uploads'",
     )
 }
 
 pub(in super::super) fn valid_stage(id: Option<Uuid>) -> Scalar<'static, bool> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM storages WHERE id=? AND type IN ('s3','mokyu') AND enabled)",
+        "SELECT ? IS NULL OR EXISTS(SELECT 1 FROM storages WHERE id=? AND type IN ('s3','mokyu') AND enabled)",
     )
+    .bind(id)
     .bind(id)
 }
 

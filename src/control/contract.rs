@@ -170,6 +170,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::cluster::rotate_node))
         .routes(routes!(super::cluster::settings))
         .routes(routes!(super::cluster::node_status))
+        .routes(routes!(super::cluster::node_handoff))
         .routes(routes!(super::cluster::node_config))
         .routes(routes!(super::cluster::node_runtime))
         .routes(routes!(super::cluster::release))
