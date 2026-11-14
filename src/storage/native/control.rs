@@ -383,7 +383,7 @@ impl Control {
             Operation::Accept { receipts } => {
                 ensure!(
                     !receipts.is_empty()
-                        && receipts.len() <= 2
+                        && receipts.len() <= crate::model::storage_payload::BATCH_LIMIT
                         && receipts.iter().all(|r| matches(&r.receipt.receipt.header)),
                     "replica receipts differ from the task"
                 );
@@ -729,7 +729,7 @@ impl Control {
             };
             if mapping.deleted
                 || (receipt.header.fragment == id && header.media == original.media)
-                || receipt.header.shard != header.shard
+                || (header.layout.parity_shards == 0 && receipt.header.shard != header.shard)
             {
                 continue;
             }
@@ -874,12 +874,17 @@ impl Control {
         }
         let snapshot = self.snapshot(request.cluster).await?;
         let cluster = &snapshot.cluster;
-        let group = cluster.manifest.groups.first().ok_or_else(|| {
-            s3s::s3_error!(
-                ServiceUnavailable,
-                "storage cluster has no enabled layout group"
-            )
-        })?;
+        let group = cluster
+            .manifest
+            .groups
+            .iter()
+            .find(|g| g.layout == cluster.policy.layout && g.replacing.is_none())
+            .ok_or_else(|| {
+                s3s::s3_error!(
+                    ServiceUnavailable,
+                    "storage cluster has no enabled layout group"
+                )
+            })?;
         let payload = recovery.map_or_else(Uuid::now_v7, |identity| identity.payload);
         self.payloads
             .reserve_object(
@@ -1045,7 +1050,7 @@ impl Control {
         completed: &[Completion],
     ) -> Result<()> {
         ensure!(
-            !completed.is_empty() && completed.len() <= 2,
+            !completed.is_empty() && completed.len() <= crate::model::storage_payload::BATCH_LIMIT,
             "invalid native completion batch"
         );
         self.upload_access(node, run, input, operation).await?;
@@ -1140,12 +1145,7 @@ impl Control {
             expected.is_none_or(|id| id == intent.operation),
             crate::model::Error::StorageObjectChanged
         );
-        ensure!(
-            intent.layout.data_shards == 1
-                && intent.layout.parity_shards == 0
-                && intent.layout.extra_copies == 1,
-            "native reads require a double-copy layout"
-        );
+        ensure!(intent.layout.supported(), "unsupported native read layout");
         let lease = ReadLease::issue(&self.secrets.credential_key, namespace, path, &object)?;
         let mut plan = Plan {
             lease,
@@ -1175,7 +1175,11 @@ impl Control {
         let count = (range.end - 1) / intent.span() - first + 1;
         ensure!(count <= 16, "native read exceeds its window");
         let snapshot = self.snapshot(intent.cluster).await?;
-        plan.parallelism = snapshot.cluster.policy.read_parallelism.min(2);
+        plan.parallelism = snapshot
+            .cluster
+            .policy
+            .read_parallelism
+            .min(intent.layout.width() as u16);
         let mappings = if resuming {
             self.payloads
                 .resume_read(intent.operation, first as u32, count as u32, until())
@@ -1218,37 +1222,67 @@ impl Control {
             );
             let mut offset = start;
             while offset < end {
-                let length = super::reader::PART.min(end - offset);
-                let preferred = if plan.parallelism > 1 {
+                let (wanted, physical, contiguous) = crate::content::erasure::locate(
+                    &intent.layout,
+                    offset - sequence * intent.span(),
+                );
+                let length = super::reader::part_length(&intent.layout)
+                    .min(end - offset)
+                    .min(contiguous);
+                let preferred = if plan.parallelism > 1 && intent.layout.data_shards == 1 {
                     plan.parts.len() % copies.len()
                 } else {
                     0
                 };
-                let mut destinations = Vec::new();
+                let mut direct = Vec::new();
+                let mut recovery = Vec::new();
                 for index in 0..copies.len() {
                     let (mapping, target) = copies[(preferred + index) % copies.len()];
+                    let same = mapping.header.shard == wanted;
+                    if !same && intent.layout.parity_shards == 0 {
+                        continue;
+                    }
                     if let Ok(destination) = self.sign_until(
                         &snapshot,
                         target,
                         Action::Read {
                             receipt: mapping.receipt.clone().unwrap(),
-                            offset: offset - mapping.header.offset,
+                            offset: physical,
                             length,
                         },
                         None,
                         expires,
                     ) {
-                        destinations.push(destination);
+                        if same {
+                            direct.push(destination);
+                        } else {
+                            recovery.push(destination);
+                        }
                     }
                 }
                 ensure!(
-                    !destinations.is_empty(),
-                    "storage read authority is expiring"
+                    !direct.is_empty()
+                        || recovery
+                            .iter()
+                            .filter_map(|t| t
+                                .authorization
+                                .grant
+                                .action
+                                .read_range()
+                                .map(|(r, _, _)| r.header.shard))
+                            .collect::<std::collections::HashSet<_>>()
+                            .len()
+                            >= usize::from(intent.layout.data_shards),
+                    s3s::s3_error!(
+                        ServiceUnavailable,
+                        "too few durable fragments are online for this range"
+                    )
                 );
                 plan.parts.push(Part {
                     offset,
                     length,
-                    copies: destinations,
+                    copies: direct,
+                    recovery,
                 });
                 offset += length;
             }

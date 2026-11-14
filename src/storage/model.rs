@@ -132,7 +132,7 @@ pub(crate) struct Store {
     pub multipart: Option<Arc<dyn object_store::multipart::MultipartStore>>,
     pub streaming: Option<super::s3::Streaming>,
     identity_marker: Value,
-    verified: tokio::sync::OnceCell<()>,
+    verified: Arc<tokio::sync::OnceCell<()>>,
 }
 
 impl Store {
@@ -186,7 +186,7 @@ impl Store {
             multipart: None,
             streaming: None,
             identity_marker,
-            verified: tokio::sync::OnceCell::new(),
+            verified: Arc::default(),
         }
     }
 
@@ -200,7 +200,10 @@ impl Store {
                     && Arc::ptr_eq(&previous.pool, &native.pool)),
             "native scope changed its connection"
         );
-        Ok(Self::native(native, self.identity_marker.clone()))
+        // The connection material fixes the namespace and marker; grants still scope every read.
+        let mut scoped = Self::native(native, self.identity_marker.clone());
+        scoped.verified = self.verified.clone();
+        Ok(scoped)
     }
 
     pub fn build(row: &Record, options: Options, secrets: &Secrets) -> Result<Self> {
@@ -301,7 +304,7 @@ impl Store {
             multipart,
             streaming,
             identity_marker: row.identity_marker.clone(),
-            verified: tokio::sync::OnceCell::new(),
+            verified: Arc::default(),
         })
     }
 
@@ -421,7 +424,7 @@ mod tests {
             multipart: None,
             streaming: None,
             identity_marker: expected.clone(),
-            verified: tokio::sync::OnceCell::new(),
+            verified: Arc::default(),
         };
         assert!(target.verify().await.is_err());
         target.initialize().await.unwrap();

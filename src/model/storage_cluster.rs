@@ -44,7 +44,10 @@ pub(crate) struct Preset {
 
 impl Layout {
     pub fn supported(&self) -> bool {
-        (self.data_shards, self.parity_shards, self.extra_copies) == (1, 0, 1)
+        matches!(
+            (self.data_shards, self.parity_shards, self.extra_copies),
+            (1, 0, 1) | (4, 2, 0)
+        )
     }
 
     fn preset(&self, featured: bool) -> Preset {
@@ -61,7 +64,16 @@ impl Layout {
     }
 
     pub fn catalog() -> Vec<Preset> {
-        vec![Self::default().preset(true)]
+        vec![
+            Self::default().preset(true),
+            Self {
+                data_shards: 4,
+                parity_shards: 2,
+                extra_copies: 0,
+                ..Self::default()
+            }
+            .preset(true),
+        ]
     }
 
     pub fn width(&self) -> usize {

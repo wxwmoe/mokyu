@@ -6,7 +6,7 @@ use crate::{
     },
     rpc::{client::Client, wire},
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -134,7 +134,8 @@ impl Worker {
             anyhow::bail!("native replication window missing");
         };
         ensure!(
-            sources.len() <= 2 && targets.len() <= 2,
+            sources.len() <= crate::model::storage_cluster::MEMBER_LIMIT
+                && targets.len() <= crate::model::storage_cluster::MEMBER_LIMIT,
             "native replication window exceeds its limit"
         );
         for target in targets {
@@ -163,10 +164,13 @@ impl Worker {
                         && receipt.header.namespace == plan.storage
                         && receipt.header.sequence == plan.sequence
                         && *offset == 0
-                        && *length == header.shard_bytes
-                        && receipt.header.shard == header.shard,
+                        && receipt.header.layout == header.layout
+                        && *length == receipt.header.shard_bytes,
                     "native replication source differs from its target"
                 );
+                if receipt.header.shard != header.shard {
+                    continue;
+                }
                 let result = async {
                     let body = pool.read(source.clone(), self.clone()).await?;
                     pool.write(target.clone(), paced(body, rate), self.as_ref())
@@ -180,6 +184,66 @@ impl Worker {
                     }
                     Err(error) => failure = error,
                 }
+            }
+            if completed.is_none() && header.layout.parity_shards > 0 && plan.backup.is_none() {
+                let mut distinct = std::collections::HashSet::new();
+                let mut streams = Vec::new();
+                for source in &sources {
+                    let (receipt, _, _) = source
+                        .authorization
+                        .grant
+                        .action
+                        .read_range()
+                        .context("read grant required")?;
+                    let shard = receipt.header.shard;
+                    if shard == header.shard || distinct.contains(&shard) {
+                        continue;
+                    }
+                    if let Ok(body) = pool.read(source.clone(), self.clone()).await {
+                        streams.push((usize::from(shard), body, bytes::Bytes::new()));
+                        distinct.insert(shard);
+                    }
+                }
+                ensure!(
+                    streams.len() >= usize::from(header.layout.data_shards),
+                    "too few independent repair sources"
+                );
+                let size = header.shard_bytes;
+                let code = crate::content::erasure::codec(&header.layout)?;
+                let count = usize::from(header.layout.data_shards + header.layout.parity_shards);
+                let wanted = usize::from(header.shard);
+                let data = usize::from(header.layout.data_shards);
+                let body = async_stream::try_stream! {
+                    use futures_util::TryStreamExt;
+                    let mut left=size;
+                    while left>0 {
+                        let len=left.min(crate::content::fragment::UNIT as u64) as usize;
+                        let mut shards=vec![None;count];
+                        // Keep all open source streams at the same physical offset; a failed one stays excluded.
+                        let next=futures_util::future::join_all(streams.iter_mut().map(|(index,body,pending)| async move {
+                            let mut out=Vec::with_capacity(len);
+                            while out.len()<len {
+                                if pending.is_empty() { *pending=body.try_next().await?.context("truncated repair source")?; }
+                                out.extend_from_slice(&pending.split_to((len-out.len()).min(pending.len())));
+                            }
+                            Ok::<_,anyhow::Error>((*index,out))
+                        })).await;
+                        let mut live=next.iter().map(Result::is_ok);
+                        streams.retain(|_|live.next().unwrap());
+                        for (index,buf) in next.into_iter().flatten() { shards[index]=Some(buf); }
+                        (streams.len()>=data).then_some(()).context("repair lost too many fragments")?;
+                        code.reconstruct(&mut shards)?;
+                        yield bytes::Bytes::from(shards[wanted].take().context("missing repaired shard")?);
+                        left-=len as u64;
+                    }
+                    for (_,mut body,pending) in streams {
+                        (pending.is_empty() && body.try_next().await?.is_none()).then_some(()).context("invalid repair source length")?;
+                    }
+                };
+                completed = Some(
+                    pool.write(target.clone(), paced(Box::pin(body), rate), self.as_ref())
+                        .await?,
+                );
             }
             let receipt = completed.ok_or(failure)?;
             #[cfg(feature = "fault-injection")]

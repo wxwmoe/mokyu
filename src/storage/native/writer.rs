@@ -97,7 +97,7 @@ impl Writes for Control {
     }
 }
 
-// Only required copies participate in the foreground stream; missing copies remain durable SQL work.
+// Unconfirmed slots remain durable repair work after the foreground write.
 pub(crate) async fn write(
     control: &dyn Writes,
     pool: &Pool,
@@ -106,10 +106,10 @@ pub(crate) async fn write(
     region: Option<&str>,
 ) -> Result<()> {
     intent.validate()?;
-    ensure!(
-        intent.layout.data_shards == 1 && intent.layout.parity_shards == 0,
-        "native streaming writes require a replicated layout"
-    );
+    ensure!(intent.layout.supported(), "unsupported native write layout");
+    let rs = (intent.layout.parity_shards > 0)
+        .then(|| crate::content::erasure::codec(&intent.layout))
+        .transpose()?;
     let mut pending = Bytes::new();
     let mut final_receipts = None;
     for sequence in 0..intent.sequences() as u32 {
@@ -119,6 +119,8 @@ pub(crate) async fn write(
             "native write plan is incomplete"
         );
         let forwarding = region.is_some()
+            && intent.layout.data_shards == 1
+            && intent.layout.parity_shards == 0
             && pieces.len() == 2
             && pieces[0].region.is_some()
             && pieces[0].region == pieces[1].region
@@ -156,7 +158,14 @@ pub(crate) async fn write(
         };
         for mut targets in groups {
             let (send, receive) = mpsc::channel::<Bytes>(2);
-            senders.push(send);
+            let shard = targets[0]
+                .authorization
+                .grant
+                .action
+                .write_header()
+                .context("native write grant required")?
+                .shard;
+            senders.push((shard, send));
             writes.push(async move {
                 let body = futures_util::stream::unfold(receive, |mut receive| async move {
                     receive.recv().await.map(|bytes| (Ok(bytes), receive))
@@ -175,23 +184,67 @@ pub(crate) async fn write(
         }
         ensure!(!writes.is_empty(), "native write has no required fragments");
         let feed = async {
+            let data = usize::from(intent.layout.data_shards);
+            let stripe = intent.layout.stripe_bytes as usize;
             let mut left = length;
+            let parity_needed = senders.iter().any(|(shard, _)| usize::from(*shard) >= data);
+            let mut parity = if parity_needed {
+                vec![vec![0u8; stripe]; usize::from(intent.layout.parity_shards)]
+            } else {
+                Vec::new()
+            };
+            let zeros = Bytes::from_static(&[0; UNIT]);
             while left > 0 {
-                if pending.is_empty() {
-                    pending = body
-                        .next()
-                        .await
-                        .context("native object ended before its planned length")??;
-                    continue;
+                for shard in 0..data {
+                    let used = left.min(stripe as u64) as usize;
+                    let stored = if rs.is_some() { stripe } else { used };
+                    let mut pos = 0usize;
+                    while pos < stored {
+                        let part = if pos < used {
+                            while pending.is_empty() {
+                                pending = body
+                                    .next()
+                                    .await
+                                    .context("native object ended before its planned length")??;
+                            }
+                            pending.split_to((used - pos).min(pending.len()).min(UNIT))
+                        } else {
+                            zeros.slice(..(stored - pos).min(UNIT))
+                        };
+                        if parity_needed {
+                            let mut slices: Vec<_> = parity
+                                .iter_mut()
+                                .map(|p| &mut p[pos..pos + part.len()])
+                                .collect();
+                            rs.as_ref()
+                                .unwrap()
+                                .encode_single_sep(shard, &part, &mut slices)?;
+                        }
+                        for (_, send) in senders
+                            .iter()
+                            .filter(|(index, _)| usize::from(*index) == shard)
+                        {
+                            send.send(part.clone())
+                                .await
+                                .context("native storage writer stopped")?;
+                        }
+                        pos += part.len();
+                    }
+                    left -= used as u64;
                 }
-                let count = pending.len().min(UNIT).min(left as usize);
-                let part = pending.split_to(count);
-                for send in &senders {
-                    send.send(part.clone())
-                        .await
-                        .context("native storage writer stopped")?;
+                for (i, buffer) in parity.iter().enumerate() {
+                    for chunk in buffer.chunks(UNIT) {
+                        let bytes = Bytes::copy_from_slice(chunk);
+                        for (_, send) in senders
+                            .iter()
+                            .filter(|(index, _)| usize::from(*index) == data + i)
+                        {
+                            send.send(bytes.clone())
+                                .await
+                                .context("native parity writer stopped")?;
+                        }
+                    }
                 }
-                left -= count as u64;
             }
             drop(senders);
             Ok::<_, anyhow::Error>(())

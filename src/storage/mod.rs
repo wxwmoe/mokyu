@@ -1067,7 +1067,7 @@ impl Storage {
             .load(record.id)
             .await
             .with_context(|| format!("storage profile is missing for {}", record.id))?;
-        self.verify_store_with_profile(record, &profile).await
+        self.verify_store_with_profile(record, &profile, true).await
     }
 
     pub(crate) async fn verify_relocation(
@@ -1110,6 +1110,7 @@ impl Storage {
         &self,
         record: StoreRecord,
         profile: &StorageProfile,
+        probe_writes: bool,
     ) -> Result<()> {
         if let Some(path) = &record.path {
             local::validate_storage_path(
@@ -1131,7 +1132,8 @@ impl Storage {
             )
             .await?;
         target.verify().await?;
-        if record.enabled
+        if probe_writes
+            && record.enabled
             && let Some(native) = &target.native
         {
             native.probe().await?;

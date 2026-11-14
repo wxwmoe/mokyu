@@ -18,6 +18,85 @@ use tokio::{
 };
 use uuid::Uuid;
 
+pub(super) type Candidate = (crate::model::storage_payload::Receipt, Uuid, bool);
+
+impl Scanner {
+    pub(super) async fn range(
+        self: &Arc<Self>,
+        intent: &crate::model::storage_payload::Intent,
+        candidates: &[Candidate],
+        start: u64,
+        end: u64,
+    ) -> Result<(
+        u64,
+        futures_util::stream::BoxStream<'static, Result<bytes::Bytes>>,
+    )> {
+        use crate::storage::native::reader;
+        ensure!(
+            start < end && end <= intent.total && intent.layout.supported(),
+            "invalid recovery read range"
+        );
+        let (wanted, offset, contiguous) =
+            crate::content::erasure::locate(&intent.layout, start % intent.span());
+        let length = contiguous
+            .min(end - start)
+            .min(reader::part_length(&intent.layout))
+            .min(intent.span() - start % intent.span());
+        let mut copies = Vec::new();
+        let mut recovery = Vec::new();
+        for (receipt, media, backup) in candidates {
+            intent.accepts(&receipt.header)?;
+            if u64::from(receipt.header.sequence) != start / intent.span() {
+                continue;
+            }
+            let direct = receipt.header.shard == wanted;
+            if !direct && intent.layout.parity_shards == 0 {
+                continue;
+            }
+            ensure!(
+                offset
+                    .checked_add(length)
+                    .is_some_and(|n| n <= receipt.header.shard_bytes),
+                "recovery range exceeds its fragment"
+            );
+            let action = if *backup {
+                Action::BackupRead {
+                    receipt: receipt.clone(),
+                    offset,
+                    length,
+                }
+            } else {
+                Action::Read {
+                    receipt: receipt.clone(),
+                    offset,
+                    length,
+                }
+            };
+            if let Ok(target) = self.target(*media, action).await {
+                if direct {
+                    copies.push(target);
+                } else {
+                    recovery.push(target);
+                }
+            }
+        }
+        Ok((
+            length,
+            reader::part(
+                self.pool.clone(),
+                self.clone(),
+                reader::Part {
+                    offset: start,
+                    length,
+                    copies,
+                    recovery,
+                },
+            )
+            .await?,
+        ))
+    }
+}
+
 struct Spool {
     file: Option<File>,
     space: Option<crate::storage::local::Space>,
@@ -75,7 +154,7 @@ impl Scanner {
         let receipts =
             verify::fragments(self.clusters.as_ref(), catalog, part, &self.anchor).await?;
         ensure!(
-            part.intent.layout.data_shards == 1 && part.intent.layout.parity_shards == 0,
+            part.intent.layout.supported(),
             "unsupported recovery fragment layout"
         );
         let root = disk.root.clone();
@@ -88,8 +167,6 @@ impl Scanner {
             file: Some(file),
             space: Some(space),
         };
-        let mut failure = anyhow::anyhow!("no recovery fragment is available");
-        let mut verified = false;
         let mut candidates = Vec::new();
         for receipt in receipts {
             if self.backup_group.is_none() {
@@ -128,62 +205,31 @@ impl Scanner {
                 }
             }
         }
-        for (receipt, media, backup) in candidates {
-            let result: Result<()> = async {
-                let target = self
-                    .target(
-                        media,
-                        if backup {
-                            Action::BackupRead {
-                                offset: 0,
-                                length: receipt.header.shard_bytes,
-                                receipt,
-                            }
-                        } else {
-                            Action::Read {
-                                offset: 0,
-                                length: receipt.header.shard_bytes,
-                                receipt,
-                            }
-                        },
-                    )
-                    .await?;
-                let mut body = self.pool.read(target, self.clone()).await?;
-                let file = spool.file.as_mut().unwrap();
-                file.set_len(0).await?;
-                file.rewind().await?;
-                let mut digest = blake3::Hasher::new();
-                let mut written = 0u64;
-                while let Some(bytes) = body.try_next().await? {
-                    written = written
-                        .checked_add(bytes.len() as u64)
-                        .context("recovery file length overflow")?;
-                    ensure!(
-                        written <= part.intent.total,
-                        "recovery fragment exceeds its publication"
-                    );
-                    let _io = disk.io.acquire().await?;
-                    file.write_all(&bytes).await?;
-                    digest.update(&bytes);
-                }
-                file.flush().await?;
-                ensure!(
-                    written == part.intent.total && digest.finalize().as_bytes() == &part.digest,
-                    "recovery fragment differs from its published digest"
-                );
-                file.rewind().await?;
-                Ok(())
+        let file = spool.file.as_mut().unwrap();
+        let mut digest = blake3::Hasher::new();
+        let mut pos = 0;
+        while pos < part.intent.total {
+            let (len, mut stream) = self
+                .range(&part.intent, &candidates, pos, part.intent.total)
+                .await?;
+            let start = pos;
+            while let Some(bytes) = stream.try_next().await? {
+                let _io = disk.io.acquire().await?;
+                file.write_all(&bytes).await?;
+                digest.update(&bytes);
+                pos += bytes.len() as u64;
             }
-            .await;
-            match result {
-                Ok(()) => {
-                    verified = true;
-                    break;
-                }
-                Err(error) => failure = error,
-            }
+            ensure!(
+                pos - start == len,
+                "recovery range ended before its planned length"
+            );
         }
-        ensure!(verified, "no verified recovery copy: {failure:#}");
+        file.flush().await?;
+        ensure!(
+            digest.finalize().as_bytes() == &part.digest,
+            "recovered bytes differ from their published digest"
+        );
+        file.rewind().await?;
         spool.space.as_mut().unwrap().materialized();
         // Validate the complete published bytes before any decoded row reaches shared staging.
         let file = spool.file.as_ref().unwrap().try_clone().await?;

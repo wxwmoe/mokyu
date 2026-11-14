@@ -14,7 +14,7 @@ pub(crate) struct Status {
 
 pub(crate) struct Table {
     policy: Policy,
-    groups: Vec<(Uuid, [Member; 2])>,
+    groups: Vec<(Uuid, Vec<Member>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,10 +86,7 @@ impl Table {
         cluster.manifest.validate()?;
         cluster.policy.validate()?;
         let layout = &cluster.policy.layout;
-        ensure!(
-            layout.data_shards == 1 && layout.parity_shards == 0 && layout.extra_copies == 1,
-            "native writes currently require two data copies"
-        );
+        ensure!(layout.supported(), "unsupported native write layout");
         let mut groups = Vec::new();
         for group in &cluster.manifest.groups {
             if group.layout != *layout || group.replacing.is_some() {
@@ -109,7 +106,7 @@ impl Table {
                 })
                 .collect();
             members.sort_by_key(|member| member.media_id);
-            groups.push((group.id, [members.remove(0), members.remove(0)]));
+            groups.push((group.id, members));
         }
         groups.sort_by_key(|(id, _)| *id);
         ensure!(
@@ -145,18 +142,65 @@ impl Table {
                 continue;
             }
             // Simple mode keeps cached roles and does not rank telemetry or regions.
-            for reverse in 0..if simple { 1 } else { 2 } {
-                let ordered = [&members[reverse], &members[1 - reverse]];
-                let available = ordered.map(|member| {
-                    member.state == "available"
-                        && status
-                            .get(&member.media_id)
-                            .is_some_and(|s| s.online && s.free >= bytes)
-                });
-                if !available[0] {
+            let layout = &self.policy.layout;
+            let k = usize::from(layout.data_shards);
+            let width = k + usize::from(layout.parity_shards);
+            let mut order: Vec<_> = members.iter().collect();
+            let is_ready = |m: &Member| {
+                m.state == "available"
+                    && status
+                        .get(&m.media_id)
+                        .is_some_and(|s| s.online && s.free >= bytes)
+            };
+            if !simple && k > 1 {
+                let mut regions = HashMap::new();
+                for m in members {
+                    if let Some(r) = m.topology.region.as_deref() {
+                        *regions.entry(r).or_insert(0usize) += 1;
+                    }
+                }
+                let local = (self.policy.data_regions == "same_region")
+                    .then(|| {
+                        regions.keys().copied().min_by_key(|r| {
+                            let count = regions[r];
+                            (count < k, Some(*r) != region, std::cmp::Reverse(count), *r)
+                        })
+                    })
+                    .flatten();
+                if let Some(local) = local {
+                    order.sort_by_key(|m| m.topology.region.as_deref() != Some(local));
+                }
+                if self.policy.parity_regions == "spread" {
+                    let mut used = std::collections::HashSet::new();
+                    for m in &order[..k] {
+                        used.insert(m.topology.region.as_deref());
+                    }
+                    for i in k..width {
+                        let next = (i..width)
+                            .find(|j| {
+                                order[*j].topology.region.is_some()
+                                    && !used.contains(&order[*j].topology.region.as_deref())
+                            })
+                            .unwrap_or(i);
+                        order.swap(i, next);
+                        used.insert(order[i].topology.region.as_deref());
+                    }
+                }
+            }
+            for reverse in 0..if !simple && width == 1 && members.len() == 2 {
+                2
+            } else {
+                1
+            } {
+                if reverse == 1 {
+                    order.swap(0, 1);
+                }
+                let ordered = &order;
+                let available: Vec<_> = ordered.iter().map(|m| is_ready(m)).collect();
+                if !available[..k].iter().all(|a| *a) {
                     continue;
                 }
-                let degraded = !available[1];
+                let degraded = available.iter().any(|a| !a);
                 let acknowledgement = if degraded {
                     self.policy
                         .degraded_acknowledgement
@@ -164,18 +208,21 @@ impl Table {
                 } else {
                     self.policy.acknowledgement
                 };
-                if acknowledgement == Acknowledgement::All && degraded {
+                if (acknowledgement == Acknowledgement::All && degraded)
+                    || (acknowledgement == Acknowledgement::DataAndParity
+                        && available[..width].iter().any(|v| !v))
+                {
                     continue;
                 }
                 let selection = Selection {
                     group: *group,
-                    members: ordered.map(|m| m.media_id).to_vec(),
+                    members: ordered.iter().map(|m| m.media_id).collect(),
                     acknowledgement,
                 };
                 if simple {
                     return Ok(selection);
                 }
-                let samples = ordered.map(|member| status.get(&member.media_id));
+                let samples = ordered.iter().map(|member| status.get(&member.media_id));
                 let live: Vec<_> = samples.into_iter().flatten().filter(|s| s.online).collect();
                 let load = live.iter().try_fold((0, 1), |worst, s| {
                     let value = s.requests.filter(|(_, slots)| *slots > 0)?;
@@ -186,7 +233,9 @@ impl Table {
                     })
                 });
                 let primary = ordered[0].topology.region.as_deref();
-                let mirror = ordered[1].topology.region.as_deref();
+                let mirror = ordered
+                    .get(width)
+                    .and_then(|m| m.topology.region.as_deref());
                 let candidate = Candidate {
                     selection,
                     degraded,
@@ -194,13 +243,14 @@ impl Table {
                         self.policy.data_regions == "same_region"
                             && region.is_some()
                             && primary != region,
-                        match self.policy.replica_regions.as_str() {
-                            "different_region" => {
-                                primary.is_none() || mirror.is_none() || primary == mirror
-                            }
-                            "same_region" => primary.is_none() || primary != mirror,
-                            _ => false,
-                        },
+                        layout.extra_copies > 0
+                            && match self.policy.replica_regions.as_str() {
+                                "different_region" => {
+                                    primary.is_none() || mirror.is_none() || primary == mirror
+                                }
+                                "same_region" => primary.is_none() || primary != mirror,
+                                _ => false,
+                            },
                     ),
                     load,
                     free: live.iter().map(|s| s.free).min().unwrap_or(0),

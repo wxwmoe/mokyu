@@ -469,8 +469,9 @@ pub(crate) async fn register(
         .await?;
     profiles.push(profile.clone());
     profile.validate_budget(&app.config, &app.config.budget_for(&profiles)?)?;
+    // Registration verifies the recovered marker. The takeover remains read-only until its history is durable.
     app.storage
-        .verify_store_with_profile(record, &profile)
+        .verify_store_with_profile(record, &profile, false)
         .await?;
     writer.finish().await?;
     app.storage.refresh_store(c.id).await

@@ -162,9 +162,7 @@ impl Repairs for Backend {
                 .receipt
                 .context("repair requires a published receipt")?;
             ensure!(
-                !mapping.deleted
-                    && original.header.layout.data_shards == 1
-                    && original.header.layout.parity_shards == 0,
+                !mapping.deleted && original.header.layout.supported(),
                 "unsupported repair layout"
             );
             q::create(&crate::model::storage_repair::Origin::Durable(original))

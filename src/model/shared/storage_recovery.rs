@@ -413,8 +413,7 @@ impl RecoveryCatalog for Backend {
                     } else {
                         Area::Blocks
                     }
-                && intent.layout.data_shards == 1
-                && intent.layout.parity_shards == 0,
+                && intent.layout.supported(),
             "unsupported physical recovery layout"
         );
         let historical = physical::manifest(anchor.cluster_id, intent.layout_revision)
@@ -565,7 +564,11 @@ impl RecoveryCatalog for Backend {
                 return Ok(());
             }
             ensure!(
-                q::covered(operation).fetch_one(&mut *tx).await?.0 as u64 == intent.sequences(),
+                q::covered(operation, intent.layout.data_shards)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    .0 as u64
+                    == intent.sequences(),
                 "recovered payload has missing file sequences"
             );
             physical::publish(operation).execute(&mut *tx).await?;

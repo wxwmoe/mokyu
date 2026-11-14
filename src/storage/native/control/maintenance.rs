@@ -60,13 +60,7 @@ impl Control {
         }
     }
 
-    async fn check_fragment(
-        self: &Arc<Self>,
-        pool: &Pool,
-        m: &Mapping,
-        h: &mut blake3::Hasher,
-        rate: u64,
-    ) -> Result<()> {
+    async fn check_fragment(self: &Arc<Self>, pool: &Pool, m: &Mapping, rate: u64) -> Result<()> {
         let size = m.header.shard_bytes;
         let mut pos = 0;
         let mut hash = blake3::Hasher::new();
@@ -82,7 +76,6 @@ impl Control {
                 got += bytes.len() as u64;
                 ensure!(got <= len, "storage readback exceeds its fragment");
                 hash.update(&bytes);
-                h.update(&bytes);
             }
             ensure!(len == got, "storage readback is truncated");
             pos += got;
@@ -127,10 +120,7 @@ impl Control {
                     .iter()
                     .filter(|m| item.job.media_id.is_none_or(|id| id == m.header.media))
                 {
-                    if let Err(error) = self
-                        .check_fragment(pool, m, &mut blake3::Hasher::new(), rate)
-                        .await
-                    {
+                    if let Err(error) = self.check_fragment(pool, m, rate).await {
                         self.clusters.scrub_damage(item, m).await?;
                         return Err(
                             error.context("storage scrub is waiting for a verified fragment")
@@ -158,7 +148,7 @@ impl Control {
             .await?;
         let target = &pending.payload.intent;
         ensure!(
-            target.layout.data_shards == 1 && target.layout.parity_shards == 0,
+            target.layout.supported(),
             "unsupported rebuild verification layout"
         );
         let source_plan = if item.job.backup_group.is_none() {
@@ -200,7 +190,7 @@ impl Control {
                 let (end,body) = if let Some(plan) = &source_plan {
                     let end=intent.total.min(start+reader::WINDOW);
                     let plan=self.plan_read(intent.namespace,&item.path,Some(intent.operation),Some(&plan.lease),Some(start..end),None,until()).await?;
-                    (end,reader::read(pool.clone(),self.clone(),plan,2)?)
+                    (end,reader::read(pool.clone(),self.clone(),plan,crate::model::storage_cluster::MEMBER_LIMIT)?)
                 } else {
                     let stripe=u64::from(intent.layout.stripe_bytes);
                     let seq=(start/intent.span()) as u32;
@@ -220,26 +210,44 @@ impl Control {
         }.boxed();
         writer::write(self.as_ref(), pool, target, body, None).await?;
         let expected = digest.into_inner().unwrap().finalize();
-        let mut copies = vec![blake3::Hasher::new(); target.layout.width()];
+        let mut readback = blake3::Hasher::new();
         for seq in 0..target.sequences() as u32 {
             let mappings = self
                 .payloads
                 .write_window(target.operation, seq, 1, until())
                 .await?;
             ensure!(
-                mappings.len() == copies.len(),
+                mappings.len() == target.layout.width(),
                 "incomplete rebuild readback"
             );
-            for (i, m) in mappings.iter().enumerate() {
+            for m in &mappings {
                 ensure!(
-                    m.receipt.is_some() && m.header.copy as usize == i && m.header.shard == 0,
+                    m.receipt.is_some(),
                     "rebuild fragment has no verified receipt"
                 );
-                self.check_fragment(pool, m, &mut copies[i], 0).await?;
+                self.check_fragment(pool, m, 0).await?;
+            }
+            let mut rel = 0;
+            let bytes = mappings[0].header.length;
+            while rel < bytes {
+                let (shard, offset, contiguous) =
+                    crate::content::erasure::locate(&target.layout, rel);
+                let m = mappings
+                    .iter()
+                    .find(|m| m.header.copy == 0 && m.header.shard == shard)
+                    .context("missing rebuilt data slot")?;
+                let len = contiguous.min(bytes - rel).min(reader::PART);
+                let mut body = pool
+                    .read(self.read(m, offset, len).await?, self.clone())
+                    .await?;
+                while let Some(bytes) = body.try_next().await? {
+                    readback.update(&bytes);
+                }
+                rel += len;
             }
         }
         ensure!(
-            copies.iter().all(|h| h.finalize() == expected),
+            readback.finalize() == expected,
             "rebuild readback differs from the source"
         );
         #[cfg(feature = "fault-injection")]

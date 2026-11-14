@@ -479,7 +479,7 @@ pub(crate) async fn create_installation_store(
         .map_err(|error| s3s::s3_error!(InvalidArgument, "{error}"))?;
     if resume {
         app.storage
-            .verify_store_with_profile(record.clone(), &profile_for_init)
+            .verify_store_with_profile(record.clone(), &profile_for_init, true)
             .await?;
     } else {
         app.storage
@@ -696,7 +696,7 @@ pub(crate) async fn update_record(
             .await
     } else {
         app.storage
-            .verify_store_with_profile(record.clone(), &profile)
+            .verify_store_with_profile(record.clone(), &profile, true)
             .await
     }
     .map_err(|error| {

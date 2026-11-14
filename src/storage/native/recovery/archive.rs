@@ -1,12 +1,12 @@
 use super::scan::Scanner;
 use crate::{
-    model::{Error, storage_payload::Intent, storage_transfer::Action},
+    model::{Error, storage_payload::Intent},
     storage::native::{
         reader,
         store::{failure, metadata},
     },
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use futures_util::TryStreamExt;
 use object_store::{GetOptions, GetResult, GetResultPayload, path::Path};
 use std::sync::Arc;
@@ -44,13 +44,7 @@ impl Archive {
         })
     }
 
-    async fn targets(
-        &self,
-        intent: &Intent,
-        sequence: u32,
-        start: u64,
-        length: u64,
-    ) -> Result<Vec<crate::model::storage_transfer::Destination>> {
+    async fn targets(&self, intent: &Intent, sequence: u32) -> Result<Vec<super::part::Candidate>> {
         let receipts = self
             .scan
             .clusters
@@ -58,26 +52,9 @@ impl Archive {
             .await?;
         let mut candidates = Vec::new();
         for receipt in receipts {
-            let h = &receipt.header;
-            intent.accepts(h)?;
-            let offset = start
-                .checked_sub(h.offset)
-                .context("invalid backup read offset")?;
-            ensure!(
-                offset
-                    .checked_add(length)
-                    .is_some_and(|end| end <= h.shard_bytes),
-                "backup read exceeds verified fragment"
-            );
+            intent.accepts(&receipt.header)?;
             for media in &self.media {
-                let action = Action::BackupRead {
-                    receipt: receipt.clone(),
-                    offset,
-                    length,
-                };
-                if let Ok(target) = self.scan.target(*media, action).await {
-                    candidates.push(target);
-                }
+                candidates.push((receipt.clone(), *media, true));
             }
         }
         ensure!(
@@ -100,10 +77,7 @@ impl Archive {
             .await
             .map_err(|e| failure(path, e))?
             .ok_or_else(|| failure(path, Error::StorageObjectMissing.into()))?;
-        if intent.cluster != self.scan.anchor.cluster_id
-            || intent.layout.data_shards != 1
-            || intent.layout.parity_shards != 0
-        {
+        if intent.cluster != self.scan.anchor.cluster_id || !intent.layout.supported() {
             return Err(failure(path, anyhow::anyhow!("unsupported backup layout")));
         }
         if options
@@ -137,11 +111,10 @@ impl Archive {
             let mut start=requested.start;
             while !options.head && start<requested.end {
                 let seq=start/intent.span();
-                let end=requested.end.min((seq+1)*intent.span()).min(start+reader::PART);
-                let copies=source.targets(&intent,seq as u32,start,end-start).await.map_err(|e|failure(&file,e))?;
-                let mut part=reader::part(source.scan.pool.clone(),source.scan.clone(),reader::Part{offset:start,length:end-start,copies}).await.map_err(|e|failure(&file,e))?;
+                let candidates=source.targets(&intent,seq as u32).await.map_err(|e|failure(&file,e))?;
+                let (len, mut part)=source.scan.range(&intent,&candidates,start,requested.end).await.map_err(|e|failure(&file,e))?;
                 while let Some(bytes)=part.try_next().await.map_err(|e|failure(&file,e))? { yield bytes; }
-                start=end;
+                start+=len;
             }
         };
         Ok(GetResult {

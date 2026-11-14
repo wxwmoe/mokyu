@@ -526,7 +526,7 @@ impl Store {
             while !head && offset < requested.end {
                 let end = requested.end.min(offset + reader::WINDOW);
                 let (plan, renewal) = store.plan(&name, Some(offset..end), Some(version), Some(&lease)).await.map_err(|error| failure(&path, error))?;
-                let mut body = reader::read(store.pool.clone(), renewal, plan, 2).map_err(|error| failure(&path, error))?;
+                let mut body = reader::read(store.pool.clone(), renewal, plan, crate::model::storage_cluster::MEMBER_LIMIT).map_err(|error| failure(&path, error))?;
                 while let Some(bytes) = body.try_next().await.map_err(|error| failure(&path, error))? { yield bytes; }
                 offset = end;
             }

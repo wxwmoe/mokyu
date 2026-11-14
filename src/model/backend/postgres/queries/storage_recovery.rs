@@ -211,6 +211,6 @@ pub(in super::super) fn page(
     sqlx::query_as("SELECT id,position,encoded_bytes FROM storage_recovery_entries WHERE catalog=$1 AND category=$2 AND (owner_id=$3 OR $4 IS NULL) AND (id>$5 OR (id=$6 AND position>$7)) ORDER BY id,position LIMIT 128")
         .bind(id).bind(category).bind(owner).bind(owner).bind(after.0).bind(after.0).bind(after.1)
 }
-pub(in super::super) fn covered(operation: Uuid) -> Rows<'static, (i64,)> {
-    sqlx::query_as("SELECT COUNT(DISTINCT sequence) FROM storage_fragments WHERE operation=$1 AND root IS NOT NULL AND NOT deleted").bind(operation)
+pub(in super::super) fn covered(operation: Uuid, data: u16) -> Rows<'static, (i64,)> {
+    sqlx::query_as("SELECT COUNT(*) FROM (SELECT sequence FROM storage_fragments WHERE operation=$1 AND root IS NOT NULL AND NOT deleted GROUP BY sequence HAVING COUNT(DISTINCT shard_index)>=$2) covered").bind(operation).bind(i32::from(data))
 }

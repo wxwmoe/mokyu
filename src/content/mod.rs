@@ -1,6 +1,7 @@
 pub(crate) mod checks;
 pub(crate) mod codec;
 pub(crate) mod compression;
+pub(crate) mod erasure;
 pub(crate) mod fragment;
 pub(crate) mod nonce;
 pub(crate) mod pack;
