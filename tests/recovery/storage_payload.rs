@@ -36,7 +36,7 @@ pub(crate) async fn fixture() -> Result<(Backend, Cluster)> {
         name: format!("payload-{id}"),
         revision: 1,
         policy: Policy::default(),
-        state: "waiting_probe".into(),
+        state: "layout_enabled".into(),
         manifest: Manifest {
             format_version: FORMAT,
             record_id: Uuid::now_v7(),

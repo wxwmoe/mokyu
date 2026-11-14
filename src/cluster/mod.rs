@@ -1,3 +1,4 @@
+pub(crate) mod handoff;
 pub(crate) mod identity;
 pub(crate) mod notifications;
 pub(crate) mod registration;

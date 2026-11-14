@@ -129,6 +129,7 @@ async fn run_control(app: Arc<app::App>) -> Result<()> {
     if app.mode_mismatch().await? || app.recovery_required() {
         return run_control_restricted(app).await;
     }
+    cluster::handoff::refresh(&app).await?;
     let control_listener = TcpListener::bind(&app.config.instance.listen_control)
         .await
         .context("control listener")?;

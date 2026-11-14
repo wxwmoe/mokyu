@@ -207,11 +207,11 @@ runtime settings 由所有角色共享。保存成功后响应会标记需要重
 
 `cluster create NAME storage` 签发 storage 节点身份。`mokyu storage` 使用专用配置启动，仅提供本机 `cli status [--ready]`；其他管理命令发给 control。
 
-`storage-cluster list/create/update/members/enable/state` 管理原生存储群集。`storage create NAME mokyu --cluster-id UUID --init` 创建停用的群集后端绑定。成员修改和策略更新要求 `--revision`，用法及当前能力边界见[存储群集](storage-clusters.md)。
+`storage-cluster list/create/update/members/preview/enable/state` 管理原生存储群集。`storage create NAME mokyu --cluster-id UUID --init` 创建停用的群集后端绑定。成员修改和策略更新要求 `--revision`，用法及当前能力边界见[存储群集](storage-clusters.md)。
 
 `storage-cluster repair CLUSTER_UUID FRAGMENT_UUID` 创建或续接指定分片的核验与修复任务，返回 `task_id`。健康片保持原样；确认丢失或损坏后，从有效主副本写入新片，验证完整回执后切换映射。网络或权限错误不会被当作损坏，不从备份来源读取。可通过 `task` 命令查看进度。
 
-`storage-cluster space` 查看逐组容量；`replace/move` 管理换盘，`sync/scrub/rebuild/cancel-run` 管理同步、巡检和重建，参数和停机条件见[扩容和成员维护](storage-clusters.md#扩容和成员维护)。
+`storage-cluster preview UUID --revision REV MEDIA...` 预览启用布局组的容量及阻塞原因；`storage-cluster health UUID` 查看已登记载荷的可读范围及保护欠账；`storage-cluster space` 查看逐组容量；`replace/move` 管理换盘，`sync/scrub/rebuild/cancel-run` 管理同步、巡检和重建，参数和停机条件见[扩容和成员维护](storage-clusters.md#扩容和成员维护)。
 
 `storage-cluster takeover NAME MEDIA_UUID...` 核对所选介质的原群集清单与历史后接管，不要求 storage 提供部署 key。`storage-cluster sources CLUSTER_UUID MEDIA_UUID [--after UUID]` 分页列出介质上可识别的恢复命名空间，返回 `entries` 和 `next`。业务目录恢复仍须核对完整发布证据，通过后端恢复入口解锁和导入，见[存储群集](storage-clusters.md#身份和恢复边界)。
 

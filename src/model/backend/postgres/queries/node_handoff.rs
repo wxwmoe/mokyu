@@ -5,6 +5,10 @@ use uuid::Uuid;
 pub(in super::super) fn role(id: Uuid) -> Rows<'static, (String, bool)> {
     sqlx::query_as("SELECT role,enabled FROM nodes WHERE id=$1 FOR UPDATE").bind(id)
 }
+pub(in super::super) fn other_control(id: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes n JOIN node_reports r ON r.node_id=n.id LEFT JOIN node_handoffs h ON h.node_id=n.id WHERE n.role='control' AND n.enabled AND n.id<>$1 AND COALESCE(h.state,'serving')='serving' AND r.received_at>=now()-interval '30 seconds' AND n.last_seen_at>=now()-interval '30 seconds' AND r.status->>'work'='normal' AND r.status->>'draining'='false' AND r.status->>'deployment_mode_revision'=(SELECT deployment_mode_revision::text FROM mokyu_meta WHERE deployment_mode='cluster'))").bind(id)
+}
+
 pub(in super::super) fn row(id: Uuid) -> Rows<'static, HandoffRow> {
     sqlx::query_as("SELECT operation,revision,state FROM node_handoffs WHERE node_id=$1").bind(id)
 }

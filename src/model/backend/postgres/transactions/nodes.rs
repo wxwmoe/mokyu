@@ -184,6 +184,9 @@ pub(in super::super) async fn report_node(
         .await?
         .rows_affected()
         == 1;
+    if role == "control" && written {
+        super::super::node_handoff::observed(&mut tx, state.node_id, report).await?;
+    }
     tx.commit().await?;
     Ok(written)
 }

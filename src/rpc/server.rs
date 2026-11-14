@@ -1403,6 +1403,7 @@ impl NodeSessions for Service {
             .ok_or_else(|| Status::unavailable("control identity is unavailable"))?
             .node_id
             .to_string();
+        let mut handoff = app.control_admission.subscribe();
         let stream = async_stream::try_stream! {
             let run = snapshot.run;
             let epoch = snapshot.epoch;
@@ -1420,6 +1421,7 @@ impl NodeSessions for Service {
                 let receipt_deadline = outstanding.values().copied().min().unwrap_or(deadline);
                 let next = tokio::select! {
                     biased;
+                    _ = async { let _ = handoff.wait_for(|closed| *closed).await; } => Err(Status::unavailable("control is preparing to go offline")),
                     _ = tokio::time::sleep_until(deadline) => Err(Status::deadline_exceeded("node heartbeat timed out")),
                     _ = tokio::time::sleep_until(receipt_deadline), if !outstanding.is_empty() => Err(Status::deadline_exceeded("node notification receipt timed out")),
                     next = incoming.message() => next,

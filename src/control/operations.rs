@@ -291,6 +291,9 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                         .move_state(principal, id, job, revision, &action)
                         .await?,
                 )?,
+                StorageClusters::Health { id } => {
+                    serde_json::to_value(clusters.health(principal, id).await?)?
+                }
                 StorageClusters::Space { id } => {
                     serde_json::to_value(clusters.space(principal, id).await?)?
                 }
@@ -364,6 +367,22 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                 } => serde_json::to_value(
                     clusters
                         .add_members(
+                            principal,
+                            id,
+                            c::Members {
+                                revision,
+                                media_ids: media,
+                            },
+                        )
+                        .await?,
+                )?,
+                StorageClusters::Preview {
+                    id,
+                    revision,
+                    media,
+                } => serde_json::to_value(
+                    clusters
+                        .preview_groups(
                             principal,
                             id,
                             c::Members {

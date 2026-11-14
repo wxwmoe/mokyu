@@ -182,6 +182,10 @@ async fn worker(
     class: i32,
 ) -> Result<()> {
     loop {
+        let Some(_control) = app.control_admission.enter() else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        };
         let token = Uuid::new_v4();
         let id = {
             let mut active = active.lock().await;
@@ -441,6 +445,10 @@ async fn execute(app: Arc<App>, id: Uuid, token: Uuid) -> Result<bool> {
 pub(crate) async fn prune_write_receipts(app: &App) -> Result<()> {
     const BATCH: i64 = 256;
     loop {
+        let Some(_control) = app.control_admission.enter() else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            continue;
+        };
         match app.node_writes.prune_write_receipts(BATCH).await {
             Ok(count) if count == BATCH as u64 => {
                 tokio::task::yield_now().await;

@@ -174,7 +174,12 @@ pub(super) async fn object_chunks(
     let total_items = if q.after.is_some() {
         None
     } else if more {
-        Some(app.objects.extent_count(object.id, object.payload_type == "raw").await?.to_string())
+        Some(
+            app.objects
+                .extent_count(object.id, object.payload_type == "raw")
+                .await?
+                .to_string(),
+        )
     } else {
         Some(rows.len().to_string())
     };

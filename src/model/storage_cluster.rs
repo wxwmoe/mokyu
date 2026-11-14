@@ -30,7 +30,40 @@ impl Default for Layout {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageLayoutPreset)]
+pub(crate) struct Preset {
+    pub data: u16,
+    pub parity: u16,
+    pub copies: u16,
+    pub members: u16,
+    pub factor: f64,
+    pub tolerance: u16,
+    pub featured: bool,
+}
+
 impl Layout {
+    pub fn supported(&self) -> bool {
+        (self.data_shards, self.parity_shards, self.extra_copies) == (1, 0, 1)
+    }
+
+    fn preset(&self, featured: bool) -> Preset {
+        let members = self.width() as u16;
+        Preset {
+            data: self.data_shards,
+            parity: self.parity_shards,
+            copies: self.extra_copies,
+            members,
+            factor: f64::from(members) / f64::from(self.data_shards),
+            tolerance: (self.parity_shards + 1) * (self.extra_copies + 1) - 1,
+            featured,
+        }
+    }
+
+    pub fn catalog() -> Vec<Preset> {
+        vec![Self::default().preset(true)]
+    }
+
     pub fn width(&self) -> usize {
         (usize::from(self.data_shards) + usize::from(self.parity_shards))
             * (usize::from(self.extra_copies) + 1)
@@ -592,6 +625,7 @@ pub(crate) struct Takeover {
 #[schema(as = StorageClusterOverview)]
 pub(crate) struct Overview {
     pub defaults: Policy,
+    pub layouts: Vec<Preset>,
     pub backups: Vec<BackupGroup>,
     pub member_moves: Vec<MemberMove>,
     pub runs: Vec<ClusterRun>,
@@ -712,6 +746,40 @@ pub(crate) struct MoveInput {
     pub bytes_per_second: Option<i64>,
 }
 
+#[derive(Default, Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageGroupPreview)]
+pub(crate) struct GroupPreview {
+    pub groups: usize,
+    pub logical_bytes: u64,
+    pub reason: Option<String>,
+    pub media: Option<Uuid>,
+}
+
+impl GroupPreview {
+    pub fn denied(reason: &str, media: Option<Uuid>) -> Self {
+        Self {
+            reason: Some(reason.into()),
+            media,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageClusterHealth)]
+pub(crate) struct Health {
+    pub state: String,
+    pub checked_at: i64,
+    pub tracked: i64,
+    pub readable: i64,
+    pub fully_protected: i64,
+    pub pending_bytes: i64,
+    pub complete_copies: Option<i64>,
+    pub online_primary: usize,
+    pub primary_domains: usize,
+    pub effective_acknowledgement: Option<Acknowledgement>,
+}
+
 #[derive(Serialize, Deserialize, ToSchema)]
 #[schema(as = StorageClusterSpace)]
 pub(crate) struct Space {
@@ -775,6 +843,7 @@ pub(crate) trait StorageClusters:
     ) -> Result<BackupPoints>;
     async fn verify_backups(&self, principal: &Principal, id: Uuid, revision: i64) -> Result<()>;
     async fn placement_snapshot(&self, id: Uuid) -> Result<(Cluster, Vec<Target>)>;
+    async fn health(&self, principal: &Principal, id: Uuid) -> Result<Health>;
     async fn space(&self, principal: &Principal, id: Uuid) -> Result<Space>;
     async fn start_move(
         &self,
@@ -811,6 +880,12 @@ pub(crate) trait StorageClusters:
     async fn update(&self, principal: &Principal, id: Uuid, input: Update) -> Result<Cluster>;
     async fn add_members(&self, principal: &Principal, id: Uuid, input: Members)
     -> Result<Cluster>;
+    async fn preview_groups(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        input: Members,
+    ) -> Result<GroupPreview>;
     async fn enable_groups(
         &self,
         principal: &Principal,

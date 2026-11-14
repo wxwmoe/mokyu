@@ -288,6 +288,10 @@ pub async fn run(app: Arc<App>) -> Result<()> {
     let mut previous = None;
     let mut next = None;
     loop {
+        let Some(control) = app.control_admission.enter() else {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            continue;
+        };
         let notified = app.wake_maintenance.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
@@ -327,6 +331,7 @@ pub async fn run(app: Arc<App>) -> Result<()> {
                 }
             }
         }
+        drop(control);
         // Database time also detects clock changes without extending the recovery scan.
         let delay = state
             .and_then(|(_, now)| next.map(|next| next - now))

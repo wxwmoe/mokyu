@@ -101,13 +101,18 @@ pub fn router(app: Arc<App>) -> Router {
     if app.ensure_mode().is_err() || !app.shared_storage_only() {
         return admin;
     }
-    let rpc = crate::rpc::server::router(app);
-    Router::new().fallback_service(tower::service_fn(move |request: axum::extract::Request| {
-        let is_rpc = request.uri().path().starts_with("/mokyu.node.")
-            || request
-                .headers()
-                .get("content-type")
-                .is_some_and(|value| value.as_bytes().starts_with(b"application/grpc"));
-        tower::ServiceExt::oneshot(if is_rpc { rpc.clone() } else { admin.clone() }, request)
-    }))
+    let rpc = crate::rpc::server::router(app.clone());
+    Router::new()
+        .fallback_service(tower::service_fn(move |request: axum::extract::Request| {
+            let is_rpc = request.uri().path().starts_with("/mokyu.node.")
+                || request
+                    .headers()
+                    .get("content-type")
+                    .is_some_and(|value| value.as_bytes().starts_with(b"application/grpc"));
+            tower::ServiceExt::oneshot(if is_rpc { rpc.clone() } else { admin.clone() }, request)
+        }))
+        .layer(axum::middleware::from_fn_with_state(
+            app,
+            crate::cluster::handoff::admit,
+        ))
 }

@@ -30,7 +30,7 @@ async fn collect(app: &App, restricted: bool) -> Result<(Value, Value)> {
         "normal"
     };
     let memory = crate::status::stats::process_memory().await;
-    let status = json!({
+    let mut status = json!({
         "work": work, "runtime": runtime, "resources": app.budget, "image_processing":crate::processing::image::job::capacity(app.budget.pack_memory_units),
         "process_memory": memory, "db_pool_size": size, "db_pool_idle": idle,
         "active_streams": app.active_operations(), "data_slots_available": app.slots.available_permits(),
@@ -47,6 +47,14 @@ async fn collect(app: &App, restricted: bool) -> Result<(Value, Value)> {
         "compression": app.compression_observations.snapshot(),
         "read_replica": app.runtime.read_replica()
     });
+    if app.role == "control" && !restricted {
+        let handoff = super::handoff::refresh(app).await?;
+        status["handoff_revision"] = json!(handoff);
+        status["handoff_reconciled"] = json!(true);
+        status["draining"] = json!(app.control_admission.closed());
+        status["control_operations"] = json!(app.control_admission.active());
+        status["deployment_mode_revision"] = json!(app.started_mode_revision);
+    }
     Ok((metadata, status))
 }
 

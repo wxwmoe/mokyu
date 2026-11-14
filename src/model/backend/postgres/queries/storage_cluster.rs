@@ -198,3 +198,32 @@ pub(in super::super) fn recovered_count(catalog: Uuid) -> Scalar<'static, i64> {
     )
     .bind(catalog)
 }
+
+pub(in super::super) fn protection(
+    id: Uuid,
+    online: Vec<Uuid>,
+) -> Rows<'static, (i64, i64, i64, i64, Option<i64>)> {
+    sqlx::query_as("WITH payload AS (
+ SELECT p.operation,(p.intent#>>'{layout,data_shards}')::bigint AS k,(p.intent#>>'{layout,parity_shards}')::bigint AS m,(p.intent#>>'{layout,extra_copies}')::bigint+1 AS copies,(p.intent#>>'{total}')::bigint AS bytes,
+ CASE WHEN (p.intent#>>'{total}')::bigint=0 THEN 1 ELSE (((p.intent#>>'{total}')::bigint-1) / (1073741824*(p.intent#>>'{layout,data_shards}')::bigint))+1 END AS sequences
+ FROM storage_payloads p JOIN storage_objects o ON o.head=p.operation AND o.namespace_id=p.namespace_id AND o.payload_id=p.payload_id
+ WHERE p.cluster_id=$1 AND p.state='published'
+), good AS (
+ SELECT f.operation,f.sequence,f.copy_index,f.shard_index FROM payload p JOIN storage_fragments f ON f.operation=p.operation
+ LEFT JOIN storage_repairs r ON r.id=f.id
+ WHERE f.root IS NOT NULL AND NOT f.deleted AND (r.state IS NULL OR r.state NOT IN ('queued','writing')) AND f.media_id IN (SELECT value::uuid FROM jsonb_array_elements_text($2::jsonb))
+), stripe AS (
+ SELECT operation,sequence,COUNT(DISTINCT shard_index) AS pieces FROM good GROUP BY operation,sequence
+), readable AS (
+ SELECT p.operation,COUNT(*) AS stripes FROM payload p JOIN stripe s ON s.operation=p.operation WHERE s.pieces>=p.k GROUP BY p.operation
+), sets AS (
+ SELECT operation,copy_index,COUNT(*) AS pieces FROM good GROUP BY operation,copy_index
+), copies_ready AS (
+ SELECT s.operation,COUNT(*) AS complete FROM sets s JOIN payload p ON p.operation=s.operation
+ WHERE s.pieces=p.sequences*(p.k+p.m) GROUP BY s.operation
+)
+SELECT COUNT(*),CAST(COALESCE(SUM(CASE WHEN r.stripes=p.sequences THEN 1 ELSE 0 END),0) AS bigint),
+CAST(COALESCE(SUM(CASE WHEN c.complete=p.copies THEN 1 ELSE 0 END),0) AS bigint),
+CAST(COALESCE(SUM(CASE WHEN COALESCE(c.complete,0)<p.copies THEN p.bytes ELSE 0 END),0) AS bigint),
+CAST(MIN(COALESCE(c.complete,0)) AS bigint) FROM payload p LEFT JOIN readable r ON r.operation=p.operation LEFT JOIN copies_ready c ON c.operation=p.operation").bind(id).bind(Json(online))
+}

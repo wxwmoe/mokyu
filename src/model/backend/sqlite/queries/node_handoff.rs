@@ -5,6 +5,10 @@ use uuid::Uuid;
 pub(in super::super) fn role(id: Uuid) -> Rows<'static, (String, bool)> {
     sqlx::query_as("SELECT role,enabled FROM nodes WHERE id=?").bind(id)
 }
+pub(in super::super) fn other_control(id: Uuid) -> Scalar<'static, bool> {
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nodes WHERE id=? AND 1=0)").bind(id)
+}
+
 pub(in super::super) fn row(id: Uuid) -> Rows<'static, HandoffRow> {
     sqlx::query_as("SELECT operation,revision,state FROM node_handoffs WHERE node_id=?").bind(id)
 }

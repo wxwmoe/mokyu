@@ -190,6 +190,7 @@ impl Active {
     }
 }
 pub struct App {
+    pub(crate) control_admission: Arc<crate::cluster::handoff::Admission>,
     pub(crate) native_storage: Arc<crate::storage::native::control::Control>,
     pub(crate) storage_clusters: Arc<dyn crate::model::storage_cluster::StorageClusters>,
     pub(crate) mirror_readers: mirroring::Readers,
@@ -270,7 +271,7 @@ pub struct App {
     pub pack_creation_paused: std::sync::atomic::AtomicBool,
     pub gc_running: std::sync::atomic::AtomicBool,
     started_mode: String,
-    started_mode_revision: i64,
+    pub(crate) started_mode_revision: i64,
     pub(crate) restart_required: Arc<std::sync::atomic::AtomicBool>,
     pub wake_gc: Arc<tokio::sync::Notify>,
     pub wake_tasks: Arc<tokio::sync::Notify>,
@@ -431,6 +432,7 @@ impl App {
             storage_clusters: stores.storage_clusters,
             node_inventory: stores.node_inventory,
             cluster: stores.cluster,
+            control_admission: crate::cluster::handoff::Admission::new(role == "control"),
             role: role.to_owned(),
             recovery_required: std::sync::atomic::AtomicBool::new(false),
             uploads: Arc::new(Semaphore::new(budget.upload_concurrency)),

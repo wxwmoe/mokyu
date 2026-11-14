@@ -973,6 +973,9 @@ pub struct StyleExport {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum StorageClusters {
     List,
+    Health {
+        id: Uuid,
+    },
     Space {
         id: Uuid,
     },
@@ -1063,6 +1066,13 @@ pub enum StorageClusters {
         policy: String,
     },
     Members {
+        id: Uuid,
+        #[arg(long)]
+        revision: i64,
+        #[arg(required=true, num_args=1..)]
+        media: Vec<Uuid>,
+    },
+    Preview {
         id: Uuid,
         #[arg(long)]
         revision: i64,

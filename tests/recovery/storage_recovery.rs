@@ -267,6 +267,23 @@ async fn physical_restore_contract() -> Result<()> {
         )
         .await?;
     assert_eq!(restored.payload.intent, intent);
+    {
+        use super::super::queries::storage_cluster as q;
+        let mut tx = q::begin(&backend).await?;
+        for (online, expected) in [
+            (Vec::new(), (2, 0, 0, 16, Some(0))),
+            (vec![intent.members[0]], (2, 1, 0, 16, Some(0))),
+            (intent.members.clone(), (2, 2, 1, 8, Some(1))),
+        ] {
+            assert_eq!(
+                q::protection(cluster.id, online)
+                    .fetch_one(&mut *tx)
+                    .await?,
+                expected
+            );
+        }
+        tx.rollback().await?;
+    }
     let fragments = crate::model::storage_payload::StoragePayloads::read(
         &backend,
         intent.operation,

@@ -1888,6 +1888,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storage-clusters/{id}/groups/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_preview_groups"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/health": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_cluster_health"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storage-clusters/{id}/members": {
         parameters: {
             query?: never;
@@ -4541,6 +4573,24 @@ export interface components {
             members: string[];
             replacing?: components["schemas"]["StorageClusterReplacement"] | null;
         };
+        StorageClusterHealth: {
+            /** Format: int64 */
+            checked_at: number;
+            /** Format: int64 */
+            complete_copies?: number | null;
+            effective_acknowledgement?: components["schemas"]["StorageClusterAcknowledgement"] | null;
+            /** Format: int64 */
+            fully_protected: number;
+            online_primary: number;
+            /** Format: int64 */
+            pending_bytes: number;
+            primary_domains: number;
+            /** Format: int64 */
+            readable: number;
+            state: string;
+            /** Format: int64 */
+            tracked: number;
+        };
         StorageClusterLayout: {
             /** Format: int32 */
             data_shards: number;
@@ -4623,6 +4673,7 @@ export interface components {
             clusters: components["schemas"]["StorageClusterCluster"][];
             defaults: components["schemas"]["StorageClusterPolicy"];
             devices: components["schemas"]["StorageClusterDevice"][];
+            layouts: components["schemas"]["StorageLayoutPreset"][];
             member_moves: components["schemas"]["StorageClusterMemberMove"][];
             runs: components["schemas"]["StorageClusterRun"][];
         };
@@ -4745,6 +4796,14 @@ export interface components {
             /** Format: int64 */
             reservations: number;
         };
+        StorageGroupPreview: {
+            groups: number;
+            /** Format: int64 */
+            logical_bytes: number;
+            /** Format: uuid */
+            media?: string | null;
+            reason?: string | null;
+        };
         StorageInput: {
             access_key?: string | null;
             /** Format: uuid */
@@ -4782,6 +4841,21 @@ export interface components {
         };
         StorageKeyInput: {
             key?: string | null;
+        };
+        StorageLayoutPreset: {
+            /** Format: int32 */
+            copies: number;
+            /** Format: int32 */
+            data: number;
+            /** Format: double */
+            factor: number;
+            featured: boolean;
+            /** Format: int32 */
+            members: number;
+            /** Format: int32 */
+            parity: number;
+            /** Format: int32 */
+            tolerance: number;
         };
         StoragePatch: {
             access_key?: string | null;
@@ -8847,6 +8921,52 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StorageClusterCluster"];
+                };
+            };
+        };
+    };
+    storage_cluster_preview_groups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageClusterMembers"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageGroupPreview"];
+                };
+            };
+        };
+    };
+    storage_cluster_health: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterHealth"];
                 };
             };
         };

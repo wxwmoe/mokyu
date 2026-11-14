@@ -178,7 +178,9 @@ impl Control {
         let members = async {
             loop {
                 let mut delay = Duration::from_secs(2);
-                if app.writable().is_ok() {
+                if let Some(_control) = app.control_admission.enter()
+                    && app.writable().is_ok()
+                {
                     match self.maintain_member(app, &pool).await {
                         Ok(true) => {
                             app.wake_tasks.notify_waiters();
@@ -196,7 +198,9 @@ impl Control {
 
     pub async fn maintain_backups(&self, app: &crate::app::App) -> Result<()> {
         loop {
-            let delay = if app.writable().is_ok() {
+            let delay = if let Some(_control) = app.control_admission.enter()
+                && app.writable().is_ok()
+            {
                 match self.payloads.backfill_backups().await {
                     Ok(true) => {
                         app.wake_tasks.notify_waiters();

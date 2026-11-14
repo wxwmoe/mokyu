@@ -9,6 +9,11 @@ use uuid::Uuid;
 
 #[async_trait]
 pub(crate) trait NodeSessions: Send + Sync {
+    async fn control_handoff(
+        &self,
+        state: &NodeState,
+        key: &Key,
+    ) -> Result<Option<super::node::HandoffRow>>;
     async fn handoff(
         &self,
         principal: &Principal,

@@ -36,7 +36,7 @@ fn cluster(row: Row) -> Result<Cluster> {
     } else if manifest.groups.is_empty() {
         "waiting_layout"
     } else {
-        "waiting_probe"
+        "layout_enabled"
     }
     .into();
     Ok(Cluster {
@@ -99,6 +99,85 @@ pub(super) async fn save(tx: &mut q::Tx<'_>, mut value: Cluster) -> Result<Clust
         Json(value.policy),
         Json(value.manifest),
     ))
+}
+
+async fn group_preview(
+    backend: &Backend,
+    tx: &mut q::Tx<'_>,
+    value: &Cluster,
+    ids: &[Uuid],
+) -> Result<GroupPreview> {
+    use std::collections::{HashMap, HashSet};
+    let layout = &value.policy.layout;
+    if !layout.supported() {
+        return Ok(GroupPreview::denied("unsupported_layout", None));
+    }
+    if ids.is_empty() || !ids.len().is_multiple_of(layout.width()) {
+        return Ok(GroupPreview::denied("incomplete_group", None));
+    }
+    let targets = q::targets(backend, tx, Some(value.id), None, false).await?;
+    let reserved: HashMap<_, _> = super::queries::storage_capacity::totals(value.id)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .collect();
+    let excluded: HashSet<_> = super::queries::storage_move::excluded(value.id)
+        .fetch_all(&mut **tx)
+        .await?
+        .into_iter()
+        .collect();
+    let now = chrono::Utc::now().timestamp_micros();
+    let mut plan = GroupPreview::default();
+    for group in ids.chunks(layout.width()) {
+        let mut domains = HashSet::new();
+        let mut least = u64::MAX;
+        for id in group {
+            let deny = |why| Ok(GroupPreview::denied(why, Some(*id)));
+            let Some(member) = value.manifest.members.iter().find(|m| m.media_id == *id) else {
+                return deny("not_member");
+            };
+            if member.topology.purpose != "primary"
+                || member.state != "available"
+                || excluded.contains(id)
+                || value.manifest.groups.iter().any(|g| {
+                    g.members.contains(id) || g.replacing.as_ref().is_some_and(|r| r.target == *id)
+                })
+            {
+                return deny("member_busy");
+            }
+            if (layout.parity_shards > 0 || layout.extra_copies > 0)
+                && !domains.insert(&member.topology.storage_group)
+            {
+                return deny("same_group");
+            }
+            let Some(t) = targets.iter().find(|t| t.device.media_id == *id) else {
+                return deny("member_offline");
+            };
+            let cap = &t.device.announcement.capacity;
+            if t.run.is_none() || t.expires <= now || now - t.device.observed_at >= 15_000_000 {
+                return deny("member_offline");
+            }
+            if !cap.accounting_ready
+                || !t
+                    .run
+                    .is_some_and(|run| cap.accounting.is_some_and(|stamp| stamp.boot == run.boot))
+            {
+                return deny("awaiting_capacity");
+            }
+            let free = cap
+                .writable()
+                .saturating_sub(reserved.get(id).copied().unwrap_or(0).max(0) as u64);
+            if free < u64::from(layout.stripe_bytes) {
+                return deny("member_full");
+            }
+            least = least.min(free);
+        }
+        plan.groups += 1;
+        plan.logical_bytes = plan
+            .logical_bytes
+            .saturating_add(least.saturating_mul(u64::from(layout.data_shards)));
+    }
+    Ok(plan)
 }
 
 fn validate_ids(ids: &[Uuid]) -> Result<()> {
@@ -551,7 +630,7 @@ impl StorageClusters for Backend {
             revision: manifest.revision,
             policy,
             manifest,
-            state: "waiting_probe".into(),
+            state: "layout_enabled".into(),
         };
         ensure!(
             q::recovered_count(catalog).fetch_one(&mut *tx).await? == anchor.revision,
@@ -1043,6 +1122,85 @@ impl StorageClusters for Backend {
         Ok(Some(step))
     }
 
+    async fn health(&self, principal: &Principal, id: Uuid) -> Result<Health> {
+        let mut tx = q::begin(self).await?;
+        q::admin(&mut tx, principal).await?;
+        let value = cluster(q::cluster(id).fetch_one(&mut *tx).await?)?;
+        let targets = q::targets(self, &mut tx, Some(id), None, false).await?;
+        let now = chrono::Utc::now().timestamp_micros();
+        let reserved = super::queries::storage_capacity::totals(id)
+            .fetch_all(&mut *tx)
+            .await?
+            .into_iter()
+            .collect();
+        let status =
+            super::storage_capacity::observations(&mut tx, &value, &targets, &reserved, now)
+                .await?;
+        let primary: Vec<_> = value
+            .manifest
+            .members
+            .iter()
+            .filter(|m| {
+                m.topology.purpose == "primary"
+                    && m.state == "available"
+                    && status.get(&m.media_id).is_some_and(|s| s.online)
+            })
+            .collect();
+        let members = primary.iter().map(|m| m.media_id).collect();
+        let (tracked, readable, fully_protected, pending_bytes, complete_copies) =
+            q::protection(id, members).fetch_one(&mut *tx).await?;
+        let selected = if value
+            .manifest
+            .groups
+            .iter()
+            .any(|g| g.layout == value.policy.layout && g.replacing.is_none())
+        {
+            placement::Table::new(&value)?
+                .select(Uuid::nil(), None, 1, &status, None)
+                .ok()
+        } else {
+            None
+        };
+        let all_groups_online = value.manifest.groups.iter().all(|g| {
+            g.members
+                .iter()
+                .all(|id| primary.iter().any(|m| m.media_id == *id))
+        });
+        let state = if value.manifest.members.is_empty() {
+            "waiting_members"
+        } else if value.manifest.groups.is_empty() {
+            "waiting_layout"
+        } else if readable < tracked {
+            "incomplete"
+        } else if fully_protected < tracked && all_groups_online {
+            "synchronizing"
+        } else if value.manifest.takeover_epoch > 1 && tracked == 0 {
+            "awaiting_recovery"
+        } else if !all_groups_online {
+            "degraded"
+        } else {
+            "healthy"
+        };
+        let result = Health {
+            state: state.into(),
+            checked_at: now,
+            tracked,
+            readable,
+            fully_protected,
+            pending_bytes,
+            complete_copies,
+            online_primary: primary.len(),
+            primary_domains: primary
+                .iter()
+                .map(|m| &m.topology.storage_group)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            effective_acknowledgement: selected.map(|s| s.acknowledgement),
+        };
+        tx.commit().await?;
+        Ok(result)
+    }
+
     async fn space(&self, principal: &Principal, id: Uuid) -> Result<Space> {
         let mut tx = q::begin(self).await?;
         q::admin(&mut tx, principal).await?;
@@ -1164,6 +1322,7 @@ impl StorageClusters for Backend {
         );
         let result = Overview {
             defaults: Policy::default(),
+            layouts: Layout::catalog(),
             runs: super::queries::storage_runs::list()
                 .fetch_all(&mut *tx)
                 .await?,
@@ -1207,6 +1366,10 @@ impl StorageClusters for Backend {
     async fn create(&self, principal: &Principal, key: &Key, input: Create) -> Result<Cluster> {
         crate::config::storage::label(&input.name, "cluster name")?;
         input.policy.validate()?;
+        ensure!(
+            input.policy.layout.supported(),
+            s3s::s3_error!(NotImplemented, "unsupported storage layout")
+        );
         let mut tx = q::begin(self).await?;
         q::admin(&mut tx, principal).await?;
         ensure!(
@@ -1245,6 +1408,10 @@ impl StorageClusters for Backend {
     async fn update(&self, principal: &Principal, id: Uuid, input: Update) -> Result<Cluster> {
         crate::config::storage::label(&input.name, "cluster name")?;
         input.policy.validate()?;
+        ensure!(
+            input.policy.layout.supported(),
+            s3s::s3_error!(NotImplemented, "unsupported storage layout")
+        );
         let mut tx = q::begin(self).await?;
         q::admin(&mut tx, principal).await?;
         let mut value = current(&mut tx, id, input.revision).await?;
@@ -1308,6 +1475,21 @@ impl StorageClusters for Backend {
         Ok(value)
     }
 
+    async fn preview_groups(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        input: Members,
+    ) -> Result<GroupPreview> {
+        validate_ids(&input.media_ids)?;
+        let mut tx = q::begin(self).await?;
+        q::admin(&mut tx, principal).await?;
+        let value = current(&mut tx, id, input.revision).await?;
+        let result = group_preview(self, &mut tx, &value, &input.media_ids).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
+
     async fn enable_groups(
         &self,
         principal: &Principal,
@@ -1319,17 +1501,7 @@ impl StorageClusters for Backend {
         q::admin(&mut tx, principal).await?;
         let mut value = cluster(q::cluster(id).fetch_one(&mut *tx).await?)?;
         ensure!(input.revision > 0, Error::OperationAborted);
-        ensure!(
-            value.policy.layout.data_shards == 1
-                && value.policy.layout.parity_shards == 0
-                && value.policy.layout.extra_copies == 1,
-            s3s::s3_error!(NotImplemented, "only the two-copy layout is available")
-        );
         let width = value.policy.layout.width();
-        ensure!(
-            input.media_ids.len().is_multiple_of(width),
-            s3s::s3_error!(InvalidArgument, "select complete layout groups")
-        );
         if input.media_ids.chunks(width).all(|members| {
             value
                 .manifest
@@ -1355,33 +1527,9 @@ impl StorageClusters for Backend {
             return Ok(value);
         }
         ensure!(value.revision == input.revision, Error::OperationAborted);
-        for media in &input.media_ids {
-            let member = value
-                .manifest
-                .members
-                .iter()
-                .find(|m| m.media_id == *media)
-                .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
-            ensure!(
-                !super::queries::storage_move::occupied(*media, *media)
-                    .fetch_one(&mut *tx)
-                    .await?
-                    && member.state == "available"
-                    && !super::queries::node_handoff::gate(member.node_id)
-                        .fetch_one(&mut *tx)
-                        .await?,
-                Error::NodeInactive
-            );
-            let observed = device(q::device(*media).fetch_one(&mut *tx).await?);
-            ensure!(
-                q::node_active(&mut tx, member.node_id).await?
-                    && observed.announcement.capacity.writable()
-                        >= u64::from(value.policy.layout.stripe_bytes),
-                s3s::s3_error!(
-                    InvalidRequest,
-                    "every selected storage needs room for a stripe"
-                )
-            );
+        let preview = group_preview(self, &mut tx, &value, &input.media_ids).await?;
+        if let Some(reason) = preview.reason {
+            return Err(s3s::s3_error!(InvalidRequest, "{reason}").into());
         }
         for members in input.media_ids.chunks(width) {
             value.manifest.groups.push(Group {

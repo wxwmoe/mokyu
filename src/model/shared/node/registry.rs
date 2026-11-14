@@ -313,6 +313,20 @@ async fn snapshot(tx: &mut q::Tx<'_>, lease: &Lease, node: Uuid) -> Result<Snaps
 
 #[async_trait::async_trait]
 impl NodeSessions for Backend {
+    async fn control_handoff(
+        &self,
+        state: &NodeState,
+        key: &Key,
+    ) -> Result<Option<crate::model::node::HandoffRow>> {
+        ensure!(state.role == "control", Error::NodeAuthentication);
+        let mut tx = q::begin(self).await?;
+        authenticated(&mut tx, state, key).await?;
+        let row = super::queries::node_handoff::row(state.node_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
     async fn handoff(
         &self,
         principal: &Principal,

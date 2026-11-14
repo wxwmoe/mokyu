@@ -217,6 +217,19 @@ impl ClusterStore for Backend {
 
 #[async_trait::async_trait]
 impl crate::model::cluster::NodeSessions for Backend {
+    async fn control_handoff(
+        &self,
+        state: &crate::cluster::NodeState,
+        key: &crate::content::codec::Key,
+    ) -> anyhow::Result<Option<crate::model::node::HandoffRow>> {
+        let mut tx = self.pool.begin().await?;
+        super::super::transactions::validate_node(&mut tx, state, "control", key).await?;
+        let row = super::node_handoff::row(state.node_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(row)
+    }
     async fn handoff(
         &self,
         principal: &Principal,

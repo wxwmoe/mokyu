@@ -26,6 +26,17 @@ pub(super) async fn repair(
     }))
 }
 
+#[utoipa::path(get, operation_id="storage_cluster_health", path="/api/v1/storage-clusters/{id}/health", params(("id"=Uuid,Path)), responses((status=200,body=crate::model::storage_cluster::Health)))]
+pub(super) async fn health(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<crate::model::storage_cluster::Health>, HttpError> {
+    Ok(Json(
+        app.storage_clusters.health(&actor.principal, id).await?,
+    ))
+}
+
 #[utoipa::path(get, operation_id="storage_cluster_space", path="/api/v1/storage-clusters/{id}/space", params(("id"=Uuid,Path)), responses((status=200,body=crate::model::storage_cluster::Space)))]
 pub(super) async fn space(
     State(app): State<Arc<App>>,
@@ -231,6 +242,20 @@ pub(super) async fn members(
     Ok(Json(
         app.storage_clusters
             .add_members(&actor.principal, id, input)
+            .await?,
+    ))
+}
+
+#[utoipa::path(post, operation_id="storage_cluster_preview_groups", path="/api/v1/storage-clusters/{id}/groups/preview", params(("id"=Uuid,Path)), request_body=Members, responses((status=200,body=crate::model::storage_cluster::GroupPreview)))]
+pub(super) async fn preview_groups(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<Members>,
+) -> Result<Json<crate::model::storage_cluster::GroupPreview>, HttpError> {
+    Ok(Json(
+        app.storage_clusters
+            .preview_groups(&actor.principal, id, input)
             .await?,
     ))
 }

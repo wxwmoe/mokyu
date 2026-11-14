@@ -30,7 +30,7 @@ const detail = useQuery({ queryKey: ['cluster-node-status', selected], enabled: 
 const runtime = useQuery({ queryKey: ['runtime-insights'], queryFn: ({ signal }) => api<Runtime>('/api/v1/usage/runtime', { signal }), refetchInterval: 15_000 })
 const history = useQuery({ queryKey: ['cluster-node-runtime', selected], enabled: computed(() => !!selected.value), queryFn: ({ signal }) => api<components['schemas']['NodeRuntime']>(`/api/v1/cluster/nodes/${encodeURIComponent(selected.value)}/runtime`, { signal }), refetchInterval: () => selected.value ? 30_000 : false })
 const nodeRequests = computed(() => (history.data.value?.history || []).map((p, i, all) => { const before = all[i - 1], seconds = before ? p.uptime_seconds - before.uptime_seconds : 0; return { at: p.received_at, epoch: p.boot_id, value: before?.boot_id === p.boot_id && seconds > 0 && seconds <= p.interval_seconds * 3 && Number(p.point.requests) >= Number(before.point.requests) ? (Number(p.point.requests) - Number(before.point.requests)) / seconds : null } }))
-type Snapshot = { work?: string; runtime?: { started_at: string; uptime_seconds: number; http: Record<string, { active: number; started: number; failed: number }> }; process_memory?: { rss_bytes: number | null }; db_pool_idle?: number; db_pool_size?: number; cache?: Record<string, number>; response_cache?: Record<string, unknown>; compression?: Record<string, unknown>; read_replica?: Record<string, unknown> | null; io?: { backend_queues: Record<string, { running: number; limit: number; queued: Record<string, number>; oldest_wait_seconds: number }> } }
+type Snapshot = { control_operations?: number; work?: string; runtime?: { started_at: string; uptime_seconds: number; http: Record<string, { active: number; started: number; failed: number }> }; process_memory?: { rss_bytes: number | null }; db_pool_idle?: number; db_pool_size?: number; cache?: Record<string, number>; response_cache?: Record<string, unknown>; compression?: Record<string, unknown>; read_replica?: Record<string, unknown> | null; io?: { backend_queues: Record<string, { running: number; limit: number; queued: Record<string, number>; oldest_wait_seconds: number }> } }
 const snapshot = computed(() => detail.data.value?.status as Snapshot | null)
 const connection = computed(() => detail.data.value?.connection)
 const handoff = computed(() => detail.data.value?.handoff), changing = ref(false)
@@ -92,6 +92,8 @@ function refresh() { void overview.refetch(); void nodes.refetch(); void runtime
       <section v-if="handoff" class="node-detail-section node-handoff">
         <h3>{{ t('nodeHandoff') }} <span class="badge node-state" role="status" :data-tone="nodeTone(handoff.state)">{{ t('handoff_' + handoff.state) }}</span></h3>
         <p class="field-help">{{ t('handoffHint_' + handoff.state) }}</p>
+        <p v-if="detail.data.value.node.role === 'control' && !singleControl" class="field-help">{{ t('handoffPeerControl') }}</p>
+        <dl v-if="handoff.state === 'preparing' && snapshot?.control_operations != null" class="facts"><dt>{{ t('handoffControlOperations') }}</dt><dd>{{ snapshot.control_operations }}</dd></dl>
         <p v-if="handoff.damaged_tails" class="error">{{ t('handoffDamaged', { count: handoff.damaged_tails }) }}</p>
         <p v-if="handoff.state === 'preparing' && handoff.pending_bytes" class="field-help">{{ t('handoffBytes', { size: bytes(handoff.pending_bytes) }) }}</p>
         <RouterLink v-if="handoff.storage" to="/storage-clusters">{{ t('scMaintenance') }}</RouterLink>

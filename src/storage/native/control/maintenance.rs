@@ -20,7 +20,9 @@ impl Control {
         pool: Arc<Pool>,
     ) -> Result<()> {
         loop {
-            let delay = if app.writable().is_ok() {
+            let delay = if let Some(_control) = app.control_admission.enter()
+                && app.writable().is_ok()
+            {
                 match self.clusters.next_run().await {
                     Ok(Some(item)) => {
                         let result=async {

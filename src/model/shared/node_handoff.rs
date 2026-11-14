@@ -3,7 +3,6 @@ use super::{
     queries::{
         node_handoff as q,
         storage_cluster::{Tx, admin},
-        storage_payload::begin,
     },
 };
 use crate::{
@@ -22,14 +21,22 @@ pub(super) async fn manage(
     node: Uuid,
     input: Option<HandoffInput>,
 ) -> Result<Handoff> {
-    let mut tx = begin(backend).await?;
+    let mut tx = if input.is_some() {
+        super::queries::storage_cluster::begin(backend).await?
+    } else {
+        super::queries::storage_payload::begin(backend).await?
+    };
     admin(&mut tx, principal).await?;
     let (role, enabled) = q::role(node)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(Error::NodeInactive)?;
     ensure!(
-        enabled && matches!(role.as_str(), "data" | "worker" | "node" | "storage"),
+        enabled
+            && matches!(
+                role.as_str(),
+                "control" | "data" | "worker" | "node" | "storage"
+            ),
         Error::NodeInactive
     );
     let mut row = q::row(node).fetch_optional(&mut *tx).await?;
@@ -47,6 +54,15 @@ pub(super) async fn manage(
             _ => return Err(Error::OperationAborted.into()),
         };
         if next != current {
+            if role == "control" && next == "preparing" {
+                ensure!(
+                    q::other_control(node).fetch_one(&mut *tx).await?,
+                    s3s::s3_error!(
+                        InvalidRequest,
+                        "another ready control is required before this control can go offline"
+                    )
+                );
+            }
             let operation = Uuid::now_v7();
             if row.is_some() {
                 ensure!(
@@ -60,7 +76,7 @@ pub(super) async fn manage(
             } else {
                 q::insert(node, operation, next).execute(&mut *tx).await?;
             }
-            if next == "preparing" && role != "storage" {
+            if next == "preparing" && !matches!(role.as_str(), "control" | "storage") {
                 q::tails(node).execute(&mut *tx).await?;
             }
             row = q::row(node).fetch_optional(&mut *tx).await?;
@@ -70,14 +86,15 @@ pub(super) async fn manage(
         || ("serving".into(), None, 0),
         |row| (row.state, Some(row.operation), row.revision),
     );
-    let (pending, (pending_bytes, damaged_tails)) = if state == "preparing" && role != "storage" {
-        (
-            q::counts(&mut tx, node).await?,
-            q::details(node).fetch_one(&mut *tx).await?,
-        )
-    } else {
-        (NodeDrain::default(), (0, 0))
-    };
+    let (pending, (pending_bytes, damaged_tails)) =
+        if state == "preparing" && !matches!(role.as_str(), "control" | "storage") {
+            (
+                q::counts(&mut tx, node).await?,
+                q::details(node).fetch_one(&mut *tx).await?,
+            )
+        } else {
+            (NodeDrain::default(), (0, 0))
+        };
     let storage = if role == "storage" && state == "preparing" {
         Some(storage(&mut tx, node).await?)
     } else {
@@ -144,6 +161,14 @@ pub(super) async fn observed(tx: &mut Tx<'_>, node: Uuid, report: &NodeReport) -
     let (role, _) = q::role(node).fetch_one(&mut **tx).await?;
     let next = match row.state.as_str() {
         "resuming" => "serving",
+        "preparing" if role == "control" => {
+            if report.status["control_operations"].as_u64() != Some(0)
+                || report.status["active_streams"].as_u64() != Some(0)
+            {
+                return Ok(());
+            }
+            "offline_ready"
+        }
         "preparing" if role == "storage" => {
             if report.status["storage_admission_closed"] != true
                 || report.status["storage_streams"].as_u64() != Some(0)

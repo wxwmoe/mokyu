@@ -13,7 +13,9 @@ async fn scan(app: Arc<App>) -> Result<()> {
         let wake = app.wake_maintenance.notified();
         tokio::pin!(wake);
         wake.as_mut().enable();
-        if app.writable().is_ok() {
+        if let Some(_control) = app.control_admission.enter()
+            && app.writable().is_ok()
+        {
             match app.journal.seed_page(128).await {
                 Ok(true) => {
                     tokio::task::yield_now().await;
