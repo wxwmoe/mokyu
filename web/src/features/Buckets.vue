@@ -13,6 +13,7 @@ import CreateBucket from '../components/CreateBucket.vue'
 import BucketLifecycle from '../components/BucketLifecycle.vue'
 import BucketRedundancy from '../components/BucketRedundancy.vue'
 import BucketVersions from '../components/BucketVersions.vue'
+import BucketTimeRecovery from '../components/BucketTimeRecovery.vue'
 import BucketTiering from '../components/BucketTiering.vue'
 import BucketMirroring from '../components/BucketMirroring.vue'
 import BucketImages from '../components/BucketImages.vue'
@@ -113,7 +114,7 @@ onBeforeUnmount(() => { window.removeEventListener('beforeunload', beforeUnload)
         <TabsContent value="website"><header class="bucket-section-intro"><h2>{{ t('bucketWebsite') }}</h2><p class="field-help">{{ t('websiteHint') }}</p></header><UiCheckbox v-model="draft.website_enabled" :label="t('enableWebsite')" /><label class="field"><span>{{ t('indexDocument') }}</span><input v-model="draft.index_document" maxlength="255" placeholder="index.html"></label><label class="field"><span>{{ t('errorDocument') }}</span><input v-model="draft.error_document" maxlength="1024" placeholder="404.html"></label><p class="info-callout">{{ t('websitePublicHint') }}</p></TabsContent>
       </fieldset>
       <TabsContent value="redundancy"><BucketRedundancy :key="id" :bucket="settings.data.value.bucket" :buckets="buckets.data.value || []" /></TabsContent>
-      <TabsContent value="history"><BucketVersions :key="id" :bucket="settings.data.value.bucket"/></TabsContent>
+      <TabsContent value="history"><BucketVersions :key="id" :bucket="settings.data.value.bucket"/><BucketTimeRecovery v-if="admin" :key="id" :bucket="settings.data.value.bucket" :buckets="buckets.data.value || []"/></TabsContent>
       <TabsContent value="tiering"><BucketTiering :key="id" :bucket="settings.data.value.bucket" /></TabsContent>
       <TabsContent value="mirroring"><BucketMirroring ref="mirroring" :key="id" :bucket="settings.data.value.bucket" @dirty="mirroringDirty=$event" /></TabsContent>
       <TabsContent value="images"><BucketImages :key="id" :bucket="settings.data.value.bucket" @dirty="imagesDirty=$event"/></TabsContent>

@@ -596,3 +596,10 @@ impl JournalStore for Backend {
         Ok(scanned)
     }
 }
+
+pub(in super::super) fn seed_time_window(bucket: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq+1,j.generation,'put',CAST('~w' AS BLOB),NULL,NULL,json_object('size',0,'etag','','metadata',json_object(),'checksums',json_object(),'payload','chunks','modified_us',0,'history',json_object('seconds',b.seconds,'floor',b.floor_us,'gaps',json(b.gaps))),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id JOIN bucket_time_windows b ON b.bucket_id=j.bucket_id WHERE b.bucket_id=?").bind(bucket)
+}
+pub(in super::super) fn seed_time_points(bucket: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq+ROW_NUMBER() OVER (ORDER BY v.object_key,v.seq),j.generation,'put',CAST(('~t/' || v.seq || '/' || v.object_key) AS BLOB),v.stream_id,s.payload_revision,json_object('size',COALESCE(s.size,0),'etag',COALESCE(s.etag,''),'metadata',json(COALESCE(s.metadata,'{}')),'checksums',json(COALESCE(s.checksums,'{}')),'payload',COALESCE(s.payload_type,'chunks'),'modified_us',v.seen_us,'history',json_object('tick',v.seq,'time',v.seen_us,'marker',CASE WHEN v.stream_id IS NULL THEN 1 ELSE 0 END)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id JOIN object_time_points v ON v.bucket_id=j.bucket_id LEFT JOIN streams s ON s.id=v.stream_id WHERE j.bucket_id=?").bind(bucket)
+}

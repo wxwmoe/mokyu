@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261114202600.
+-- Generated from the complete postgres migration chain through 20261114231000.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -48,6 +48,18 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.capture_time_point() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF (TG_OP='INSERT' AND NEW.stream_id IS NULL) OR (TG_OP='UPDATE' AND OLD.stream_id IS NOT DISTINCT FROM NEW.stream_id) THEN RETURN NEW; END IF;
+    PERFORM 1 FROM buckets WHERE id=NEW.bucket_id FOR SHARE;
+    UPDATE time_restore_items SET target_changed=TRUE WHERE target_key=NEW.object_key AND item_state IN ('add','replace','remove') AND plan_id IN (SELECT id FROM time_restore_plans WHERE target_bucket=NEW.bucket_id AND phase IN ('preview','running'));
+    UPDATE bucket_time_windows SET last_us=GREATEST(last_us+1,(extract(epoch FROM clock_timestamp())*1000000)::bigint),seq=seq+1 WHERE bucket_id=NEW.bucket_id;
+    IF FOUND THEN INSERT INTO object_time_points(bucket_id,object_key,seq,seen_us,stream_id) SELECT bucket_id,NEW.object_key,seq,last_us,NEW.stream_id FROM bucket_time_windows WHERE bucket_id=NEW.bucket_id; END IF;
+    RETURN NEW;
+END $$;
+
 CREATE FUNCTION public.catalog_category(key text, mime text) RETURNS text
     LANGUAGE sql IMMUTABLE
     AS $_$
@@ -87,6 +99,15 @@ BEGIN
         catalog_type=coalesce(NEW.metadata->>'content_type','application/octet-stream'),
         catalog_category=catalog_category(object_key,coalesce(NEW.metadata->>'content_type','application/octet-stream')),
         catalog_public=NEW.public_read WHERE stream_id=NEW.id;
+    RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.charge_time_stream() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN PERFORM quota_adjust(NEW.bucket_id,NEW.bytes,0,0,0);
+    ELSE PERFORM quota_adjust(OLD.bucket_id,-OLD.bytes,0,0,0); END IF;
     RETURN NULL;
 END $$;
 
@@ -255,6 +276,38 @@ BEGIN
         PERFORM journal_capture(NEW.bucket_id,NEW.object_key,NEW.id);
     END IF;
     RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.journal_time_insert_fn() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE journal SMALLINT;
+BEGIN
+    SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id FOR SHARE;
+    IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.bucket_id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'put',('~t/' || NEW.seq || '/' || NEW.object_key),NEW.stream_id,s.payload_revision,jsonb_build_object('size',COALESCE(s.size,0),'etag',COALESCE(s.etag,''),'metadata',COALESCE(s.metadata,'{}'::jsonb),'checksums',COALESCE(s.checksums,'{}'::jsonb),'payload',COALESCE(s.payload_type,'chunks'),'modified_us',NEW.seen_us,'history',jsonb_build_object('tick',NEW.seq,'time',NEW.seen_us,'marker',CASE WHEN NEW.stream_id IS NULL THEN 1 ELSE 0 END)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id LEFT JOIN streams s ON s.id=NEW.stream_id WHERE j.bucket_id=NEW.bucket_id;
+    ELSIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.bucket_id;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.journal_time_remove_fn() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE journal SMALLINT;
+BEGIN
+    SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id FOR SHARE;
+    IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=OLD.bucket_id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'delete',('~t/' || OLD.seq || '/' || OLD.object_key),NULL,NULL,NULL,TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id WHERE j.bucket_id=OLD.bucket_id;
+    ELSIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=OLD.bucket_id;
+    END IF;
+    RETURN OLD;
 END
 $$;
 
@@ -754,6 +807,7 @@ BEGIN
     owner:=coalesce(upload,s);
     IF NOT EXISTS(SELECT 1 FROM quota_reservations WHERE id=owner) THEN
         SELECT o.stream_id,st.size INTO old_id,old_size FROM objects o JOIN streams st ON st.id=o.stream_id WHERE o.bucket_id=info.bucket_id AND o.object_key=info.object_key;
+        IF old_id IS NOT NULL AND EXISTS(SELECT 1 FROM object_time_points WHERE bucket_id=info.bucket_id AND stream_id=old_id) THEN old_id:=NULL; END IF;
         IF old_id IS NOT NULL AND EXISTS(SELECT 1 FROM object_versions v JOIN buckets b ON b.id=v.bucket_id WHERE v.stream_id=old_id AND (b.version_mode=1 OR v.version_id<>'null')) THEN old_id:=NULL; END IF;
         IF old_id IS NOT NULL AND EXISTS(SELECT 1 FROM quota_reservations WHERE bucket_id=info.bucket_id AND object_key=info.object_key AND replaced_stream_id=old_id) THEN old_id:=NULL; END IF;
         INSERT INTO quota_reservations(id,bucket_id,object_key,stream_id,upload_id,replaced_stream_id,credit_bytes)
@@ -877,6 +931,14 @@ BEGIN
     RETURN NEW;
 END
 $$;
+
+CREATE FUNCTION public.retain_time_stream() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    IF TG_TABLE_NAME='objects' THEN INSERT INTO time_retained_streams(bucket_id,stream_id,bytes) SELECT OLD.bucket_id,OLD.stream_id,s.size FROM streams s WHERE s.id=OLD.stream_id AND OLD.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=OLD.bucket_id)=0 AND EXISTS(SELECT 1 FROM object_time_points t WHERE t.bucket_id=OLD.bucket_id AND t.stream_id=OLD.stream_id) ON CONFLICT DO NOTHING; ELSE INSERT INTO time_retained_streams(bucket_id,stream_id,bytes) SELECT OLD.bucket_id,OLD.stream_id,s.size FROM streams s WHERE s.id=OLD.stream_id AND OLD.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=OLD.bucket_id)>0 AND EXISTS(SELECT 1 FROM object_time_points t WHERE t.bucket_id=OLD.bucket_id AND t.stream_id=OLD.stream_id) AND NOT EXISTS(SELECT 1 FROM object_versions v WHERE v.bucket_id=OLD.bucket_id AND v.stream_id=OLD.stream_id) ON CONFLICT DO NOTHING; END IF;
+    RETURN NULL;
+END $$;
 
 CREATE FUNCTION public.validate_pack_member_binding() RETURNS trigger
     LANGUAGE plpgsql
@@ -1009,6 +1071,16 @@ CREATE TABLE public.bucket_tiering (
     CONSTRAINT bucket_tiering_check CHECK ((hot_storage <> cold_storage)),
     CONSTRAINT bucket_tiering_revision_check CHECK ((revision > 0)),
     CONSTRAINT bucket_tiering_state_check CHECK ((state = ANY (ARRAY['active'::text, 'paused'::text, 'draining'::text])))
+);
+
+CREATE TABLE public.bucket_time_windows (
+    bucket_id uuid NOT NULL,
+    seconds bigint NOT NULL,
+    gaps text NOT NULL,
+    floor_us bigint NOT NULL,
+    last_us bigint NOT NULL,
+    seq bigint NOT NULL,
+    CONSTRAINT bucket_time_windows_seconds_check CHECK ((seconds > 0))
 );
 
 CREATE TABLE public.buckets (
@@ -1429,7 +1501,8 @@ CREATE TABLE public.journal_restore_items (
     history_id character varying(32),
     history_seq bigint,
     history_time bigint,
-    history_marker boolean DEFAULT false NOT NULL
+    history_marker boolean DEFAULT false NOT NULL,
+    origin_stream uuid
 );
 
 CREATE TABLE public.journal_restore_orphans (
@@ -2136,6 +2209,14 @@ CREATE TABLE public.notifications (
     CONSTRAINT notifications_check CHECK (((scope = 'object'::text) = (object_key <> ''::text))),
     CONSTRAINT notifications_object_key_check CHECK ((octet_length(object_key) <= 1024)),
     CONSTRAINT notifications_scope_check CHECK ((scope = ANY (ARRAY['object'::text, 'bucket'::text, 'storage'::text])))
+);
+
+CREATE TABLE public.object_time_points (
+    bucket_id uuid NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    seq bigint NOT NULL,
+    seen_us bigint NOT NULL,
+    stream_id uuid
 );
 
 CREATE TABLE public.object_version_clocks (
@@ -3235,6 +3316,39 @@ CREATE TABLE public.tier_scans (
     CONSTRAINT tier_scan_unit CHECK (((unit >= 0) AND (unit <= 2)))
 );
 
+CREATE TABLE public.time_restore_items (
+    plan_id uuid NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    target_key text NOT NULL COLLATE pg_catalog."C",
+    source_stream uuid,
+    target_changed boolean DEFAULT false NOT NULL,
+    expected_stream uuid,
+    item_state text NOT NULL,
+    CONSTRAINT time_restore_items_item_state_check CHECK ((item_state = ANY (ARRAY['add'::text, 'replace'::text, 'remove'::text, 'skip'::text, 'missing'::text, 'done'::text, 'conflict'::text])))
+);
+
+CREATE TABLE public.time_restore_plans (
+    id uuid NOT NULL,
+    source_bucket uuid NOT NULL,
+    target_bucket uuid NOT NULL,
+    worker_token uuid,
+    lease_until_us bigint DEFAULT 0 NOT NULL,
+    request_json text NOT NULL,
+    owner_json text NOT NULL,
+    digest text NOT NULL,
+    cut_seq bigint NOT NULL,
+    at_us bigint NOT NULL,
+    expires_us bigint NOT NULL,
+    phase text NOT NULL,
+    CONSTRAINT time_restore_plans_phase_check CHECK ((phase = ANY (ARRAY['preview'::text, 'running'::text, 'done'::text, 'expired'::text])))
+);
+
+CREATE TABLE public.time_retained_streams (
+    bucket_id uuid NOT NULL,
+    stream_id uuid NOT NULL,
+    bytes bigint NOT NULL
+);
+
 CREATE TABLE public.token_bucket_grants (
     token_id uuid CONSTRAINT token_grants_token_id_not_null NOT NULL,
     bucket_id uuid CONSTRAINT token_grants_bucket_id_not_null NOT NULL,
@@ -3579,6 +3693,9 @@ ALTER TABLE ONLY public.bucket_mirroring
 ALTER TABLE ONLY public.bucket_tiering
     ADD CONSTRAINT bucket_tiering_pkey PRIMARY KEY (bucket_id);
 
+ALTER TABLE ONLY public.bucket_time_windows
+    ADD CONSTRAINT bucket_time_windows_pkey PRIMARY KEY (bucket_id);
+
 ALTER TABLE ONLY public.buckets
     ADD CONSTRAINT buckets_id_project_id_key UNIQUE (id, project_id);
 
@@ -3915,6 +4032,9 @@ ALTER TABLE ONLY public.notifications
 ALTER TABLE ONLY public.notifications
     ADD CONSTRAINT notifications_transaction_id_scope_resource_id_object_key_key UNIQUE (transaction_id, scope, resource_id, object_key);
 
+ALTER TABLE ONLY public.object_time_points
+    ADD CONSTRAINT object_time_points_pkey PRIMARY KEY (bucket_id, object_key, seq);
+
 ALTER TABLE ONLY public.object_version_clocks
     ADD CONSTRAINT object_version_clocks_pkey PRIMARY KEY (bucket_id);
 
@@ -4205,6 +4325,15 @@ ALTER TABLE ONLY public.tier_moves
 
 ALTER TABLE ONLY public.tier_scans
     ADD CONSTRAINT tier_scans_pkey PRIMARY KEY (bucket_id);
+
+ALTER TABLE ONLY public.time_restore_items
+    ADD CONSTRAINT time_restore_items_pkey PRIMARY KEY (plan_id, object_key);
+
+ALTER TABLE ONLY public.time_restore_plans
+    ADD CONSTRAINT time_restore_plans_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.time_retained_streams
+    ADD CONSTRAINT time_retained_streams_pkey PRIMARY KEY (bucket_id, stream_id);
 
 ALTER TABLE ONLY public.token_external_grants
     ADD CONSTRAINT token_external_grants_pkey PRIMARY KEY (token_id, bucket_id);
@@ -4557,6 +4686,8 @@ CREATE INDEX replica_targets_link ON public.replica_targets USING btree (link_id
 
 CREATE UNIQUE INDEX replica_targets_task ON public.replica_targets USING btree (task_id);
 
+CREATE INDEX restore_item_origin ON public.journal_restore_items USING btree (job, source_bucket, origin_stream);
+
 CREATE INDEX runtime_cluster_time ON public.runtime_samples USING btree (sampled_at DESC) WHERE ((data ->> 'scope'::text) = 'cluster'::text);
 
 CREATE UNIQUE INDEX session_refresh_active ON public.session_refresh_tokens USING btree (session_id) WHERE (revoked_at IS NULL);
@@ -4651,6 +4782,20 @@ CREATE INDEX tier_moves_source ON public.tier_moves USING btree (source_address,
 
 CREATE INDEX tier_scans_due ON public.tier_scans USING btree (next_scan, bucket_id);
 
+CREATE INDEX time_item_next ON public.time_restore_items USING btree (plan_id, item_state, object_key);
+
+CREATE INDEX time_item_stream ON public.time_restore_items USING btree (source_stream);
+
+CREATE INDEX time_item_target ON public.time_restore_items USING btree (target_key, plan_id);
+
+CREATE INDEX time_plan_expiry ON public.time_restore_plans USING btree (phase, expires_us);
+
+CREATE INDEX time_plan_target ON public.time_restore_plans USING btree (target_bucket, phase, id);
+
+CREATE INDEX time_points_clock ON public.object_time_points USING btree (bucket_id, seen_us, seq);
+
+CREATE INDEX time_points_stream ON public.object_time_points USING btree (stream_id);
+
 CREATE INDEX token_bucket_grants_bucket ON public.token_bucket_grants USING btree (bucket_id, token_id);
 
 CREATE INDEX token_external_bucket ON public.token_external_grants USING btree (bucket_id);
@@ -4721,6 +4866,8 @@ CREATE TRIGGER catalog_object BEFORE INSERT OR UPDATE OF stream_id ON public.obj
 
 CREATE TRIGGER catalog_stream AFTER UPDATE OF size, metadata, public_read, created_at ON public.streams FOR EACH ROW WHEN (((new.size IS DISTINCT FROM old.size) OR (new.metadata IS DISTINCT FROM old.metadata) OR (new.public_read IS DISTINCT FROM old.public_read) OR (new.created_at IS DISTINCT FROM old.created_at))) EXECUTE FUNCTION public.catalog_stream();
 
+CREATE TRIGGER charge_time_stream AFTER INSERT OR DELETE ON public.time_retained_streams FOR EACH ROW EXECUTE FUNCTION public.charge_time_stream();
+
 CREATE TRIGGER chunk_encodings_fingerprint BEFORE INSERT OR UPDATE OF storage_id, block_key_id, encryption_algorithm, standalone_compressed ON public.chunk_encodings FOR EACH ROW EXECUTE FUNCTION public.refresh_encoding_fingerprint();
 
 CREATE TRIGGER chunk_locations_storage_binding BEFORE INSERT OR UPDATE OF chunk_id, storage_id ON public.chunk_encodings FOR EACH ROW EXECUTE FUNCTION public.validate_storage_binding();
@@ -4748,6 +4895,10 @@ CREATE TRIGGER journal_drop BEFORE DELETE ON public.buckets FOR EACH ROW EXECUTE
 CREATE TRIGGER journal_insert AFTER INSERT ON public.objects FOR EACH ROW WHEN ((new.stream_id IS NOT NULL)) EXECUTE FUNCTION public.journal_object_change();
 
 CREATE TRIGGER journal_stream AFTER UPDATE OF payload_revision, metadata, checksums, etag, size ON public.streams FOR EACH ROW EXECUTE FUNCTION public.journal_stream_change();
+
+CREATE TRIGGER journal_time_insert AFTER INSERT ON public.object_time_points FOR EACH ROW EXECUTE FUNCTION public.journal_time_insert_fn();
+
+CREATE TRIGGER journal_time_remove AFTER DELETE ON public.object_time_points FOR EACH ROW EXECUTE FUNCTION public.journal_time_remove_fn();
 
 CREATE TRIGGER journal_update AFTER UPDATE ON public.objects FOR EACH ROW WHEN ((old.stream_id IS DISTINCT FROM new.stream_id)) EXECUTE FUNCTION public.journal_object_change();
 
@@ -4819,6 +4970,8 @@ CREATE TRIGGER streams_notify AFTER UPDATE OF public_read, metadata, etag, size,
 
 CREATE TRIGGER tier_location_notice AFTER INSERT OR DELETE OR UPDATE OF generation ON public.tier_locations FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_tier();
 
+CREATE TRIGGER time_capture AFTER INSERT OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.capture_time_point();
+
 CREATE TRIGGER token_authorization BEFORE UPDATE OF system, expires_at, revoked_at ON public.api_tokens FOR EACH ROW EXECUTE FUNCTION public.advance_authorization_revision();
 
 CREATE TRIGGER token_grant_authorization AFTER INSERT OR DELETE OR UPDATE ON public.token_bucket_grants FOR EACH ROW EXECUTE FUNCTION public.invalidate_token_authorization();
@@ -4830,6 +4983,10 @@ CREATE TRIGGER user_authorization BEFORE UPDATE OF role, enabled, password_hash 
 CREATE TRIGGER version_write_receipt AFTER INSERT ON public.object_versions FOR EACH ROW WHEN (((new.seq > 0) AND (new.stream_id IS NOT NULL))) EXECUTE FUNCTION public.version_write_receipt();
 
 CREATE TRIGGER versions_capture AFTER INSERT OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.capture_object_version();
+
+CREATE TRIGGER zz_time_old_head AFTER UPDATE OF stream_id ON public.objects FOR EACH ROW WHEN (((old.stream_id IS DISTINCT FROM new.stream_id) AND (old.stream_id IS NOT NULL))) EXECUTE FUNCTION public.retain_time_stream();
+
+CREATE TRIGGER zz_time_old_version AFTER DELETE ON public.object_versions FOR EACH ROW WHEN ((old.stream_id IS NOT NULL)) EXECUTE FUNCTION public.retain_time_stream();
 
 ALTER TABLE ONLY public.api_tokens
     ADD CONSTRAINT api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.web_users(id) ON DELETE CASCADE;
@@ -4848,6 +5005,9 @@ ALTER TABLE ONLY public.bucket_tiering
 
 ALTER TABLE ONLY public.bucket_tiering
     ADD CONSTRAINT bucket_tiering_hot_storage_fkey FOREIGN KEY (hot_storage) REFERENCES public.storages(id);
+
+ALTER TABLE ONLY public.bucket_time_windows
+    ADD CONSTRAINT bucket_time_windows_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.buckets
     ADD CONSTRAINT buckets_project_id_fkey FOREIGN KEY (project_id) REFERENCES public.projects(id);
@@ -5203,6 +5363,12 @@ ALTER TABLE ONLY public.notification_consumers
 ALTER TABLE ONLY public.notification_targets
     ADD CONSTRAINT notification_targets_notification_id_fkey FOREIGN KEY (notification_id) REFERENCES public.notifications(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.object_time_points
+    ADD CONSTRAINT object_time_points_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.bucket_time_windows(bucket_id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.object_time_points
+    ADD CONSTRAINT object_time_points_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id);
+
 ALTER TABLE ONLY public.object_version_clocks
     ADD CONSTRAINT object_version_clocks_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
 
@@ -5553,6 +5719,24 @@ ALTER TABLE ONLY public.tier_moves
 
 ALTER TABLE ONLY public.tier_scans
     ADD CONSTRAINT tier_scans_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.time_restore_items
+    ADD CONSTRAINT time_restore_items_plan_id_fkey FOREIGN KEY (plan_id) REFERENCES public.time_restore_plans(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.time_restore_items
+    ADD CONSTRAINT time_restore_items_source_stream_fkey FOREIGN KEY (source_stream) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.time_restore_plans
+    ADD CONSTRAINT time_restore_plans_source_bucket_fkey FOREIGN KEY (source_bucket) REFERENCES public.buckets(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.time_restore_plans
+    ADD CONSTRAINT time_restore_plans_target_bucket_fkey FOREIGN KEY (target_bucket) REFERENCES public.buckets(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.time_retained_streams
+    ADD CONSTRAINT time_retained_streams_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);
+
+ALTER TABLE ONLY public.time_retained_streams
+    ADD CONSTRAINT time_retained_streams_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id);
 
 ALTER TABLE ONLY public.token_external_grants
     ADD CONSTRAINT token_external_grants_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.external_buckets(id) ON DELETE CASCADE;

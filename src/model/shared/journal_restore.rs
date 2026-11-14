@@ -369,6 +369,7 @@ impl RecoveryStore for Backend {
             history::{Subject, subject},
             journal::record::History,
         };
+        let mut stage_meta = obj.metadata.clone();
         let (logical, history_id, order, when, marker, count) =
             match (subject(key)?, obj.history.as_ref()) {
                 (Subject::Current(logical), None) => (logical, None, None, None, false, 1),
@@ -383,6 +384,25 @@ impl RecoveryStore for Backend {
                     logical,
                     Some(id),
                     Some(*order),
+                    Some(*time),
+                    *marker == 1,
+                    0,
+                ),
+                (
+                    Subject::Window,
+                    Some(History::Window {
+                        seconds,
+                        floor,
+                        gaps,
+                    }),
+                ) => {
+                    stage_meta = serde_json::to_value(gaps)?;
+                    ("", Some("window"), Some(*seconds), Some(*floor), true, 0)
+                }
+                (Subject::Point(logical, _), Some(History::Point { tick, time, marker })) => (
+                    logical,
+                    Some("point"),
+                    Some(*tick),
                     Some(*time),
                     *marker == 1,
                     0,
@@ -412,12 +432,13 @@ impl RecoveryStore for Backend {
             marker,
             obj.size,
             &obj.etag,
-            &obj.metadata,
+            &stage_meta,
             &obj.checksums,
             &obj.payload,
             obj.modified_us,
             mime,
             q::category(logical, mime),
+            obj.origin,
         )
         .execute(&mut *tx)
         .await?;
@@ -486,6 +507,35 @@ impl RecoveryStore for Backend {
             )
             .execute(&mut *tx)
             .await?;
+        }
+        if let Some((seconds, first, prior_gaps)) = q::time_window_record(job, source)
+            .fetch_optional(&mut *tx)
+            .await?
+        {
+            super::queries::time_recovery::start(bucket, seconds, first, first)
+                .execute(&mut *tx)
+                .await?;
+            q::time_rows(bucket, bucket, job, source)
+                .execute(&mut *tx)
+                .await?;
+            q::time_clock(bucket).execute(&mut *tx).await?;
+            use super::queries::time_recovery as clock;
+            let (_, _, last, _) = clock::window(bucket).fetch_one(&mut *tx).await?;
+            let now = clock::now().fetch_one(&mut *tx).await?.max(last);
+            let mut gaps: Vec<crate::model::time_recovery::Gap> =
+                serde_json::from_str(&prior_gaps)?;
+            let since = gaps.last().map_or(last, |g| last.max(g.before_us));
+            if now > since {
+                gaps.push(crate::model::time_recovery::Gap {
+                    after_us: since,
+                    before_us: now,
+                });
+            }
+            gaps.retain(|g| g.before_us > first.max(now.saturating_sub(seconds * 1_000_000)));
+            clock::store_gaps(&serde_json::to_string(&gaps)?, now, bucket)
+                .execute(&mut *tx)
+                .await?;
+            q::retained_time_points(bucket).execute(&mut *tx).await?;
         }
         q::stream_names(job, source, bucket)
             .execute(&mut *tx)

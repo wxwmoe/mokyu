@@ -17,5 +17,6 @@ pub(crate) mod scheduler;
 pub(crate) mod sync;
 pub(crate) mod task;
 mod tiering;
+mod time_recovery;
 
 pub(crate) use crate::model::REQUEST_ID;

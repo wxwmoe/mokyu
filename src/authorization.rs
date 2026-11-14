@@ -141,6 +141,7 @@ impl Principal {
             return Err(s3_error!(AccessDenied).into());
         }
         Ok(Permit {
+            time_step: None,
             principal: self.clone(),
             resources: BTreeMap::from([(bucket, vec![action])]),
         })
@@ -150,18 +151,22 @@ impl Principal {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Permit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) time_step: Option<crate::model::time_recovery::Step>,
     pub principal: Principal,
     pub resources: BTreeMap<Uuid, Vec<Action>>,
 }
 impl Permit {
     pub fn system() -> Self {
         Self {
+            time_step: None,
             principal: Principal::System,
             resources: BTreeMap::new(),
         }
     }
     pub fn for_action(principal: Principal, bucket: Uuid, action: Action) -> Self {
         Self {
+            time_step: None,
             principal,
             resources: BTreeMap::from([(bucket, vec![action])]),
         }

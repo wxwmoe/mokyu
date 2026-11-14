@@ -67,6 +67,7 @@ async fn raw_ranges_are_bound_to_the_verified_source() -> Result<()> {
 fn object_checksums_cover_only_their_declared_scope() -> Result<()> {
     use crate::dump::verify::LogicalDigest;
     let mut attrs = Attributes {
+        origin: None,
         history: None,
         size: 3,
         etag: "900150983cd24fb0d6963f7d28e17f72".into(),

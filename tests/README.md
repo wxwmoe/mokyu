@@ -38,6 +38,8 @@ Each native contract exercises its own interface, transactions and recovery. Use
 
 For Python integration tests start an isolated `fault-injection` build with dedicated local/S3 storage, bucket, chunk key and administrator. Install `boto3` and `requests`, plus `psycopg` for PostgreSQL-specific tests.
 
+For a time recovery smoke test, run `python tests/recovery/time_window.py` with a fresh bucket, the S3 endpoint and credentials used by the other S3 tests, and `MOKYU_TEST_CONFIG` for its administrator CLI. The pre-existing key becomes the baseline; an overwrite must survive copying the earlier bytes to a new prefix.
+
 Lifecycle tests wait for capacity statistics. Set `metrics.refresh_interval` to a short interval such as `2s`; save and restart the test service before running.
 
 Read the module header and `MOKYU_TEST_*` lookups for required settings. Supply credentials through files and keep passwords/S3 secrets out of logs. Recovery suites kill and restart the configured gateway: run them only in dedicated test containers. Never deploy a fault-injection build.

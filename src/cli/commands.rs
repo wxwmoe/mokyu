@@ -173,6 +173,32 @@ pub enum Integrity {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Buckets {
     List,
+    RecoveryWindow {
+        name: String,
+        #[arg(long)]
+        seconds: Option<i64>,
+    },
+    TimePreview {
+        name: String,
+        at: chrono::DateTime<chrono::Utc>,
+        #[arg(value_enum)]
+        scope: crate::model::time_recovery::Scope,
+        #[arg(long, default_value = "")]
+        key: String,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long, default_value = "")]
+        target_prefix: String,
+        #[arg(long)]
+        in_place: bool,
+    },
+    TimeRestore {
+        id: Uuid,
+        #[arg(long, conflicts_with = "after")]
+        digest: Option<String>,
+        #[arg(long)]
+        after: Option<String>,
+    },
     Versioning {
         name: String,
         #[arg(value_enum)]

@@ -784,6 +784,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/time-restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["preview_time_restore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/time-window": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["recovery_window"];
+        put: operations["set_recovery_window"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/transfer": {
         parameters: {
             query?: never;
@@ -2592,6 +2624,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/time-restores/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["time_restore_plan"];
+        put?: never;
+        post: operations["execute_time_restore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/uploads": {
         parameters: {
             query?: never;
@@ -2839,6 +2887,19 @@ export interface components {
             /** Format: uuid */
             id: string;
             name: string;
+        };
+        BucketRecoveryWindow: {
+            /** Format: int64 */
+            earliest_us?: number | null;
+            gaps: components["schemas"]["RecoveryGap"][];
+            /** Format: int64 */
+            latest_us: number;
+            /** Format: int64 */
+            retained_bytes: number;
+            /** Format: int64 */
+            seconds: number;
+            /** Format: int64 */
+            watermark: number;
         };
         BucketSettings: {
             bucket: components["schemas"]["BucketView"];
@@ -4215,6 +4276,16 @@ export interface components {
         RecoverInput: {
             confirm?: boolean;
         };
+        RecoveryGap: {
+            /** Format: int64 */
+            after_us: number;
+            /** Format: int64 */
+            before_us: number;
+        };
+        RecoveryWindowChange: {
+            /** Format: int64 */
+            seconds: number;
+        };
         /** @enum {string} */
         RedundancyAction: "pause" | "resume" | "retry" | "reconcile" | "remove";
         RedundancyCommand: {
@@ -5227,6 +5298,44 @@ export interface components {
             /** Format: int64 */
             revision: number;
         };
+        TimeRestoreConfirmation: {
+            digest: string;
+        };
+        TimeRestoreItem: {
+            key: string;
+            state: string;
+            target: string;
+        };
+        TimeRestorePlan: {
+            counts: {
+                [key: string]: number;
+            };
+            digest: string;
+            /** Format: int64 */
+            expires_us: number;
+            /** Format: uuid */
+            id: string;
+            items: components["schemas"]["TimeRestoreItem"][];
+            next?: string | null;
+            phase: string;
+            request: components["schemas"]["TimeRestoreRequest"];
+            /** Format: uuid */
+            source_bucket: string;
+            /** Format: int64 */
+            watermark: number;
+        };
+        TimeRestoreRequest: {
+            /** Format: date-time */
+            at: string;
+            in_place?: boolean;
+            key?: string;
+            scope: components["schemas"]["TimeRestoreScope"];
+            /** Format: uuid */
+            target_bucket: string;
+            target_prefix?: string;
+        };
+        /** @enum {string} */
+        TimeRestoreScope: "object" | "prefix" | "bucket";
         Toggle: {
             enabled: boolean;
         };
@@ -6919,6 +7028,77 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TierUnitUsage"][];
+                };
+            };
+        };
+    };
+    preview_time_restore: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimeRestoreRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeRestorePlan"];
+                };
+            };
+        };
+    };
+    recovery_window: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketRecoveryWindow"];
+                };
+            };
+        };
+    };
+    set_recovery_window: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoveryWindowChange"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BucketRecoveryWindow"];
                 };
             };
         };
@@ -10270,6 +10450,54 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    time_restore_plan: {
+        parameters: {
+            query?: {
+                after?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeRestorePlan"];
+                };
+            };
+        };
+    };
+    execute_time_restore: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TimeRestoreConfirmation"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimeRestorePlan"];
                 };
             };
         };

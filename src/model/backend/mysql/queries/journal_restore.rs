@@ -315,8 +315,9 @@ pub(in super::super) fn stage<'a>(
     modified: i64,
     mime: &'a str,
     category: &'a str,
+    origin: Option<Uuid>,
 ) -> Statement<'a> {
-    sqlx::query("INSERT INTO journal_restore_items(job,source_bucket,object_key,size,etag,metadata,checksums,payload,modified_us,content_type,category,stage_key,logical_key,history_id,history_seq,history_time,history_marker) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(job).bind(bucket).bind(key.as_bytes()).bind(size).bind(etag).bind(Json(metadata)).bind(Json(sums)).bind(payload).bind(modified).bind(mime).bind(category).bind(identity.as_bytes()).bind(logical.as_bytes()).bind(history_id).bind(order).bind(when).bind(marker)
+    sqlx::query("INSERT INTO journal_restore_items(job,source_bucket,object_key,size,etag,metadata,checksums,payload,modified_us,content_type,category,stage_key,logical_key,history_id,history_seq,history_time,history_marker,origin_stream) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(job).bind(bucket).bind(key.as_bytes()).bind(size).bind(etag).bind(Json(metadata)).bind(Json(sums)).bind(payload).bind(modified).bind(mime).bind(category).bind(identity.as_bytes()).bind(logical.as_bytes()).bind(history_id).bind(order).bind(when).bind(marker).bind(origin)
 }
 
 pub(in super::super) fn range<'a>(
@@ -407,7 +408,7 @@ pub(in super::super) fn version_rows(
     job: Uuid,
     source: Uuid,
 ) -> Statement<'static> {
-    sqlx::query("INSERT INTO object_versions(bucket_id,object_key,seq,version_id,stream_id,modified_us) SELECT ?,i.logical_key,i.history_seq,i.history_id,s.id,i.history_time FROM journal_restore_items i LEFT JOIN streams s ON s.bucket_id=? AND s.object_key=i.stage_key WHERE i.job=? AND i.source_bucket=? AND i.history_id IS NOT NULL AND i.history_id<>'mode'").bind(bucket).bind(owner).bind(job).bind(source)
+    sqlx::query("INSERT INTO object_versions(bucket_id,object_key,seq,version_id,stream_id,modified_us) SELECT ?,i.logical_key,i.history_seq,i.history_id,s.id,i.history_time FROM journal_restore_items i LEFT JOIN streams s ON s.bucket_id=? AND s.object_key=i.stage_key WHERE i.job=? AND i.source_bucket=? AND i.history_id IS NOT NULL AND i.history_id NOT IN ('mode','point','window')").bind(bucket).bind(owner).bind(job).bind(source)
 }
 pub(in super::super) fn version_clock(bucket: Uuid, owner: Uuid) -> Statement<'static> {
     sqlx::query("INSERT INTO object_version_clocks(bucket_id,version_seq) SELECT ?,COALESCE(MAX(seq),0) FROM object_versions WHERE bucket_id=?").bind(bucket).bind(owner)
@@ -536,4 +537,26 @@ pub(in super::super) fn native_pending(storage: Uuid) -> Scalar<'static, Uuid> {
 
 pub(in super::super) fn native_read_only(bucket: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id JOIN journal_restore_scopes p ON p.storage_id=s.id JOIN journal_recoveries j ON j.id=p.job WHERE b.id=? AND s.type='mokyu' AND j.source_storage=j.target_storage AND j.state<>'completed')").bind(bucket)
+}
+
+pub(in super::super) fn time_window_record(
+    job: Uuid,
+    b: Uuid,
+) -> Rows<'static, (i64, i64, String)> {
+    sqlx::query_as("SELECT history_seq,history_time,CONVERT(metadata USING utf8mb4) FROM journal_restore_items WHERE job=? AND source_bucket=? AND history_id='window'").bind(job).bind(b)
+}
+pub(in super::super) fn time_rows(
+    bucket: Uuid,
+    owner: Uuid,
+    job: Uuid,
+    source: Uuid,
+) -> Statement<'static> {
+    sqlx::query("INSERT INTO object_time_points(bucket_id,object_key,seq,seen_us,stream_id) SELECT ?,i.logical_key,i.history_seq,i.history_time,CASE WHEN i.history_marker THEN NULL ELSE COALESCE((SELECT ss.id FROM journal_restore_items alt JOIN streams ss ON ss.object_key=alt.stage_key WHERE ss.bucket_id=s.bucket_id AND alt.job=i.job AND alt.source_bucket=i.source_bucket AND alt.origin_stream=i.origin_stream AND alt.logical_key=i.logical_key AND NOT alt.history_marker ORDER BY CASE WHEN alt.history_id='point' THEN 2 WHEN alt.history_id IS NULL THEN 1 ELSE 0 END,alt.object_key LIMIT 1),s.id) END FROM journal_restore_items i LEFT JOIN streams s ON s.bucket_id=? AND s.object_key=i.stage_key WHERE i.job=? AND i.source_bucket=? AND i.history_id='point'").bind(bucket).bind(owner).bind(job).bind(source)
+}
+pub(in super::super) fn time_clock(b: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE bucket_time_windows SET seq=COALESCE((SELECT MAX(t.seq) FROM object_time_points t WHERE t.bucket_id=bucket_time_windows.bucket_id),0),last_us=COALESCE((SELECT MAX(t.seen_us) FROM object_time_points t WHERE t.bucket_id=bucket_time_windows.bucket_id),floor_us) WHERE bucket_id=?").bind(b)
+}
+
+pub(in super::super) fn retained_time_points(b: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO time_retained_streams(bucket_id,stream_id,bytes) SELECT DISTINCT t.bucket_id,t.stream_id,s.size FROM object_time_points t JOIN streams s ON s.id=t.stream_id WHERE t.bucket_id=? AND NOT EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=t.bucket_id AND o.stream_id=t.stream_id) AND NOT EXISTS(SELECT 1 FROM object_versions v WHERE v.bucket_id=t.bucket_id AND v.stream_id=t.stream_id)").bind(b)
 }

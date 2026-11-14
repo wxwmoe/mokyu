@@ -153,6 +153,7 @@ mod integrity;
 pub(super) use integrity::*;
 pub(super) mod history;
 mod objects;
+pub(super) mod time_recovery;
 pub(super) use objects::*;
 mod metrics;
 pub(super) use metrics::*;

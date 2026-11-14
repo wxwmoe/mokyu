@@ -110,6 +110,7 @@ mod tasks;
 pub(super) use tasks::*;
 pub(super) mod history;
 mod objects;
+pub(super) mod time_recovery;
 pub(super) use objects::*;
 mod buckets;
 pub(super) mod mirroring;

@@ -142,6 +142,9 @@ pub(in super::super) async fn publish_in(
         )
         .await?;
     }
+    if let Some(step) = &authority.time_step {
+        super::super::time_recovery::applied(tx, step, bucket, &object_key, old, false).await?;
+    }
     if !apply_publish(tx, id, bucket, &object_key, old, completion.as_ref()).await? {
         return Ok(false);
     }
@@ -442,6 +445,9 @@ async fn change_object_in(
         complete_media_operation(tx, Some(id)).await?;
         return Ok(false);
     }
+    if let Ok(step) = crate::model::time_recovery::REMOVE.try_with(Clone::clone) {
+        super::super::time_recovery::applied(tx, &step, bucket, object_key, old, true).await?;
+    }
     apply_object_change(tx, bucket, object_key, old, None).await?;
     queries::history::deleted(tx, bucket, object_key, old.is_none()).await?;
     complete_media_operation(tx, None).await?;
@@ -506,6 +512,7 @@ pub(in super::super) async fn change_node_objects(
         revision: change.credential_revision,
     };
     let mut permit = Permit {
+        time_step: None,
         principal,
         resources: Default::default(),
     };

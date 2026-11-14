@@ -255,6 +255,15 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::history::list, super::history::remove))
         .routes(routes!(super::history::content))
         .routes(routes!(super::history::restore))
+        .routes(routes!(
+            super::time_recovery::window,
+            super::time_recovery::set
+        ))
+        .routes(routes!(super::time_recovery::preview))
+        .routes(routes!(
+            super::time_recovery::status,
+            super::time_recovery::run
+        ))
         .routes(routes!(super::media::detail))
         .routes(routes!(super::media::content))
         .routes(routes!(super::media::thumbnail))

@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261114202600.
+-- Generated from the complete mysql migration chain through 20261114231000.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -108,6 +108,18 @@ CREATE TABLE `bucket_tiering` (
   CONSTRAINT `bucket_tiering_chk_1` CHECK ((`revision` > 0)),
   CONSTRAINT `bucket_tiering_chk_2` CHECK ((`state` in (_utf8mb4'active',_utf8mb4'paused',_utf8mb4'draining'))),
   CONSTRAINT `bucket_tiering_chk_3` CHECK ((`hot_storage` <> `cold_storage`))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `bucket_time_windows` (
+  `bucket_id` binary(16) NOT NULL,
+  `seconds` bigint NOT NULL,
+  `gaps` text COLLATE utf8mb4_bin NOT NULL,
+  `floor_us` bigint NOT NULL,
+  `last_us` bigint NOT NULL,
+  `seq` bigint NOT NULL,
+  PRIMARY KEY (`bucket_id`),
+  CONSTRAINT `bucket_time_windows_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `bucket_time_windows_chk_1` CHECK ((`seconds` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `buckets` (
@@ -621,7 +633,9 @@ CREATE TABLE `journal_restore_items` (
   `history_seq` bigint DEFAULT NULL,
   `history_time` bigint DEFAULT NULL,
   `history_marker` tinyint(1) NOT NULL DEFAULT '0',
+  `origin_stream` binary(16) DEFAULT NULL,
   PRIMARY KEY (`job`,`source_bucket`,`object_key`),
+  KEY `restore_item_origin` (`job`,`source_bucket`,`origin_stream`),
   CONSTRAINT `journal_restore_items_ibfk_1` FOREIGN KEY (`job`, `source_bucket`) REFERENCES `journal_restore_buckets` (`job`, `source_bucket`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
@@ -1404,6 +1418,19 @@ CREATE TABLE `notification_consumers` (
   PRIMARY KEY (`node_id`),
   CONSTRAINT `notification_consumers_ibfk_1` FOREIGN KEY (`node_id`) REFERENCES `nodes` (`id`) ON DELETE CASCADE,
   CONSTRAINT `notification_consumers_role` CHECK ((`role` in (_utf8mb4'control',_utf8mb4'data',_utf8mb4'worker',_utf8mb4'node',_utf8mb4'storage')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `object_time_points` (
+  `bucket_id` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `seq` bigint NOT NULL,
+  `seen_us` bigint NOT NULL,
+  `stream_id` bigint DEFAULT NULL,
+  PRIMARY KEY (`bucket_id`,`object_key`,`seq`),
+  KEY `time_points_clock` (`bucket_id`,`seen_us`,`seq`),
+  KEY `time_points_stream` (`stream_id`),
+  CONSTRAINT `object_time_points_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `bucket_time_windows` (`bucket_id`) ON DELETE CASCADE,
+  CONSTRAINT `object_time_points_ibfk_2` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `object_version_clocks` (
@@ -2763,6 +2790,55 @@ CREATE TABLE `tier_scans` (
   CONSTRAINT `tier_scan_unit` CHECK ((`unit` between 0 and 2))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `time_restore_items` (
+  `plan_id` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `target_key` varbinary(1024) NOT NULL,
+  `source_stream` bigint DEFAULT NULL,
+  `target_changed` tinyint(1) NOT NULL DEFAULT '0',
+  `expected_stream` bigint DEFAULT NULL,
+  `item_state` varchar(120) COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`plan_id`,`object_key`),
+  KEY `time_item_stream` (`source_stream`),
+  KEY `time_item_target` (`target_key`,`plan_id`),
+  KEY `time_item_next` (`plan_id`,`item_state`,`object_key`),
+  CONSTRAINT `time_restore_items_ibfk_1` FOREIGN KEY (`plan_id`) REFERENCES `time_restore_plans` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `time_restore_items_ibfk_2` FOREIGN KEY (`source_stream`) REFERENCES `streams` (`id`),
+  CONSTRAINT `time_restore_items_chk_1` CHECK ((`item_state` in (_utf8mb4'add',_utf8mb4'replace',_utf8mb4'remove',_utf8mb4'skip',_utf8mb4'missing',_utf8mb4'done',_utf8mb4'conflict')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `time_restore_plans` (
+  `id` binary(16) NOT NULL,
+  `source_bucket` binary(16) NOT NULL,
+  `target_bucket` binary(16) NOT NULL,
+  `worker_token` binary(16) DEFAULT NULL,
+  `lease_until_us` bigint NOT NULL DEFAULT '0',
+  `request_json` text COLLATE utf8mb4_bin NOT NULL,
+  `owner_json` text COLLATE utf8mb4_bin NOT NULL,
+  `digest` varchar(120) COLLATE utf8mb4_bin NOT NULL,
+  `cut_seq` bigint NOT NULL,
+  `at_us` bigint NOT NULL,
+  `expires_us` bigint NOT NULL,
+  `phase` varchar(120) COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `source_bucket` (`source_bucket`),
+  KEY `time_plan_expiry` (`phase`,`expires_us`),
+  KEY `time_plan_target` (`target_bucket`,`phase`,`id`),
+  CONSTRAINT `time_restore_plans_ibfk_1` FOREIGN KEY (`source_bucket`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `time_restore_plans_ibfk_2` FOREIGN KEY (`target_bucket`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
+  CONSTRAINT `time_restore_plans_chk_1` CHECK ((`phase` in (_utf8mb4'preview',_utf8mb4'running',_utf8mb4'done',_utf8mb4'expired')))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `time_retained_streams` (
+  `bucket_id` binary(16) NOT NULL,
+  `stream_id` bigint NOT NULL,
+  `bytes` bigint NOT NULL,
+  PRIMARY KEY (`bucket_id`,`stream_id`),
+  KEY `stream_id` (`stream_id`),
+  CONSTRAINT `time_retained_streams_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `time_retained_streams_ibfk_2` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `token_bucket_grants` (
   `token_id` binary(16) NOT NULL,
   `bucket_id` binary(16) NOT NULL,
@@ -3227,6 +3303,14 @@ CREATE TRIGGER `bucket_domains_notice_update_destination` AFTER UPDATE ON `bucke
     END IF;
 END;
 
+CREATE TRIGGER `charge_time_stream_delete` AFTER DELETE ON `time_retained_streams` FOR EACH ROW BEGIN
+    UPDATE quota_scopes SET used_bytes=used_bytes-OLD.bytes WHERE (scope='bucket' AND scope_id=OLD.bucket_id) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=OLD.bucket_id));
+END;
+
+CREATE TRIGGER `charge_time_stream_insert` AFTER INSERT ON `time_retained_streams` FOR EACH ROW BEGIN
+    UPDATE quota_scopes SET used_bytes=used_bytes+NEW.bytes WHERE (scope='bucket' AND scope_id=NEW.bucket_id) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=NEW.bucket_id));
+END;
+
 CREATE TRIGGER `chunk_encodings_notice_update` AFTER UPDATE ON `chunk_encodings` FOR EACH ROW BEGIN
     DECLARE gate TINYINT;
     IF (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control' AND ((NOT (OLD.quarantine_code<=>NEW.quarantine_code) OR NOT (OLD.quarantine_revision<=>NEW.quarantine_revision))) THEN
@@ -3312,6 +3396,28 @@ CREATE TRIGGER `journal_stream` AFTER UPDATE ON `streams` FOR EACH ROW BEGIN
         FROM journal_buckets j
         WHERE j.bucket_id=NEW.bucket_id;
         END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `journal_time_insert` AFTER INSERT ON `object_time_points` FOR EACH ROW BEGIN
+    DECLARE journal SMALLINT;
+        SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.bucket_id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'put',CONCAT('~t/',NEW.seq,'/',NEW.object_key),NEW.stream_id,s.payload_revision,JSON_OBJECT('size',COALESCE(s.size,0),'etag',COALESCE(s.etag,''),'metadata',COALESCE(JSON_EXTRACT(s.metadata,'$'),JSON_OBJECT()),'checksums',COALESCE(JSON_EXTRACT(s.checksums,'$'),JSON_OBJECT()),'payload',COALESCE(s.payload_type,'chunks'),'modified_us',NEW.seen_us,'history',JSON_OBJECT('tick',NEW.seq,'time',NEW.seen_us,'marker',CASE WHEN NEW.stream_id IS NULL THEN 1 ELSE 0 END)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id LEFT JOIN streams s ON s.id=NEW.stream_id WHERE j.bucket_id=NEW.bucket_id;
+    ELSEIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.bucket_id;
+    END IF;
+END;
+
+CREATE TRIGGER `journal_time_remove` AFTER DELETE ON `object_time_points` FOR EACH ROW BEGIN
+    DECLARE journal SMALLINT;
+        SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id LOCK IN SHARE MODE;
+        IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=OLD.bucket_id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'delete',CONCAT('~t/',OLD.seq,'/',OLD.object_key),NULL,NULL,NULL,TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id WHERE j.bucket_id=OLD.bucket_id;
+    ELSEIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=OLD.bucket_id;
     END IF;
 END;
 
@@ -3684,6 +3790,34 @@ CREATE TRIGGER `tier_locations_notice_update` AFTER UPDATE ON `tier_locations` F
         ELSE 'reset' END,
         generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
     END IF;
+END;
+
+CREATE TRIGGER `time_capture_insert` AFTER INSERT ON `objects` FOR EACH ROW BEGIN
+    DECLARE gate BINARY(16);
+    IF NEW.stream_id IS NOT NULL THEN
+        SELECT id INTO gate FROM buckets WHERE id=NEW.bucket_id LOCK IN SHARE MODE;
+        UPDATE time_restore_items SET target_changed=TRUE WHERE target_key=NEW.object_key AND item_state IN ('add','replace','remove') AND plan_id IN (SELECT id FROM time_restore_plans WHERE target_bucket=NEW.bucket_id AND phase IN ('preview','running'));
+        UPDATE bucket_time_windows SET last_us=GREATEST(last_us+1,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',UTC_TIMESTAMP(6))),seq=seq+1 WHERE bucket_id=NEW.bucket_id;
+        IF ROW_COUNT()>0 THEN INSERT INTO object_time_points(bucket_id,object_key,seq,seen_us,stream_id) SELECT bucket_id,NEW.object_key,seq,last_us,NEW.stream_id FROM bucket_time_windows WHERE bucket_id=NEW.bucket_id; END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `time_capture_update` AFTER UPDATE ON `objects` FOR EACH ROW BEGIN
+    DECLARE gate BINARY(16);
+    IF NOT (OLD.stream_id <=> NEW.stream_id) THEN
+        SELECT id INTO gate FROM buckets WHERE id=NEW.bucket_id LOCK IN SHARE MODE;
+        UPDATE time_restore_items SET target_changed=TRUE WHERE target_key=NEW.object_key AND item_state IN ('add','replace','remove') AND plan_id IN (SELECT id FROM time_restore_plans WHERE target_bucket=NEW.bucket_id AND phase IN ('preview','running'));
+        UPDATE bucket_time_windows SET last_us=GREATEST(last_us+1,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',UTC_TIMESTAMP(6))),seq=seq+1 WHERE bucket_id=NEW.bucket_id;
+        IF ROW_COUNT()>0 THEN INSERT INTO object_time_points(bucket_id,object_key,seq,seen_us,stream_id) SELECT bucket_id,NEW.object_key,seq,last_us,NEW.stream_id FROM bucket_time_windows WHERE bucket_id=NEW.bucket_id; END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `time_old_head` AFTER UPDATE ON `objects` FOR EACH ROW BEGIN
+    IF OLD.stream_id IS NOT NULL AND NOT (OLD.stream_id <=> NEW.stream_id) THEN INSERT IGNORE INTO time_retained_streams(bucket_id,stream_id,bytes) SELECT OLD.bucket_id,OLD.stream_id,s.size FROM streams s WHERE s.id=OLD.stream_id AND OLD.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=OLD.bucket_id)=0 AND EXISTS(SELECT 1 FROM object_time_points t WHERE t.bucket_id=OLD.bucket_id AND t.stream_id=OLD.stream_id); END IF;
+END;
+
+CREATE TRIGGER `time_old_version` AFTER DELETE ON `object_versions` FOR EACH ROW BEGIN
+    IF OLD.stream_id IS NOT NULL THEN INSERT IGNORE INTO time_retained_streams(bucket_id,stream_id,bytes) SELECT OLD.bucket_id,OLD.stream_id,s.size FROM streams s WHERE s.id=OLD.stream_id AND OLD.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=OLD.bucket_id)>0 AND EXISTS(SELECT 1 FROM object_time_points t WHERE t.bucket_id=OLD.bucket_id AND t.stream_id=OLD.stream_id) AND NOT EXISTS(SELECT 1 FROM object_versions v WHERE v.bucket_id=OLD.bucket_id AND v.stream_id=OLD.stream_id); END IF;
 END;
 
 CREATE TRIGGER `transfer_changes_backlog_delete` AFTER DELETE ON `transfer_changes` FOR EACH ROW BEGIN

@@ -63,6 +63,7 @@ pub(crate) mod storage_transfer;
 mod stream;
 pub(crate) mod task;
 pub(crate) mod tiering;
+pub(crate) mod time_recovery;
 pub(crate) mod transfer;
 
 use backend::postgres;

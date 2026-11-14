@@ -188,6 +188,10 @@ pub(in super::super) async fn change_object_in(
         complete_media_operation(tx, Some(id)).await?;
         return Ok(false);
     }
+    if let Ok(step) = crate::model::time_recovery::REMOVE.try_with(Clone::clone) {
+        super::super::time_recovery::applied(tx, &step, input.bucket, &input.key, old, true)
+            .await?;
+    }
     remove_object_reference(tx, input.bucket, &input.key, old).await?;
     if let Some(id) = old {
         queries::retire_stream(id).execute(&mut **tx).await?;
@@ -229,6 +233,18 @@ pub(in super::super) async fn move_object_in(
     authority.add(input.source_bucket, Action::Delete);
     authority.add(input.target_bucket, Action::Write);
     lock_media_scope(tx, &authority).await?;
+    let versioned = queries::history::mode(input.source_bucket, true)
+        .fetch_one(&mut **tx)
+        .await?
+        != 0;
+    if versioned
+        || queries::time_recovery::window(input.source_bucket)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some()
+    {
+        return Err(crate::model::time_recovery::PreserveSource.into());
+    }
     let required = super::super::transactions::redundancy::writable_targets(
         tx,
         input.target_bucket,
@@ -653,6 +669,7 @@ pub(in super::super) async fn publish_migration_in(
         queries::retire_stream(job.source_version)
             .execute(&mut **tx)
             .await?;
+        queries::history::deleted(tx, job.source_bucket, &job.source_key, false).await?;
     }
     replace_object_reference(tx, &stream, old).await?;
     Ok(())

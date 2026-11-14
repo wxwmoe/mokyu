@@ -151,6 +151,18 @@ pub(in super::super) async fn move_object_in(
 ) -> Result<()> {
     let target = input.target_bucket;
     lock_media_scope(tx, permit).await?;
+    let versioned = queries::history::mode(input.source_bucket, true)
+        .fetch_one(&mut **tx)
+        .await?
+        != 0;
+    if versioned
+        || queries::time_recovery::window(input.source_bucket)
+            .fetch_optional(&mut **tx)
+            .await?
+            .is_some()
+    {
+        return Err(crate::model::time_recovery::PreserveSource.into());
+    }
     let required = super::super::transactions::redundancy::writable_targets(
         tx,
         input.target_bucket,
@@ -539,6 +551,7 @@ pub(in super::super) async fn publish_migration_in(
         queries::retire_stream(job.source_version)
             .execute(&mut **tx)
             .await?;
+        queries::history::deleted(tx, job.source_bucket, &job.source_key, false).await?;
     }
     if let Some(old) = old {
         queries::retire_stream(old).execute(&mut **tx).await?;

@@ -43,7 +43,12 @@ pub(super) async fn configure(db: &mut Connection, bucket: Uuid, enabled: bool) 
     };
     control(db, bucket, operation).await?;
     if operation == "start" {
-        for query in [q::seed_history_mode(bucket), q::seed_history(bucket)] {
+        for query in [
+            q::seed_history_mode(bucket),
+            q::seed_history(bucket),
+            q::seed_time_window(bucket),
+            q::seed_time_points(bucket),
+        ] {
             let n = i64::try_from(query.execute(&mut *db).await?.rows_affected())?;
             if n != 0 {
                 q::advanced_history(n, bucket).execute(&mut *db).await?;
@@ -361,6 +366,16 @@ pub(super) async fn prepare(
                 && stream.etag == attrs.etag,
             "journal object identity changed"
         );
+        // Native integer IDs can be reused by a different deployment after takeover.
+        let stamp = format!(
+            "{}/{}/{}",
+            stream.bucket_id,
+            stream.id,
+            stream.created_at.timestamp_micros()
+        );
+        attrs.origin = Some(Uuid::from_bytes(
+            blake3::hash(stamp.as_bytes()).as_bytes()[..16].try_into()?,
+        ));
         attrs.payload.clone_from(&stream.payload_type);
         let start = state.end_offset;
         if start < stream.size {

@@ -156,7 +156,7 @@ pub(in super::super) fn part_quota(upload: Uuid, part: i32, stream: Id) -> Scala
 }
 
 pub(in super::super) fn quota_credit(bucket: Uuid, key: &str) -> Rows<'_, (Id, i64)> {
-    sqlx::query_as("SELECT o.stream_id,s.size FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=? AND o.object_key=? AND NOT EXISTS(SELECT 1 FROM object_versions v JOIN buckets b ON b.id=v.bucket_id WHERE v.stream_id=o.stream_id AND (b.version_mode=1 OR v.version_id<>'null')) AND NOT EXISTS(SELECT 1 FROM quota_reservations r WHERE r.bucket_id=o.bucket_id AND r.object_key=o.object_key AND r.replaced_stream_id=o.stream_id)").bind(bucket).bind(key.as_bytes())
+    sqlx::query_as("SELECT o.stream_id,s.size FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=? AND o.object_key=? AND NOT EXISTS(SELECT 1 FROM object_time_points tp WHERE tp.bucket_id=o.bucket_id AND tp.stream_id=o.stream_id) AND NOT EXISTS(SELECT 1 FROM object_versions v JOIN buckets b ON b.id=v.bucket_id WHERE v.stream_id=o.stream_id AND (b.version_mode=1 OR v.version_id<>'null')) AND NOT EXISTS(SELECT 1 FROM quota_reservations r WHERE r.bucket_id=o.bucket_id AND r.object_key=o.object_key AND r.replaced_stream_id=o.stream_id)").bind(bucket).bind(key.as_bytes())
 }
 
 pub(in super::super) fn insert_quota_reservation(

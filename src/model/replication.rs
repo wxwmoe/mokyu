@@ -223,6 +223,7 @@ impl Options {
 
     pub(crate) fn visible(&self, principal: Principal, external: bool) -> Permit {
         let mut permit = Permit {
+            time_step: None,
             principal,
             resources: Default::default(),
         };
@@ -237,6 +238,7 @@ impl Options {
 
     fn authority_for(&self, principal: Principal, external: bool) -> Permit {
         let mut permit = Permit {
+            time_step: None,
             principal,
             resources: Default::default(),
         };

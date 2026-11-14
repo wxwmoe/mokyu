@@ -149,12 +149,14 @@ pub(crate) enum Subject<'a> {
     Current(&'a str),
     History(&'a str, &'a str),
     Mode,
+    Window,
+    Point(&'a str, i64),
 }
 impl Subject<'_> {
     pub(crate) fn key(&self) -> Option<&str> {
         match self {
-            Self::Current(k) | Self::History(k, _) => Some(k),
-            Self::Mode => None,
+            Self::Current(k) | Self::History(k, _) | Self::Point(k, _) => Some(k),
+            Self::Mode | Self::Window => None,
         }
     }
 }
@@ -162,7 +164,20 @@ pub(crate) fn subject(slot: &str) -> Result<Subject<'_>> {
     if slot == "~m" {
         return Ok(Subject::Mode);
     }
-    let subject = if let Some(h) = slot.strip_prefix("~h/") {
+    if slot == "~w" {
+        return Ok(Subject::Window);
+    }
+    let subject = if let Some(p) = slot.strip_prefix("~t/") {
+        let (n, key) = p
+            .split_once('/')
+            .ok_or_else(|| anyhow::anyhow!("invalid recovery position"))?;
+        let seq = n.parse::<i64>()?;
+        ensure!(
+            seq >= 0 && seq.to_string() == n,
+            "invalid recovery position"
+        );
+        Subject::Point(key, seq)
+    } else if let Some(h) = slot.strip_prefix("~h/") {
         let (id, key) = h
             .split_once('/')
             .ok_or_else(|| anyhow::anyhow!("invalid journal history key"))?;

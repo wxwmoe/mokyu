@@ -34,6 +34,7 @@ pub(crate) mod storage_policy;
 pub(crate) mod system;
 pub(crate) mod tasks;
 mod tiering;
+mod time_recovery;
 pub(crate) mod tokens;
 mod uploads;
 pub(crate) mod users;

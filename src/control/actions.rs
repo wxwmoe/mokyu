@@ -314,6 +314,12 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         )
         .await;
     drop(_coord);
+    if result
+        .as_ref()
+        .is_err_and(|e| e.is::<crate::model::time_recovery::PreserveSource>())
+    {
+        return copy_object(app, input, item, permit).await;
+    }
     app.wait_publication(result).await?;
     app.wake_gc.notify_one();
     Ok(())
@@ -356,8 +362,8 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         .storage(target)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
-    if source_target != target_target {
-        if !input.confirm_storage_migration {
+    if source_target != target_target || input.action == MediaAction::Move {
+        if source_target != target_target && !input.confirm_storage_migration {
             return Err(problem(StatusCode::CONFLICT, "StorageMigrationConfirmationRequired").0);
         }
         let _coord = app.coord.lock().await;

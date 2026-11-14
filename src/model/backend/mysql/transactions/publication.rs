@@ -169,6 +169,17 @@ pub(in super::super) async fn publish_in(
         Some((id, stream.size)),
     )
     .await?;
+    if let Some(step) = &authority.time_step {
+        super::super::time_recovery::applied(
+            tx,
+            step,
+            stream.bucket_id,
+            &stream.object_key,
+            old,
+            false,
+        )
+        .await?;
+    }
     queries::publish_object(&stream).execute(&mut **tx).await?;
     queries::publish_stream(id).execute(&mut **tx).await?;
     queries::ready_stream_queues(tx, id).await?;
@@ -204,6 +215,14 @@ pub(in super::super) async fn publish_in(
             .execute(&mut **tx)
             .await?;
         checkpoint_event(tx,"upload.complete",&upload.to_string(),serde_json::json!({"bucket_id":stream.bucket_id,"key":stream.object_key,"size":stream.size})).await?;
+    }
+    if old.is_some() && accounts.iter().any(|v| v.logical_bytes_limit.is_some()) {
+        ensure!(
+            queries::time_recovery::quota_ok(stream.bucket_id, stream.bucket_id)
+                .fetch_one(&mut **tx)
+                .await?,
+            crate::model::Error::QuotaExceeded
+        );
     }
     Ok(true)
 }

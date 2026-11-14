@@ -1143,6 +1143,60 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let buckets: Vec<Bucket> = app.buckets.all().await?;
             Ok(serde_json::to_value(buckets)?)
         }
+        Command::Bucket(Buckets::RecoveryWindow { name, seconds }) => {
+            if seconds.is_some() {
+                app.writable()?;
+            }
+            let b = app.bucket(&name, false).await?;
+            Ok(serde_json::to_value(
+                app.objects.time_window(principal, b.id, seconds).await?,
+            )?)
+        }
+        Command::Bucket(Buckets::TimePreview {
+            name,
+            at,
+            scope,
+            key,
+            target,
+            target_prefix,
+            in_place,
+        }) => {
+            app.writable()?;
+            let b = app.bucket(&name, false).await?;
+            let target_bucket = match target {
+                Some(n) => app.bucket(&n, false).await?.id,
+                None => b.id,
+            };
+            Ok(serde_json::to_value(
+                app.objects
+                    .time_preview(
+                        principal,
+                        b.id,
+                        &crate::model::time_recovery::Request {
+                            at,
+                            scope,
+                            key,
+                            target_bucket,
+                            target_prefix,
+                            in_place,
+                        },
+                    )
+                    .await?,
+            )?)
+        }
+        Command::Bucket(Buckets::TimeRestore { id, digest, after }) => {
+            if digest.is_some() {
+                app.writable()?;
+            }
+            let v = app
+                .objects
+                .time_plan(principal, id, digest.as_deref(), after.as_deref())
+                .await?;
+            if digest.is_some() {
+                app.wake_maintenance.notify_waiters();
+            }
+            Ok(serde_json::to_value(v)?)
+        }
         Command::Bucket(Buckets::Versioning { name, mode }) => {
             let b = app.bucket(&name, mode.is_some()).await?;
             Ok(serde_json::to_value(

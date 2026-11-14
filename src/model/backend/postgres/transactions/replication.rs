@@ -292,6 +292,7 @@ impl ReplicationStore for Backend {
             transactions::lock_permit(
                 &mut db,
                 &Permit {
+                    time_step: None,
                     principal: principal.clone(),
                     resources: Default::default(),
                 },

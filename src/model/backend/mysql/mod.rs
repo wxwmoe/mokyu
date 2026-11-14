@@ -71,6 +71,8 @@ mod tier_access;
 mod tier_move_transactions;
 #[path = "../../shared/tier.rs"]
 mod tier_transactions;
+#[path = "../../shared/time_recovery.rs"]
+mod time_recovery;
 mod transactions;
 #[path = "../../shared/upload_staging.rs"]
 mod upload_staging;

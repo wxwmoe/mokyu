@@ -128,6 +128,7 @@ pub(super) mod mirroring;
 pub(super) use buckets::*;
 pub(super) mod history;
 mod objects;
+pub(super) mod time_recovery;
 pub(super) use objects::*;
 mod keys;
 pub(super) use keys::*;

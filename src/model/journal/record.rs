@@ -241,11 +241,30 @@ pub(crate) struct Span {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(untagged, deny_unknown_fields)]
 pub(crate) enum History {
-    State { mode: i16 },
-    Version { order: i64, time: i64, marker: i16 },
+    State {
+        mode: i16,
+    },
+    Window {
+        seconds: i64,
+        floor: i64,
+        #[serde(default)]
+        gaps: Vec<crate::model::time_recovery::Gap>,
+    },
+    Point {
+        tick: i64,
+        time: i64,
+        marker: i16,
+    },
+    Version {
+        order: i64,
+        time: i64,
+        marker: i16,
+    },
 }
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Attributes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<uuid::Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<History>,
     pub size: i64,
@@ -319,6 +338,23 @@ impl Change {
                             marker,
                         }),
                     ) => *order >= 0 && *time >= 0 && (*marker == 0 || *marker == 1 && a.size == 0),
+                    (
+                        Subject::Window,
+                        Some(History::Window {
+                            seconds,
+                            floor,
+                            gaps,
+                        }),
+                    ) =>
+                        (1..=315_360_000).contains(seconds)
+                            && *floor >= 0
+                            && a.size == 0
+                            && gaps
+                                .iter()
+                                .all(|g| g.after_us >= 0 && g.before_us > g.after_us)
+                            && gaps.windows(2).all(|v| v[0].before_us <= v[1].after_us),
+                    (Subject::Point(_, seq), Some(History::Point { tick, time, marker })) =>
+                        seq == *tick && *time >= 0 && (*marker == 0 || *marker == 1 && a.size == 0),
                     (Subject::Mode, Some(History::State { mode })) =>
                         (1..=2).contains(mode) && a.size == 0,
                     _ => false,

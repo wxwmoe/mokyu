@@ -342,3 +342,17 @@ docker exec mokyu mokyu cli task resume TASK_UUID
 | `integrity recheck --storage UUID --source chunk\|pack\|raw ID [--confirm FINGERPRINT]` | 预览已隔离来源；确认后异步完整回源复检，成功才解除 |
 
 ID 是独立 encoding ID、pack ID 或 raw source ID。CLI 与面板使用同一授权、来源代次和任务边界；无强制解除选项。隔离/复检允许维护模式，排空时拒绝。任务入队不代表成功，使用 `task show UUID` 核对状态与结果；普通巡检不会自动隔离，故障计数也不会触发改库。
+
+### 时间点恢复
+
+管理员可以为单个桶设置恢复窗口。默认是 `0` 秒；启用时建立基线，启用前的时间不能恢复。窗口独立于 S3 版本控制，永久删除的版本仍可能在窗口内恢复。
+
+```sh
+mokyu cli bucket recovery-window media --seconds 86400
+mokyu cli bucket recovery-window media
+mokyu cli bucket time-preview media 2026-11-14T09:00:00Z prefix --key photos/ --target-prefix restored/
+mokyu cli bucket time-restore PLAN_ID --digest PREVIEW_DIGEST
+mokyu cli bucket time-restore PLAN_ID
+```
+
+时间使用带时区的 RFC 3339。范围可选 `object`、`prefix` 或 `bucket`。可以用 `--target` 指向另一个已创建的桶；`--target-prefix` 原样加在完整对象键前，另存会跳过已存在的目标。只有显式指定 `--in-place` 才能替换或删除原位置的文件。执行须由创建预览的身份提交预览摘要，预览在 15 分钟后过期。结果按键显示，下一页传 `--after` 和返回的游标。任务会在服务重启后继续，执行期间撤销管理员授权会停止任务。 灾备导入会在 `gaps` 列出最后一个可证实的时间点与接管之间的缺口，缺口内不能恢复。最低盘数只够读取时，可用 `--target` 另存到健康后端的桶。
