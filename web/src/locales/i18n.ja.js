@@ -109,7 +109,7 @@ export default {
   scNoSources: "このディスクには復元可能な名前空間がありません",
   scNeedsEvidence: "公開記録が不足しています",
   scPickLayout: "レイアウトを選ぶ",
-  scLayoutGuide: "容量と保護の違いを比較できます。耐障害数は独立したストレージグループを前提とします。",
+  scLayoutGuide: "新規クラスターの既定は 2 コピーです。容量と保護を比較できます。耐障害数は独立したストレージグループを前提とします",
   scColumn_data: "データ片数",
   scColumn_parity: "パリティ片数",
   scColumn_copies: "追加コピー数",

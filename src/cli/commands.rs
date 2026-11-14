@@ -1051,8 +1051,10 @@ pub enum StorageClusters {
         #[arg(required=true, num_args=1..)]
         media: Vec<Uuid>,
     },
+    /// Create a cluster. Defaults to two copies, 1 MiB shards per stripe and four concurrent reads.
     Create {
         name: String,
+        /// Cluster policy as JSON. A new layout applies to new writes until a rebuild moves existing data.
         #[arg(long)]
         policy: Option<String>,
     },

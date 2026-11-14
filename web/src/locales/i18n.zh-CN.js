@@ -109,7 +109,7 @@ export default {
   scNoSources: "此盘未发现可恢复的命名空间",
   scNeedsEvidence: "缺少发布证据",
   scPickLayout: "选择布局",
-  scLayoutGuide: "对比不同布局的空间占用与保护能力。可坏盘数按独立存储分组计算。",
+  scLayoutGuide: "新群集默认保留两份数据。可在这里比较空间占用和保护能力，可坏盘数按独立存储分组计算",
   scColumn_data: "数据分片",
   scColumn_parity: "校验分片",
   scColumn_copies: "额外数据副本",

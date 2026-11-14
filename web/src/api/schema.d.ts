@@ -4598,7 +4598,10 @@ export interface components {
             extra_copies: number;
             /** Format: int32 */
             parity_shards: number;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description Bytes per data shard in each stripe; default 1 MiB (64 KiB to 16 MiB, powers of two).
+             */
             stripe_bytes: number;
         };
         StorageClusterManifest: {
@@ -4695,6 +4698,7 @@ export interface components {
             /** @default null */
             degraded_acknowledgement: components["schemas"]["StorageClusterAcknowledgement"] | null;
             /**
+             * @description Layout for new writes. Defaults to one data shard with one extra copy.
              * @default {
              *       "data_shards": 1,
              *       "extra_copies": 1,
@@ -4711,6 +4715,7 @@ export interface components {
             placement_order: string;
             /**
              * Format: int32
+             * @description Maximum concurrent shard reads per request, independent of the layout; default 4.
              * @default 4
              */
             read_parallelism: number;

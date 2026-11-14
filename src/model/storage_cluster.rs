@@ -16,6 +16,7 @@ pub(crate) struct Layout {
     pub data_shards: u16,
     pub parity_shards: u16,
     pub extra_copies: u16,
+    /// Bytes per data shard in each stripe; default 1 MiB (64 KiB to 16 MiB, powers of two).
     pub stripe_bytes: u32,
 }
 
@@ -131,7 +132,9 @@ pub(crate) enum Acknowledgement {
 #[serde(default, deny_unknown_fields)]
 #[schema(as = StorageClusterPolicy)]
 pub(crate) struct Policy {
+    /// Layout for new writes. Defaults to one data shard with one extra copy.
     pub layout: Layout,
+    /// Maximum concurrent shard reads per request, independent of the layout; default 4.
     pub read_parallelism: u16,
     pub acknowledgement: Acknowledgement,
     pub degraded_acknowledgement: Option<Acknowledgement>,

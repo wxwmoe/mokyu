@@ -109,7 +109,7 @@ export default {
   scNoSources: "No recoverable namespace was found on this disk.",
   scNeedsEvidence: "Missing publication evidence",
   scPickLayout: "Choose layout",
-  scLayoutGuide: "Compare the space and protection of each layout. Disk tolerance assumes independent storage groups.",
+  scLayoutGuide: "New clusters use two copies. Choose a layout to compare space and protection across independent storage groups.",
   scColumn_data: "Data shards",
   scColumn_parity: "Parity shards",
   scColumn_copies: "Extra copies",
