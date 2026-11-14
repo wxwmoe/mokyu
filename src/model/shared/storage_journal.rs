@@ -203,6 +203,10 @@ async fn settle(
     }
     super::storage_native::publish_in(tx, storage, part.intent.payload, owner).await?;
     q::settled(proof.publication.id).execute(&mut **tx).await?;
+    if !proof.publication.retired.is_empty() {
+        super::storage_backup::recheck(tx, &part.intent, chrono::Utc::now().timestamp_micros())
+            .await?;
+    }
     Ok(())
 }
 

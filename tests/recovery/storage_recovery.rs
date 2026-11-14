@@ -123,6 +123,32 @@ async fn physical_restore_contract() -> Result<()> {
         },
     ];
     backend
+        .catalog_map(catalog, marker_intent.operation, &epochs, false)
+        .await?;
+    assert_eq!(
+        backend
+            .catalog_image(catalog, namespace, "mokyu.json")
+            .await?,
+        Some(marker_intent.clone())
+    );
+    assert!(
+        backend
+            .read_object(
+                namespace,
+                "mokyu.json",
+                None,
+                chrono::Utc::now().timestamp_micros() + 60_000_000
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        !backend
+            .catalog_shards(catalog, marker_intent.operation, 0)
+            .await?
+            .is_empty()
+    );
+    backend
         .catalog_restore(catalog, marker_intent.operation, &epochs)
         .await?;
     backend
@@ -225,6 +251,13 @@ async fn physical_restore_contract() -> Result<()> {
     backend
         .catalog_restore(catalog, intent.operation, &epochs)
         .await?;
+    backend
+        .catalog_map(catalog, intent.operation, &epochs, false)
+        .await?;
+    assert_eq!(
+        backend.catalog_shards(catalog, intent.operation, 0).await?,
+        vec![repaired.clone()]
+    );
     let restored = backend
         .read_object(
             namespace,

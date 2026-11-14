@@ -106,6 +106,40 @@ pub(super) async fn commit(
     commit_historical(files, proof, manifest.clone(), manifest, check).await
 }
 
+pub(super) async fn verify_backup(
+    files: &Files,
+    namespace: Uuid,
+    link: Link,
+    check: Check,
+) -> Result<()> {
+    let disk = files.disk.clone();
+    let permit = fragments::checked(disk.io.clone().acquire_owned(), &check).await??;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        check()?;
+        let head = disk
+            .root
+            .join("recovery/heads")
+            .join(format!("{}.json", namespace.simple()));
+        let proof = history(&disk.root, namespace, link.id);
+        fragments::check_directories(&disk.root, &head)?;
+        fragments::check_directories(&disk.root, &proof)?;
+        let missing = || tonic::Status::failed_precondition("backup evidence is missing");
+        let head: Link = serde_json::from_slice(&read(&head)?.ok_or_else(missing)?)?;
+        let value: Proof = serde_json::from_slice(&read(&proof)?.ok_or_else(missing)?)?;
+        let current = history(&disk.root, namespace, head.id);
+        let latest: Proof = serde_json::from_slice(&read(&current)?.ok_or_else(missing)?)?;
+        ensure!(
+            value.link()? == link
+                && latest.link()? == head
+                && latest.publication.revision >= value.publication.revision,
+            "backup evidence conflicts"
+        );
+        check()
+    })
+    .await?
+}
+
 pub(super) async fn commit_historical(
     files: &Files,
     proof: Proof,
@@ -127,6 +161,7 @@ pub(super) async fn commit_historical(
             .any(|member| member.media_id == files.media.media_id),
         "recovery evidence targets another media"
     );
+    let backup = files.backup;
     let bytes = serde_json::to_vec(&proof)?;
     ensure!(
         bytes.len() <= PROOF_LIMIT,
@@ -163,11 +198,44 @@ pub(super) async fn commit_historical(
             .map(|bytes| serde_json::from_slice(&bytes))
             .transpose()?;
         let link = proof.link()?;
+        // While rechecking a backup, restore a proven history file without moving its newer head backwards.
+        if backup
+            && let Some(active) = &current
+            && active != &link
+            && Some(active) != proof.publication.previous.as_ref()
+        {
+            let current_path = history(&disk.root, namespace, active.id);
+            if let Some(bytes) = read(&current_path)? {
+                let active_proof: Proof = serde_json::from_slice(&bytes)?;
+                ensure!(
+                    active_proof.link()? == *active
+                        && active_proof.publication.revision > proof.publication.revision,
+                    "backup history conflicts with its head"
+                );
+            }
+            let mut space =
+                disk.reserve_space(&disk.root, disk.floor, bytes.len() as u64 + 65536)?;
+            space.observe(vec![
+                destination.clone(),
+                fragments::temporary(&destination),
+            ])?;
+            publish(&disk.root, &destination, &bytes, true, &check)?;
+            return Ok(link);
+        }
         ensure!(
             current == proof.publication.previous || current.as_ref() == Some(&link),
             "recovery head changed"
         );
         if current.as_ref() == Some(&link) {
+            if backup && read(&destination)?.is_none() {
+                let mut space =
+                    disk.reserve_space(&disk.root, disk.floor, bytes.len() as u64 + 65536)?;
+                space.observe(vec![
+                    destination.clone(),
+                    fragments::temporary(&destination),
+                ])?;
+                publish(&disk.root, &destination, &bytes, true, &check)?;
+            }
             ensure!(
                 read(&destination)?.as_deref() == Some(bytes.as_slice()),
                 "committed recovery evidence is missing or differs"

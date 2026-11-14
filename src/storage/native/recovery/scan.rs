@@ -16,8 +16,9 @@ use std::sync::Arc;
 pub(crate) struct Scanner {
     pub(super) clusters: Arc<dyn StorageClusters>,
     control: Arc<Control>,
-    pub(super) pool: Pool,
+    pub(super) pool: Arc<Pool>,
     pub anchor: Manifest,
+    pub(super) backup_group: Option<String>,
 }
 
 #[async_trait::async_trait]
@@ -41,17 +42,27 @@ impl Scanner {
         clusters: Arc<dyn StorageClusters>,
         control: Arc<Control>,
         cluster: Uuid,
+        backup_group: Option<String>,
     ) -> Result<Arc<Self>> {
         let (value, _) = clusters.placement_snapshot(cluster).await?;
         Ok(Arc::new(Self {
             clusters,
             control,
-            pool: Pool::new(Duration::from_secs(90)),
+            pool: Arc::new(Pool::new(Duration::from_secs(90))),
             anchor: value.manifest,
+            backup_group,
         }))
     }
 
     pub(super) async fn target(&self, media: Uuid, action: Action) -> Result<Destination> {
+        if let Some(group) = &self.backup_group {
+            ensure!(
+                self.anchor.members.iter().any(|m| m.media_id == media
+                    && m.topology.purpose == "backup"
+                    && &m.topology.storage_group == group),
+                "media is outside the selected recovery group"
+            );
+        }
         self.control
             .recovery_target(&self.anchor, media, action, None)
             .await
@@ -159,10 +170,24 @@ impl Scanner {
                             && receipt.header.namespace == namespace
                         {
                             ensure!(
-                                receipt.header.media == media
+                                (receipt.header.media == media
+                                    || self
+                                        .anchor
+                                        .members
+                                        .iter()
+                                        .any(|m| m.media_id == media
+                                            && m.topology.purpose == "backup"))
                                     && entry.header.as_ref() == Some(&receipt.header),
                                 "recovery fragment belongs to another source"
                             );
+                            if receipt.header.media != media {
+                                entries.push(CatalogEntry::BackupLocation {
+                                    fragment: receipt.header.fragment,
+                                    media,
+                                    namespace,
+                                    cluster: self.anchor.cluster_id,
+                                });
+                            }
                             entries.push(CatalogEntry::Fragment(receipt));
                         }
                     }

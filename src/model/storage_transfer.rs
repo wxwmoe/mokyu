@@ -67,6 +67,18 @@ pub(crate) enum Action {
     Repair {
         header: Header,
     },
+    Backup {
+        header: Header,
+    },
+    BackupCheck {
+        receipt: Receipt,
+        evidence: Option<super::storage_recovery::Link>,
+    },
+    BackupRead {
+        receipt: Receipt,
+        offset: u64,
+        length: u64,
+    },
     Read {
         receipt: Receipt,
         offset: u64,
@@ -113,6 +125,32 @@ pub(crate) struct Grant {
     pub action: Action,
 }
 
+impl Action {
+    pub fn write_header(&self) -> Option<&Header> {
+        match self {
+            Self::Write { header } | Self::Repair { header } | Self::Backup { header } => {
+                Some(header)
+            }
+            _ => None,
+        }
+    }
+    pub fn read_range(&self) -> Option<(&Receipt, u64, u64)> {
+        match self {
+            Self::Read {
+                receipt,
+                offset,
+                length,
+            }
+            | Self::BackupRead {
+                receipt,
+                offset,
+                length,
+            } => Some((receipt, *offset, *length)),
+            _ => None,
+        }
+    }
+}
+
 impl Grant {
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -139,6 +177,13 @@ impl Grant {
             Action::Write { header } | Action::Stat { header } | Action::Discard { header } => {
                 Some(header)
             }
+            Action::Backup { header } => {
+                ensure!(
+                    header.digest != [0; 32],
+                    "backup requires a verified source"
+                );
+                Some(header)
+            }
             Action::Repair { header } => {
                 ensure!(
                     header.generation > 0,
@@ -147,6 +192,11 @@ impl Grant {
                 Some(header)
             }
             Action::Read {
+                receipt,
+                offset,
+                length,
+            }
+            | Action::BackupRead {
                 receipt,
                 offset,
                 length,
@@ -160,7 +210,7 @@ impl Grant {
                 );
                 Some(&receipt.header)
             }
-            Action::Remove { receipt } => {
+            Action::Remove { receipt } | Action::BackupCheck { receipt, .. } => {
                 receipt.validate()?;
                 Some(&receipt.header)
             }
@@ -188,7 +238,13 @@ impl Grant {
         if let Some(header) = header {
             header.validate()?;
             ensure!(
-                header.media == self.media
+                (header.media == self.media
+                    || matches!(
+                        self.action,
+                        Action::Backup { .. }
+                            | Action::BackupRead { .. }
+                            | Action::BackupCheck { .. }
+                    ))
                     && header.cluster == self.cluster
                     && (header.takeover_epoch == self.takeover_epoch
                         || !matches!(self.action, Action::Write { .. })
@@ -256,6 +312,36 @@ impl SignedGrant {
                     .any(|member| member.media_id == grant.media && member.node_id == grant.node),
             "storage grant differs from the active membership"
         );
+        let backup = manifest
+            .members
+            .iter()
+            .find(|m| m.media_id == grant.media)
+            .is_some_and(|m| m.topology.purpose == "backup");
+        match &grant.action {
+            Action::Backup { header }
+            | Action::BackupRead {
+                receipt: Receipt { header, .. },
+                ..
+            }
+            | Action::BackupCheck {
+                receipt: Receipt { header, .. },
+                ..
+            } => {
+                ensure!(
+                    backup && header.media != grant.media,
+                    "backup grant requires independent backup media"
+                );
+            }
+            Action::Write { .. }
+            | Action::Read { .. }
+            | Action::Repair { .. }
+            | Action::Remove { .. }
+            | Action::Discard { .. }
+            | Action::Stat { .. } => {
+                ensure!(!backup, "a primary grant cannot use backup media");
+            }
+            _ => (),
+        }
         signature::UnparsedPublicKey::new(&signature::ED25519, manifest.publication_key)
             .verify(&grant.message()?, &self.signature)
             .map_err(|_| anyhow::anyhow!("invalid storage grant signature"))
@@ -299,7 +385,10 @@ impl Completion {
                 && target.expires > now * 1_000_000,
             "storage receipt belongs to an inactive run"
         );
-        let (Action::Write { header } | Action::Repair { header }) = &grant.action else {
+        let Some(header) = grant.action.write_header().or_else(|| match &grant.action {
+            Action::BackupCheck { receipt, .. } => Some(&receipt.header),
+            _ => None,
+        }) else {
             anyhow::bail!("storage receipt requires a write grant");
         };
         let mut expected = self.receipt.receipt.header.clone();

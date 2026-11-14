@@ -72,6 +72,8 @@ pub(super) async fn plan(
         operation: header.operation,
         sequence: header.sequence,
         repair: Some(id),
+        backup: None,
+        shard: header.shard,
     }))
 }
 

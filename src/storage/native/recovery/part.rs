@@ -97,15 +97,61 @@ impl Scanner {
         };
         let mut failure = anyhow::anyhow!("no recovery fragment is available");
         let mut verified = false;
+        let mut candidates = Vec::new();
         for receipt in receipts {
+            if self.backup_group.is_none() {
+                let media = receipt.header.media;
+                candidates.push((receipt, media, false));
+                continue;
+            }
+            let mut after = None;
+            loop {
+                let page = self
+                    .clusters
+                    .catalog_page(catalog, 2, Some(receipt.header.fragment), after)
+                    .await?;
+                for record in page.entries {
+                    if let crate::model::storage_recovery::CatalogEntry::BackupLocation {
+                        media,
+                        fragment,
+                        ..
+                    } = record
+                    {
+                        ensure!(
+                            fragment == receipt.header.fragment
+                                && self
+                                    .anchor
+                                    .members
+                                    .iter()
+                                    .any(|m| m.media_id == media && m.topology.purpose == "backup"),
+                            "untrusted backup recovery location"
+                        );
+                        candidates.push((receipt.clone(), media, true));
+                    }
+                }
+                match page.after {
+                    Some(next) => after = Some(next),
+                    None => break,
+                }
+            }
+        }
+        for (receipt, media, backup) in candidates {
             let result: Result<()> = async {
                 let target = self
                     .target(
-                        receipt.header.media,
-                        Action::Read {
-                            offset: 0,
-                            length: receipt.header.shard_bytes,
-                            receipt,
+                        media,
+                        if backup {
+                            Action::BackupRead {
+                                offset: 0,
+                                length: receipt.header.shard_bytes,
+                                receipt,
+                            }
+                        } else {
+                            Action::Read {
+                                offset: 0,
+                                length: receipt.header.shard_bytes,
+                                receipt,
+                            }
                         },
                     )
                     .await?;

@@ -444,6 +444,9 @@ pub enum Recoveries {
         file: PathBuf,
         #[arg(long)]
         namespace: Option<Uuid>,
+        /// Recover from this independent backup group into another backend.
+        #[arg(long, requires = "namespace")]
+        backup_group: Option<String>,
         #[arg(long, conflicts_with = "key_stdin")]
         unlock: bool,
         #[arg(long)]
@@ -805,7 +808,11 @@ impl Command {
             | Self::Cluster(
                 Cluster::Status | Cluster::Nodes { .. } | Cluster::Handoff { action: None, .. },
             )
-            | Self::StorageCluster(StorageClusters::List | StorageClusters::Sources { .. }) => None,
+            | Self::StorageCluster(
+                StorageClusters::List
+                | StorageClusters::Sources { .. }
+                | StorageClusters::Backups { .. },
+            ) => None,
             Self::Bucket(_) => Some("bucket.change"),
             Self::Credential(_) => Some("credential.change"),
             Self::Token(_) => Some("token.change"),
@@ -965,6 +972,16 @@ pub struct StyleExport {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum StorageClusters {
     List,
+    Backups {
+        id: Uuid,
+        #[arg(long)]
+        after: Option<Uuid>,
+    },
+    VerifyBackups {
+        id: Uuid,
+        #[arg(long)]
+        revision: i64,
+    },
     Repair {
         id: Uuid,
         fragment: Uuid,

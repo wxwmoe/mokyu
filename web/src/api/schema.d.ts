@@ -1840,6 +1840,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/storage-clusters/{id}/backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["storage_cluster_backup_points"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/storage-clusters/{id}/fragments/{fragment}/repair": {
         parameters: {
             query?: never;
@@ -1914,6 +1930,22 @@ export interface paths {
         get: operations["storage_cluster_recovery_sources"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/storage-clusters/{id}/verify-backups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["storage_cluster_verify_backups"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4341,6 +4373,42 @@ export interface components {
             pending_manifest?: components["schemas"]["StorageClusterManifest"] | null;
             topology: components["schemas"]["StorageClusterTopology"];
         };
+        StorageClusterBackupGroup: {
+            /** Format: uuid */
+            cluster: string;
+            /** Format: int64 */
+            last_verified?: number | null;
+            /** Format: int64 */
+            oldest_pending?: number | null;
+            /** Format: int64 */
+            pending: number;
+            /** Format: int64 */
+            pending_bytes: number;
+            storage_group?: string | null;
+            /** Format: int64 */
+            verified: number;
+        };
+        StorageClusterBackupPoint: {
+            /** Format: int64 */
+            evidence_revision: number;
+            group: string;
+            /** Format: int64 */
+            missing_bodies: number;
+            /** Format: int64 */
+            missing_metadata: number;
+            name: string;
+            /** Format: int64 */
+            published_revision: number;
+            /** Format: int64 */
+            recoverable_through?: number | null;
+            /** Format: uuid */
+            storage: string;
+        };
+        StorageClusterBackupPoints: {
+            /** Format: uuid */
+            after?: string | null;
+            entries: components["schemas"]["StorageClusterBackupPoint"][];
+        };
         StorageClusterCapacity: {
             accounting?: components["schemas"]["StorageClusterAccounting"] | null;
             accounting_ready?: boolean;
@@ -4439,6 +4507,7 @@ export interface components {
             revision: number;
         };
         StorageClusterOverview: {
+            backups: components["schemas"]["StorageClusterBackupGroup"][];
             clusters: components["schemas"]["StorageClusterCluster"][];
             defaults: components["schemas"]["StorageClusterPolicy"];
             devices: components["schemas"]["StorageClusterDevice"][];
@@ -4446,6 +4515,11 @@ export interface components {
         StorageClusterPolicy: {
             /** @default all */
             acknowledgement: components["schemas"]["StorageClusterAcknowledgement"];
+            /**
+             * Format: int64
+             * @default 16777216
+             */
+            backup_bytes_per_second: number;
             /**
              * Format: int32
              * @default 0
@@ -4646,6 +4720,7 @@ export interface components {
             revision: string;
         };
         StorageRecoveryProbe: {
+            backup_group?: string | null;
             deployment_key?: string | null;
             /** Format: uuid */
             namespace?: string | null;
@@ -4954,6 +5029,10 @@ export interface components {
         UserPatch: {
             enabled?: boolean | null;
             role?: string | null;
+        };
+        VerifyBackups: {
+            /** Format: int64 */
+            revision: number;
         };
         Website: {
             error_document: string;
@@ -8532,6 +8611,29 @@ export interface operations {
             };
         };
     };
+    storage_cluster_backup_points: {
+        parameters: {
+            query?: {
+                after?: string | null;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageClusterBackupPoints"];
+                };
+            };
+        };
+    };
     storage_cluster_repair: {
         parameters: {
             query?: never;
@@ -8651,6 +8753,29 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["StorageRecoverySources"];
                 };
+            };
+        };
+    };
+    storage_cluster_verify_backups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerifyBackups"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -3,6 +3,7 @@
 pub(super) mod node_handoff;
 pub(super) mod upload_staging;
 
+pub(super) mod storage_backup;
 pub(super) mod storage_capacity;
 pub(super) mod storage_cluster;
 pub(super) mod storage_journal;

@@ -151,6 +151,7 @@ async fn page_in(
 }
 
 async fn restore_receipt(
+    catalog: Option<Uuid>,
     tx: &mut q::Tx<'_>,
     intent: &crate::model::storage_payload::Intent,
     members: &[Uuid],
@@ -164,6 +165,16 @@ async fn restore_receipt(
         members.get(usize::from(h.copy)) == Some(&h.media),
         "recovered fragment differs from its historical member"
     );
+    if let Some(id) = catalog {
+        use super::queries::storage_backup as backup;
+        if let Some(old) = backup::shard(id, receipt).fetch_optional(&mut **tx).await?
+            && !receipt.newer_than(&old)?
+        {
+            return Ok(());
+        }
+        backup::put_shard(id, receipt).execute(&mut **tx).await?;
+        return Ok(());
+    }
     if let Some(old) = physical::slot(h).fetch_optional(&mut **tx).await? {
         let old = super::storage_payload::mapping(old)?
             .receipt
@@ -195,11 +206,59 @@ async fn restore_receipt(
 
 #[async_trait::async_trait]
 impl RecoveryCatalog for Backend {
-    async fn catalog_restore(
+    async fn catalog_image(
+        &self,
+        id: Uuid,
+        namespace: Uuid,
+        path: &str,
+    ) -> Result<Option<crate::model::storage_payload::Intent>> {
+        let hash = crate::model::storage_native::path(path)?;
+        let mut tx = q::begin(self).await?;
+        let row = super::queries::storage_backup::image(id, hash.to_vec())
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        let Some((name, published, intent)) = row else {
+            return Ok(None);
+        };
+        intent.validate()?;
+        ensure!(
+            name == path && intent.namespace == namespace,
+            "recovery address differs"
+        );
+        Ok(published.then_some(intent.0))
+    }
+
+    async fn catalog_shards(
+        &self,
+        id: Uuid,
+        op: Uuid,
+        seq: u32,
+    ) -> Result<Vec<crate::model::storage_payload::Receipt>> {
+        let mut tx = q::begin(self).await?;
+        let rows = super::queries::storage_backup::shards(id, op, seq)
+            .fetch_all(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        ensure!(rows.len() <= 256, "oversized recovery stripe");
+        rows.into_iter()
+            .map(|r| {
+                r.validate()?;
+                ensure!(
+                    r.header.operation == op && r.header.sequence == seq,
+                    "recovery shard index differs"
+                );
+                Ok(r.0)
+            })
+            .collect()
+    }
+
+    async fn catalog_map(
         &self,
         id: Uuid,
         operation: Uuid,
         epochs: &[crate::storage::marker::EpochCut],
+        install: bool,
     ) -> Result<()> {
         use super::queries::{storage_native as objects, storage_payload as physical};
         use crate::content::fragment::Area;
@@ -371,50 +430,80 @@ impl RecoveryCatalog for Backend {
             file.part.validate_layout(&historical)?;
         }
         let hash = crate::model::storage_native::path(&path)?.to_vec();
-        objects::insert(namespace, intent.payload, hash.clone(), &path)
-            .execute(&mut *tx)
-            .await?;
-        let previous = {
-            let old = objects::object(namespace, hash).fetch_one(&mut *tx).await?;
-            ensure!(
-                old.0 == intent.payload && old.1 == path && old.3.is_none(),
-                "physical recovery conflicts with a live write"
-            );
-            if old.4 >= intent.revision as i64 {
+        if !install {
+            use super::queries::storage_backup as backup;
+            if let Some((old_path, old_published, old)) = backup::image(id, hash.clone())
+                .fetch_optional(&mut *tx)
+                .await?
+            {
                 ensure!(
-                    old.4 > intent.revision as i64 || old.2 == published.then_some(operation),
-                    "physical recovery revision conflicts at {path} for {operation} (current {:?}, revision {})",
-                    old.2,
-                    old.4
+                    old_path == path && old.payload == intent.payload,
+                    "conflicting recovery address"
                 );
-                if old.4 == intent.revision as i64 {
+                if old.revision >= intent.revision {
                     ensure!(
-                        super::storage_payload::current(&mut tx, operation)
-                            .await?
-                            .intent
-                            == intent,
-                        "physical recovery intent conflicts"
+                        old.revision > intent.revision
+                            || old.0 == intent && old_published == published,
+                        "conflicting recovery version"
                     );
+                    tx.commit().await?;
+                    return Ok(());
                 }
-                tx.commit().await?;
-                return Ok(());
             }
-            old.2
+            backup::put_image(id, hash.clone(), &path, &intent, published)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let previous = if install {
+            objects::insert(namespace, intent.payload, hash.clone(), &path)
+                .execute(&mut *tx)
+                .await?;
+            let previous = {
+                let old = objects::object(namespace, hash).fetch_one(&mut *tx).await?;
+                ensure!(
+                    old.0 == intent.payload && old.1 == path && old.3.is_none(),
+                    "physical recovery conflicts with a live write"
+                );
+                if old.4 >= intent.revision as i64 {
+                    ensure!(
+                        old.4 > intent.revision as i64 || old.2 == published.then_some(operation),
+                        "physical recovery revision conflicts at {path} for {operation} (current {:?}, revision {})",
+                        old.2,
+                        old.4
+                    );
+                    if old.4 == intent.revision as i64 {
+                        ensure!(
+                            super::storage_payload::current(&mut tx, operation)
+                                .await?
+                                .intent
+                                == intent,
+                            "physical recovery intent conflicts"
+                        );
+                    }
+                    tx.commit().await?;
+                    return Ok(());
+                }
+                old.2
+            };
+            ensure!(
+                objects::unregistered(namespace).fetch_one(&mut *tx).await?,
+                "cannot restore over a registered backend"
+            );
+            physical::insert(&intent).execute(&mut *tx).await?;
+            let saved = super::storage_payload::current(&mut tx, operation).await?;
+            ensure!(
+                saved.intent == intent && saved.state == "prepared",
+                "physical recovery operation conflicts"
+            );
+            previous
+        } else {
+            None
         };
-        ensure!(
-            objects::unregistered(namespace).fetch_one(&mut *tx).await?,
-            "cannot restore over a registered backend"
-        );
-        physical::insert(&intent).execute(&mut *tx).await?;
-        let saved = super::storage_payload::current(&mut tx, operation).await?;
-        ensure!(
-            saved.intent == intent && saved.state == "prepared",
-            "physical recovery operation conflicts"
-        );
+        let recovery_catalog = (!install).then_some(id);
         if published {
             if let Some(root) = root {
                 for receipt in &root.receipts {
-                    restore_receipt(&mut tx, &intent, members, receipt).await?;
+                    restore_receipt(recovery_catalog, &mut tx, &intent, members, receipt).await?;
                 }
             }
             let mut after = None;
@@ -440,12 +529,16 @@ impl RecoveryCatalog for Backend {
                         CatalogEntry::Fragment(receipt) if file.is_some() => receipt,
                         _ => anyhow::bail!("invalid recovered fragment record"),
                     };
-                    restore_receipt(&mut tx, &intent, members, &receipt).await?;
+                    restore_receipt(recovery_catalog, &mut tx, &intent, members, &receipt).await?;
                 }
                 match page.after {
                     Some(next) => after = Some(next),
                     None => break,
                 }
+            }
+            if !install {
+                tx.commit().await?;
+                return Ok(());
             }
             ensure!(
                 q::covered(operation).fetch_one(&mut *tx).await?.0 as u64 == intent.sequences(),
@@ -461,8 +554,11 @@ impl RecoveryCatalog for Backend {
             )
             .execute(&mut *tx)
             .await?;
-        } else {
+        } else if install {
             physical::retire(operation).execute(&mut *tx).await?;
+        } else {
+            tx.commit().await?;
+            return Ok(());
         }
         objects::reserve(namespace, intent.payload, intent.revision as i64, operation)
             .execute(&mut *tx)
@@ -808,6 +904,17 @@ impl RecoveryCatalog for Backend {
         }
         for entry in entries {
             entry.validate(namespace, anchor.cluster_id)?;
+            if let CatalogEntry::BackupLocation { media, .. } = entry {
+                ensure!(
+                    cursor.scope == "recovery"
+                        && *media == cursor.media
+                        && anchor
+                            .members
+                            .iter()
+                            .any(|m| m.media_id == *media && m.topology.purpose == "backup"),
+                    "backup location differs from its scanned medium"
+                );
+            }
         }
         insert(&mut tx, id, entries, &encoded).await?;
         if old.is_some() {

@@ -187,9 +187,14 @@ impl App {
             &self.config.requests.read_idle_timeout,
         )?);
         let recovery = crate::storage::read_retry::Recovery::new(idle);
-        let verify_first = ranges
-            .first()
-            .is_some_and(|(row, mode)| row.source.pending_upload && mode == "inline");
+        let verify_first = ranges.first().is_some_and(|(row, mode)| {
+            row.source.pending_upload && mode == "inline"
+                || !row.source.pending_upload
+                    && self
+                        .storage
+                        .store_backend(row.source.storage_id)
+                        .is_ok_and(|store| store.native.is_some())
+        });
         let first = if let Some((first, _)) = ranges.first() {
             Some(
                 pin.borrow()
@@ -282,7 +287,7 @@ impl App {
             }
         };
         let mut body = Box::pin(body);
-        // Verify the first requested pending page before committing a successful response.
+        // Verify the first pending page or native range before committing the response.
         let first = if verify_first {
             body.try_next().await?
         } else {

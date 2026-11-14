@@ -94,6 +94,8 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::storage_clusters::takeover))
         .routes(routes!(super::storage_clusters::sources))
         .routes(routes!(super::storage_clusters::repair))
+        .routes(routes!(super::storage_clusters::verify_backups))
+        .routes(routes!(super::storage_clusters::backup_points))
         .routes(routes!(super::storage_clusters::members))
         .routes(routes!(super::storage_clusters::groups))
         .routes(routes!(super::storage_clusters::state))
@@ -400,6 +402,8 @@ mod tests {
             ("/api/v1/domains", "post"),
             ("/api/v1/domains/{host}", "delete"),
             ("/api/v1/cluster/recover", "post"),
+            ("/api/v1/storage-clusters/{id}/backups", "get"),
+            ("/api/v1/storage-clusters/{id}/verify-backups", "post"),
             (
                 "/api/v1/storage-clusters/{id}/fragments/{fragment}/repair",
                 "post",

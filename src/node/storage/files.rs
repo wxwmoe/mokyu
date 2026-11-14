@@ -13,6 +13,7 @@ use uuid::Uuid;
 pub(super) struct Files {
     pub disk: Arc<Disk>,
     pub media: Media,
+    pub backup: bool,
     pub manifest: RwLock<Option<Manifest>>,
     pub pending: RwLock<Option<Manifest>>,
     pub history: std::sync::Mutex<Option<Manifest>>,
@@ -149,6 +150,7 @@ impl Files {
         let history = std::sync::Mutex::new(manifest.clone());
         Ok(Self {
             disk: Disk::storage_member(instance, budget)?,
+            backup: instance.storage_purpose.as_deref() == Some("backup"),
             media,
             manifest: RwLock::new(manifest),
             pending: RwLock::new(receiving),

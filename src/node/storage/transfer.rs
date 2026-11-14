@@ -314,16 +314,22 @@ pub(super) async fn read(
     input: Streaming<wire::StorageInput>,
     auth: Arc<Authorization>,
 ) -> Result<Output> {
-    let Action::Read {
-        receipt,
-        offset,
-        length,
-    } = auth.value().action
-    else {
+    let grant = auth.value();
+    let Some((receipt, offset, length)) = grant.action.read_range() else {
         return Err(Status::permission_denied("a read grant is required").into());
     };
     let cancellation = Cancel(auth.clone());
-    let mut bytes = fragments::read(&node.files, receipt, offset, length, auth.checking()).await?;
+    if matches!(grant.action, Action::BackupRead { .. }) {
+        node.backup_reads.fetch_add(1, Ordering::Relaxed);
+    }
+    let mut bytes = fragments::read(
+        &node.files,
+        receipt.clone(),
+        offset,
+        length,
+        auth.checking(),
+    )
+    .await?;
     let renewal = renewing(input, auth.clone());
     let check = auth.checking();
     Ok(monitored(

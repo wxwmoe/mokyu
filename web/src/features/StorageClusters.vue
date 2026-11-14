@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { useRoute, useRouter } from 'vue-router'
-import { Network, Layers, Pencil, Plus, RefreshCw, Server } from 'lucide-vue-next'
+import { ChevronRight, Network, Layers, Pencil, Plus, RefreshCw, Server } from 'lucide-vue-next'
 import { api, bytes, queries, write } from '../api/client'
 import type { components } from '../api/schema'
 import { useDeployment } from '../app/cluster'
@@ -29,6 +29,11 @@ const selected = computed({
   set(id: string) { void router.replace({ query: { ...route.query, cluster: id } }) },
 })
 const busy = ref(false), open = ref(false), name = ref(''), policy = ref<Policy>(), editing = ref<Cluster>(), operation = ref<'add' | 'enable' | 'bind'>(), media = ref<string[]>([])
+const backupGroups = computed(() => catalog.data.value?.backups.filter(row => row.cluster === selected.value) || [])
+const showPoints = ref(false), pages = ref<string[]>([''])
+const cursor = computed(() => pages.value.at(-1) || '')
+const points = useQuery({ queryKey: ['storage-backup-points', selected, cursor], enabled: computed(() => !!current.value && showPoints.value), queryFn: ({ signal }) => api<components['schemas']['StorageClusterBackupPoints']>(`/api/v1/storage-clusters/${selected.value}/backups${cursor.value ? '?after=' + cursor.value : ''}`, { signal }), refetchInterval: 10000 })
+watch(selected, () => { showPoints.value = false; pages.value = [''] })
 const operationRevision = ref(0)
 const canApply = computed(() => {
   if (operation.value === 'bind') return !!name.value.trim()
@@ -50,6 +55,12 @@ function edit(row?: Cluster) {
   const source = row?.policy || catalog.data.value?.defaults
   policy.value = source ? { ...source, layout: { ...source.layout } } : undefined
   open.value = true
+}
+async function verifyBackups(row: Cluster) {
+  busy.value = true
+  try { await write(`/api/v1/storage-clusters/${row.id}/verify-backups`, { revision: row.revision }); await refresh() }
+  catch (error) { report(error) }
+  finally { busy.value = false }
 }
 async function refresh() { await queries.invalidateQueries({ queryKey: ['storage-clusters'] }) }
 async function save() {
@@ -106,6 +117,30 @@ function available(id: string) {
       <section v-if="current" class="surface sc-detail">
         <div class="sc-heading"><div><h2>{{ current.name }}</h2><span class="badge node-state" data-tone="cream">{{ t('sc_' + current.state) }}</span></div><button class="icon-button" :aria-label="t('scEdit')" @click="edit(current)"><Pencil :size="17" /></button></div>
         <p class="muted">{{ t('scHint_' + current.state) }}</p>
+        <section v-if="current.policy.backup_copies || backupGroups.length" class="sc-backups">
+          <div class="sc-heading"><h3>{{ t('scBackups') }}</h3><button v-if="backupGroups.length" class="button" :disabled="busy" @click="verifyBackups(current)"><RefreshCw :size="15" />{{ t('scVerifyBackups') }}</button></div>
+          <p v-if="!backupGroups.length" class="muted">{{ t('scBackupEmpty') }}</p>
+          <details v-if="backupGroups.length" class="sc-points" :open="showPoints" @toggle="showPoints = ($event.target as HTMLDetailsElement).open">
+            <summary><ChevronRight :size="15" />{{ t('scRecoveryPoints') }}</summary>
+            <ErrorNotice v-if="points.error.value" :error="points.error.value" />
+            <p v-else-if="points.isLoading.value" class="sc-empty" role="status">{{ t('sc_checking') }}</p>
+            <p v-else-if="points.data.value && !points.data.value.entries.length" class="sc-empty">{{ t('scNoPoints') }}</p>
+            <div v-for="point in points.data.value?.entries" :key="point.storage + point.group" class="sc-backup-group">
+              <strong>{{ point.name }} · {{ point.group }}</strong>
+              <dl class="sc-facts">
+                <div><dt>{{ t('scBackupWatermark') }}</dt><dd>{{ point.recoverable_through ?? '—' }}</dd></div>
+                <div><dt>{{ t('scBackupEvidence') }}</dt><dd>{{ point.evidence_revision }} / {{ point.published_revision }}</dd></div>
+                <div><dt>{{ t('scMissingBodies') }}</dt><dd>{{ point.missing_bodies }}</dd></div>
+                <div><dt>{{ t('scMissingMetadata') }}</dt><dd>{{ point.missing_metadata }}</dd></div>
+              </dl>
+            </div>
+            <div v-if="pages.length > 1 || points.data.value?.after" class="sc-actions"><button v-if="pages.length > 1" class="button" @click="pages.pop()">{{ t('previousPage') }}</button><button v-if="points.data.value?.after" class="button" @click="pages.push(points.data.value.after)">{{ t('nextPage') }}</button></div>
+          </details>
+          <div v-for="row in backupGroups" :key="row.storage_group || ''" class="sc-backup-group">
+            <strong>{{ row.storage_group || t('scBackupUnassigned') }}</strong>
+            <dl class="sc-facts"><div><dt>{{ t('scBackupPending') }}</dt><dd>{{ row.pending }} · {{ bytes(row.pending_bytes) }}</dd></div><div><dt>{{ t('scBackupVerified') }}</dt><dd>{{ row.verified }}</dd></div><div v-if="row.oldest_pending"><dt>{{ t('scBackupOldest') }}</dt><dd>{{ date(new Date(row.oldest_pending / 1000).toISOString()) }}</dd></div><div v-if="row.last_verified"><dt>{{ t('scBackupChecked') }}</dt><dd>{{ date(new Date(row.last_verified / 1000).toISOString()) }}</dd></div></dl>
+          </div>
+        </section>
         <dl class="sc-facts"><div><dt>{{ t('scLayout') }}</dt><dd>{{ t('scLayoutValue', { data: current.policy.layout.data_shards, parity: current.policy.layout.parity_shards, copies: current.policy.layout.extra_copies }) }}</dd></div><div><dt>{{ t('scGroups') }}</dt><dd>{{ current.manifest.groups.length }}</dd></div><div><dt>{{ t('scRevision') }}</dt><dd>{{ current.revision }}</dd></div></dl>
         <div class="sc-section-heading"><h3><Server :size="18" />{{ t('scMembers') }}</h3><button :disabled="busy" @click="choose('add')"><Plus :size="16" />{{ t('scAdd') }}</button></div>
         <p v-if="!current.manifest.members.length" class="sc-empty muted">{{ t('scNoMembers') }}</p>
@@ -136,6 +171,10 @@ function available(id: string) {
         <label class="field"><span>{{ t('scOrder') }}</span><UiSelect v-model="policy.placement_order" :label="t('scOrder')" :options="choices(['region_first','node_first'])" :disabled="busy" /></label>
         <label class="field"><span>{{ t('scReadParallelism') }}</span><input v-model.number="policy.read_parallelism" type="number" min="1" max="256" required :disabled="busy" /></label>
       </div></fieldset>
+      <fieldset class="sc-policy-section"><legend>{{ t('scBackups') }}</legend><div class="sc-form-grid">
+        <label class="field"><span>{{ t('scBackupCopies') }}</span><input v-model.number="policy.backup_copies" type="number" min="0" max="256" required :disabled="busy" /><small>{{ t('scBackupCopiesHint') }}</small></label>
+        <label v-if="policy.backup_copies" class="field"><span>{{ t('scBackupRate') }}</span><input v-model.number="policy.backup_bytes_per_second" type="number" min="1" max="1099511627776" required :disabled="busy" /><small>{{ bytes(policy.backup_bytes_per_second || 0) }}/s</small></label>
+      </div></fieldset>
     </form>
     <template #footer><button type="button" :disabled="busy" @click="open = false">{{ t('cancel') }}</button><button class="primary" :disabled="busy || !policy || !name.trim()" type="submit" form="storage-cluster-policy">{{ t(editing ? 'save' : 'scCreate') }}</button></template>
   </UiDialog>
@@ -150,6 +189,9 @@ function available(id: string) {
 </template>
 
 <style scoped>
+.sc-backups { display:grid; gap:12px; padding-block:16px; border-block:1px solid var(--line); }
+.sc-backups h3, .sc-backups p, .sc-backup-group .sc-facts { margin:0; }
+.sc-backup-group { display:grid; gap:8px; min-width:0; overflow-wrap:anywhere; }
 .sc-layout { display: grid; grid-template-columns: minmax(180px, 240px) minmax(0, 1fr); gap: 24px; align-items: start; }
 .sc-list { display: grid; gap: 8px; }
 .sc-list button { text-align: start; justify-content: start; padding: 16px; height: auto; }
@@ -172,8 +214,16 @@ function available(id: string) {
 .sc-member details { margin-top: 16px; }
 .sc-identifiers { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 12px; font-size: .85rem; }
 .sc-identifiers dd { margin: 0; text-align: end; overflow-wrap: anywhere; }
+.sc-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.sc-backup-group + .sc-backup-group { border-top: 1px solid var(--line-soft); padding-top: 12px; }
+.sc-points { padding: 10px 14px; background: var(--surface-soft); border: 1px solid var(--line-soft); border-radius: 12px; }
+.sc-points > summary { display: flex; align-items: center; gap: 8px; list-style: none; cursor: pointer; font-weight: var(--ui-weight, 700); }
+.sc-points > :not(summary) { margin-top: 12px; }
+.sc-points summary::-webkit-details-marker { display: none; }
+.sc-points[open] summary svg { transform: rotate(90deg); }
 .sc-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 24px; }
-.sc-empty { padding: 20px 0; }
+.sc-empty { margin: 0; padding: 12px 0; color: var(--muted); }
+.sc-points > .sc-empty { padding: 0; }
 .sc-discovery { margin-top: 24px; }
 .sc-discovered { padding: 16px 0; border-top: 1px solid var(--line-soft); }
 .sc-discovered > div { min-width: 0; overflow-wrap: anywhere; }

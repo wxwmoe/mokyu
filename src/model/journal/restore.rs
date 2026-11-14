@@ -61,6 +61,8 @@ pub(crate) struct Unlocked {
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct NativeRecovery {
     pub catalog: Uuid,
+    #[serde(default)]
+    pub backup_group: Option<String>,
     pub head: crate::model::storage_recovery::Proof,
 }
 impl Unlocked {

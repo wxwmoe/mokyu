@@ -198,9 +198,7 @@ impl Pool {
         renewal: &dyn Renewal,
     ) -> Result<Vec<Completion>> {
         let target = &targets[0];
-        let (Action::Write { header } | Action::Repair { header }) =
-            &target.authorization.grant.action
-        else {
+        let Some(header) = target.authorization.grant.action.write_header() else {
             anyhow::bail!("write plan required");
         };
         let expected = header.clone();
@@ -288,8 +286,7 @@ impl Pool {
             .zip(receipts)
             .map(|(target, receipt)| {
                 let signed = target.authorization;
-                let (Action::Write { header } | Action::Repair { header }) = &signed.grant.action
-                else {
+                let Some(header) = signed.grant.action.write_header() else {
                     anyhow::bail!("write plan required");
                 };
                 let mut expected = header.clone();
@@ -319,7 +316,7 @@ impl Pool {
         let client = self.client(&target.url);
         Box::pin(async move {
             let mut signed = target.authorization;
-            let Action::Read { length, .. } = signed.grant.action else {
+            let Some((_, _, length)) = signed.grant.action.read_range() else {
                 anyhow::bail!("read plan required");
             };
             if signed.grant.expires <= chrono::Utc::now().timestamp() + 5 {
@@ -350,6 +347,27 @@ impl Pool {
         let state: FragmentState = serde_json::from_slice(&reply.result_json)?;
         state.validate(header)?;
         Ok(state)
+    }
+
+    pub async fn check_backup(&self, target: &Destination) -> Result<Completion> {
+        ensure!(
+            matches!(
+                target.authorization.grant.action,
+                Action::BackupCheck { .. }
+            ),
+            "backup verification grant required"
+        );
+        let reply = self
+            .client(&target.url)?
+            .state(wire::StorageRequest {
+                grant_json: serde_json::to_vec(&target.authorization)?,
+            })
+            .await?
+            .into_inner();
+        Ok(Completion {
+            authorization: target.authorization.clone(),
+            receipt: serde_json::from_slice(&reply.result_json)?,
+        })
     }
 
     pub async fn publish(&self, target: &Destination) -> Result<()> {

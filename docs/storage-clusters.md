@@ -64,6 +64,19 @@ data 使用 HTTP/2 直接访问 storage，分范围并行读取并按对象顺�
 
 使用 `storage-cluster repair CLUSTER_UUID FRAGMENT_UUID` 核验并修复分片。健康片保持不变；确认损坏或缺失后，从健康主副本生成新片，完整校验后切换映射。读租约、共享引用、任务和元数据恢复点仍使用旧来源时不会回收它。网络错误不会被当作磁盘损坏。
 
+## 独立备份
+
+在“存储群集”里将用途为 `backup` 的成员加入群集，然后设置备份份数。每份备份使用不同的 `storage_group`；同组可以有多块盘，恢复这一份时需找回持有相应文件的成员。份数默认为 0。调高份数时后台也会补齐先前已发布的载荷。限速按单次传输生效。备份盘断线或已满时，主写仍按正常或降级确认档返回，欠账保留。
+
+展开“恢复点”可分别查看后端在各组的正文缺口、元数据缺口和发布修订。只有已启用元数据日志，且所需正文、恢复载荷与发布证据都齐全时，才有可恢复的业务水位。未启用日志的桶即使正文已备份，也需要原控制面的数据库才能识别对象。怀疑盘上文件丢失或损坏时，点击“核验备份”；后台从主存储补回能校验的内容。也可使用：
+
+```sh
+mokyu cli storage-cluster backups CLUSTER_UUID
+mokyu cli storage-cluster verify-backups CLUSTER_UUID --revision N
+```
+
+原控制面丢失时，在新 control 接管所选组的介质，再用 `mokyu cli storage recovery probe connection.json --namespace STORAGE_UUID --backup-group GROUP` 预览。需要旧部署 key 时通过 `--key-stdin` 输入。导入到另一个可写后端；若选 Mokyu 后端，须绑定另一个存储群集。此方式只从选定组读取，恢复前不会把备份盘用于业务流量。
+
 ## 身份和恢复边界
 
 每个介质有稳定的 `media.json` UUID。已发布群集清单为 `cluster.json`，不可变历史放在 `cluster/history/<群集 UUID>/<记录 UUID>.json`。记录包含修订、记录 UUID 和前序摘要。同步先持久保存 `cluster.json.part`，逐批核对并保存历史后再原子发布清单；中断重启后继续同步。缺失或损坏的身份和清单不会被当成空盘重新初始化。

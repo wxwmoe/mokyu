@@ -11,6 +11,7 @@ use futures_util::TryStreamExt;
 use std::time::Duration;
 use uuid::Uuid;
 
+pub(crate) mod archive;
 mod part;
 mod replay;
 pub(crate) mod scan;

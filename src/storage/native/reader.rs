@@ -5,7 +5,6 @@ use bytes::Bytes;
 use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use serde::{Deserialize, Serialize};
 use std::{ops::Range, sync::Arc};
-use uuid::Uuid;
 
 pub(crate) const PART: u64 = 512 * 1024;
 pub(crate) const WINDOW: u64 = 8 * 1024 * 1024;
@@ -91,7 +90,7 @@ impl Plan {
     }
 }
 
-async fn part(
+pub(super) async fn part(
     pool: Arc<Pool>,
     renewal: Arc<dyn Renewal>,
     part: Part,

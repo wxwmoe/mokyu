@@ -340,9 +340,34 @@ pub(crate) async fn response(
                 }
             })
         } else {
+            let first_storage = prepared
+                .reply
+                .mapping
+                .as_ref()
+                .map(|v| prepared.material::<read::Mapping>(v))
+                .transpose()?
+                .and_then(|mapping| mapping.segments.into_iter().next())
+                .map(|segment| segment.source.storage())
+                .transpose()?
+                .flatten();
+            let native = first_storage
+                .map(|id| prepared.backend(id))
+                .transpose()?
+                .is_some_and(|backend| backend.store.native.is_some());
             prepared.capture = builder.as_ref().map(|builder| builder.capture.clone());
+            let mut body = super::body::stream(reads.clone(), prepared, ranges);
+            // A disconnected primary must fail before HTTP commits a successful Range response.
+            let first = if native && size > 0 {
+                tokio::time::timeout(idle, body.next())
+                    .await
+                    .map_err(|_| s3s::s3_error!(ServiceUnavailable, "storage read timed out"))?
+                    .transpose()?
+            } else {
+                None
+            };
             Box::pin(
-                super::body::stream(reads.clone(), prepared, ranges)
+                futures_util::stream::iter(first.map(Ok))
+                    .chain(body)
                     .map(|result| result.map_err(io::Error::other)),
             )
         };

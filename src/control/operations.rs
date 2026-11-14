@@ -199,6 +199,13 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let clusters = &app.storage_clusters;
             Ok(match command {
                 StorageClusters::List => serde_json::to_value(clusters.overview().await?)?,
+                StorageClusters::Backups { id, after } => {
+                    serde_json::to_value(clusters.backup_points(principal, id, after).await?)?
+                }
+                StorageClusters::VerifyBackups { id, revision } => {
+                    clusters.verify_backups(principal, id, revision).await?;
+                    serde_json::Value::Null
+                }
                 StorageClusters::Repair { id, fragment } => serde_json::json!({"task_id":
                     app.native_storage.request_repair(principal, id, fragment).await?}),
                 StorageClusters::Sources { id, media, after } => serde_json::to_value(
@@ -397,6 +404,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                             document,
                             deployment_key,
                             namespace,
+                            backup_group,
                             ..
                         } => serde_json::to_value(
                             recovery::probe(
@@ -408,6 +416,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                                     )?,
                                     deployment_key,
                                     namespace,
+                                    backup_group,
                                 },
                             )
                             .await?,
@@ -646,6 +655,7 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                                 storage: input.clone(),
                                 deployment_key: None,
                                 namespace: None,
+                                backup_group: None,
                             },
                         )
                         .await?;

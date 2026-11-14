@@ -112,6 +112,12 @@ pub(crate) enum CatalogEntry {
     Manifest(Manifest),
     Proof(Proof),
     Fragment(super::storage_payload::Receipt),
+    BackupLocation {
+        fragment: Uuid,
+        media: Uuid,
+        namespace: Uuid,
+        cluster: Uuid,
+    },
     Physical(Uuid, Physical),
     Business {
         payload: Uuid,
@@ -151,6 +157,20 @@ impl CatalogEntry {
                 value.publication.revision,
             ),
             Self::Fragment(value) => (2, value.header.operation, value.header.fragment, 0),
+            Self::BackupLocation {
+                fragment, media, ..
+            } => {
+                let mut hash =
+                    blake3::Hasher::new_derive_key("mokyu/storage/recovery-backup-location/v1");
+                hash.update(fragment.as_bytes());
+                hash.update(media.as_bytes());
+                (
+                    2,
+                    *fragment,
+                    Uuid::from_bytes(hash.finalize().as_bytes()[..16].try_into().unwrap()),
+                    1,
+                )
+            }
             Self::Physical(epoch, value) => {
                 let (category, owner, key, sequence) = match value {
                     Physical::Payload {
@@ -209,6 +229,20 @@ impl CatalogEntry {
                         && value.publication.namespace == namespace
                         && value.signature.len() == 64,
                     "foreign recovery proof"
+                );
+            }
+            Self::BackupLocation {
+                fragment,
+                media,
+                namespace: source,
+                cluster: owner,
+            } => {
+                ensure!(
+                    !fragment.is_nil()
+                        && !media.is_nil()
+                        && *source == namespace
+                        && *owner == cluster,
+                    "foreign backup recovery location"
                 );
             }
             Self::Fragment(value) => {
@@ -299,6 +333,22 @@ pub(crate) trait RecoveryCatalog: Send + Sync {
         id: Uuid,
         operation: Uuid,
         epochs: &[crate::storage::marker::EpochCut],
+    ) -> Result<()> {
+        self.catalog_map(id, operation, epochs, true).await
+    }
+    async fn catalog_image(&self, id: Uuid, namespace: Uuid, path: &str) -> Result<Option<Intent>>;
+    async fn catalog_shards(
+        &self,
+        id: Uuid,
+        op: Uuid,
+        seq: u32,
+    ) -> Result<Vec<super::storage_payload::Receipt>>;
+    async fn catalog_map(
+        &self,
+        id: Uuid,
+        operation: Uuid,
+        epochs: &[crate::storage::marker::EpochCut],
+        install: bool,
     ) -> Result<()>;
     async fn catalog_bind(&self, id: Uuid, head: &Proof) -> Result<()>;
     async fn catalog_proofs(&self, id: Uuid, after: u64, through: u64) -> Result<Vec<Proof>>;

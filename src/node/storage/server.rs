@@ -101,7 +101,7 @@ impl StorageNode for Service {
             .map_err(transfer::error)?;
         let _cancel = Cancel(auth.clone());
         let grant = auth.value();
-        let (Action::Write { header } | Action::Repair { header }) = grant.action else {
+        let Some(header) = grant.action.write_header().cloned() else {
             return Err(Status::permission_denied("a write grant is required"));
         };
         self.node
@@ -207,7 +207,24 @@ impl StorageNode for Service {
     ) -> Result<Response<wire::StorageResult>, Status> {
         let auth = self.authorize(request.into_inner())?;
         let _cancel = Cancel(auth.clone());
-        let Action::Stat { header } = auth.value().action else {
+        let grant = auth.value();
+        if let Action::BackupCheck { receipt, evidence } = grant.action {
+            if let Some(link) = evidence {
+                super::recovery::verify_backup(
+                    &self.node.files,
+                    receipt.header.namespace,
+                    link,
+                    auth.checking(),
+                )
+                .await
+                .map_err(transfer::error)?;
+            }
+            let receipt = fragments::verify_backup(&self.node.files, receipt, auth.checking())
+                .await
+                .map_err(transfer::error)?;
+            return result_json(&self.receipt(grant.id, receipt).map_err(transfer::error)?);
+        }
+        let Action::Stat { header } = grant.action else {
             return Err(Status::permission_denied("a state grant is required"));
         };
         let result = fragments::inspect(&self.node.files, header, auth.checking())

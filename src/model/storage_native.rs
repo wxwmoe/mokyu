@@ -92,6 +92,10 @@ pub(crate) struct Fill {
     pub sequence: u32,
     #[serde(default)]
     pub repair: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<Uuid>,
+    #[serde(default)]
+    pub shard: u16,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

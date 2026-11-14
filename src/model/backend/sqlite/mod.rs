@@ -45,6 +45,8 @@ mod read_reports;
 mod replica_transactions;
 #[path = "../../shared/staging.rs"]
 mod staging;
+#[path = "../../shared/storage_backup.rs"]
+mod storage_backup;
 #[path = "../../shared/storage_capacity.rs"]
 mod storage_capacity;
 #[path = "../../shared/storage_cluster.rs"]

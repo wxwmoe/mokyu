@@ -17,7 +17,7 @@ use uuid::Uuid;
 pub(super) struct Allocation {
     pub cluster: Cluster,
     pub targets: Vec<Target>,
-    status: HashMap<Uuid, Status>,
+    pub(super) status: HashMap<Uuid, Status>,
     cursor: Option<Uuid>,
 }
 

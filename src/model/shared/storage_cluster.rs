@@ -300,6 +300,88 @@ impl StorageClusters for Backend {
         Ok((value, targets))
     }
 
+    async fn backup_points(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        after: Option<Uuid>,
+    ) -> Result<BackupPoints> {
+        use super::queries::{storage_backup as b, storage_journal as j};
+        use std::collections::BTreeMap;
+        let mut tx = q::begin(self).await?;
+        q::admin(&mut tx, principal).await?;
+        let cluster = cluster(q::cluster(id).fetch_one(&mut *tx).await?)?;
+        let mut groups = BTreeMap::<String, Vec<Uuid>>::new();
+        for m in cluster
+            .manifest
+            .members
+            .iter()
+            .filter(|m| m.topology.purpose == "backup")
+        {
+            groups
+                .entry(m.topology.storage_group.clone())
+                .or_default()
+                .push(m.media_id);
+        }
+        let mut out = Vec::new();
+        let namespaces = b::namespaces(id, after.unwrap_or(Uuid::nil()))
+            .fetch_all(&mut *tx)
+            .await?;
+        let next = (namespaces.len() > 8).then(|| namespaces[7].0);
+        for (storage, name) in namespaces.into_iter().take(8) {
+            let latest = j::latest(storage).fetch_optional(&mut *tx).await?;
+            let revision = latest
+                .as_ref()
+                .map_or(0, |(p, _)| p.publication.revision as i64);
+            for (group, members) in &groups {
+                let (missing_bodies, missing_metadata) =
+                    b::gaps(storage, group).fetch_one(&mut *tx).await?;
+                let mut evidence = 0;
+                for media in members {
+                    evidence = evidence.max(
+                        j::evidence(storage, *media)
+                            .fetch_optional(&mut *tx)
+                            .await?
+                            .unwrap_or(0),
+                    );
+                }
+                let recoverable_through = latest.as_ref().and_then(|(p, settled)| {
+                    (*settled
+                        && evidence == revision
+                        && missing_bodies == 0
+                        && missing_metadata == 0)
+                        .then_some(p.publication.through)
+                });
+                out.push(BackupPoint {
+                    storage,
+                    name: name.clone(),
+                    group: group.clone(),
+                    missing_bodies,
+                    missing_metadata,
+                    published_revision: revision,
+                    evidence_revision: evidence,
+                    recoverable_through,
+                });
+            }
+        }
+        tx.commit().await?;
+        Ok(BackupPoints {
+            entries: out,
+            after: next,
+        })
+    }
+
+    async fn verify_backups(&self, principal: &Principal, id: Uuid, revision: i64) -> Result<()> {
+        let mut tx = q::begin(self).await?;
+        q::admin(&mut tx, principal).await?;
+        current(&mut tx, id, revision).await?;
+        super::queries::storage_backup::verify(id, chrono::Utc::now().timestamp_micros())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn overview(&self) -> Result<Overview> {
         let mut tx = q::begin(self).await?;
         let clusters = q::clusters().fetch_all(&mut *tx).await?;
@@ -310,6 +392,30 @@ impl StorageClusters for Backend {
         );
         let result = Overview {
             defaults: Policy::default(),
+            backups: super::queries::storage_backup::stats()
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .map(
+                    |(
+                        cluster,
+                        storage_group,
+                        pending,
+                        verified,
+                        pending_bytes,
+                        oldest_pending,
+                        last_verified,
+                    )| BackupGroup {
+                        cluster,
+                        storage_group,
+                        pending,
+                        verified,
+                        pending_bytes,
+                        oldest_pending,
+                        last_verified,
+                    },
+                )
+                .collect(),
             clusters: clusters.into_iter().map(cluster).collect::<Result<_>>()?,
             devices: devices.into_iter().map(device).collect(),
         };
@@ -361,6 +467,11 @@ impl StorageClusters for Backend {
         let mut tx = q::begin(self).await?;
         q::admin(&mut tx, principal).await?;
         let mut value = current(&mut tx, id, input.revision).await?;
+        if input.policy.backup_copies > value.policy.backup_copies {
+            super::queries::storage_backup::schedule(id)
+                .execute(&mut *tx)
+                .await?;
+        }
         value.name = input.name;
         value.policy = input.policy;
         let value = save(&mut tx, value).await?;

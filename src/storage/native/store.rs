@@ -26,6 +26,7 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub(crate) enum Authority {
     Unscoped,
+    Recovery(Arc<super::recovery::archive::Archive>),
     Control(Arc<Control>),
     Read {
         client: Arc<Client>,
@@ -143,13 +144,7 @@ impl Store {
             result?
         };
         if let Authority::Control(control) = &self.authority {
-            let (_, name) = path
-                .as_ref()
-                .split_once('/')
-                .context("missing copy address")?;
-            let owner = crate::storage::location::Layout::S3
-                .parse_name(name)
-                .context("invalid copy address")?;
+            let owner = carrier_owner(path)?;
             control
                 .publish(self.namespace, intent.payload, owner)
                 .await?;
@@ -399,17 +394,7 @@ impl Store {
                 let publication = match options.extensions.get::<Publication>() {
                     Some(value) => value.clone(),
                     None => {
-                        let (directory, name) = path
-                            .as_ref()
-                            .split_once('/')
-                            .context("native carrier path is missing")?;
-                        ensure!(
-                            matches!(directory, "objects" | "chunks" | "packs"),
-                            "native publication context is missing"
-                        );
-                        let owner = crate::storage::location::Layout::S3
-                            .parse_name(name)
-                            .context("invalid native carrier path")?;
+                        let owner = carrier_owner(path)?;
                         Publication {
                             owner,
                             area: Area::Blocks,
@@ -508,6 +493,9 @@ impl Store {
 
     async fn get(&self, path: &Path, options: GetOptions) -> object_store::Result<GetResult> {
         let name = self.path(path);
+        if let Authority::Recovery(source) = &self.authority {
+            return source.get(path, &name, options).await;
+        }
         let version = options
             .version
             .as_deref()
@@ -553,7 +541,24 @@ impl Store {
     }
 }
 
-fn metadata(path: Path, value: &reader::Metadata) -> Result<ObjectMeta> {
+fn carrier_owner(path: &Path) -> Result<Uuid> {
+    let value = path.as_ref();
+    if crate::storage::is_fragment_key(value) {
+        return Ok(Uuid::parse_str(value.rsplit('/').next().unwrap())?);
+    }
+    let (directory, name) = value
+        .split_once('/')
+        .context("missing native carrier address")?;
+    ensure!(
+        matches!(directory, "objects" | "chunks" | "packs"),
+        "native publication context is missing"
+    );
+    crate::storage::location::Layout::S3
+        .parse_name(name)
+        .context("invalid native carrier path")
+}
+
+pub(super) fn metadata(path: Path, value: &reader::Metadata) -> Result<ObjectMeta> {
     Ok(ObjectMeta {
         location: path,
         last_modified: chrono::DateTime::from_timestamp_micros(value.modified)
@@ -564,7 +569,7 @@ fn metadata(path: Path, value: &reader::Metadata) -> Result<ObjectMeta> {
     })
 }
 
-fn failure(path: &Path, error: anyhow::Error) -> object_store::Error {
+pub(super) fn failure(path: &Path, error: anyhow::Error) -> object_store::Error {
     match error.downcast_ref::<crate::model::Error>() {
         Some(crate::model::Error::StorageObjectMissing) => object_store::Error::NotFound {
             path: path.to_string(),

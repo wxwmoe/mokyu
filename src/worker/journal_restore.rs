@@ -61,6 +61,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                 .connection
                 .cluster_id
                 .context("missing recovery cluster")?,
+            native.backup_group.clone(),
         )
         .await?;
         let data =
@@ -71,6 +72,16 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                     &native.head,
                     &app.storage.disk,
                     Some(&unlocked.cut),
+                )
+                .await?
+            } else if native.backup_group.is_some() {
+                scan.map(
+                    native.catalog,
+                    &unlocked.source,
+                    &native.head,
+                    &app.storage.disk,
+                    Some(&unlocked.cut),
+                    false,
                 )
                 .await?
             } else {
@@ -87,7 +98,25 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
     } else {
         None
     };
-    let source_store = recovery::native::connect(app, &unlocked.source.connection)?;
+    let source_store = if let (Some((scan, _)), Some(native)) = (&native_scan, &unlocked.native)
+        && let Some(group) = &native.backup_group
+    {
+        ensure!(!exclusive_takeover, "a backup source is read-only");
+        let archive = crate::storage::native::recovery::archive::Archive::new(
+            scan.clone(),
+            native.catalog,
+            unlocked.source.connection.id,
+            group,
+        )?;
+        model::Store::connect_native(
+            &unlocked.source.connection,
+            source::options(),
+            crate::storage::native::store::Authority::Recovery(Arc::new(archive)),
+            None,
+        )?
+    } else {
+        recovery::native::connect(app, &unlocked.source.connection)?
+    };
     let origin = source_store.backend.clone();
     let source_storage = unlocked.source.connection.id;
     let local = crate::storage::journal::local::Local::new(&unlocked.source.connection)?;

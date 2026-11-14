@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261114113200.
+-- Generated from the complete postgres migration chain through 20261114135600.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2533,6 +2533,32 @@ CREATE TABLE public.staging_objects (
     CONSTRAINT staging_objects_bytes_check CHECK ((bytes > 0))
 );
 
+CREATE TABLE public.storage_backup_files (
+    backup_id uuid NOT NULL,
+    sequence bigint NOT NULL,
+    shard smallint NOT NULL,
+    media_id uuid NOT NULL,
+    receipt jsonb NOT NULL,
+    verified_at bigint
+);
+
+CREATE TABLE public.storage_backup_scans (
+    cluster_id uuid NOT NULL,
+    after_id uuid NOT NULL,
+    verify_since bigint DEFAULT 0 NOT NULL
+);
+
+CREATE TABLE public.storage_backups (
+    id uuid NOT NULL,
+    operation uuid NOT NULL,
+    ordinal smallint NOT NULL,
+    verify_since bigint DEFAULT 0 NOT NULL,
+    storage_group character varying(128),
+    created_at bigint NOT NULL,
+    verified_at bigint,
+    CONSTRAINT storage_backup_bounds CHECK (((ordinal >= 0) AND (ordinal < 256)))
+);
+
 CREATE TABLE public.storage_cluster_history (
     cluster_id uuid NOT NULL,
     revision bigint NOT NULL,
@@ -2834,6 +2860,24 @@ CREATE TABLE public.storage_recovery_files (
     CONSTRAINT storage_recovery_file_hash CHECK ((octet_length(path_hash) = 32)),
     CONSTRAINT storage_recovery_file_revision CHECK ((publication_revision > 0)),
     CONSTRAINT storage_recovery_file_sequence CHECK ((through_sequence >= 0))
+);
+
+CREATE TABLE public.storage_recovery_objects (
+    catalog uuid NOT NULL,
+    path_hash bytea NOT NULL,
+    path text NOT NULL,
+    revision bigint NOT NULL,
+    published boolean NOT NULL,
+    intent jsonb NOT NULL
+);
+
+CREATE TABLE public.storage_recovery_shards (
+    catalog uuid NOT NULL,
+    operation uuid NOT NULL,
+    sequence bigint NOT NULL,
+    copy_index smallint NOT NULL,
+    shard_index smallint NOT NULL,
+    receipt jsonb NOT NULL
 );
 
 CREATE TABLE public.storage_repairs (
@@ -3825,6 +3869,21 @@ ALTER TABLE ONLY public.sessions
 ALTER TABLE ONLY public.staging_objects
     ADD CONSTRAINT staging_objects_pkey PRIMARY KEY (storage_id, object_key);
 
+ALTER TABLE ONLY public.storage_backups
+    ADD CONSTRAINT storage_backup_domain UNIQUE (operation, storage_group);
+
+ALTER TABLE ONLY public.storage_backup_files
+    ADD CONSTRAINT storage_backup_files_pkey PRIMARY KEY (backup_id, sequence, shard);
+
+ALTER TABLE ONLY public.storage_backups
+    ADD CONSTRAINT storage_backup_ordinal UNIQUE (operation, ordinal);
+
+ALTER TABLE ONLY public.storage_backup_scans
+    ADD CONSTRAINT storage_backup_scans_pkey PRIMARY KEY (cluster_id);
+
+ALTER TABLE ONLY public.storage_backups
+    ADD CONSTRAINT storage_backups_pkey PRIMARY KEY (id);
+
 ALTER TABLE ONLY public.storage_cluster_history
     ADD CONSTRAINT storage_cluster_history_pkey PRIMARY KEY (cluster_id, revision);
 
@@ -3902,6 +3961,12 @@ ALTER TABLE ONLY public.storage_recovery_entries
 
 ALTER TABLE ONLY public.storage_recovery_files
     ADD CONSTRAINT storage_recovery_file_id PRIMARY KEY (catalog, operation);
+
+ALTER TABLE ONLY public.storage_recovery_objects
+    ADD CONSTRAINT storage_recovery_objects_pkey PRIMARY KEY (catalog, path_hash);
+
+ALTER TABLE ONLY public.storage_recovery_shards
+    ADD CONSTRAINT storage_recovery_shards_pkey PRIMARY KEY (catalog, operation, sequence, shard_index, copy_index);
 
 ALTER TABLE ONLY public.storage_repairs
     ADD CONSTRAINT storage_repairs_pkey PRIMARY KEY (id);
@@ -4305,6 +4370,14 @@ CREATE INDEX sessions_expiry ON public.sessions USING btree (expires_at);
 CREATE INDEX sessions_user ON public.sessions USING btree (user_id, created_at DESC, id);
 
 CREATE INDEX staging_objects_created ON public.staging_objects USING btree (created_at, storage_id);
+
+CREATE INDEX storage_backup_debt ON public.storage_backups USING btree (verified_at, created_at, id);
+
+CREATE INDEX storage_backup_location ON public.storage_backup_files USING btree (media_id, backup_id);
+
+CREATE INDEX storage_backup_recheck ON public.storage_backup_files USING btree (backup_id, verified_at, sequence, shard);
+
+CREATE INDEX storage_backup_scan_payload ON public.storage_payloads USING btree (cluster_id, state, operation);
 
 CREATE INDEX storage_fragment_media ON public.storage_fragments USING btree (media_id, operation);
 
@@ -5093,6 +5166,15 @@ ALTER TABLE ONLY public.sessions
 ALTER TABLE ONLY public.staging_objects
     ADD CONSTRAINT staging_objects_storage_id_fkey FOREIGN KEY (storage_id) REFERENCES public.storages(id) ON DELETE CASCADE;
 
+ALTER TABLE ONLY public.storage_backup_files
+    ADD CONSTRAINT storage_backup_file_slot FOREIGN KEY (backup_id) REFERENCES public.storage_backups(id);
+
+ALTER TABLE ONLY public.storage_backups
+    ADD CONSTRAINT storage_backup_payload FOREIGN KEY (operation) REFERENCES public.storage_payloads(operation);
+
+ALTER TABLE ONLY public.storage_backup_scans
+    ADD CONSTRAINT storage_backup_scan_cluster FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id) ON DELETE CASCADE;
+
 ALTER TABLE ONLY public.storage_cluster_history
     ADD CONSTRAINT storage_cluster_history_cluster_id_fkey FOREIGN KEY (cluster_id) REFERENCES public.storage_clusters(id);
 
@@ -5146,6 +5228,12 @@ ALTER TABLE ONLY public.storage_recovery_entries
 
 ALTER TABLE ONLY public.storage_recovery_files
     ADD CONSTRAINT storage_recovery_file_catalog FOREIGN KEY (catalog) REFERENCES public.storage_recovery_catalogs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.storage_recovery_objects
+    ADD CONSTRAINT storage_recovery_object_catalog FOREIGN KEY (catalog) REFERENCES public.storage_recovery_catalogs(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.storage_recovery_shards
+    ADD CONSTRAINT storage_recovery_shard_catalog FOREIGN KEY (catalog) REFERENCES public.storage_recovery_catalogs(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.storage_repairs
     ADD CONSTRAINT storage_repair_payload FOREIGN KEY (operation) REFERENCES public.storage_payloads(operation);

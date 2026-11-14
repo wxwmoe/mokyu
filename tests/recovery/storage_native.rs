@@ -656,9 +656,18 @@ async fn native_journal_publishes_evidence_before_watermarks() -> Result<()> {
         backend.clone(),
         fresh.clone(),
         cluster.id,
+        None,
     )
     .await?;
     let media = nodes[0].announcement()?.media.media_id;
+    let isolated = crate::storage::native::recovery::scan::Scanner::open(
+        backend.clone(),
+        fresh.clone(),
+        cluster.id,
+        Some("missing-backup-group".into()),
+    )
+    .await?;
+    assert!(isolated.namespaces(media).await.is_err());
     let mut discovered = scanner.namespaces(media).await?;
     use futures_util::TryStreamExt;
     let entry = discovered
@@ -1729,7 +1738,9 @@ async fn native_early_ack_replicas_resume_with_authorized_receipts() -> Result<(
         )
         .await?;
         tx.commit().await?;
-        let Reply::Window { sources, targets } = control
+        let Reply::Window {
+            sources, targets, ..
+        } = control
             .node_replicate(
                 &worker,
                 run,
@@ -2007,7 +2018,10 @@ async fn repair_generations(logged: bool) -> Result<()> {
             let reply = control
                 .replicate(&plan, Operation::Checked { damaged: true }, i64::MAX)
                 .await?;
-            let Reply::Window { sources, targets } = reply else {
+            let Reply::Window {
+                sources, targets, ..
+            } = reply
+            else {
                 anyhow::bail!("missing repair window")
             };
             let body = pool.read(sources[0].clone(), control.clone()).await?;

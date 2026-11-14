@@ -52,6 +52,7 @@ pub(crate) mod session;
 pub(crate) mod settings;
 pub(crate) mod source;
 pub(crate) mod storage;
+pub(crate) mod storage_backup;
 pub(crate) mod storage_cluster;
 pub(crate) mod storage_native;
 pub(crate) mod storage_payload;

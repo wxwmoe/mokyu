@@ -36,6 +36,8 @@ pub(crate) enum Reply {
     Window {
         sources: Vec<Destination>,
         targets: Vec<Destination>,
+        #[serde(default)]
+        rate: u64,
     },
     Accepted,
     Renewed {
@@ -123,7 +125,12 @@ impl Worker {
         } else {
             reply
         };
-        let Reply::Window { sources, targets } = reply else {
+        let Reply::Window {
+            sources,
+            targets,
+            rate,
+        } = reply
+        else {
             anyhow::bail!("native replication window missing");
         };
         ensure!(
@@ -131,9 +138,7 @@ impl Worker {
             "native replication window exceeds its limit"
         );
         for target in targets {
-            let (Action::Write { header } | Action::Repair { header }) =
-                &target.authorization.grant.action
-            else {
+            let Some(header) = target.authorization.grant.action.write_header() else {
                 anyhow::bail!("native replication destination is not writable");
             };
             ensure!(
@@ -164,7 +169,22 @@ impl Worker {
                 );
                 let result = async {
                     let body = pool.read(source.clone(), self.clone()).await?;
-                    pool.write(target.clone(), body, self.as_ref()).await
+                    if rate==0 {
+                        pool.write(target.clone(),body,self.as_ref()).await
+                    } else {
+                        use futures_util::{StreamExt,TryStreamExt};
+                        let started=tokio::time::Instant::now();
+                        let paced=async_stream::try_stream! {
+                            let mut source=body;
+                            let mut sent=0u64;
+                            while let Some(bytes)=source.try_next().await? {
+                                sent+=bytes.len() as u64;
+                                tokio::time::sleep_until(started+std::time::Duration::from_secs_f64(sent as f64/rate as f64)).await;
+                                yield bytes;
+                            }
+                        };
+                        pool.write(target.clone(),paced.boxed(),self.as_ref()).await
+                    }
                 }
                 .await;
                 match result {

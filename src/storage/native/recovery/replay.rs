@@ -369,12 +369,24 @@ impl Scanner {
         disk: &Arc<Disk>,
         fixed: Option<&Cut>,
     ) -> Result<(crate::storage::journal::replay::Catalog, Cut)> {
+        self.map(catalog, source, head, disk, fixed, true).await
+    }
+
+    pub async fn map(
+        self: &Arc<Self>,
+        catalog: Uuid,
+        source: &Source,
+        head: &Proof,
+        disk: &Arc<Disk>,
+        fixed: Option<&Cut>,
+        install: bool,
+    ) -> Result<(crate::storage::journal::replay::Catalog, Cut)> {
         let (rows, cut, epochs) = self
             .replay_epochs(catalog, source, head, disk, fixed)
             .await?;
         if let Some(root) = &head.publication.root {
             self.clusters
-                .catalog_restore(catalog, root.intent.operation, &epochs)
+                .catalog_map(catalog, root.intent.operation, &epochs, install)
                 .await?;
         }
         let mut after_file = Uuid::nil();
@@ -387,7 +399,7 @@ impl Scanner {
                 after_file = file.part.intent.operation;
                 if !file.retired && file.decoded.is_some() {
                     self.clusters
-                        .catalog_restore(catalog, after_file, &epochs)
+                        .catalog_map(catalog, after_file, &epochs, install)
                         .await?;
                 }
             }
@@ -404,7 +416,7 @@ impl Scanner {
                     anyhow::bail!("invalid recovered payload record");
                 };
                 self.clusters
-                    .catalog_restore(catalog, intent.operation, &epochs)
+                    .catalog_map(catalog, intent.operation, &epochs, install)
                     .await?;
             }
             match page.after {

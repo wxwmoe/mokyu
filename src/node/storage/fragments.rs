@@ -45,7 +45,7 @@ pub(super) fn open(path: &Path, write: bool) -> Result<File> {
 fn path(files: &Files, header: &Header) -> Result<PathBuf> {
     header.validate()?;
     ensure!(
-        header.media == files.media.media_id,
+        header.media == files.media.media_id || files.backup,
         "fragment belongs to another media"
     );
     Ok(files.disk.root.join(header.area.path(header.fragment)))
@@ -286,6 +286,7 @@ pub(super) async fn write(
 ) -> Result<Receipt> {
     let destination = path(files, &planned)?;
     check()?;
+    let backup = files.backup && planned.digest != [0; 32];
     let disk = files.disk.clone();
     let lock = files.lock.clone();
     let permit = checked(disk.io.clone().acquire_owned(), &check).await??;
@@ -301,6 +302,8 @@ pub(super) async fn write(
         check_directories(&disk.root, &destination)?;
         let pending = temporary(&destination);
         let existing = match open(&destination, false) {
+            // A backup grant fixes the expected digest; stage a replacement before switching a damaged copy.
+            Ok(_) if backup => None,
             Ok(mut file) => Some((inspect_file(&mut file)?, file, true)),
             Err(error)
                 if error
@@ -442,6 +445,31 @@ pub(super) async fn write(
             root: tree[0],
         };
         receipt.validate()?;
+        Ok(receipt)
+    })
+    .await?
+}
+
+pub(super) async fn verify_backup(
+    files: &Files,
+    receipt: Receipt,
+    check: Check,
+) -> Result<Receipt> {
+    let destination = path(files, &receipt.header)?;
+    let disk = files.disk.clone();
+    let lock = files.lock.clone();
+    tokio::task::spawn_blocking(move || {
+        let _lock = lock;
+        let permit = io(&disk, &check)?;
+        check_directories(&disk.root, &destination)?;
+        let mut file = open(&destination, false)?;
+        ensure!(
+            inspect_file(&mut file)? == receipt,
+            crate::content::codec::IntegrityError::Metadata
+        );
+        drop(permit);
+        validate_file(&mut file, &receipt, &disk, &check)?;
+        check()?;
         Ok(receipt)
     })
     .await?
@@ -721,6 +749,41 @@ pub(super) mod tests {
             output.extend_from_slice(&part?);
         }
         Ok(output)
+    }
+
+    #[tokio::test]
+    async fn published_backup_rechecks_bytes_and_only_replaces_with_the_signed_content()
+    -> Result<()> {
+        let (_d, _i, _b, mut files) = fixture("8MiB").await?;
+        files.backup = true;
+        let bytes = Bytes::from(vec![41; UNIT + 17]);
+        let mut h = header(&files, bytes.len() as u64);
+        h.media = Uuid::now_v7();
+        h.digest = *blake3::hash(&bytes).as_bytes();
+        let r = write(&files, h.clone(), input(bytes.clone(), true), allowed()).await?;
+        verify_backup(&files, r.clone(), allowed()).await?;
+        let path = path(&files, &h)?;
+        let mut file = open(&path, true)?;
+        file.seek(SeekFrom::Start(HEADER_SIZE as u64 + 5))?;
+        file.write_all(b"x")?;
+        file.sync_all()?;
+        drop(file);
+        assert!(verify_backup(&files, r.clone(), allowed()).await.is_err());
+        let before = std::fs::read(&path)?;
+        assert!(
+            write(
+                &files,
+                h.clone(),
+                input(bytes.slice(0..10), true),
+                allowed()
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path)?, before);
+        assert_eq!(write(&files, h, input(bytes, true), allowed()).await?, r);
+        verify_backup(&files, r, allowed()).await?;
+        Ok(())
     }
 
     #[tokio::test]

@@ -67,6 +67,12 @@ async fn reclaimable(tx: &mut q::Tx<'_>, value: &Payload) -> Result<()> {
         value.state == "retired" && value.write_until <= now && value.protected_until <= now,
         Error::OperationAborted
     );
+    ensure!(
+        !super::queries::storage_backup::pending(value.intent.operation)
+            .fetch_one(&mut **tx)
+            .await?,
+        Error::OperationAborted
+    );
     recovery_clear(tx, value).await
 }
 
@@ -245,6 +251,7 @@ pub(super) async fn publish_in(tx: &mut q::Tx<'_>, operation: Uuid) -> Result<()
         Error::OperationAborted
     );
     q::publish(operation).execute(&mut **tx).await?;
+    super::storage_backup::enqueue(tx, &value.intent).await?;
     super::queries::storage_journal::dirty(operation)
         .execute(&mut **tx)
         .await?;
@@ -261,6 +268,12 @@ pub(super) async fn fill_plan(
     tx: &mut q::Tx<'_>,
     operation: Uuid,
 ) -> Result<Option<crate::model::storage_native::Fill>> {
+    if let Some((source, _, done)) = super::queries::storage_backup::row(operation)
+        .fetch_optional(&mut **tx)
+        .await?
+    {
+        return super::storage_backup::plan(tx, operation, source, done.is_some()).await;
+    }
     if super::queries::storage_repair::operation(operation)
         .fetch_optional(&mut **tx)
         .await?
@@ -286,6 +299,8 @@ pub(super) async fn fill_plan(
         operation,
         sequence: sequence.try_into()?,
         repair: None,
+        backup: None,
+        shard: 0,
     }))
 }
 
@@ -294,6 +309,9 @@ pub(super) async fn filled(
     plan: &crate::model::storage_native::Fill,
 ) -> Result<()> {
     let value = current(tx, plan.operation).await?;
+    if let Some(id) = plan.backup {
+        return super::storage_backup::captured(tx, id, plan).await;
+    }
     if value.state == "retired" {
         return Ok(());
     }

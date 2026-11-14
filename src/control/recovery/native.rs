@@ -33,7 +33,11 @@ pub(crate) struct Page {
     next: Option<Uuid>,
 }
 
-pub(crate) async fn scanner(app: &App, cluster: Uuid) -> Result<Arc<Scanner>> {
+pub(crate) async fn scanner(
+    app: &App,
+    cluster: Uuid,
+    backup_group: Option<String>,
+) -> Result<Arc<Scanner>> {
     ensure!(
         app.deployment_mode() != "single",
         "native recovery requires cluster mode"
@@ -42,6 +46,7 @@ pub(crate) async fn scanner(app: &App, cluster: Uuid) -> Result<Arc<Scanner>> {
         app.storage_clusters.clone(),
         app.storage.native_control.clone(),
         cluster,
+        backup_group,
     )
     .await
 }
@@ -53,7 +58,7 @@ pub(crate) async fn list(
     query: Query,
 ) -> Result<Page> {
     app.authorization.admin(principal).await?.finish().await?;
-    let scan = scanner(app, cluster).await?;
+    let scan = scanner(app, cluster, None).await?;
     let mut stream = scan.namespaces(query.media).await?;
     let mut entries = BTreeMap::new();
     while let Some(entry) = stream.try_next().await? {
@@ -94,8 +99,9 @@ pub(crate) async fn collect(
     id: Uuid,
     cluster: Uuid,
     namespace: Uuid,
+    backup_group: Option<String>,
 ) -> Result<(Arc<Scanner>, NativeRecovery)> {
-    let scan = scanner(app, cluster).await?;
+    let scan = scanner(app, cluster, backup_group.clone()).await?;
     let (current, targets) = app.storage_clusters.placement_snapshot(cluster).await?;
     ensure!(
         current.manifest == scan.anchor,
@@ -105,7 +111,12 @@ pub(crate) async fn collect(
     let media: Vec<_> = targets
         .into_iter()
         .filter(|target| {
-            target.run.is_some() && target.expires > now && target.credential.is_some()
+            let topology = &target.device.announcement.topology;
+            let selected = match &backup_group {
+                Some(group) => topology.purpose == "backup" && topology.storage_group == *group,
+                None => topology.purpose == "primary",
+            };
+            selected && target.run.is_some() && target.expires > now && target.credential.is_some()
         })
         .map(|target| target.device.media_id)
         .collect();
@@ -114,7 +125,14 @@ pub(crate) async fn collect(
         head.publication.root.is_some(),
         "recovery root mapping is missing"
     );
-    Ok((scan, NativeRecovery { catalog: id, head }))
+    Ok((
+        scan,
+        NativeRecovery {
+            catalog: id,
+            head,
+            backup_group,
+        },
+    ))
 }
 
 pub(crate) fn connect(app: &App, source: &model::Connection) -> Result<model::Store> {

@@ -747,6 +747,7 @@ impl NodeWork for Backend {
                     .execute(&mut *tx)
                     .await?;
             }
+            let native = task_type == "storage_migration" && detail["operation"] == "native";
             let prepared = match detail["operation"].as_str() {
                 Some("native") if task_type == "storage_migration" => {
                     if let Some(plan) = super::storage_payload::fill_plan(&mut tx, task.id).await? {
@@ -911,7 +912,7 @@ impl NodeWork for Backend {
                 wake_shared |= record.state == "queued"
                     && record.detail["external"] != true
                     && record.detail["phase"] != "verify";
-            } else if input.class == 2 && task_type == "upload" {
+            } else if (input.class == 2 && task_type == "upload") || native {
                 check_again = queries::task_record(task.id)
                     .fetch_one(&mut *tx)
                     .await?

@@ -35,6 +35,7 @@ pub(crate) struct Probe {
     pub storage: StorageInput,
     pub deployment_key: Option<String>,
     pub namespace: Option<Uuid>,
+    pub backup_group: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 #[schema(as=StorageRecoveryProbeResult)]
@@ -111,6 +112,13 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
             && input.namespace.is_none_or(|id| !id.is_nil()),
         "native recovery requires a namespace; local and S3 do not"
     );
+    if let Some(group) = &input.backup_group {
+        ensure!(
+            info.storage_type == "mokyu",
+            "backup groups require native storage"
+        );
+        crate::config::storage::label(group, "backup_group")?;
+    }
     let name = storage::validate_name(&info.name)?;
     let id = Uuid::new_v4();
     let tmp = input.namespace.unwrap_or_else(Uuid::new_v4);
@@ -143,6 +151,7 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
                 id,
                 conn.cluster_id.context("missing storage cluster")?,
                 tmp,
+                input.backup_group,
             )
             .await
             .map_err(|e| probe_error(e, "RecoveryIncomplete"))?,
@@ -300,6 +309,14 @@ pub(crate) async fn start(app: &App, p: &Principal, id: Uuid, input: Start) -> R
     );
     let selection = &input.selection;
     ensure!(
+        !selection.exclusive_takeover
+            || unlocked
+                .native
+                .as_ref()
+                .is_none_or(|n| n.backup_group.is_none()),
+        "restore a backup group into an independent writable backend"
+    );
+    ensure!(
         !selection.buckets.is_empty()
             && selection.exclusive_takeover == selection.destination.is_none()
             && (!selection.complete_journal_upload
@@ -331,10 +348,23 @@ pub(crate) async fn start(app: &App, p: &Principal, id: Uuid, input: Start) -> R
             .context("destination storage unavailable")?;
         ensure!(
             target_row.store_type == "s3"
-                || target_row.store_type == "local" && app.deployment_mode() == "single",
+                || target_row.store_type == "local" && app.deployment_mode() == "single"
+                || target_row.store_type == "mokyu"
+                    && matches!(app.deployment_mode(), "single_control" | "cluster"),
             "unsupported recovery destination"
         );
         let origin = &unlocked.source.connection;
+        if unlocked
+            .native
+            .as_ref()
+            .is_some_and(|source| source.backup_group.is_some())
+            && target_row.store_type == "mokyu"
+        {
+            ensure!(
+                target_row.cluster_id.is_some() && target_row.cluster_id != origin.cluster_id,
+                "backup recovery requires separate writable primary storage"
+            );
+        }
         if origin.r#type == "local" && target_row.store_type == "local" {
             let from = crate::storage::journal::local::Local::new(origin)?
                 .context("missing local source")?

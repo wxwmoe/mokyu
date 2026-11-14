@@ -73,6 +73,7 @@ pub(crate) struct Policy {
     pub node_priority: String,
     pub placement_order: String,
     pub backup_copies: u16,
+    pub backup_bytes_per_second: u64,
 }
 
 impl Default for Policy {
@@ -88,6 +89,7 @@ impl Default for Policy {
             node_priority: "idle".into(),
             placement_order: "region_first".into(),
             backup_copies: 0,
+            backup_bytes_per_second: 16 * 1024 * 1024,
         }
     }
 }
@@ -96,8 +98,10 @@ impl Policy {
     pub fn validate(&self) -> Result<()> {
         self.layout.validate()?;
         ensure!(
-            (1..=256).contains(&self.read_parallelism) && self.backup_copies <= 256,
-            "invalid read_parallelism or backup_copies"
+            (1..=256).contains(&self.read_parallelism)
+                && self.backup_copies <= 256
+                && (1..=1_099_511_627_776).contains(&self.backup_bytes_per_second),
+            "invalid read parallelism, backup count or backup rate"
         );
         for (field, value, allowed) in [
             (
@@ -495,8 +499,41 @@ pub(crate) struct Takeover {
 #[schema(as = StorageClusterOverview)]
 pub(crate) struct Overview {
     pub defaults: Policy,
+    pub backups: Vec<BackupGroup>,
     pub clusters: Vec<Cluster>,
     pub devices: Vec<Device>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageClusterBackupGroup)]
+pub(crate) struct BackupGroup {
+    pub cluster: Uuid,
+    pub storage_group: Option<String>,
+    pub pending: i64,
+    pub verified: i64,
+    pub pending_bytes: i64,
+    pub oldest_pending: Option<i64>,
+    pub last_verified: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageClusterBackupPoints)]
+pub(crate) struct BackupPoints {
+    pub entries: Vec<BackupPoint>,
+    pub after: Option<Uuid>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+#[schema(as = StorageClusterBackupPoint)]
+pub(crate) struct BackupPoint {
+    pub storage: Uuid,
+    pub name: String,
+    pub group: String,
+    pub missing_bodies: i64,
+    pub missing_metadata: i64,
+    pub published_revision: i64,
+    pub evidence_revision: i64,
+    pub recoverable_through: Option<u64>,
 }
 
 #[async_trait::async_trait]
@@ -513,6 +550,13 @@ pub(crate) trait StorageClusters:
         input: Takeover,
     ) -> Result<Cluster>;
     async fn overview(&self) -> Result<Overview>;
+    async fn backup_points(
+        &self,
+        principal: &Principal,
+        id: Uuid,
+        after: Option<Uuid>,
+    ) -> Result<BackupPoints>;
+    async fn verify_backups(&self, principal: &Principal, id: Uuid, revision: i64) -> Result<()>;
     async fn placement_snapshot(&self, id: Uuid) -> Result<(Cluster, Vec<Target>)>;
     async fn create(&self, principal: &Principal, key: &Key, input: Create) -> Result<Cluster>;
     async fn update(&self, principal: &Principal, id: Uuid, input: Update) -> Result<Cluster>;

@@ -61,6 +61,7 @@ pub(super) struct Node {
     connection: Mutex<Connection>,
     writes: Arc<Semaphore>,
     active_writes: Mutex<Vec<Uuid>>,
+    backup_reads: std::sync::atomic::AtomicU64,
 }
 
 impl Node {
@@ -98,6 +99,7 @@ impl Node {
             "boot_id": self.boot, "started_at": self.started, "resources": self.budget,
             "region": self.config.instance.region, "storage_url": self.config.instance.storage_url,
             "storage_group": self.config.instance.storage_group, "storage_purpose": self.config.instance.storage_purpose.as_deref().unwrap_or("primary"),
+            "backup_reads": self.backup_reads.load(std::sync::atomic::Ordering::Relaxed),
             "data_directory": self.files.capacity(self.boot)?, "write_load": self.write_load(), "maintenance": state.maintenance, "draining": false,
             "work": if foreign { "recovery" } else if ready { "normal" } else { "starting" },
             "cluster_id": manifest.as_ref().map(|m| m.cluster_id), "cluster_revision": manifest.as_ref().map(|m| m.revision),
@@ -332,6 +334,7 @@ pub(crate) async fn run(config: NodeConfig, budget: Budget) -> Result<()> {
         config,
         writes: Arc::new(Semaphore::new(budget.storage_upload_slots)),
         active_writes: Mutex::new(Vec::new()),
+        backup_reads: Default::default(),
         budget,
         client,
         files,

@@ -206,6 +206,7 @@ impl EvidenceScan {
 pub(super) struct Scan {
     disk: Arc<Disk>,
     media: Uuid,
+    backup: bool,
     area: Area,
     prefix: u16,
     directory: Option<ReadDir>,
@@ -227,6 +228,7 @@ impl Scan {
         Ok(Self {
             disk: files.disk.clone(),
             media: files.media.media_id,
+            backup: files.backup,
             area,
             prefix,
             directory: None,
@@ -316,7 +318,9 @@ impl Scan {
                 file.read_exact(&mut bytes)?;
                 let header = Header::decode(&bytes)?;
                 ensure!(
-                    header.fragment == id && header.media == self.media && header.area == self.area,
+                    header.fragment == id
+                        && (header.media == self.media || self.backup)
+                        && header.area == self.area,
                     "fragment header differs from its path or media"
                 );
                 entry.header = Some(header);

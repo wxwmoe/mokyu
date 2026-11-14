@@ -16,7 +16,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
-use futures_util::TryStreamExt;
+use futures_util::{StreamExt, TryStreamExt};
 use md5::{Digest, Md5};
 use object_store::{ObjectStore, ObjectStoreExt, PutMode, PutOptions, path::Path};
 use std::{collections::BTreeMap, sync::Arc};
@@ -119,17 +119,27 @@ impl Import<'_> {
             let root = backend.raw_root.as_ref().and_then(|p| p.parent()).unwrap();
             space.observe(vec![root.join(key)])?;
         }
-        let result = self
-            .destination
-            .put_opts(
-                &Path::from(key),
-                Bytes::from(data).into(),
-                PutOptions {
-                    mode: PutMode::Create,
-                    ..Default::default()
-                },
-            )
-            .await;
+        let result = if let Some(native) = &backend.native {
+            let data = Bytes::from(data);
+            native
+                .stage_copy(&Path::from(key), size as u64, || {
+                    futures_util::stream::iter([Ok(data.clone())]).boxed()
+                })
+                .await
+        } else {
+            self.destination
+                .put_opts(
+                    &Path::from(key),
+                    Bytes::from(data).into(),
+                    PutOptions {
+                        mode: PutMode::Create,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(anyhow::Error::from)
+        };
         if let Err(error) = result {
             let existing = source::bytes(self.destination.as_ref(), key, size as u64)
                 .await?
@@ -155,11 +165,6 @@ impl Import<'_> {
         let mut hasher = CarrierDigest::new(packed);
         let mut header = Vec::new();
         let mut selected = Vec::new();
-        let object = self.origin.get(&Path::from(from)).await?;
-        ensure!(
-            object.meta.size == size,
-            "recovered carrier length mismatch"
-        );
         let copy = !(self.same && from == to);
         let existed = if copy {
             match self.destination.head(&Path::from(to)).await {
@@ -233,8 +238,23 @@ impl Import<'_> {
         } else {
             None
         };
+        let native = backend.native.as_ref().filter(|_| writing);
+        if let Some(native) = native {
+            let from = Path::from(from);
+            let from = &from;
+            native.stage_copy(&Path::from(to),size,||Box::pin(async_stream::try_stream!{
+                let response=self.origin.get(from).await?;
+                if response.meta.size!=size { Err(anyhow::anyhow!("recovered carrier length mismatch"))?; }
+                let mut body=response.into_stream();
+                let mut hash=CarrierDigest::new(packed);
+                while let Some(bytes)=body.try_next().await? {
+                    hash.update(&bytes);yield bytes;
+                }
+                if !hash.matches(expected) {Err(anyhow::anyhow!("recovered carrier digest mismatch"))?;}
+            })).await?;
+        }
         let client = self.client.as_ref();
-        let upload = if writing && local.is_none() && size > part_bytes as u64 {
+        let upload = if writing && native.is_none() && local.is_none() && size > part_bytes as u64 {
             Some(
                 client
                     .context("missing S3 recovery client")?
@@ -248,7 +268,16 @@ impl Import<'_> {
             let mut buffer = BytesMut::new();
             let mut parts = Vec::new();
             let mut read = 0u64;
-            let mut body = object.into_stream();
+            let response = if native.is_some() {
+                self.destination.get(&Path::from(to)).await?
+            } else {
+                self.origin.get(&Path::from(from)).await?
+            };
+            ensure!(
+                response.meta.size == size,
+                "recovered carrier length mismatch"
+            );
+            let mut body = response.into_stream();
             while let Some(bytes) = body.try_next().await? {
                 read = read
                     .checked_add(bytes.len() as u64)
@@ -273,7 +302,7 @@ impl Import<'_> {
                 hasher.update(&bytes);
                 if let Some(out) = &mut local {
                     tokio::io::AsyncWriteExt::write_all(out, &bytes).await?;
-                } else if writing {
+                } else if writing && native.is_none() {
                     buffer.extend_from_slice(&bytes);
                     if let Some(upload) = &upload {
                         while buffer.len() >= part_bytes {
@@ -317,7 +346,7 @@ impl Import<'_> {
                 tokio::io::AsyncWriteExt::flush(out).await?;
                 out.sync_all().await?;
                 tokio::fs::hard_link(temp, destination).await?;
-            } else if writing {
+            } else if writing && native.is_none() {
                 self.put(to, buffer.to_vec()).await?;
             }
             if existed {

@@ -675,7 +675,8 @@ impl NativeObjects for Backend {
         };
         let payload = storage_payload::current(&mut tx, plan.operation).await?;
         ensure!(
-            payload.state == "published" && payload.intent.namespace == plan.storage,
+            (payload.state == "published" || plan.backup.is_some() && payload.state == "retired")
+                && payload.intent.namespace == plan.storage,
             ModelError::OperationAborted
         );
         tx.commit().await?;

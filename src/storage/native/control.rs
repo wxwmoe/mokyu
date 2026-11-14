@@ -50,6 +50,26 @@ fn until() -> i64 {
 }
 
 impl Control {
+    pub async fn maintain_backups(&self, app: &crate::app::App) -> Result<()> {
+        loop {
+            let delay = if app.writable().is_ok() {
+                match self.payloads.backfill_backups().await {
+                    Ok(true) => {
+                        app.wake_tasks.notify_waiters();
+                        Duration::from_millis(100)
+                    }
+                    Ok(false) => Duration::from_secs(5),
+                    Err(error) => {
+                        tracing::warn!(%error,"backup reconciliation will retry");
+                        Duration::from_secs(5)
+                    }
+                }
+            } else {
+                Duration::from_secs(5)
+            };
+            tokio::time::sleep(delay).await;
+        }
+    }
     pub async fn recovery_target(
         &self,
         anchor: &crate::model::storage_cluster::Manifest,
@@ -66,7 +86,8 @@ impl Control {
                 } | Action::History { .. }
                     | Action::Layouts
                     | Action::Namespaces
-            ) || matches!(&action, Action::Read { receipt, .. } if receipt.header.area == Area::Recovery),
+            ) || matches!(&action, Action::Read { receipt, .. } if receipt.header.area == Area::Recovery)
+                || matches!(&action,Action::BackupRead {..} if anchor.members.iter().any(|m|m.media_id==media && m.topology.purpose=="backup")),
             "recovery access is read-only"
         );
         let snapshot = self.snapshot(anchor.cluster_id).await?;
@@ -145,9 +166,13 @@ impl Control {
         use super::replication::{Operation, Reply};
         let payload = self.payloads.get(plan.operation).await?;
         ensure!(
-            payload.state == "published" && payload.intent.namespace == plan.storage,
+            (payload.state == "published" || plan.backup.is_some() && payload.state == "retired")
+                && payload.intent.namespace == plan.storage,
             crate::model::Error::OperationAborted
         );
+        if let Some(id) = plan.backup {
+            return self.replicate_backup(plan, id, action, expires).await;
+        }
         if let Some(id) = plan.repair {
             return self.replicate_repair(plan, id, action, expires).await;
         }
@@ -201,7 +226,11 @@ impl Control {
                     targets.is_empty() || !sources.is_empty(),
                     "no durable replica source is online"
                 );
-                Ok(Reply::Window { sources, targets })
+                Ok(Reply::Window {
+                    sources,
+                    targets,
+                    rate: 0,
+                })
             }
             Operation::Accept { receipts } => {
                 ensure!(
@@ -224,6 +253,217 @@ impl Control {
                     grant: self.renew_until(&grant, expires).await?,
                 })
             }
+        }
+    }
+
+    async fn replicate_backup(
+        &self,
+        plan: &crate::model::storage_native::Fill,
+        id: Uuid,
+        action: super::replication::Operation,
+        expires: i64,
+    ) -> Result<super::replication::Reply> {
+        use super::replication::{Operation, Reply};
+        let file = self
+            .payloads
+            .backup_file(id, plan.sequence, plan.shard)
+            .await?;
+        let header = &file.receipt.header;
+        ensure!(
+            header.operation == plan.operation
+                && header.namespace == plan.storage
+                && header.sequence == plan.sequence
+                && header.shard == plan.shard,
+            "backup task differs from its carrier"
+        );
+        let snapshot = self.snapshot(header.cluster).await?;
+        let destination = snapshot
+            .targets
+            .iter()
+            .find(|v| v.device.media_id == file.media)
+            .context("backup media is offline")?;
+        ensure!(
+            snapshot
+                .cluster
+                .manifest
+                .members
+                .iter()
+                .any(|m| m.media_id == file.media
+                    && m.state == "available"
+                    && m.topology.purpose == "backup"),
+            "backup media is unavailable"
+        );
+        match action {
+            Operation::Accept { receipts } => {
+                ensure!(receipts.len() == 1, "backup requires one full receipt");
+                if header.area == Area::Recovery {
+                    let pool = super::transport::Pool::new(Duration::from_secs(30));
+                    for _ in 0..32 {
+                        let Some((proof, history)) =
+                            self.payloads.backup_evidence(id, file.media).await?
+                        else {
+                            break;
+                        };
+                        let link = proof.link()?;
+                        let target = self
+                            .publication_target(&proof, &history, file.media)
+                            .await?;
+                        pool.publish(&target).await?;
+                        self.payloads
+                            .backup_published(
+                                id,
+                                file.media,
+                                plan.sequence,
+                                plan.shard,
+                                proof.publication.revision,
+                                &link,
+                            )
+                            .await?;
+                    }
+                }
+                self.payloads
+                    .backup_accept(&self.secrets.credential_key, id, &receipts[0])
+                    .await?;
+                Ok(Reply::Accepted)
+            }
+            Operation::Renew { grant } => {
+                grant.verify(&snapshot.cluster.manifest)?;
+                match &grant.grant.action {
+                    Action::Backup { header: planned }
+                        if !file.verified
+                            && planned == header
+                            && grant.grant.media == file.media =>
+                    {
+                        Ok(Reply::Renewed {
+                            grant: self
+                                .sign_until(
+                                    &snapshot,
+                                    destination,
+                                    grant.grant.action.clone(),
+                                    Some(&grant.grant),
+                                    expires,
+                                )?
+                                .authorization,
+                        })
+                    }
+                    Action::Read {
+                        receipt,
+                        offset: 0,
+                        length,
+                    } if receipt.header.operation == plan.operation
+                        && receipt.header.sequence == plan.sequence
+                        && receipt.header.shard == plan.shard
+                        && receipt.root == file.receipt.root
+                        && receipt.header.digest == header.digest
+                        && *length == header.shard_bytes =>
+                    {
+                        Ok(Reply::Renewed {
+                            grant: self.renew_until(&grant, expires).await?,
+                        })
+                    }
+                    _ => anyhow::bail!("backup renewal differs from its task"),
+                }
+            }
+            Operation::Window if file.verified => Ok(Reply::Window {
+                sources: vec![],
+                targets: vec![],
+                rate: 0,
+            }),
+            Operation::Window => {
+                if file.recheck {
+                    let evidence = if header.area == Area::Recovery {
+                        Some(self.payloads.backup_link(id).await?)
+                    } else {
+                        None
+                    };
+                    let grant = self.sign_until(
+                        &snapshot,
+                        destination,
+                        Action::BackupCheck {
+                            receipt: file.receipt.clone(),
+                            evidence,
+                        },
+                        None,
+                        expires,
+                    )?;
+                    let pool = super::transport::Pool::new(Duration::from_secs(30));
+                    match pool.check_backup(&grant).await {
+                        Ok(proof) => {
+                            self.payloads
+                                .backup_accept(&self.secrets.credential_key, id, &proof)
+                                .await?;
+                            return Ok(Reply::Window {
+                                sources: vec![],
+                                targets: vec![],
+                                rate: 0,
+                            });
+                        }
+                        Err(e)
+                            if e.downcast_ref::<tonic::Status>().is_some_and(|s| {
+                                s.code() == tonic::Code::FailedPrecondition
+                                    && s.message() == "backup evidence is missing"
+                            }) =>
+                        {
+                            self.payloads
+                                .reset_evidence(id, file.media, plan.sequence, plan.shard)
+                                .await?;
+                        }
+                        Err(e)
+                            if e.downcast_ref::<tonic::Status>().is_some_and(|s| {
+                                matches!(s.code(), tonic::Code::DataLoss | tonic::Code::NotFound)
+                            }) => {}
+                        Err(e) => return Err(e),
+                    }
+                }
+                let mut sources = Vec::new();
+                for mapping in self
+                    .payloads
+                    .resume_read(plan.operation, plan.sequence, 1, until())
+                    .await?
+                {
+                    if mapping.deleted {
+                        continue;
+                    }
+                    if let Some(receipt) = mapping.receipt
+                        && receipt.header.shard == plan.shard
+                        && receipt.root == file.receipt.root
+                        && receipt.header.digest == header.digest
+                        && let Some(target) = snapshot
+                            .targets
+                            .iter()
+                            .find(|t| t.device.media_id == receipt.header.media)
+                        && let Ok(source) = self.sign_until(
+                            &snapshot,
+                            target,
+                            Action::Read {
+                                receipt,
+                                offset: 0,
+                                length: header.shard_bytes,
+                            },
+                            None,
+                            expires,
+                        )
+                    {
+                        sources.push(source);
+                    }
+                }
+                ensure!(!sources.is_empty(), "no verified primary source for backup");
+                let target = self.sign_until(
+                    &snapshot,
+                    destination,
+                    Action::Backup {
+                        header: header.clone(),
+                    },
+                    None,
+                    expires,
+                )?;
+                Ok(Reply::Window {
+                    sources,
+                    targets: vec![target],
+                    rate: snapshot.cluster.policy.backup_bytes_per_second,
+                })
+            }
+            Operation::Checked { .. } => anyhow::bail!("backup is not a repair check"),
         }
     }
 
@@ -314,6 +554,7 @@ impl Control {
         }
         if matches!(repair.state.as_str(), "installed" | "healthy") {
             return Ok(Reply::Window {
+                rate: 0,
                 sources: vec![],
                 targets: vec![],
             });
@@ -355,6 +596,7 @@ impl Control {
             "no verified primary copy is available for repair"
         );
         Ok(Reply::Window {
+            rate: 0,
             sources,
             targets: vec![self.sign_until(
                 &snapshot,
@@ -808,7 +1050,10 @@ impl Control {
                     mapping.header.copy,
                 )
             });
-            ensure!(!copies.is_empty(), "no durable storage copy is online");
+            ensure!(
+                !copies.is_empty(),
+                s3s::s3_error!(ServiceUnavailable, "no durable storage copy is online")
+            );
             let mut offset = start;
             while offset < end {
                 let length = super::reader::PART.min(end - offset);

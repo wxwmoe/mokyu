@@ -1,5 +1,7 @@
 #[path = "../../shared/node_handoff.rs"]
 mod node_handoff;
+#[path = "../../shared/storage_backup.rs"]
+mod storage_backup;
 #[path = "../../shared/storage_capacity.rs"]
 mod storage_capacity;
 #[path = "../../shared/storage_cluster.rs"]

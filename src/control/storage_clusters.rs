@@ -26,6 +26,50 @@ pub(super) async fn repair(
     }))
 }
 
+#[derive(serde::Deserialize, utoipa::IntoParams)]
+pub(super) struct BackupQuery {
+    after: Option<Uuid>,
+}
+
+#[utoipa::path(get, operation_id="storage_cluster_backup_points", path="/api/v1/storage-clusters/{id}/backups",params(("id"=Uuid,Path),BackupQuery),responses((status=200,body=crate::model::storage_cluster::BackupPoints)))]
+pub(super) async fn backup_points(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    axum::extract::Query(query): axum::extract::Query<BackupQuery>,
+) -> Result<Json<crate::model::storage_cluster::BackupPoints>, HttpError> {
+    app.authorization
+        .admin(&actor.principal)
+        .await?
+        .finish()
+        .await?;
+    Ok(Json(
+        app.storage_clusters
+            .backup_points(&actor.principal, id, query.after)
+            .await?,
+    ))
+}
+
+#[utoipa::path(post, operation_id="storage_cluster_verify_backups", path="/api/v1/storage-clusters/{id}/verify-backups", params(("id"=Uuid,Path)), request_body=VerifyBackups, responses((status=204)))]
+pub(super) async fn verify_backups(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<VerifyBackups>,
+) -> Result<axum::http::StatusCode, HttpError> {
+    actor.recent(&app).await?;
+    app.storage_clusters
+        .verify_backups(&actor.principal, id, input.revision)
+        .await?;
+    Ok(axum::http::StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct VerifyBackups {
+    revision: i64,
+}
+
 #[utoipa::path(get, operation_id="storage_cluster_recovery_sources", path="/api/v1/storage-clusters/{id}/recovery-sources", params(("id"=Uuid,Path), super::recovery::native::Query), responses((status=200,body=super::recovery::native::Page)))]
 pub(super) async fn sources(
     State(app): State<Arc<App>>,

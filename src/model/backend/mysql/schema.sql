@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261114113200.
+-- Generated from the complete mysql migration chain through 20261114135600.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -2035,6 +2035,43 @@ CREATE TABLE `staging_objects` (
   CONSTRAINT `staging_objects_ibfk_1` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `storage_backup_files` (
+  `backup_id` binary(16) NOT NULL,
+  `sequence` bigint NOT NULL,
+  `shard` smallint NOT NULL,
+  `media_id` binary(16) NOT NULL,
+  `receipt` json NOT NULL,
+  `verified_at` bigint DEFAULT NULL,
+  PRIMARY KEY (`backup_id`,`sequence`,`shard`),
+  KEY `storage_backup_recheck` (`backup_id`,`verified_at`,`sequence`,`shard`),
+  KEY `storage_backup_location` (`media_id`,`backup_id`),
+  CONSTRAINT `storage_backup_file_slot` FOREIGN KEY (`backup_id`) REFERENCES `storage_backups` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_backup_scans` (
+  `cluster_id` binary(16) NOT NULL,
+  `after_id` binary(16) NOT NULL,
+  `verify_since` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`cluster_id`),
+  CONSTRAINT `storage_backup_scan_cluster` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_backups` (
+  `id` binary(16) NOT NULL,
+  `operation` binary(16) NOT NULL,
+  `ordinal` smallint NOT NULL,
+  `verify_since` bigint NOT NULL DEFAULT '0',
+  `storage_group` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT NULL,
+  `created_at` bigint NOT NULL,
+  `verified_at` bigint DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `storage_backup_ordinal` (`operation`,`ordinal`),
+  UNIQUE KEY `storage_backup_domain` (`operation`,`storage_group`),
+  KEY `storage_backup_debt` (`verified_at`,`created_at`,`id`),
+  CONSTRAINT `storage_backup_payload` FOREIGN KEY (`operation`) REFERENCES `storage_payloads` (`operation`),
+  CONSTRAINT `storage_backup_bounds` CHECK (((`ordinal` >= 0) and (`ordinal` < 256)))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `storage_cluster_history` (
   `cluster_id` binary(16) NOT NULL,
   `revision` bigint NOT NULL,
@@ -2201,8 +2238,8 @@ CREATE TABLE `storage_payloads` (
   `collect_after` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`operation`),
   UNIQUE KEY `storage_payload_identity` (`namespace_id`,`payload_id`,`revision`),
-  KEY `storage_payload_cluster` (`cluster_id`),
   KEY `storage_payload_collection` (`namespace_id`,`state`,`collect_after`,`operation`),
+  KEY `storage_backup_scan_payload` (`cluster_id`,`state`,`operation`),
   CONSTRAINT `storage_payload_cluster` FOREIGN KEY (`cluster_id`) REFERENCES `storage_clusters` (`id`),
   CONSTRAINT `storage_payload_protection` CHECK ((`protected_until` >= 0)),
   CONSTRAINT `storage_payload_revision` CHECK ((`revision` > 0)),
@@ -2381,6 +2418,28 @@ CREATE TABLE `storage_recovery_files` (
   CONSTRAINT `storage_recovery_file_hash` CHECK ((length(`path_hash`) = 32)),
   CONSTRAINT `storage_recovery_file_revision` CHECK ((`publication_revision` > 0)),
   CONSTRAINT `storage_recovery_file_sequence` CHECK ((`through_sequence` >= 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_recovery_objects` (
+  `catalog` binary(16) NOT NULL,
+  `path_hash` binary(32) NOT NULL,
+  `path` text COLLATE utf8mb4_bin NOT NULL,
+  `revision` bigint NOT NULL,
+  `published` tinyint(1) NOT NULL,
+  `intent` json NOT NULL,
+  PRIMARY KEY (`catalog`,`path_hash`),
+  CONSTRAINT `storage_recovery_object_catalog` FOREIGN KEY (`catalog`) REFERENCES `storage_recovery_catalogs` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `storage_recovery_shards` (
+  `catalog` binary(16) NOT NULL,
+  `operation` binary(16) NOT NULL,
+  `sequence` bigint NOT NULL,
+  `copy_index` smallint NOT NULL,
+  `shard_index` smallint NOT NULL,
+  `receipt` json NOT NULL,
+  PRIMARY KEY (`catalog`,`operation`,`sequence`,`shard_index`,`copy_index`),
+  CONSTRAINT `storage_recovery_shard_catalog` FOREIGN KEY (`catalog`) REFERENCES `storage_recovery_catalogs` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `storage_repairs` (

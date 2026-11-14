@@ -248,6 +248,7 @@ pub(crate) trait StoragePayloads:
     super::storage_recovery::RecoveryCatalog
     + super::storage_native::NativeObjects
     + super::storage_repair::Repairs
+    + super::storage_backup::Backups
     + Send
     + Sync
 {
