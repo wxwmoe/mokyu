@@ -108,6 +108,7 @@ mod cache;
 pub(super) use cache::*;
 mod tasks;
 pub(super) use tasks::*;
+pub(super) mod history;
 mod objects;
 pub(super) use objects::*;
 mod buckets;

@@ -320,7 +320,7 @@ impl Writes {
         trailers: Option<s3s::TrailingHeaders>,
         if_match: Option<String>,
         if_none: Option<String>,
-    ) -> Result<(String, serde_json::Value)> {
+    ) -> Result<(String, serde_json::Value, Option<String>)> {
         let length = input.size;
         let key = input.key.clone();
         let operation = self.begin(request, input).await?;
@@ -344,7 +344,8 @@ impl Writes {
                     Some(&mut publication),
                 )
                 .await?;
-            self.publish(&operation, size, &etag, &sums, publication.request)
+            let receipt = self
+                .publish(&operation, size, &etag, &sums, publication.request)
                 .await?;
             if let Some((file, source, epoch)) = publication.cache {
                 self.reads.reader.files.fill_request(
@@ -355,7 +356,7 @@ impl Writes {
                     epoch,
                 );
             }
-            Ok((etag, sums))
+            Ok((etag, sums, receipt.published.and_then(|v| v.version_id)))
         }
         .await;
         if result.is_err() {
@@ -575,7 +576,7 @@ impl Writes {
         source: reads::Prepared,
         if_match: Option<String>,
         if_none: Option<String>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         let object: read::Object = source.material(
             source
                 .reply
@@ -673,7 +674,7 @@ impl Writes {
                 },
             )
             .await
-            .map(|_| ())
+            .map(|r| r.published.and_then(|v| v.version_id))
         }
         .await;
         if result.is_err() {

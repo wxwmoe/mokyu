@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261114160500.
+-- Generated from the complete sqlite migration chain through 20261114202600.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -90,7 +90,7 @@ CREATE TABLE buckets (
     settings_revision INTEGER NOT NULL DEFAULT 0,
     uploads_paused INTEGER CHECK (uploads_paused IN (0,1)) NOT NULL DEFAULT FALSE,
     public_base_url TEXT NOT NULL DEFAULT (''),
-    storage_id BLOB CHECK (storage_id IS NULL OR length(storage_id)=16) NOT NULL, image_revision INTEGER NOT NULL DEFAULT 0, image_families INTEGER NOT NULL DEFAULT 0, image_policy TEXT, image_import_token TEXT,
+    storage_id BLOB CHECK (storage_id IS NULL OR length(storage_id)=16) NOT NULL, image_revision INTEGER NOT NULL DEFAULT 0, image_families INTEGER NOT NULL DEFAULT 0, image_policy TEXT, image_import_token TEXT, version_mode INTEGER NOT NULL DEFAULT 0 CHECK (version_mode IN (0,1,2)),
     UNIQUE (id,project_id),
     CONSTRAINT buckets_state CHECK (state IN ('active','purging')),
     CONSTRAINT buckets_project FOREIGN KEY (project_id) REFERENCES projects(id),
@@ -337,7 +337,7 @@ CREATE TABLE journal_entries (
     stream_id INTEGER,
     payload_revision INTEGER,
     attributes TEXT,
-    recorded_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
+    recorded_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), history_subject INTEGER NOT NULL DEFAULT FALSE,
     PRIMARY KEY (bucket_id,seq),
     FOREIGN KEY (bucket_id) REFERENCES journal_buckets(bucket_id),
     FOREIGN KEY (stream_id) REFERENCES streams(id)
@@ -456,7 +456,7 @@ CREATE TABLE journal_restore_items (
     payload TEXT NOT NULL,
     modified_us INTEGER NOT NULL,
     content_type TEXT NOT NULL,
-    category TEXT NOT NULL,
+    category TEXT NOT NULL, stage_key BLOB, logical_key BLOB, history_id TEXT, history_seq INTEGER, history_time INTEGER, history_marker INTEGER NOT NULL DEFAULT FALSE,
     PRIMARY KEY (job,source_bucket,object_key),
     FOREIGN KEY (job,source_bucket) REFERENCES journal_restore_buckets(job,source_bucket)
 ) STRICT, WITHOUT ROWID;
@@ -720,13 +720,13 @@ CREATE TABLE media_operations (
     CONSTRAINT media_operations_user FOREIGN KEY (user_id) REFERENCES web_users(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE member_bucket_grants (
+CREATE TABLE "member_bucket_grants" (
     user_id BLOB CHECK (user_id IS NULL OR length(user_id)=16) NOT NULL,
     project_id BLOB CHECK (project_id IS NULL OR length(project_id)=16) NOT NULL,
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     actions INTEGER NOT NULL,
     PRIMARY KEY (user_id,bucket_id),
-    CONSTRAINT member_grants_actions CHECK (actions BETWEEN 0 AND 127),
+    CONSTRAINT member_grants_actions CHECK (actions BETWEEN 0 AND 2047),
     CONSTRAINT member_grants_member FOREIGN KEY (user_id,project_id) REFERENCES project_members(user_id,project_id) ON DELETE CASCADE,
     CONSTRAINT member_grants_bucket FOREIGN KEY (bucket_id,project_id) REFERENCES buckets(id,project_id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
@@ -1093,6 +1093,30 @@ CREATE TABLE "notification_consumers" (
     FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
 
+CREATE TABLE object_version_clocks (
+    bucket_id BLOB NOT NULL PRIMARY KEY,
+    version_seq INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE object_versions (
+    bucket_id BLOB NOT NULL,
+    object_key BLOB NOT NULL,
+    seq INTEGER NOT NULL,
+    version_id TEXT NOT NULL,
+    stream_id INTEGER,
+    modified_us INTEGER NOT NULL,
+    PRIMARY KEY (bucket_id,object_key,seq),
+    UNIQUE (bucket_id,object_key,version_id),
+    FOREIGN KEY (bucket_id) REFERENCES buckets(id),
+    FOREIGN KEY (stream_id) REFERENCES streams(id)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE object_write_receipts (
+    stream_id INTEGER NOT NULL PRIMARY KEY REFERENCES streams(id) ON DELETE CASCADE,
+    version_id TEXT NOT NULL
+) STRICT, WITHOUT ROWID;
+
 CREATE TABLE objects (
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     object_key BLOB NOT NULL,
@@ -1102,7 +1126,7 @@ CREATE TABLE objects (
     catalog_modified INTEGER,
     catalog_type TEXT,
     catalog_category TEXT,
-    catalog_public INTEGER CHECK (catalog_public IN (0,1)),
+    catalog_public INTEGER CHECK (catalog_public IN (0,1)), version_switch INTEGER NOT NULL DEFAULT FALSE,
     PRIMARY KEY (bucket_id,object_key),
     CONSTRAINT objects_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id),
     CONSTRAINT objects_stream FOREIGN KEY (stream_id) REFERENCES streams(id),
@@ -1503,12 +1527,12 @@ CREATE TABLE runtime_settings (
     is_default INTEGER NOT NULL DEFAULT 1 CHECK(is_default IN (0,1))
 ) STRICT, WITHOUT ROWID;
 
-CREATE TABLE s3_credential_grants (
+CREATE TABLE "s3_credential_grants" (
     access_key TEXT NOT NULL,
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     actions INTEGER NOT NULL,
     PRIMARY KEY (access_key,bucket_id),
-    CONSTRAINT credential_grants_actions CHECK (actions BETWEEN 0 AND 127),
+    CONSTRAINT credential_grants_actions CHECK (actions BETWEEN 0 AND 2047),
     CONSTRAINT credential_grants_credential FOREIGN KEY (access_key) REFERENCES s3_credentials(access_key_id) ON DELETE CASCADE,
     CONSTRAINT credential_grants_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
@@ -2124,12 +2148,12 @@ CREATE TABLE tier_scans (
     FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE CASCADE
 );
 
-CREATE TABLE token_bucket_grants (
+CREATE TABLE "token_bucket_grants" (
     token_id BLOB CHECK (token_id IS NULL OR length(token_id)=16) NOT NULL,
     bucket_id BLOB CHECK (bucket_id IS NULL OR length(bucket_id)=16) NOT NULL,
     actions INTEGER NOT NULL,
     PRIMARY KEY (token_id,bucket_id),
-    CONSTRAINT token_grants_actions CHECK (actions BETWEEN 0 AND 127),
+    CONSTRAINT token_grants_actions CHECK (actions BETWEEN 0 AND 2047),
     CONSTRAINT token_grants_token FOREIGN KEY (token_id) REFERENCES api_tokens(id) ON DELETE CASCADE,
     CONSTRAINT token_grants_bucket FOREIGN KEY (bucket_id) REFERENCES buckets(id) ON DELETE CASCADE
 ) STRICT, WITHOUT ROWID;
@@ -2573,6 +2597,8 @@ CREATE INDEX node_writes_retention ON node_writes(phase,updated_at);
 
 CREATE UNIQUE INDEX nodes_active_control ON nodes(role) WHERE role='control';
 
+CREATE INDEX object_versions_stream ON object_versions(stream_id);
+
 CREATE INDEX objects_catalog_modified ON objects(bucket_id,catalog_modified,object_key);
 
 CREATE INDEX objects_catalog_size ON objects(bucket_id,catalog_size,object_key);
@@ -2831,7 +2857,7 @@ CREATE VIEW notice_changes(scope,resource_id,object_key) AS SELECT scope,resourc
 
 CREATE VIEW token_bucket_access AS
 SELECT t.id AS token_id,g.bucket_id,
-    g.actions & IIF(u.role='admin',127,COALESCE(a.actions,0)) AS actions
+    g.actions & IIF(u.role='admin',2047,COALESCE(a.actions,0)) AS actions
 FROM api_tokens t JOIN web_users u ON u.id=t.user_id
 JOIN token_bucket_grants g ON g.token_id=t.id
 LEFT JOIN user_bucket_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket_id;
@@ -2845,8 +2871,8 @@ LEFT JOIN user_external_access a ON a.user_id=t.user_id AND a.bucket_id=g.bucket
 
 CREATE VIEW user_bucket_access AS
 SELECT m.user_id,b.id AS bucket_id,
-    (CASE m.role WHEN 'reader' THEN 67 WHEN 'writer' THEN 95 WHEN 'maintainer' THEN 127 ELSE 0 END)
-    & IIF(m.scope='all',127,COALESCE(g.actions,0)) AS actions
+    (CASE m.role WHEN 'reader' THEN 67 WHEN 'writer' THEN 479 WHEN 'maintainer' THEN 2047 ELSE 0 END)
+    & IIF(m.scope='all',2047,COALESCE(g.actions,0)) AS actions
 FROM project_members m JOIN buckets b ON b.project_id=m.project_id
 LEFT JOIN member_bucket_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
 
@@ -2958,6 +2984,27 @@ BEGIN
         WHERE j.bucket_id=NEW.bucket_id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id)=1;
 END;
 
+CREATE TRIGGER journal_version_insert AFTER INSERT ON object_versions WHEN (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id)>0
+BEGIN
+    UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.bucket_id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id)=1;
+    INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'put',CAST(('~h/' || NEW.version_id || '/' || NEW.object_key) AS BLOB),NEW.stream_id,s.payload_revision,json_object('size',COALESCE(s.size,0),'etag',COALESCE(s.etag,''),'metadata',json(COALESCE(s.metadata,'{}')),'checksums',json(COALESCE(s.checksums,'{}')),'payload',COALESCE(s.payload_type,'chunks'),'modified_us',NEW.modified_us,'history',json_object('order',NEW.seq,'time',NEW.modified_us,'marker',CASE WHEN NEW.stream_id IS NULL THEN 1 ELSE 0 END)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id LEFT JOIN streams s ON s.id=NEW.stream_id WHERE j.bucket_id=NEW.bucket_id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id)=1;
+    UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.bucket_id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id)=2;
+END;
+
+CREATE TRIGGER journal_version_mode AFTER UPDATE ON buckets WHEN (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.id)>0 AND OLD.version_mode<>NEW.version_mode
+BEGIN
+    UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.id)=1;
+    INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'put',CAST('~m' AS BLOB),NULL,NULL,json_object('size',0,'etag','','metadata',json_object(),'checksums',json_object(),'payload','chunks','modified_us',0,'history',json_object('mode',NEW.version_mode)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id WHERE j.bucket_id=NEW.id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.id)=1;
+    UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=NEW.id)=2;
+END;
+
+CREATE TRIGGER journal_version_remove AFTER DELETE ON object_versions WHEN (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id)>0
+BEGIN
+    UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=OLD.bucket_id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id)=1;
+    INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'delete',CAST(('~h/' || OLD.version_id || '/' || OLD.object_key) AS BLOB),NULL,NULL,NULL,TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id WHERE j.bucket_id=OLD.bucket_id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id)=1;
+    UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=OLD.bucket_id AND (SELECT journal_mode FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id)=2;
+END;
+
 CREATE TRIGGER notice_publish INSTEAD OF INSERT ON notice_changes
 WHEN (SELECT deployment_mode FROM mokyu_meta WHERE id=1)='single_control'
 BEGIN
@@ -2976,6 +3023,35 @@ BEGIN
         WHEN node_notices.scope IN ('object','bucket') AND excluded.scope IN ('object','bucket') AND node_notices.resource_id=excluded.resource_id THEN 'bucket'
         ELSE 'reset' END,
         generation=excluded.generation,event_id=excluded.event_id,resource_id=excluded.resource_id,object_key=excluded.object_key,retry_at=NULL;
+END;
+
+CREATE TRIGGER object_version_quota_delete AFTER DELETE ON object_versions WHEN OLD.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=OLD.bucket_id)>0
+BEGIN
+    UPDATE quota_scopes SET used_bytes=used_bytes-(SELECT size FROM streams WHERE id=OLD.stream_id) WHERE ((scope='bucket' AND scope_id=OLD.bucket_id) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=OLD.bucket_id)));
+END;
+
+CREATE TRIGGER object_version_quota_insert AFTER INSERT ON object_versions WHEN NEW.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=NEW.bucket_id)>0
+BEGIN
+    SELECT RAISE(ABORT,'version_quota_exceeded') WHERE EXISTS(SELECT 1 FROM quota_scopes WHERE ((scope='bucket' AND scope_id=NEW.bucket_id) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=NEW.bucket_id))) AND logical_bytes_limit IS NOT NULL AND used_bytes+reserved_bytes+(SELECT size FROM streams WHERE id=NEW.stream_id)>logical_bytes_limit AND (SELECT size FROM streams WHERE id=NEW.stream_id)>0);
+    UPDATE quota_scopes SET used_bytes=used_bytes+(SELECT size FROM streams WHERE id=NEW.stream_id) WHERE ((scope='bucket' AND scope_id=NEW.bucket_id) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=NEW.bucket_id)));
+END;
+
+CREATE TRIGGER object_versions_insert AFTER INSERT ON objects
+WHEN NEW.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=NEW.bucket_id)>0
+BEGIN
+    UPDATE object_version_clocks SET version_seq=version_seq+1 WHERE bucket_id=NEW.bucket_id;
+    DELETE FROM object_versions WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND version_id='null' AND (SELECT version_mode FROM buckets WHERE id=NEW.bucket_id)=2;
+    INSERT INTO object_versions(bucket_id,object_key,seq,version_id,stream_id,modified_us)
+        SELECT bucket_id,NEW.object_key,version_seq,CASE WHEN version_mode=1 THEN lower(hex(randomblob(16))) ELSE 'null' END,NEW.stream_id,CAST(unixepoch('subsec')*1000000 AS INTEGER) FROM object_version_clocks JOIN buckets ON buckets.id=object_version_clocks.bucket_id WHERE bucket_id=NEW.bucket_id;
+END;
+
+CREATE TRIGGER object_versions_update AFTER UPDATE OF stream_id ON objects
+WHEN OLD.stream_id IS NOT NEW.stream_id AND OLD.version_switch=NEW.version_switch AND (SELECT version_mode FROM buckets WHERE id=NEW.bucket_id)>0
+BEGIN
+    UPDATE object_version_clocks SET version_seq=version_seq+1 WHERE bucket_id=NEW.bucket_id;
+    DELETE FROM object_versions WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND version_id='null' AND (SELECT version_mode FROM buckets WHERE id=NEW.bucket_id)=2;
+    INSERT INTO object_versions(bucket_id,object_key,seq,version_id,stream_id,modified_us)
+        SELECT bucket_id,NEW.object_key,version_seq,CASE WHEN version_mode=1 THEN lower(hex(randomblob(16))) ELSE 'null' END,NEW.stream_id,CAST(unixepoch('subsec')*1000000 AS INTEGER) FROM object_version_clocks JOIN buckets ON buckets.id=object_version_clocks.bucket_id WHERE bucket_id=NEW.bucket_id;
 END;
 
 CREATE TRIGGER objects_capture_delete AFTER DELETE ON objects
@@ -3140,6 +3216,10 @@ END;
 CREATE TRIGGER transfer_changes_backlog_insert AFTER INSERT ON transfer_changes FOR EACH ROW
 BEGIN
     UPDATE redundancy_backlogs SET queued_keys=queued_keys+1 WHERE id=NEW.task_id;
+END;
+
+CREATE TRIGGER version_write_receipt AFTER INSERT ON object_versions WHEN NEW.seq>0 AND NEW.stream_id IS NOT NULL BEGIN
+    INSERT INTO object_write_receipts(stream_id,version_id) VALUES(NEW.stream_id,NEW.version_id) ON CONFLICT(stream_id) DO NOTHING;
 END;
 
 DELETE FROM sqlite_sequence;

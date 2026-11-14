@@ -402,7 +402,16 @@ pub(crate) fn query(input: wire::ReadRequest) -> Result<read::Query, Status> {
     } else {
         route
     };
+    if input
+        .version_id
+        .as_deref()
+        .is_some_and(|v| !crate::model::history::valid_id(v))
+    {
+        return Err(Status::invalid_argument("invalid version id"));
+    }
     Ok(read::Query {
+        restore_version: input.restore_version,
+        version_id: input.version_id,
         run,
         operation,
         route,
@@ -547,6 +556,8 @@ pub(crate) fn reply(input: read::Reply) -> wire::ReadReply {
         image_policy: input.image_policy.map(version),
         image_style: input.image_style.map(version),
         source_key: input.source_key,
+        version_id: input.version_id,
+        delete_marker_us: input.delete_marker_us,
         grants: input.grants.into_iter().map(grant).collect(),
         next: input.next.map(|cursor| wire::ReadCursor {
             lease_id: cursor.lease.to_string(),

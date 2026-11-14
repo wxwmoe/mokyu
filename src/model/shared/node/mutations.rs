@@ -63,7 +63,8 @@ pub(super) async fn change_objects(
     if let Some(outcome) = previous {
         return Ok(outcome);
     }
-    let mut change = input.change;
+    let change = input.change;
+    let items = change.items();
     let route = ReadRoute::Bucket {
         name: change.bucket,
         key: String::new(),
@@ -82,20 +83,48 @@ pub(super) async fn change_objects(
         .as_ref()
         .map(|s| s3s::dto::ETagCondition::parse_http_header(s.as_bytes()))
         .transpose()?;
-    change.keys.sort_unstable();
-    change.keys.dedup();
     let mut outcome = Outcome::Applied;
-    for key in change.keys {
+    let mut removed = Vec::new();
+    if let Some(mode) = change.versioning {
+        let p = crate::authorization::Permit::for_action(
+            principal.clone(),
+            bucket.id,
+            crate::authorization::Action::Settings,
+        );
+        super::transactions::lock_media_scope(&mut tx, &p).await?;
+        super::history::set_mode(&mut tx, bucket.id, Some(mode)).await?;
+    }
+    for (key, version) in items {
+        if !version.is_empty() {
+            let p = crate::authorization::Permit::for_action(
+                principal.clone(),
+                bucket.id,
+                crate::authorization::Action::DeleteVersion,
+            );
+            super::transactions::lock_media_scope(&mut tx, &p).await?;
+            if let Some(row) = super::history::delete(&mut tx, bucket.id, &key, &version).await? {
+                removed.push(row.into());
+            }
+            continue;
+        }
         let item = crate::model::ObjectChange {
             principal: principal.clone(),
             bucket: bucket.id,
-            key,
+            key: key.clone(),
             expected: None,
             public: change.public,
             if_match: condition.clone(),
         };
         match super::transactions::change_object_in(&mut tx, item).await {
-            Ok(_) => {}
+            Ok(_) => {
+                if change.public.is_none()
+                    && bucket.version_mode != 0
+                    && let Some(row) =
+                        super::queries::history::one(&mut tx, bucket.id, &key, None).await?
+                {
+                    removed.push(row.into());
+                }
+            }
             Err(e)
                 if e.downcast_ref::<s3s::S3Error>()
                     .is_some_and(|s| s.code() == &s3s::S3ErrorCode::NoSuchKey) =>
@@ -111,12 +140,15 @@ pub(super) async fn change_objects(
             Err(e) => return Err(e),
         }
     }
+    if outcome == Outcome::Applied && !removed.is_empty() {
+        outcome = Outcome::Removed(removed);
+    }
     q::save(
         node,
         input.operation,
         "objects",
         &hash,
-        serde_json::to_value(outcome)?,
+        serde_json::to_value(&outcome)?,
     )
     .execute(&mut *tx)
     .await?;

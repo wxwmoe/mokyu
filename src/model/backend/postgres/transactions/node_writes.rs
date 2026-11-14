@@ -99,7 +99,29 @@ pub(in super::super) async fn begin_node_write(
                 && input.intent.size == Some(source.size),
             Error::NodeOperationConflict
         );
-        authority.add(source.bucket_id, Action::Read);
+        if let Some(version) = input.intent.source_version.as_deref() {
+            authority.add(source.bucket_id, Action::ReadVersion);
+            if source.bucket_id == bucket.id && source.object_key == input.intent.key {
+                authority.add(bucket.id, Action::RestoreVersion);
+            }
+            let row = if version == "null"
+                && queries::history::mode(source.bucket_id, false)
+                    .fetch_one(&mut *tx)
+                    .await?
+                    == 0
+            {
+                queries::history::current(&mut tx, source.bucket_id, &source.object_key).await?
+            } else {
+                queries::history::one(&mut tx, source.bucket_id, &source.object_key, Some(version))
+                    .await?
+            };
+            ensure!(
+                row.and_then(|v| v.stream) == Some(source.id),
+                Error::NodeOperationConflict
+            );
+        } else {
+            authority.add(source.bucket_id, Action::Read);
+        }
         let storage = queries::storage_for_stream(source.id)
             .fetch_one(&mut *tx)
             .await?
@@ -1564,6 +1586,7 @@ pub(in super::super) async fn publish_node_write(
         .execute(&mut *tx)
         .await?;
     let result = write::Published {
+        version_id: super::super::queries::history::receipt(&mut tx, stream).await?,
         identity: row.bucket_id.map(|bucket| (bucket, stream)),
         size: input.size,
         etag: input.etag,

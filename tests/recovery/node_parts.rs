@@ -55,6 +55,7 @@ pub(super) async fn check(
             metadata: serde_json::json!({}),
             public: false,
             size: None,
+            source_version: None,
             copy_read: None,
             part: Some(write::Part {
                 upload,

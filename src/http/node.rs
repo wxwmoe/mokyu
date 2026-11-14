@@ -174,6 +174,23 @@ impl Gateway {
                 request: super::image::request(image_query)?,
             };
         }
+        let mut version_id = None;
+        if let Some(query) = image_query {
+            for (name, value) in axum::extract::Query::<Vec<(String, String)>>::try_from_uri(
+                &format!("/?{query}").parse()?,
+            )?
+            .0
+            {
+                if name == "versionId" {
+                    ensure!(
+                        version_id.is_none() && crate::model::history::valid_id(&value),
+                        s3s::s3_error!(InvalidArgument)
+                    );
+                    ensure!(!anonymous, s3s::s3_error!(AccessDenied));
+                    version_id = Some(value);
+                }
+            }
+        }
         let read_route = route.clone();
         let image = route.image().cloned();
         let head = method != Method::GET;
@@ -230,6 +247,7 @@ impl Gateway {
                 .collect()
         };
         let mut input = wire::ReadRequest {
+            version_id,
             route: Some(wire::ReadRoute { route: Some(route) }),
             access_key: access.unwrap_or_default(),
             method: if head {
@@ -291,7 +309,11 @@ impl Gateway {
         overrides: &HeaderMap,
     ) -> Result<object::Read> {
         let head = request.input.method == wire::ReadMethod::Head as i32;
-        if !head && request.prepared.reply.outcome == wire::ReadOutcome::NoSuchKey as i32 {
+        if !head
+            && request.input.version_id.is_none()
+            && request.prepared.reply.delete_marker_us.is_none()
+            && request.prepared.reply.outcome == wire::ReadOutcome::NoSuchKey as i32
+        {
             let credential = request.prepared.reply.credential.clone();
             let bucket = request.prepared.reply.bucket.clone();
             let until = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -758,10 +780,12 @@ impl Gateway {
                     || request.method() == Method::DELETE
                     || (request.method() == Method::POST
                         && target.query.iter().any(|value| value == "uploadId"))
-                    || target
-                        .query
-                        .iter()
-                        .any(|value| matches!(value.as_str(), "acl" | "delete" | "uploads"))
+                    || target.query.iter().any(|value| {
+                        matches!(
+                            value.as_str(),
+                            "acl" | "delete" | "uploads" | "versioning" | "versions"
+                        )
+                    })
                 {
                     let query = catalog::query(request.method(), request.uri(), &bucket, &key)?;
                     let memory = Arc::new(
@@ -1146,6 +1170,91 @@ impl S3 for Gateway {
         catalog::buckets(request, &self.settings.s3_region).map_err(delivery::error)
     }
 
+    async fn get_bucket_versioning(
+        &self,
+        request: S3Request<GetBucketVersioningInput>,
+    ) -> S3Result<S3Response<GetBucketVersioningOutput>> {
+        let rows = catalog::result(
+            &request.input.bucket,
+            request.credentials.as_ref().map(|c| c.access_key.as_str()),
+            wire::prepare_request_input::Query::Versioning(wire::VersioningQuery {}),
+        )
+        .map_err(delivery::error)?;
+        let crate::model::node_request::Catalog::Versioning(code) = rows else {
+            return Err(s3s::s3_error!(InternalError));
+        };
+        Ok(S3Response::new(GetBucketVersioningOutput {
+            status: match code {
+                0 => None,
+                1 => Some("Enabled".to_owned().into()),
+                2 => Some("Suspended".to_owned().into()),
+                _ => return Err(s3s::s3_error!(InternalError)),
+            },
+            ..Default::default()
+        }))
+    }
+    async fn list_object_versions(
+        &self,
+        request: S3Request<ListObjectVersionsInput>,
+    ) -> S3Result<S3Response<ListObjectVersionsOutput>> {
+        let i = request.input;
+        let s = gateway::versions::selection(&i);
+        let q = wire::prepare_request_input::Query::Versions(wire::VersionsQuery {
+            prefix: s.prefix,
+            delimiter: s.delimiter,
+            key_marker: s.key_marker,
+            version_marker: s.version_marker,
+            max_keys: s.max_keys,
+        });
+        let result = catalog::result(
+            &i.bucket,
+            request.credentials.as_ref().map(|c| c.access_key.as_str()),
+            q,
+        )
+        .map_err(delivery::error)?;
+        let crate::model::node_request::Catalog::Versions(page) = result else {
+            return Err(s3s::s3_error!(InternalError));
+        };
+        gateway::versions::listing(i, page).map_err(delivery::error)
+    }
+    async fn put_bucket_versioning(
+        &self,
+        request: S3Request<PutBucketVersioningInput>,
+    ) -> S3Result<S3Response<PutBucketVersioningOutput>> {
+        let access = request
+            .credentials
+            .as_ref()
+            .ok_or_else(|| s3s::s3_error!(AccessDenied))?;
+        let i = request.input;
+        if i.mfa.is_some() || i.versioning_configuration.mfa_delete.is_some() {
+            return Err(s3s::s3_error!(NotImplemented));
+        }
+        let mode = match i
+            .versioning_configuration
+            .status
+            .as_ref()
+            .map(|s| s.as_str())
+        {
+            Some("Enabled") => 1,
+            Some("Suspended") => 2,
+            _ => return Err(s3s::s3_error!(InvalidArgument)),
+        };
+        objects::prepared()
+            .map_err(delivery::error)?
+            .change(
+                &self.reads,
+                &access.access_key,
+                &i.bucket,
+                vec![],
+                None,
+                None,
+                vec![],
+                Some(mode),
+            )
+            .await
+            .map_err(delivery::error)?;
+        Ok(S3Response::new(PutBucketVersioningOutput::default()))
+    }
     async fn list_objects_v2(
         &self,
         request: S3Request<ListObjectsV2Input>,
@@ -1201,7 +1310,7 @@ impl S3 for Gateway {
                 .body
                 .take()
                 .unwrap_or_else(|| StreamingBlob::from_bytes(bytes::Bytes::new()));
-            let (etag, sums) = self
+            let (etag, sums, version_id) = self
                 .writes
                 .put(
                     prepared,
@@ -1214,6 +1323,7 @@ impl S3 for Gateway {
                 )
                 .await?;
             let mut output = PutObjectOutput {
+                version_id,
                 e_tag: Some(ETag::Strong(etag)),
                 ..Default::default()
             };

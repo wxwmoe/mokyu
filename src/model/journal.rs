@@ -31,6 +31,7 @@ pub(crate) struct BucketJournal {
 
 #[derive(sqlx::FromRow)]
 pub(crate) struct Entry {
+    pub history_subject: bool,
     pub encrypt_frames: bool,
     pub bucket_id: Uuid,
     pub bucket_name: String,

@@ -5,6 +5,8 @@ use crate::model::node_read as read;
 
 fn source(run: Run, key: &str) -> read::Query {
     read::Query {
+        restore_version: false,
+        version_id: None,
         run,
         operation: Uuid::new_v4(),
         route: model::ReadRoute::Bucket {

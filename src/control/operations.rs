@@ -1143,6 +1143,65 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
             let buckets: Vec<Bucket> = app.buckets.all().await?;
             Ok(serde_json::to_value(buckets)?)
         }
+        Command::Bucket(Buckets::Versioning { name, mode }) => {
+            let b = app.bucket(&name, mode.is_some()).await?;
+            Ok(serde_json::to_value(
+                app.objects.versioning(principal, b.id, mode).await?,
+            )?)
+        }
+        Command::Bucket(Buckets::Versions {
+            name,
+            prefix,
+            key_marker,
+            version_marker,
+            limit,
+        }) => {
+            let b = app.bucket(&name, false).await?;
+            let p = crate::authorization::Permit::for_action(
+                principal.clone(),
+                b.id,
+                Action::ListVersions,
+            );
+            Ok(serde_json::to_value(
+                app.objects
+                    .versions(
+                        &p,
+                        b.id,
+                        &crate::model::history::Selection {
+                            prefix,
+                            key_marker,
+                            version_marker,
+                            max_keys: Some(limit),
+                            delimiter: None,
+                        },
+                    )
+                    .await?,
+            )?)
+        }
+        Command::Bucket(Buckets::RestoreVersion {
+            name,
+            key,
+            version_id,
+        }) => {
+            let b = app.bucket(&name, true).await?;
+            Ok(json!({"version_id":app.restore_version(principal,b.id,&key,&version_id).await?}))
+        }
+        Command::Bucket(Buckets::DeleteVersion {
+            name,
+            key,
+            version_id,
+        }) => {
+            let b = app.bucket(&name, true).await?;
+            let p = crate::authorization::Permit::for_action(
+                principal.clone(),
+                b.id,
+                Action::DeleteVersion,
+            );
+            Ok(serde_json::to_value(
+                app.history_delete(&p, b.id, &key, Some(&version_id), None)
+                    .await?,
+            )?)
+        }
         Command::Bucket(Buckets::Mirroring { name, command }) => {
             use crate::cli::Mirroring;
             let bucket = app.bucket(&name, true).await?.id;

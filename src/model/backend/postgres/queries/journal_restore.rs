@@ -305,6 +305,12 @@ pub(in super::super) fn stage<'a>(
     job: Uuid,
     bucket: Uuid,
     key: &'a str,
+    identity: &'a str,
+    logical: &'a str,
+    history_id: Option<&'a str>,
+    order: Option<i64>,
+    when: Option<i64>,
+    marker: bool,
     size: i64,
     etag: &'a str,
     metadata: &'a serde_json::Value,
@@ -314,7 +320,7 @@ pub(in super::super) fn stage<'a>(
     mime: &'a str,
     category: &'a str,
 ) -> Statement<'a> {
-    sqlx::query("INSERT INTO journal_restore_items(job,source_bucket,object_key,size,etag,metadata,checksums,payload,modified_us,content_type,category) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)").bind(job).bind(bucket).bind(key).bind(size).bind(etag).bind(Json(metadata)).bind(Json(sums)).bind(payload).bind(modified).bind(mime).bind(category)
+    sqlx::query("INSERT INTO journal_restore_items(job,source_bucket,object_key,size,etag,metadata,checksums,payload,modified_us,content_type,category,stage_key,logical_key,history_id,history_seq,history_time,history_marker) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)").bind(job).bind(bucket).bind(key).bind(size).bind(etag).bind(Json(metadata)).bind(Json(sums)).bind(payload).bind(modified).bind(mime).bind(category).bind(identity).bind(logical).bind(history_id).bind(order).bind(when).bind(marker)
 }
 
 pub(in super::super) fn range<'a>(
@@ -333,10 +339,11 @@ pub(in super::super) fn range<'a>(
 pub(in super::super) fn advance<'a>(
     next: &'a str,
     size: i64,
+    count: i64,
     job: Uuid,
     source: Uuid,
 ) -> Statement<'a> {
-    sqlx::query("UPDATE journal_restore_buckets SET next_key=$1,restored_objects=restored_objects+1,restored_bytes=restored_bytes+$2 WHERE job=$3 AND source_bucket=$4").bind(next).bind(size).bind(job).bind(source)
+    sqlx::query("UPDATE journal_restore_buckets SET next_key=$1,restored_objects=restored_objects+$5,restored_bytes=restored_bytes+$2 WHERE job=$3 AND source_bucket=$4").bind(next).bind(size).bind(job).bind(source).bind(count)
 }
 
 pub(in super::super) fn totals(job: Uuid, source: Uuid) -> Rows<'static, (String, i64, i64)> {
@@ -357,15 +364,15 @@ pub(in super::super) fn publish_bucket<'a>(
 }
 
 pub(in super::super) fn streams(bucket: Uuid, job: Uuid, source: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag,metadata,checksums,payload_type,created_at,touched_at,write_authorization) SELECT $1,i.object_key,'object','ready',i.size,i.etag,i.metadata,i.checksums,i.payload,TIMESTAMPTZ 'epoch'+i.modified_us*INTERVAL '1 microsecond',TIMESTAMPTZ 'epoch'+i.modified_us*INTERVAL '1 microsecond','{}' FROM journal_restore_items i WHERE i.job=$2 AND i.source_bucket=$3").bind(bucket).bind(job).bind(source)
+    sqlx::query("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag,metadata,checksums,payload_type,created_at,touched_at,write_authorization) SELECT $1,i.stage_key,'object',CASE WHEN i.history_id IS NULL THEN 'ready' ELSE 'retired' END,i.size,i.etag,i.metadata,i.checksums,i.payload,TIMESTAMPTZ 'epoch'+i.modified_us*INTERVAL '1 microsecond',TIMESTAMPTZ 'epoch'+i.modified_us*INTERVAL '1 microsecond','{}' FROM journal_restore_items i WHERE NOT i.history_marker AND i.job=$2 AND i.source_bucket=$3").bind(bucket).bind(job).bind(source)
 }
 
 pub(in super::super) fn extents(bucket: Uuid, job: Uuid, source: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,source_offset,chunk_id,fragment_id) SELECT s.id,r.offset_bytes,r.length,r.source_offset,CASE WHEN r.kind='chunk' THEN r.native_id END,CASE WHEN r.kind='fragment' THEN r.native_id END FROM journal_restore_ranges r JOIN streams s ON s.bucket_id=$1 AND s.object_key=r.object_key WHERE r.job=$2 AND r.source_bucket=$3 AND r.kind<>'raw'").bind(bucket).bind(job).bind(source)
+    sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,source_offset,chunk_id,fragment_id) SELECT s.id,r.offset_bytes,r.length,r.source_offset,CASE WHEN r.kind='chunk' THEN r.native_id END,CASE WHEN r.kind='fragment' THEN r.native_id END FROM journal_restore_ranges r JOIN journal_restore_items i ON i.job=r.job AND i.source_bucket=r.source_bucket AND i.object_key=r.object_key JOIN streams s ON s.bucket_id=$1 AND s.object_key=i.stage_key WHERE r.job=$2 AND r.source_bucket=$3 AND r.kind<>'raw'").bind(bucket).bind(job).bind(source)
 }
 
 pub(in super::super) fn raw_ranges(bucket: Uuid, job: Uuid, source: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_offset,source_id) SELECT s.id,r.offset_bytes,r.length,r.source_offset,r.native_id FROM journal_restore_ranges r JOIN streams s ON s.bucket_id=$1 AND s.object_key=r.object_key WHERE r.job=$2 AND r.source_bucket=$3 AND r.kind='raw'").bind(bucket).bind(job).bind(source)
+    sqlx::query("INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_offset,source_id) SELECT s.id,r.offset_bytes,r.length,r.source_offset,r.native_id FROM journal_restore_ranges r JOIN journal_restore_items i ON i.job=r.job AND i.source_bucket=r.source_bucket AND i.object_key=r.object_key JOIN streams s ON s.bucket_id=$1 AND s.object_key=i.stage_key WHERE r.job=$2 AND r.source_bucket=$3 AND r.kind='raw'").bind(bucket).bind(job).bind(source)
 }
 
 pub(in super::super) fn objects(
@@ -374,9 +381,52 @@ pub(in super::super) fn objects(
     job: Uuid,
     source: Uuid,
 ) -> Statement<'static> {
-    sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token,catalog_size,catalog_modified,catalog_type,catalog_category,catalog_public) SELECT $1,i.object_key,s.id,s.id,i.size,s.created_at,i.content_type,i.category,FALSE FROM journal_restore_items i JOIN streams s ON s.bucket_id=$2 AND s.object_key=i.object_key WHERE i.job=$3 AND i.source_bucket=$4").bind(bucket).bind(owner).bind(job).bind(source)
+    sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token,catalog_size,catalog_modified,catalog_type,catalog_category,catalog_public) SELECT $1,i.logical_key,s.id,s.id,i.size,s.created_at,i.content_type,i.category,FALSE FROM journal_restore_items i JOIN streams s ON s.bucket_id=$2 AND s.object_key=i.stage_key WHERE i.history_id IS NULL AND NOT i.history_marker AND i.job=$3 AND i.source_bucket=$4").bind(bucket).bind(owner).bind(job).bind(source)
 }
 
+pub(in super::super) fn restore_mode(job: Uuid, source: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT COALESCE(MAX(history_seq),0) FROM journal_restore_items WHERE job=$1 AND source_bucket=$2 AND history_id='mode'").bind(job).bind(source)
+}
+pub(in super::super) fn version_rows(
+    bucket: Uuid,
+    owner: Uuid,
+    job: Uuid,
+    source: Uuid,
+) -> Statement<'static> {
+    sqlx::query("INSERT INTO object_versions(bucket_id,object_key,seq,version_id,stream_id,modified_us) SELECT $1,i.logical_key,i.history_seq,i.history_id,s.id,i.history_time FROM journal_restore_items i LEFT JOIN streams s ON s.bucket_id=$2 AND s.object_key=i.stage_key WHERE i.job=$3 AND i.source_bucket=$4 AND i.history_id IS NOT NULL AND i.history_id<>'mode'").bind(bucket).bind(owner).bind(job).bind(source)
+}
+pub(in super::super) fn version_clock(bucket: Uuid, owner: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO object_version_clocks(bucket_id,version_seq) SELECT $1,COALESCE(MAX(seq),0) FROM object_versions WHERE bucket_id=$2").bind(bucket).bind(owner)
+}
+pub(in super::super) fn missing_heads(bucket: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO objects(bucket_id,object_key,write_token) SELECT v.bucket_id,v.object_key,gen_random_uuid() FROM object_versions v LEFT JOIN objects o ON o.bucket_id=v.bucket_id AND o.object_key=v.object_key WHERE v.bucket_id=$1 AND o.object_key IS NULL GROUP BY v.bucket_id,v.object_key").bind(bucket)
+}
+pub(in super::super) async fn charge_history(
+    tx: &mut super::history::Tx<'_>,
+    bucket: Uuid,
+) -> Result<()> {
+    let bytes:i64=sqlx::query_scalar("SELECT CAST(COALESCE(SUM(s.size),0) AS BIGINT) FROM object_versions v JOIN streams s ON s.id=v.stream_id WHERE v.bucket_id=$1 AND NOT EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=v.bucket_id AND o.object_key=v.object_key AND o.stream_id=v.stream_id)").bind(bucket).fetch_one(&mut **tx).await?;
+    if bytes > 0 {
+        sqlx::query("SELECT quota_adjust($1,$2,0,0,0)")
+            .bind(bucket)
+            .bind(bytes)
+            .execute(&mut **tx)
+            .await?;
+    }
+    Ok(())
+}
+pub(in super::super) fn retire_heads(bucket: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET state='retired' WHERE bucket_id=$1 AND state='ready' AND EXISTS(SELECT 1 FROM objects o JOIN object_versions v ON v.bucket_id=o.bucket_id AND v.object_key=o.object_key WHERE o.stream_id=streams.id)").bind(bucket)
+}
+pub(in super::super) fn version_heads(bucket: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE objects SET stream_id=(SELECT v.stream_id FROM object_versions v WHERE v.bucket_id=objects.bucket_id AND v.object_key=objects.object_key ORDER BY v.seq DESC LIMIT 1) WHERE bucket_id=$1 AND EXISTS(SELECT 1 FROM object_versions v WHERE v.bucket_id=objects.bucket_id AND v.object_key=objects.object_key)").bind(bucket)
+}
+pub(in super::super) fn ready_heads(bucket: Uuid, owner: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET state='ready' WHERE bucket_id=$1 AND id IN (SELECT stream_id FROM objects WHERE bucket_id=$2 AND stream_id IS NOT NULL)").bind(bucket).bind(owner)
+}
+pub(in super::super) fn stream_names(job: Uuid, source: Uuid, bucket: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE streams SET object_key=(SELECT i.logical_key FROM journal_restore_items i WHERE i.job=$1 AND i.source_bucket=$2 AND i.stage_key=streams.object_key) WHERE bucket_id=$3").bind(job).bind(source).bind(bucket)
+}
 pub(in super::super) fn complete_bucket(job: Uuid, source: Uuid) -> Statement<'static> {
     sqlx::query(
         "UPDATE journal_restore_buckets SET state='published' WHERE job=$1 AND source_bucket=$2",

@@ -52,6 +52,10 @@ pub(in super::super) fn node_request_allowed(
 ) -> Scalar<'static, bool> {
     let mask = match action {
         "object.read" => 2,
+        "object.versions.read" => 256,
+        "object.versions.restore" => 1024,
+        "object.versions.list" => 128,
+        "bucket.settings" => 32,
         "bucket.list" => 1,
         _ => 0,
     };

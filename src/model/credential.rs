@@ -128,7 +128,7 @@ pub(crate) fn validate_grants(grants: &[BucketGrant]) -> Result<()> {
         || grants.iter().any(|g| {
             !ids.insert(g.bucket_id)
                 || g.actions.is_empty()
-                || g.actions.len() > 7
+                || g.actions.len() > crate::authorization::Action::ALL.len()
                 || g.actions
                     .iter()
                     .enumerate()

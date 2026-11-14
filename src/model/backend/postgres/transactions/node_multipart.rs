@@ -139,6 +139,8 @@ pub(in super::super) async fn node_complete_sources(
     let mut parts = Vec::with_capacity(count);
     for (operation, stream) in input.reads.into_iter().zip(streams) {
         let query = read::Query {
+            restore_version: false,
+            version_id: None,
             run: input.run,
             operation,
             route: crate::model::ReadRoute::Bucket {

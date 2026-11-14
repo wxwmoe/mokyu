@@ -239,7 +239,15 @@ pub(crate) struct Span {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub(crate) enum History {
+    State { mode: i16 },
+    Version { order: i64, time: i64, marker: i16 },
+}
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct Attributes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<History>,
     pub size: i64,
     pub etag: String,
     pub metadata: Value,
@@ -291,11 +299,33 @@ impl Change {
         ensure!(
             self.key
                 .as_ref()
-                .is_none_or(|v| !v.is_empty() && v.len() <= 1024)
+                .is_none_or(|v| crate::model::history::subject(v).is_ok())
                 && self.key.is_some()
                     == matches!(self.operation, Operation::Put | Operation::Delete),
             "invalid journal object key"
         );
+        if let Some(k) = self.key.as_deref()
+            && let Some(a) = &self.attributes
+        {
+            use crate::model::history::{Subject, subject};
+            ensure!(
+                match (subject(k)?, a.history.as_ref()) {
+                    (Subject::Current(_), None) => true,
+                    (
+                        Subject::History(_, _),
+                        Some(History::Version {
+                            order,
+                            time,
+                            marker,
+                        }),
+                    ) => *order >= 0 && *time >= 0 && (*marker == 0 || *marker == 1 && a.size == 0),
+                    (Subject::Mode, Some(History::State { mode })) =>
+                        (1..=2).contains(mode) && a.size == 0,
+                    _ => false,
+                },
+                "invalid journal version metadata"
+            );
+        }
         ensure!(
             self.attributes.is_some() == (self.operation == Operation::Put),
             "invalid journal attributes"

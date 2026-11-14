@@ -26,6 +26,7 @@ pub(super) fn begin_complete(
         metadata: serde_json::json!({}),
         public: false,
         size: None,
+        source_version: None,
         copy_read: None,
         part: None,
         completion: Some(serde_json::from_slice(&input.manifest_json).map_err(|_| invalid())?),

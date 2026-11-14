@@ -35,6 +35,7 @@ pub(crate) mod readiness;
 pub(crate) mod reads;
 pub(crate) mod responses;
 pub(crate) mod streams;
+pub(crate) mod versions;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Bucket {
@@ -43,6 +44,8 @@ pub struct Bucket {
     pub name: String,
     pub storage_id: Option<Uuid>,
     pub state: String,
+    #[serde(default)]
+    pub version_mode: i16,
     pub settings_revision: i64,
     pub image_revision: i64,
     pub uploads_paused: bool,

@@ -21,6 +21,12 @@ pub(super) fn change(input: wire::ChangeObjectsRequest) -> Result<node_object::R
                 .map_err(|_| invalid())?,
             bucket: input.bucket,
             keys: input.keys,
+            versions: input.versions,
+            versioning: input
+                .versioning
+                .map(|i| crate::model::history::Versioning::from_code(i.into()))
+                .transpose()
+                .map_err(|_| invalid())?,
             public: input.public_read,
             if_match: input.if_match,
         },
@@ -31,8 +37,21 @@ pub(super) fn change(input: wire::ChangeObjectsRequest) -> Result<node_object::R
 
 pub(super) fn reply(outcome: node_object::Outcome) -> wire::ChangeObjectsReply {
     wire::ChangeObjectsReply {
+        versions: match &outcome {
+            node_object::Outcome::Removed(rows) => rows
+                .iter()
+                .map(|r| wire::RemovedVersion {
+                    key: r.key.clone(),
+                    version_id: r.version_id.clone(),
+                    marker: r.marker,
+                })
+                .collect(),
+            _ => Vec::new(),
+        },
         outcome: match outcome {
-            node_object::Outcome::Applied => wire::ObjectChangeOutcome::Applied,
+            node_object::Outcome::Removed(_) | node_object::Outcome::Applied => {
+                wire::ObjectChangeOutcome::Applied
+            }
             node_object::Outcome::NoSuchKey => wire::ObjectChangeOutcome::ObjectChangeNoSuchKey,
             node_object::Outcome::PreconditionFailed => {
                 wire::ObjectChangeOutcome::ObjectChangePreconditionFailed

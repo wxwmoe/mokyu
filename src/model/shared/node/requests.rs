@@ -130,10 +130,11 @@ impl NodeRequests for Backend {
                 .access
                 .as_deref()
                 .context("catalog credential missing")?;
-            let action = if matches!(&query, Query::Acl { .. }) {
-                "object.read"
-            } else {
-                "bucket.list"
+            let action = match &query {
+                Query::Acl { .. } => "object.read",
+                Query::Versioning => "bucket.settings",
+                Query::Versions(_) => "object.versions.list",
+                _ => "bucket.list",
             };
             if let Some(bucket) = &bucket
                 && !q::node_request_allowed(access, bucket.project_id, bucket.id, action)
@@ -144,6 +145,20 @@ impl NodeRequests for Backend {
             } else {
                 let result: Result<Catalog> = async {
                     Ok(match query {
+                        Query::Versioning => Catalog::Versioning(
+                            bucket
+                                .as_ref()
+                                .context("catalog bucket missing")?
+                                .version_mode,
+                        ),
+                        Query::Versions(s) => Catalog::Versions(
+                            super::history::page(
+                                &mut tx,
+                                bucket.as_ref().context("catalog bucket missing")?.id,
+                                &s,
+                            )
+                            .await?,
+                        ),
                         Query::Bucket => Catalog::Bucket,
                         Query::Acl { key } => Catalog::Acl {
                             public: q::node_object_acl(

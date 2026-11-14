@@ -42,6 +42,14 @@ pub(super) async fn configure(db: &mut Connection, bucket: Uuid, enabled: bool) 
         "pause"
     };
     control(db, bucket, operation).await?;
+    if operation == "start" {
+        for query in [q::seed_history_mode(bucket), q::seed_history(bucket)] {
+            let n = i64::try_from(query.execute(&mut *db).await?.rows_affected())?;
+            if n != 0 {
+                q::advanced_history(n, bucket).execute(&mut *db).await?;
+            }
+        }
+    }
     q::set_mode(bucket, if enabled { 1 } else { 2 })
         .execute(&mut *db)
         .await?;
@@ -325,7 +333,13 @@ pub(super) async fn prepare(
         generation: event.generation,
         seq: event.seq,
         operation: Operation::parse(&event.operation)?,
-        key: event.object_key,
+        key: event.object_key.map(|k| {
+            if event.history_subject {
+                k
+            } else {
+                crate::model::history::journal_key(k)
+            }
+        }),
         attributes: event.attributes.map(|v| v.0),
         ranges: Vec::new(),
     };
@@ -338,7 +352,11 @@ pub(super) async fn prepare(
         ensure!(
             change.operation == Operation::Put
                 && stream.bucket_id == bucket
-                && Some(&stream.object_key) == change.key.as_ref()
+                && change
+                    .key
+                    .as_deref()
+                    .and_then(|k| crate::model::history::subject(k).ok())
+                    .is_some_and(|s| s.key() == Some(stream.object_key.as_str()))
                 && stream.size == attrs.size
                 && stream.etag == attrs.etag,
             "journal object identity changed"

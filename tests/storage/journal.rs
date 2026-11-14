@@ -27,6 +27,7 @@ fn event(bucket: Uuid, seq: i64, operation: Operation, metadata: serde_json::Val
             key: put.then(|| format!("key-{seq}")),
             ranges: Vec::new(),
             attributes: put.then(|| Attributes {
+                history: None,
                 size: 0,
                 etag: "empty".into(),
                 metadata,

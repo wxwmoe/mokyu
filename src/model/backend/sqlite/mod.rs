@@ -1,6 +1,8 @@
 mod connection;
 #[path = "../../shared/node/embedded_native.rs"]
 mod embedded_native;
+#[path = "../../shared/history.rs"]
+mod history;
 #[path = "../../shared/image.rs"]
 mod image_transactions;
 #[path = "../../shared/journal.rs"]
@@ -160,6 +162,9 @@ pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
     let code = sqlx::error::DatabaseError::code(native)?
         .parse::<i32>()
         .ok()?;
+    if sqlx::error::DatabaseError::message(native) == "version_quota_exceeded" {
+        return Some(crate::model::Error::QuotaExceeded);
+    }
     if code == 275
         && sqlx::error::DatabaseError::message(native)
             == "CHECK constraint failed: redundancy_queue_full"

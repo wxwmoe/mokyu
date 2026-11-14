@@ -272,7 +272,7 @@ impl Replay<'_> {
                     ensure!(
                         file.part.digest == page.digest
                             && file.part.intent.total == page.bytes
-                            && summary.kind == FrameType::Snapshot
+                            && matches!(summary.kind, FrameType::Snapshot | FrameType::Mappings)
                             && summary.first == 1
                             && summary.last == page.items,
                         "snapshot page differs from its manifest"

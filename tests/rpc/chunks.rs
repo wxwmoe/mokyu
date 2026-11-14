@@ -174,6 +174,7 @@ async fn node_chunk_batches_upload_once_replay_and_publish_over_rpc() -> Result<
         operation_id: operation.clone(),
         access_key: source.access_key.clone(),
         credential_revision: Some(credential.revision as u64),
+        source_version: None,
         copy_read_id: None,
         part: None,
         bucket: source.bucket.clone(),

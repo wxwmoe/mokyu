@@ -59,7 +59,7 @@ pub(in super::super) fn lock_bucket(bucket: Uuid) -> Rows<'static, Bucket> {
 }
 
 pub(in super::super) fn bucket_has_streams(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM streams WHERE bucket_id=$1) OR EXISTS(SELECT 1 FROM uploads WHERE bucket_id=$1)").bind(bucket)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM streams WHERE bucket_id=$1) OR EXISTS(SELECT 1 FROM uploads WHERE bucket_id=$1) OR EXISTS(SELECT 1 FROM object_versions WHERE bucket_id=$1)").bind(bucket)
 }
 
 pub(in super::super) fn delete_bucket_objects(bucket: Uuid) -> Statement<'static> {
@@ -235,7 +235,7 @@ pub(in super::super) fn visible_buckets(
     admin: bool,
     token: Option<Uuid>,
 ) -> Rows<'static, BucketView> {
-    sqlx::query_as("SELECT b.*,b.settings_revision::text AS revision,CASE WHEN $2 THEN ARRAY['bucket.list','object.read','object.write','object.delete','object.acl','bucket.settings','storage.inspect'] WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END AS actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=$3 WHERE $2 OR 'bucket.list'=ANY(CASE WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END) ORDER BY b.name LIMIT 1000").bind(user).bind(admin).bind(token)
+    sqlx::query_as("SELECT b.*,b.settings_revision::text AS revision,CASE WHEN $2 THEN ARRAY['bucket.list','object.read','object.write','object.delete','object.acl','bucket.settings','storage.inspect','object.versions.list','object.versions.read','object.versions.delete','object.versions.restore'] WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END AS actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=$1 LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=$3 WHERE $2 OR 'bucket.list'=ANY(CASE WHEN $3::uuid IS NOT NULL THEN t.actions ELSE a.actions END) ORDER BY b.name LIMIT 1000").bind(user).bind(admin).bind(token)
 }
 
 pub(in super::super) fn bucket_cors(bucket: Uuid) -> Scalar<'static, Value> {

@@ -214,9 +214,18 @@ pub(super) async fn open_in(
     };
     if bucket.state != "active"
         || if let Some(access) = &input.access {
-            !q::node_read_allowed(access, bucket.project_id, bucket.id)
-                .fetch_one(&mut **tx)
-                .await?
+            !super::queries::node_requests::node_request_allowed(
+                access,
+                bucket.project_id,
+                bucket.id,
+                if input.version_id.is_some() {
+                    "object.versions.read"
+                } else {
+                    "object.read"
+                },
+            )
+            .fetch_one(&mut **tx)
+            .await?
         } else {
             false
         }
@@ -239,7 +248,54 @@ pub(super) async fn open_in(
         None
     };
     reply.source_key = object_key.clone();
-    let Some(stream) = q::current_stream(tx, bucket.id, &object_key).await? else {
+    if input.version_id.is_some() && input.access.is_none() {
+        reply.outcome = Outcome::AccessDenied;
+        return Ok(reply);
+    }
+    if input.restore_version
+        && (input.version_id.is_none()
+            || !super::queries::node_requests::node_request_allowed(
+                input.access.as_deref().unwrap_or_default(),
+                bucket.project_id,
+                bucket.id,
+                "object.versions.restore",
+            )
+            .fetch_one(&mut **tx)
+            .await?)
+    {
+        reply.outcome = Outcome::AccessDenied;
+        return Ok(reply);
+    }
+    let current = if bucket.version_mode != 0 {
+        match super::queries::history::one(tx, bucket.id, &object_key, input.version_id.as_deref())
+            .await?
+        {
+            Some(v) => {
+                reply.version_id = Some(v.version_id);
+                if let Some(s) = v.stream {
+                    let mut stream = q::node_read_stream(s).fetch_one(&mut **tx).await?;
+                    stream.object_key = object_key.clone();
+                    stream.bucket_id = bucket.id;
+                    stream.touched_at = chrono::DateTime::from_timestamp_micros(v.modified_us)
+                        .context("invalid version timestamp")?;
+                    Some(stream)
+                } else {
+                    reply.outcome = Outcome::NoSuchKey;
+                    reply.delete_marker_us = Some(v.modified_us);
+                    reply.http_status = if input.version_id.is_some() { 405 } else { 404 };
+                    return Ok(reply);
+                }
+            }
+            None => None,
+        }
+    } else if input.version_id.as_deref().is_none_or(|v| v == "null") {
+        reply.version_id = input.version_id.clone();
+        q::current_stream(tx, bucket.id, &object_key).await?
+    } else {
+        None
+    };
+    let Some(stream) = current else {
+        reply.version_id = input.version_id.clone();
         reply.outcome = Outcome::NoSuchKey;
         return Ok(reply);
     };

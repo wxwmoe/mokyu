@@ -19,6 +19,13 @@ impl Gateway {
             .extensions
             .get::<crate::status::stats::RequestContext>()
             .cloned();
+        let versioned = prepared
+            .reply
+            .bucket
+            .as_ref()
+            .map(|r| prepared.material::<crate::app::Bucket>(r))
+            .transpose()?
+            .is_some_and(|b| b.version_mode != 0);
         let mut output = self
             .writes
             .complete(prepared, request.input.bucket, request.input.key, manifest)
@@ -36,6 +43,9 @@ impl Gateway {
                     error
                 })
             }));
+        }
+        if versioned && let Some(future) = output.future.take() {
+            output = future.await?;
         }
         Ok(S3Response::new(output))
     }

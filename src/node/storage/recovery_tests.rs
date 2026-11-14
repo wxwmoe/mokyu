@@ -212,6 +212,7 @@ pub(crate) async fn contract(catalog: &dyn RecoveryCatalog) -> Result<()> {
                 },
                 key: Some("object".into()),
                 attributes: (!deleted).then(|| Attributes {
+                    history: None,
                     size: 0,
                     etag: format!("revision-{sequence}"),
                     metadata: serde_json::json!({}),

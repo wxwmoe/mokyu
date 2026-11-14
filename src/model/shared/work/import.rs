@@ -55,6 +55,7 @@ pub(super) async fn prepare(
             )?,
             public: false,
             size: Some(i64::try_from(incoming.size)?),
+            source_version: None,
             copy_read: None,
             part: None,
             completion: None,

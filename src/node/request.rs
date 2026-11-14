@@ -92,7 +92,9 @@ impl Request {
         keys: Vec<String>,
         public: Option<bool>,
         if_match: Option<s3s::dto::ETagCondition>,
-    ) -> Result<()> {
+        versions: Vec<String>,
+        versioning: Option<i32>,
+    ) -> Result<Vec<wire::RemovedVersion>> {
         let credential = self.authorize(access, bucket)?;
         let resolved: crate::app::Bucket = self.material(
             self.reply
@@ -114,6 +116,8 @@ impl Request {
                 credential_revision: Some(credential.revision as u64),
                 bucket: bucket.to_owned(),
                 keys: keys.clone(),
+                versions,
+                versioning,
                 public_read: public,
                 if_match: if_match
                     .as_ref()
@@ -125,7 +129,7 @@ impl Request {
             .await?;
         self.check()?;
         match wire::ObjectChangeOutcome::try_from(reply.outcome)? {
-            wire::ObjectChangeOutcome::Applied => Ok(()),
+            wire::ObjectChangeOutcome::Applied => Ok(reply.versions),
             wire::ObjectChangeOutcome::ObjectChangeNoSuchKey => {
                 Err(s3s::s3_error!(NoSuchKey).into())
             }

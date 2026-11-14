@@ -126,6 +126,7 @@ pub(super) use multipart::*;
 mod buckets;
 pub(super) mod mirroring;
 pub(super) use buckets::*;
+pub(super) mod history;
 mod objects;
 pub(super) use objects::*;
 mod keys;

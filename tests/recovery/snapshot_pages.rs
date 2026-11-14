@@ -47,6 +47,7 @@ async fn select_and_verify_a_gibibyte_checkpoint() {
                 generation: 1,
                 seq: n as i64 + 1,
                 attributes: Attributes {
+                    history: None,
                     size: 0,
                     etag: "d41d8cd98f00b204e9800998ecf8427e".into(),
                     metadata: serde_json::json!({"sample":URL_SAFE_NO_PAD.encode(metadata)}),

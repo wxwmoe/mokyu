@@ -444,11 +444,16 @@ message ChangeObjectsRequest {
   optional bool public_read = 7;
   // A single-key delete may require the current ETag, or any existing object (*).
   optional string if_match = 8;
+  repeated string versions = 9;
+  optional int32 versioning = 10;
 }
 
 message ChangeObjectsReply {
   ObjectChangeOutcome outcome = 1;
+  repeated RemovedVersion versions = 2;
 }
+
+message RemovedVersion { string key = 1; string version_id = 2; bool marker = 3; }
 
 enum ObjectChangeOutcome {
   OBJECT_CHANGE_OUTCOME_UNSPECIFIED = 0;
@@ -561,6 +566,7 @@ message PublishedWrite {
   uint64 size = 1;
   string etag = 2;
   string last_modified = 3;
+  optional string version_id = 4;
 }
 
 message BeginWriteRequest {
@@ -576,6 +582,7 @@ message BeginWriteRequest {
   optional uint64 credential_revision = 10;
   optional string copy_read_id = 11;
   WritePart part = 12;
+  optional string source_version = 13;
 }
 
 message WritePart {
@@ -617,10 +624,20 @@ message PrepareRequestInput {
     ListObjectsQuery list_objects = 8;
     ListUploadsQuery list_uploads = 10;
     ListPartsQuery list_parts = 11;
+    VersioningQuery versioning = 12;
+    VersionsQuery versions = 13;
   }
 }
 
 message DescribeBucketQuery {}
+message VersioningQuery {}
+message VersionsQuery {
+  string prefix = 1;
+  optional string delimiter = 2;
+  optional string key_marker = 3;
+  optional string version_marker = 4;
+  optional int32 max_keys = 5;
+}
 
 message ObjectAclQuery { string key = 1; }
 
@@ -924,6 +941,8 @@ message ReadRequest {
   string image_query = 14;
   uint32 read_lanes = 15;
   ReadPermits permits = 16;
+  optional string version_id = 17;
+  bool restore_version = 18;
 }
 
 // The client pins these verified bytes until the request finishes.
@@ -1023,4 +1042,6 @@ message ReadReply {
   string source_key = 18;
   optional bytes origin_work_json = 19;
   optional bytes origin_range_json = 20;
+  optional string version_id = 21;
+  optional int64 delete_marker_us = 22;
 }

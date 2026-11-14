@@ -11,11 +11,29 @@ pub(crate) struct Change {
     pub credential_revision: i64,
     pub bucket: String,
     pub keys: Vec<String>,
+    pub versions: Vec<String>,
+    pub versioning: Option<super::history::Versioning>,
     pub public: Option<bool>,
     pub if_match: Option<String>,
 }
 
 impl Change {
+    pub(crate) fn items(&self) -> Vec<(String, String)> {
+        let mut items: Vec<_> = self
+            .keys
+            .iter()
+            .enumerate()
+            .map(|(i, key)| {
+                (
+                    key.clone(),
+                    self.versions.get(i).cloned().unwrap_or_default(),
+                )
+            })
+            .collect();
+        items.sort_unstable();
+        items.dedup();
+        items
+    }
     pub(crate) fn hash(&self) -> Result<Vec<u8>> {
         let name =
             |value: &str, limit| !value.is_empty() && value.len() <= limit && !value.contains('\0');
@@ -23,6 +41,19 @@ impl Change {
             name(&self.access, 256)
                 && self.credential_revision >= 0
                 && name(&self.bucket, 255)
+                && self
+                    .versioning
+                    .is_none_or(|v| v != super::history::Versioning::Off
+                        && self.keys.is_empty()
+                        && self.public.is_none()
+                        && self.if_match.is_none())
+                && (self.versions.is_empty()
+                    || self.versions.len() == self.keys.len()
+                        && self.public.is_none()
+                        && self
+                            .versions
+                            .iter()
+                            .all(|v| v.is_empty() || super::history::valid_id(v)))
                 && self.keys.len() <= 1000
                 && self.keys.iter().all(|key| name(key, 1024))
                 && (self.public.is_none() || self.keys.len() == 1)
@@ -50,10 +81,26 @@ impl Request {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Removed {
+    pub key: String,
+    pub version_id: String,
+    pub marker: bool,
+}
+impl From<super::history::Version> for Removed {
+    fn from(v: super::history::Version) -> Self {
+        Self {
+            key: v.key,
+            version_id: v.version_id,
+            marker: v.size.is_none(),
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Outcome {
     Applied,
+    Removed(Vec<Removed>),
     NoSuchKey,
     PreconditionFailed,
 }
@@ -68,6 +115,8 @@ mod tests {
             access: "writer".into(),
             credential_revision: 1,
             bucket: "bucket".into(),
+            versions: vec![],
+            versioning: None,
             keys: vec!["a".into(), "b".into()],
             public: None,
             if_match: None,

@@ -132,6 +132,9 @@ pub async fn s3_http(
         let signed = target.signed;
         let virtual_bucket = target.virtual_bucket.as_deref();
         let alias = target.alias.as_deref();
+        if !signed && read && query.iter().any(|k| k == "versionId") {
+            return Err(s3s::s3_error!(AccessDenied).into());
+        }
         let image_uri = request.uri().clone();
         let route = read
             .then(|| read_route(request.uri().path(), virtual_bucket, alias))
@@ -594,6 +597,7 @@ pub fn decode_path(path: &str) -> Result<String> {
 }
 
 pub(crate) struct ReadOptions {
+    pub selected: Option<(crate::app::StoredStream, crate::app::Active)>,
     pub public: Option<Bucket>,
     pub preview: Option<bool>,
     pub version: Option<Id>,
@@ -601,6 +605,7 @@ pub(crate) struct ReadOptions {
 impl ReadOptions {
     pub(super) fn public(bucket: &Bucket) -> Self {
         Self {
+            selected: None,
             public: Some(bucket.clone()),
             preview: None,
             version: None,
@@ -608,6 +613,7 @@ impl ReadOptions {
     }
     pub fn managed(preview: bool, version: Option<Id>) -> Self {
         Self {
+            selected: None,
             public: None,
             preview: Some(preview),
             version,
@@ -653,7 +659,9 @@ pub(crate) async fn respond(
     let iums = date("if-unmodified-since");
     let light =
         method == Method::HEAD || im.is_some() || inm.is_some() || ims.is_some() || iums.is_some();
-    let (mut s, mut pin) = if light {
+    let (mut s, mut pin) = if let Some((stream, pin)) = options.selected {
+        (stream, Some(pin))
+    } else if light {
         (app.metadata(bucket, key).await?, None)
     } else {
         let (s, pin) = app.current(bucket, key).await?;

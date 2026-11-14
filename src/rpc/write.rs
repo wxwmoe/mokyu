@@ -104,6 +104,7 @@ pub(super) fn begin(input: wire::BeginWriteRequest) -> Result<write::Begin, Stat
             .map(i64::try_from)
             .transpose()
             .map_err(|_| invalid())?,
+        source_version: input.source_version,
         copy_read: input
             .copy_read_id
             .map(|value| super::uuid(&value))
@@ -281,6 +282,7 @@ pub(super) fn reply(value: write::Reply) -> Result<wire::WriteReply, Status> {
         storage: value.storage.map(read::version),
         grants: value.grants.into_iter().map(read::grant).collect(),
         published: value.published.map(|value| wire::PublishedWrite {
+            version_id: value.version_id,
             size: value.size as u64,
             etag: value.etag,
             last_modified: value.modified.to_rfc3339(),

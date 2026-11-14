@@ -8,6 +8,8 @@ import { RefreshCw, ArrowUpRight, ChevronRight, LockKeyhole, Globe, Home, Heart,
 import { api, bytes, params, session, type Bucket } from '../api/client'
 import { notify, report, errorText } from '../app/feedback'
 import { t, date } from '../app/i18n'
+import VersionHistory from '../components/VersionHistory.vue'
+import UiDialog from '../components/ui/UiDialog.vue'
 import UiSelect from '../components/ui/UiSelect.vue'
 import ObjectViewer from '../components/ObjectViewer.vue'
 import MediaThumbnail from '../components/MediaThumbnail.vue'
@@ -26,6 +28,7 @@ import UiListFooter from '../components/ui/UiListFooter.vue'
 
 type MediaObject = components['schemas']['MediaItem']
 type ObjectPage = components['schemas']['MediaPage']
+const historyOpen=ref(false)
 const route = useRoute(), router = useRouter()
 const bucket = computed(() => String(route.params.bucket || ''))
 const prefix = computed(() => String(route.query.prefix || ''))
@@ -84,7 +87,7 @@ async function refresh() {
 </script>
 
 <template>
-  <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><CreateBucket v-if="!bucket" @created="router.push('/media/' + $event.id)" /><RouterLink v-if="current?.actions.includes('bucket.settings')" class="button" :to="'/buckets/' + bucket">{{ t('buckets') }}</RouterLink><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button><button v-if="current?.status === 'active' && current.actions.includes('object.write')" :disabled="current?.uploads_paused || current?.status !== 'active'" class="primary" @click="uploading = true"><UploadCloud :size="16" />{{ t('uploadTitle') }}</button></div></div>
+  <div class="page-heading"><div><p class="eyebrow">{{ t('collection') }}</p><h1>{{ current?.name || t('media') }}</h1><p>{{ t('everything') }}</p></div><div class="heading-actions"><CreateBucket v-if="!bucket" @created="router.push('/media/' + $event.id)" /><button v-if="current?.actions.includes('object.versions.list')" @click="historyOpen=true">{{ t('versionTitle') }}</button><RouterLink v-if="current?.actions.includes('bucket.settings')" class="button" :to="'/buckets/' + bucket">{{ t('buckets') }}</RouterLink><button :disabled="buckets.isFetching.value || (bucket !== '' && objects.isFetching.value)" @click="refresh"><RefreshCw :size="16" />{{ t('refresh') }}</button><button v-if="current?.status === 'active' && current.actions.includes('object.write')" :disabled="current?.uploads_paused || current?.status !== 'active'" class="primary" @click="uploading = true"><UploadCloud :size="16" />{{ t('uploadTitle') }}</button></div></div>
   <ErrorNotice v-if="buckets.error.value || objects.error.value" :error="buckets.error.value || objects.error.value" />
   <QuotaPanel v-if="current?.actions.includes('storage.inspect')" scope="bucket" :id="current.id" />
   <div v-if="!bucket" class="bucket-grid">
@@ -116,5 +119,6 @@ async function refresh() {
   <div v-if="picks.length && current" class="selection-bar"><span class="selection-count">{{ picks.length }}</span><strong>{{ t('selectedObjects', { count: picks.length }) }}</strong><MediaActionsMenu :bucket="current" :items="picks" @action="operate($event)" /><button class="icon-button" :aria-label="t('clearSelection')" @click="checked = new Set()"><X :size="17" /></button></div>
   <ObjectViewer v-if="current" :bucket="current" :item="selected" :previous="selectedIndex > 0" :next="selectedIndex >= 0 && selectedIndex < (objects.data.value?.items.length || 0) - 1" @close="close" @step="step" @action="operate($event, selected ? [selected] : [])" />
   <MediaActionDialog v-if="current" v-model:open="actionOpen" :bucket="current" :buckets="buckets.data.value || []" :items="actionItems" :action="action" :prefix="prefix" @changed="changed" />
+  <UiDialog v-if="current" v-model:open="historyOpen" :title="t('versionTitle')" :description="t('versionBrowseHint')" medium><VersionHistory :bucket="current" @changed="refresh"/></UiDialog>
   <UploadDialog v-model:open="uploading" :buckets="buckets.data.value || []" :bucket="bucket" :prefix="prefix" />
 </template>

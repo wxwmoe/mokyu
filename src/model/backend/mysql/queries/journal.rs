@@ -52,6 +52,17 @@ pub(in super::super) fn control<'a>(bucket: Uuid, operation: &'a str) -> Stateme
     sqlx::query("INSERT INTO journal_entries(encrypt_frames,bucket_id,generation,seq,operation) SELECT (SELECT st.block_key_id IS NOT NULL FROM storages st WHERE st.id=journal_buckets.storage_id),bucket_id,generation,last_seq,? FROM journal_buckets WHERE bucket_id=?").bind(operation).bind(bucket)
 }
 
+pub(in super::super) fn seed_history_mode(bucket: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq+1,j.generation,'put','~m',NULL,NULL,JSON_OBJECT('size',0,'etag','','metadata',JSON_OBJECT(),'checksums',JSON_OBJECT(),'payload','chunks','modified_us',0,'history',JSON_OBJECT('mode',b.version_mode)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id JOIN buckets b ON b.id=j.bucket_id WHERE b.version_mode<>0 AND b.id=?").bind(bucket)
+}
+pub(in super::super) fn seed_history(bucket: Uuid) -> Statement<'static> {
+    sqlx::query("INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq+ROW_NUMBER() OVER (ORDER BY v.object_key,v.seq),j.generation,'put',CONCAT('~h/',v.version_id,'/',v.object_key),v.stream_id,s.payload_revision,JSON_OBJECT('size',COALESCE(s.size,0),'etag',COALESCE(s.etag,''),'metadata',COALESCE(JSON_EXTRACT(s.metadata,'$'),JSON_OBJECT()),'checksums',COALESCE(JSON_EXTRACT(s.checksums,'$'),JSON_OBJECT()),'payload',COALESCE(s.payload_type,'chunks'),'modified_us',v.modified_us,'history',JSON_OBJECT('order',v.seq,'time',v.modified_us,'marker',CASE WHEN v.stream_id IS NULL THEN 1 ELSE 0 END)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id JOIN object_versions v ON v.bucket_id=j.bucket_id LEFT JOIN streams s ON s.id=v.stream_id WHERE j.bucket_id=?").bind(bucket)
+}
+pub(in super::super) fn advanced_history(n: i64, b: Uuid) -> Statement<'static> {
+    sqlx::query("UPDATE journal_buckets SET last_seq=last_seq+? WHERE bucket_id=?")
+        .bind(n)
+        .bind(b)
+}
 pub(in super::super) fn scanning(bucket: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT scanning FROM journal_buckets WHERE bucket_id=?").bind(bucket)
 }
@@ -87,7 +98,7 @@ pub(in super::super) fn ledger(storage: Uuid) -> Rows<'static, Ledger> {
 }
 
 pub(in super::super) fn event(bucket: Uuid) -> Rows<'static, Entry> {
-    sqlx::query_as("SELECT e.encrypt_frames,e.bucket_id,j.bucket_name,e.seq,e.generation,e.operation,CONVERT(e.object_key USING utf8mb4) AS object_key,e.stream_id,e.attributes FROM journal_entries e JOIN journal_buckets j ON j.bucket_id=e.bucket_id WHERE e.bucket_id=? AND e.seq>j.published_seq AND NOT EXISTS(SELECT 1 FROM journal_drafts d WHERE d.bucket_id=e.bucket_id AND d.seq=e.seq AND d.final_page) ORDER BY e.seq LIMIT 1").bind(bucket)
+    sqlx::query_as("SELECT e.history_subject,e.encrypt_frames,e.bucket_id,j.bucket_name,e.seq,e.generation,e.operation,CONVERT(e.object_key USING utf8mb4) AS object_key,e.stream_id,e.attributes FROM journal_entries e JOIN journal_buckets j ON j.bucket_id=e.bucket_id WHERE e.bucket_id=? AND e.seq>j.published_seq AND NOT EXISTS(SELECT 1 FROM journal_drafts d WHERE d.bucket_id=e.bucket_id AND d.seq=e.seq AND d.final_page) ORDER BY e.seq LIMIT 1").bind(bucket)
 }
 
 pub(in super::super) fn cursor(bucket: Uuid, seq: i64) -> Rows<'static, Cursor> {

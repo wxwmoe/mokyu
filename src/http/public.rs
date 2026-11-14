@@ -111,6 +111,14 @@ async fn public(
         )
         .map_err(|_| unauthorized())?
     };
+    if axum::extract::Query::<Vec<(String, String)>>::try_from_uri(request.uri())
+        .map_err(|_| unauthorized())?
+        .0
+        .iter()
+        .any(|(key, _)| key == "versionId")
+    {
+        return Err(unauthorized());
+    }
     let cors_generation = app.cors_cache.generation();
     let route = crate::model::ReadRoute::Image {
         route: Box::new(crate::model::ReadRoute::Host {

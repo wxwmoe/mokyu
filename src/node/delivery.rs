@@ -89,7 +89,22 @@ pub(crate) async fn response(
     match outcome {
         wire::ReadOutcome::Ready | wire::ReadOutcome::NotModified => {}
         wire::ReadOutcome::NoSuchBucket => return Err(s3s::s3_error!(NoSuchBucket).into()),
-        wire::ReadOutcome::NoSuchKey => return Err(s3s::s3_error!(NoSuchKey).into()),
+        wire::ReadOutcome::NoSuchKey => {
+            if let (Some(id), Some(us)) =
+                (&prepared.reply.version_id, prepared.reply.delete_marker_us)
+            {
+                return Err(crate::app::versions::marker(
+                    id,
+                    us,
+                    prepared.reply.http_status == 405,
+                )
+                .into());
+            }
+            if prepared.reply.version_id.is_some() {
+                return Err(s3s::s3_error!(NoSuchVersion).into());
+            }
+            return Err(s3s::s3_error!(NoSuchKey).into());
+        }
         wire::ReadOutcome::AccessDenied => return Err(s3s::s3_error!(AccessDenied).into()),
         wire::ReadOutcome::PreconditionFailed => {
             return Err(s3s::s3_error!(PreconditionFailed).into());
@@ -130,6 +145,9 @@ pub(crate) async fn response(
         "read etag mismatch"
     );
     let mut headers = object::metadata_headers(&metadata)?;
+    if let Some(id) = &prepared.reply.version_id {
+        headers.insert("x-amz-version-id", id.parse()?);
+    }
     headers.extend(overrides.clone());
     compression::vary(&mut headers, "Accept-Encoding");
     headers.insert(header::ETAG, prepared.reply.etag.parse()?);

@@ -334,6 +334,10 @@ pub(in super::super) async fn replace_object_quota(
             inflight -= pending;
         }
     }
+    let versioned = super::super::queries::history::mode(bucket, false)
+        .fetch_one(&mut *connection)
+        .await?
+        != 0;
     let credits = queries::displaced_credits(bucket, key, old.map(|v| v.0))
         .fetch_one(&mut *connection)
         .await?;
@@ -343,7 +347,11 @@ pub(in super::super) async fn replace_object_quota(
     adjust_quota(
         connection,
         accounts,
-        new.map_or(0, |v| v.1) - old.map_or(0, |v| v.1),
+        if versioned {
+            0
+        } else {
+            new.map_or(0, |v| v.1) - old.map_or(0, |v| v.1)
+        },
         credits - freed,
         -inflight,
         i64::from(new.is_some()) - i64::from(old.is_some()),

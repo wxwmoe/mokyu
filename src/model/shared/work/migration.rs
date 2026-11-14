@@ -179,6 +179,7 @@ pub(super) async fn offer(
                 metadata: original.metadata.clone(),
                 public: job.public_read,
                 size: Some(original.size),
+                source_version: None,
                 copy_read: None,
                 part: None,
                 completion: None,
@@ -257,6 +258,8 @@ pub(super) async fn read(
     );
     let original = source(&mut tx, &job(&task.detail)?).await?;
     let query = read::Query {
+        restore_version: false,
+        version_id: None,
         run: input.run,
         operation: saved.read,
         route: crate::model::ReadRoute::Bucket {

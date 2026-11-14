@@ -13,6 +13,10 @@ pub(in super::super) fn action_bit(action: Action) -> i64 {
         Action::Acl => 16,
         Action::Settings => 32,
         Action::Inspect => 64,
+        Action::ListVersions => 128,
+        Action::ReadVersion => 256,
+        Action::DeleteVersion => 512,
+        Action::RestoreVersion => 1024,
     }
 }
 
@@ -43,7 +47,7 @@ pub(in super::super) async fn bucket_actions(
         Principal::Token { id, .. } => sqlx::query_scalar("SELECT actions FROM token_bucket_access WHERE token_id=? AND bucket_id=?").bind(id).bind(bucket).fetch_optional(connection).await?,
         Principal::Service { access_key, .. } => sqlx::query_scalar("SELECT g.actions FROM s3_credential_grants g JOIN buckets b ON b.id=g.bucket_id JOIN s3_credentials c ON c.access_key_id=g.access_key AND c.project_id=b.project_id WHERE g.access_key=? AND g.bucket_id=?").bind(access_key).bind(bucket).fetch_optional(connection).await?,
         Principal::Node { .. } => return Err(s3s::s3_error!(AccessDenied).into()),
-        Principal::System | Principal::Bootstrap | Principal::Local => Some(127),
+        Principal::System | Principal::Bootstrap | Principal::Local => Some(action_bits(&Action::ALL)),
     };
     Ok(actions(bits.unwrap_or(0)))
 }

@@ -91,6 +91,7 @@ pub(in super::super) async fn finish_replica_node(
             .fetch_one(&mut **db)
             .await?;
         let result = crate::model::node_write::Published {
+            version_id: super::super::queries::history::receipt(db, stream).await?,
             identity: Some((source.bucket_id, stream)),
             size: source.size,
             etag: source.etag,

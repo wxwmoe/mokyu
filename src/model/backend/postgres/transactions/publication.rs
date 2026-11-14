@@ -317,7 +317,12 @@ pub(in super::super) async fn apply_publish(
         queries::retire_stream(old).execute(&mut **tx).await?;
     }
     if let Some((upload, hash, result, token)) = completion {
-        let changed = queries::complete_upload(upload, hash, result, id, *token)
+        let mut result = result.clone();
+        if let Some(row) = super::super::queries::history::one(tx, bucket, object_key, None).await?
+        {
+            result["version_id"] = row.version_id.into();
+        }
+        let changed = queries::complete_upload(upload, hash, &result, id, *token)
             .execute(&mut **tx)
             .await?
             .rows_affected();
@@ -438,6 +443,7 @@ async fn change_object_in(
         return Ok(false);
     }
     apply_object_change(tx, bucket, object_key, old, None).await?;
+    queries::history::deleted(tx, bucket, object_key, old.is_none()).await?;
     complete_media_operation(tx, None).await?;
     Ok(true)
 }
@@ -495,18 +501,41 @@ pub(in super::super) async fn change_node_objects(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?;
-    let mut permit = Permit::for_action(
-        Principal::Service {
-            access_key: change.access.clone(),
-            revision: change.credential_revision,
-        },
-        bucket.id,
-        if change.public.is_some() {
-            Action::Acl
-        } else {
-            Action::Delete
-        },
-    );
+    let principal = Principal::Service {
+        access_key: change.access.clone(),
+        revision: change.credential_revision,
+    };
+    let mut permit = Permit {
+        principal,
+        resources: Default::default(),
+    };
+    if change.versioning.is_some() {
+        permit.add(bucket.id, Action::Settings);
+    }
+    if change.public.is_some() {
+        permit.add(bucket.id, Action::Acl);
+    }
+    let items = change.items();
+    for (key, version) in &items {
+        let _ = key;
+        if change.public.is_none() {
+            let action = if version.is_empty() {
+                Action::Delete
+            } else {
+                Action::DeleteVersion
+            };
+            if !permit
+                .resources
+                .get(&bucket.id)
+                .is_some_and(|v| v.contains(&action))
+            {
+                permit.add(bucket.id, action);
+            }
+        }
+    }
+    if items.is_empty() && change.versioning.is_none() {
+        permit.add(bucket.id, Action::Delete);
+    }
     let if_match = change
         .if_match
         .as_ref()
@@ -518,11 +547,20 @@ pub(in super::super) async fn change_node_objects(
     permit.lock(&mut tx).await?;
     lock_object_bucket(&mut tx, bucket.id).await?;
     // All batches acquire object locks in the same order, including duplicate keys.
-    let mut keys = change.keys.clone();
-    keys.sort_unstable();
-    keys.dedup();
+    if let Some(mode) = change.versioning {
+        super::super::history::set_mode(&mut tx, bucket.id, Some(mode)).await?;
+    }
     let mut outcome = Outcome::Applied;
-    for object_key in keys {
+    let mut removed = Vec::new();
+    for (object_key, version) in items {
+        if !version.is_empty() {
+            if let Some(row) =
+                super::super::history::delete(&mut tx, bucket.id, &object_key, &version).await?
+            {
+                removed.push(row.into());
+            }
+            continue;
+        }
         match change_object_in(
             &mut tx,
             bucket.id,
@@ -533,7 +571,15 @@ pub(in super::super) async fn change_node_objects(
         )
         .await
         {
-            Ok(_) => {}
+            Ok(_) => {
+                if change.public.is_none()
+                    && bucket.version_mode != 0
+                    && let Some(row) =
+                        queries::history::one(&mut tx, bucket.id, &object_key, None).await?
+                {
+                    removed.push(row.into());
+                }
+            }
             Err(error)
                 if error
                     .downcast_ref::<s3s::S3Error>()
@@ -551,7 +597,10 @@ pub(in super::super) async fn change_node_objects(
             Err(error) => return Err(error),
         }
     }
-    queries::save_node_object_change(node, input.operation, &hash, outcome)
+    if outcome == Outcome::Applied && !removed.is_empty() {
+        outcome = Outcome::Removed(removed);
+    }
+    queries::save_node_object_change(node, input.operation, &hash, outcome.clone())
         .execute(&mut *tx)
         .await?;
     queries::expire_node_object_changes(node.node_id)

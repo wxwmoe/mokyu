@@ -657,9 +657,8 @@ impl App {
         let future = Box::pin(async move {
             let result = tokio::time::timeout(completion_timeout(), async move {
                 if let Some(work) = work {
-                    return work
-                        .await
-                        .map_err(|error| crate::app::internal(error.into()))?;
+                    work.await
+                        .map_err(|error| crate::app::internal(error.into()))??;
                 }
                 loop {
                     let current = app
@@ -701,6 +700,9 @@ impl App {
                 error
             })
         });
+        if b.version_mode != 0 {
+            return Ok(S3Response::new(future.await?));
+        }
         Ok(S3Response::new(CompleteMultipartUploadOutput {
             future: Some(future),
             ..Default::default()
@@ -1189,6 +1191,7 @@ pub(crate) fn completion_output(
 ) -> CompleteMultipartUploadOutput {
     let sums = &result["checksums"];
     let mut out = CompleteMultipartUploadOutput {
+        version_id: result["version_id"].as_str().map(str::to_owned),
         bucket: Some(bucket.into()),
         key: Some(key.into()),
         e_tag: result["etag"].as_str().map(|e| ETag::Strong(e.into())),

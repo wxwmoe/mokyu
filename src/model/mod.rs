@@ -11,6 +11,7 @@ pub(crate) mod credential;
 mod error;
 pub(crate) mod external;
 pub(crate) mod external_test;
+pub(crate) mod history;
 mod id;
 pub(crate) mod image_styles;
 pub(crate) mod integrity;

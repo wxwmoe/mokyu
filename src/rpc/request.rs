@@ -36,6 +36,16 @@ pub(super) fn prepare(
             .map(|query| -> Result<_, Status> {
                 use wire::prepare_request_input::Query;
                 Ok(match query {
+                    Query::Versioning(_) => node_request::Query::Versioning,
+                    Query::Versions(v) => {
+                        node_request::Query::Versions(crate::model::history::Selection {
+                            prefix: v.prefix,
+                            delimiter: v.delimiter,
+                            key_marker: v.key_marker,
+                            version_marker: v.version_marker,
+                            max_keys: v.max_keys,
+                        })
+                    }
                     Query::DescribeBucket(_) => node_request::Query::Bucket,
                     Query::ObjectAcl(value) => node_request::Query::Acl { key: value.key },
                     Query::ListBuckets(value) => node_request::Query::Buckets {

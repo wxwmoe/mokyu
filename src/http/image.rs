@@ -545,12 +545,6 @@ where
 {
     ensure!(stream.public_read, s3s::s3_error!(AccessDenied));
     super::gateway::reject_features(&request)?;
-    let axum::extract::Query(query) =
-        axum::extract::Query::<Vec<(String, String)>>::try_from_uri(&uri)?;
-    ensure!(
-        !query.iter().any(|(name, _)| name == "versionId"),
-        s3s::s3_error!(NotImplemented, "versioning is unsupported")
-    );
     let head = method == Method::HEAD;
     let Some(rule) = &selection.rule else {
         return original(stream, request, head, body).await;

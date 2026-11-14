@@ -96,7 +96,7 @@ impl ObjectTransfer<'_> {
 }
 
 #[async_trait]
-pub(crate) trait ObjectStore: Send + Sync {
+pub(crate) trait ObjectStore: crate::model::history::History + Send + Sync {
     async fn browse(
         &self,
         authority: &Permit,

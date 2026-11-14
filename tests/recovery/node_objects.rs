@@ -32,6 +32,8 @@ fn request(
         run,
         operation,
         change: Change {
+            versions: vec![],
+            versioning: None,
             access: "writer".into(),
             credential_revision: revision,
             bucket: "object-change-a".into(),

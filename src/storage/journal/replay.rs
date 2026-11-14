@@ -45,20 +45,31 @@ pub(crate) struct Summary {
 
 impl Bucket {
     pub fn summary(&self) -> Result<Summary> {
-        let bytes = self
-            .objects
-            .values()
-            .try_fold(0i64, |size, c| {
-                size.checked_add(c.attributes.as_ref()?.size)
-            })
-            .context("journal bucket size overflow")?;
+        let mut count = 0u64;
+        let mut bytes = 0i64;
+        for (slot, row) in &self.objects {
+            if matches!(
+                crate::model::history::subject(slot)?,
+                crate::model::history::Subject::Current(_)
+            ) {
+                count += 1;
+                bytes = bytes
+                    .checked_add(
+                        row.attributes
+                            .as_ref()
+                            .context("missing object attributes")?
+                            .size,
+                    )
+                    .context("journal bucket size overflow")?;
+            }
+        }
         Ok(Summary {
             id: self.id,
             name: self.name.clone(),
             generation: self.generation.to_string(),
             sequence: self.sequence.to_string(),
             stopped: self.paused,
-            objects: self.objects.len().to_string(),
+            objects: count.to_string(),
             logical_bytes: bytes.to_string(),
         })
     }

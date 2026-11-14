@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261114160500.
+-- Generated from the complete postgres migration chain through 20261114202600.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -25,6 +25,28 @@ BEGIN
     NEW.settings_revision:=OLD.settings_revision+1;
     RETURN NEW;
 END $$;
+
+CREATE FUNCTION public.capture_object_version() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE mode_value SMALLINT;
+    next_seq BIGINT;
+BEGIN
+    IF (TG_OP='INSERT' AND NEW.stream_id IS NULL) OR (TG_OP='UPDATE' AND (OLD.stream_id IS NOT DISTINCT FROM NEW.stream_id OR OLD.version_switch<>NEW.version_switch)) THEN
+        RETURN NEW;
+    END IF;
+    SELECT version_mode INTO STRICT mode_value FROM buckets WHERE id=NEW.bucket_id FOR SHARE;
+    IF mode_value>0 THEN
+        UPDATE object_version_clocks SET version_seq=version_seq+1 WHERE bucket_id=NEW.bucket_id RETURNING version_seq INTO next_seq;
+        IF mode_value=2 THEN
+            DELETE FROM object_versions WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND version_id='null';
+        END IF;
+        INSERT INTO object_versions(bucket_id,object_key,seq,version_id,stream_id,modified_us)
+            VALUES(NEW.bucket_id,NEW.object_key,next_seq,CASE WHEN mode_value=1 THEN replace(gen_random_uuid()::text,'-','') ELSE 'null' END,NEW.stream_id,(extract(epoch FROM clock_timestamp())*1000000)::bigint);
+    END IF;
+    RETURN NEW;
+END
+$$;
 
 CREATE FUNCTION public.catalog_category(key text, mime text) RETURNS text
     LANGUAGE sql IMMUTABLE
@@ -233,6 +255,54 @@ BEGIN
         PERFORM journal_capture(NEW.bucket_id,NEW.object_key,NEW.id);
     END IF;
     RETURN NULL;
+END
+$$;
+
+CREATE FUNCTION public.journal_version_insert_fn() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE journal SMALLINT;
+BEGIN
+    SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id FOR SHARE;
+    IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.bucket_id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'put',('~h/' || NEW.version_id || '/' || NEW.object_key),NEW.stream_id,s.payload_revision,jsonb_build_object('size',COALESCE(s.size,0),'etag',COALESCE(s.etag,''),'metadata',COALESCE(s.metadata,'{}'::jsonb),'checksums',COALESCE(s.checksums,'{}'::jsonb),'payload',COALESCE(s.payload_type,'chunks'),'modified_us',NEW.modified_us,'history',jsonb_build_object('order',NEW.seq,'time',NEW.modified_us,'marker',CASE WHEN NEW.stream_id IS NULL THEN 1 ELSE 0 END)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id LEFT JOIN streams s ON s.id=NEW.stream_id WHERE j.bucket_id=NEW.bucket_id;
+    ELSIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.bucket_id;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.journal_version_mode_fn() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE journal SMALLINT;
+BEGIN
+    SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=NEW.id FOR SHARE;
+    IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'put','~m',NULL,NULL,jsonb_build_object('size',0,'etag','','metadata','{}'::jsonb,'checksums','{}'::jsonb,'payload','chunks','modified_us',0,'history',jsonb_build_object('mode',NEW.version_mode)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id WHERE j.bucket_id=NEW.id;
+    ELSIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.id;
+    END IF;
+    RETURN NEW;
+END
+$$;
+
+CREATE FUNCTION public.journal_version_remove_fn() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE journal SMALLINT;
+BEGIN
+    SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id FOR SHARE;
+    IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=OLD.bucket_id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'delete',('~h/' || OLD.version_id || '/' || OLD.object_key),NULL,NULL,NULL,TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id WHERE j.bucket_id=OLD.bucket_id;
+    ELSIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=OLD.bucket_id;
+    END IF;
+    RETURN OLD;
 END
 $$;
 
@@ -610,7 +680,7 @@ BEGIN
         SELECT coalesce(sum(greatest(logical_bytes,0)-greatest(logical_bytes-credit_bytes,0)),0) INTO credits
         FROM quota_reservations WHERE bucket_id=b AND object_key=k AND replaced_stream_id=before_id;
         UPDATE quota_reservations SET credit_bytes=0,replaced_stream_id=NULL WHERE bucket_id=b AND object_key=k AND replaced_stream_id=before_id;
-        PERFORM quota_adjust(b,after_size-before_size,credits-freed,-inflight,(after_id IS NOT NULL)::int-(before_id IS NOT NULL)::int);
+        PERFORM quota_adjust(b,CASE WHEN (SELECT version_mode FROM buckets WHERE id=b)>0 THEN 0 ELSE after_size-before_size END,credits-freed,-inflight,(after_id IS NOT NULL)::int-(before_id IS NOT NULL)::int);
     END IF;
     IF TG_OP='UPDATE' AND OLD.write_token<>NEW.write_token THEN
         SELECT * INTO r FROM quota_reservations WHERE stream_id=OLD.write_token;
@@ -684,6 +754,7 @@ BEGIN
     owner:=coalesce(upload,s);
     IF NOT EXISTS(SELECT 1 FROM quota_reservations WHERE id=owner) THEN
         SELECT o.stream_id,st.size INTO old_id,old_size FROM objects o JOIN streams st ON st.id=o.stream_id WHERE o.bucket_id=info.bucket_id AND o.object_key=info.object_key;
+        IF old_id IS NOT NULL AND EXISTS(SELECT 1 FROM object_versions v JOIN buckets b ON b.id=v.bucket_id WHERE v.stream_id=old_id AND (b.version_mode=1 OR v.version_id<>'null')) THEN old_id:=NULL; END IF;
         IF old_id IS NOT NULL AND EXISTS(SELECT 1 FROM quota_reservations WHERE bucket_id=info.bucket_id AND object_key=info.object_key AND replaced_stream_id=old_id) THEN old_id:=NULL; END IF;
         INSERT INTO quota_reservations(id,bucket_id,object_key,stream_id,upload_id,replaced_stream_id,credit_bytes)
         VALUES(owner,info.bucket_id,info.object_key,CASE WHEN upload IS NULL THEN s END,upload,old_id,CASE WHEN old_id IS NULL THEN 0 ELSE old_size END);
@@ -740,6 +811,19 @@ BEGIN
             UPDATE quota_reservations SET closed=true,replaced_stream_id=NULL,result_stream_id=NULL WHERE id=r.id;
             IF pending=0 THEN DELETE FROM quota_reservations WHERE id=r.id; END IF;
         END IF;
+    END IF;
+    RETURN NULL;
+END $$;
+
+CREATE FUNCTION public.quota_version() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+DECLARE b uuid; s uuid; delta bigint;
+BEGIN
+    IF TG_OP='INSERT' THEN b:=NEW.bucket_id; s:=NEW.stream_id; ELSE b:=OLD.bucket_id; s:=OLD.stream_id; END IF;
+    IF s IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=b)>0 THEN
+        SELECT size INTO STRICT delta FROM streams WHERE id=s;
+        PERFORM quota_adjust(b,CASE WHEN TG_OP='INSERT' THEN delta ELSE -delta END,0,0,0);
     END IF;
     RETURN NULL;
 END $$;
@@ -841,6 +925,14 @@ BEGIN
 END
 $$;
 
+CREATE FUNCTION public.version_write_receipt() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    INSERT INTO object_write_receipts(stream_id,version_id) VALUES(NEW.stream_id,NEW.version_id) ON CONFLICT DO NOTHING;
+    RETURN NULL;
+END $$;
+
 CREATE TABLE public.api_tokens (
     id uuid DEFAULT uuidv7() NOT NULL,
     user_id uuid NOT NULL,
@@ -937,7 +1029,9 @@ CREATE TABLE public.buckets (
     image_families bigint DEFAULT 0 NOT NULL,
     image_policy text,
     image_import_token character varying(64),
-    CONSTRAINT buckets_state_check CHECK ((state = ANY (ARRAY['active'::text, 'purging'::text])))
+    version_mode smallint DEFAULT 0 NOT NULL,
+    CONSTRAINT buckets_state_check CHECK ((state = ANY (ARRAY['active'::text, 'purging'::text]))),
+    CONSTRAINT buckets_version_mode_check CHECK ((version_mode = ANY (ARRAY[0, 1, 2])))
 );
 
 CREATE TABLE public.cache_pins (
@@ -1178,6 +1272,7 @@ CREATE TABLE public.journal_entries (
     payload_revision bigint,
     attributes jsonb,
     recorded_at timestamp with time zone DEFAULT clock_timestamp() NOT NULL,
+    history_subject boolean DEFAULT false NOT NULL,
     CONSTRAINT journal_entries_generation_check CHECK ((generation > 0)),
     CONSTRAINT journal_entries_operation_check CHECK ((operation = ANY (ARRAY['start'::text, 'ready'::text, 'put'::text, 'delete'::text, 'pause'::text, 'resume'::text, 'drop'::text]))),
     CONSTRAINT journal_entries_seq_check CHECK ((seq > 0))
@@ -1328,7 +1423,13 @@ CREATE TABLE public.journal_restore_items (
     payload text NOT NULL,
     modified_us bigint NOT NULL,
     content_type text NOT NULL,
-    category text NOT NULL
+    category text NOT NULL,
+    stage_key text,
+    logical_key text COLLATE pg_catalog."C",
+    history_id character varying(32),
+    history_seq bigint,
+    history_time bigint,
+    history_marker boolean DEFAULT false NOT NULL
 );
 
 CREATE TABLE public.journal_restore_orphans (
@@ -1580,7 +1681,7 @@ CREATE TABLE public.member_bucket_grants (
     project_id uuid CONSTRAINT member_grants_project_id_not_null NOT NULL,
     bucket_id uuid CONSTRAINT member_grants_bucket_id_not_null NOT NULL,
     actions text[] CONSTRAINT member_grants_actions_not_null NOT NULL,
-    CONSTRAINT member_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text]))
+    CONSTRAINT member_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text, 'object.versions.list'::text, 'object.versions.read'::text, 'object.versions.delete'::text, 'object.versions.restore'::text]))
 );
 
 CREATE TABLE public.member_external_grants (
@@ -2037,6 +2138,25 @@ CREATE TABLE public.notifications (
     CONSTRAINT notifications_scope_check CHECK ((scope = ANY (ARRAY['object'::text, 'bucket'::text, 'storage'::text])))
 );
 
+CREATE TABLE public.object_version_clocks (
+    bucket_id uuid NOT NULL,
+    version_seq bigint DEFAULT 0 NOT NULL
+);
+
+CREATE TABLE public.object_versions (
+    bucket_id uuid NOT NULL,
+    object_key text NOT NULL COLLATE pg_catalog."C",
+    seq bigint NOT NULL,
+    version_id text NOT NULL,
+    stream_id uuid,
+    modified_us bigint NOT NULL
+);
+
+CREATE TABLE public.object_write_receipts (
+    stream_id uuid NOT NULL,
+    version_id character varying(36) NOT NULL
+);
+
 CREATE TABLE public.objects (
     bucket_id uuid NOT NULL,
     object_key text CONSTRAINT objects_key_not_null NOT NULL COLLATE pg_catalog."C",
@@ -2047,6 +2167,7 @@ CREATE TABLE public.objects (
     catalog_type text,
     catalog_category text,
     catalog_public boolean,
+    version_switch boolean DEFAULT false NOT NULL,
     CONSTRAINT objects_key_check CHECK (((octet_length(object_key) >= 1) AND (octet_length(object_key) <= 1024)))
 )
 WITH (autovacuum_vacuum_scale_factor='0.05', autovacuum_analyze_scale_factor='0.02');
@@ -2469,7 +2590,7 @@ CREATE TABLE public.s3_credential_grants (
     access_key text CONSTRAINT grants_access_key_not_null NOT NULL,
     bucket_id uuid CONSTRAINT grants_bucket_id_not_null NOT NULL,
     actions text[] CONSTRAINT grants_actions_not_null NOT NULL,
-    CONSTRAINT grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text]))
+    CONSTRAINT grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text, 'object.versions.list'::text, 'object.versions.read'::text, 'object.versions.delete'::text, 'object.versions.restore'::text]))
 );
 
 CREATE TABLE public.s3_credentials (
@@ -3118,7 +3239,7 @@ CREATE TABLE public.token_bucket_grants (
     token_id uuid CONSTRAINT token_grants_token_id_not_null NOT NULL,
     bucket_id uuid CONSTRAINT token_grants_bucket_id_not_null NOT NULL,
     actions text[] CONSTRAINT token_grants_actions_not_null NOT NULL,
-    CONSTRAINT token_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text]))
+    CONSTRAINT token_grants_actions_check CHECK ((actions <@ ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text, 'object.versions.list'::text, 'object.versions.read'::text, 'object.versions.delete'::text, 'object.versions.restore'::text]))
 );
 
 CREATE VIEW public.user_bucket_access AS
@@ -3128,8 +3249,8 @@ CREATE VIEW public.user_bucket_access AS
            FROM unnest(
                 CASE m.role
                     WHEN 'reader'::text THEN ARRAY['bucket.list'::text, 'object.read'::text, 'storage.inspect'::text]
-                    WHEN 'writer'::text THEN ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'storage.inspect'::text]
-                    ELSE ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text]
+                    WHEN 'writer'::text THEN ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'storage.inspect'::text, 'object.versions.list'::text, 'object.versions.read'::text]
+                    ELSE ARRAY['bucket.list'::text, 'object.read'::text, 'object.write'::text, 'object.delete'::text, 'object.acl'::text, 'bucket.settings'::text, 'storage.inspect'::text, 'object.versions.list'::text, 'object.versions.read'::text, 'object.versions.delete'::text, 'object.versions.restore'::text]
                 END) action(action)
           WHERE ((m.scope = 'all'::text) OR (action.action = ANY (COALESCE(g.actions, ARRAY[]::text[]))))) AS actions
    FROM ((public.project_members m
@@ -3794,6 +3915,18 @@ ALTER TABLE ONLY public.notifications
 ALTER TABLE ONLY public.notifications
     ADD CONSTRAINT notifications_transaction_id_scope_resource_id_object_key_key UNIQUE (transaction_id, scope, resource_id, object_key);
 
+ALTER TABLE ONLY public.object_version_clocks
+    ADD CONSTRAINT object_version_clocks_pkey PRIMARY KEY (bucket_id);
+
+ALTER TABLE ONLY public.object_versions
+    ADD CONSTRAINT object_versions_bucket_id_object_key_version_id_key UNIQUE (bucket_id, object_key, version_id);
+
+ALTER TABLE ONLY public.object_versions
+    ADD CONSTRAINT object_versions_pkey PRIMARY KEY (bucket_id, object_key, seq);
+
+ALTER TABLE ONLY public.object_write_receipts
+    ADD CONSTRAINT object_write_receipts_pkey PRIMARY KEY (stream_id);
+
 ALTER TABLE ONLY public.objects
     ADD CONSTRAINT objects_pkey PRIMARY KEY (bucket_id, object_key);
 
@@ -4312,6 +4445,8 @@ CREATE INDEX notification_targets_pending ON public.notification_targets USING b
 
 CREATE INDEX notifications_created ON public.notifications USING btree (created_at, id);
 
+CREATE INDEX object_versions_stream ON public.object_versions USING btree (stream_id);
+
 CREATE INDEX objects_catalog_category ON public.objects USING btree (bucket_id, catalog_category, object_key) WHERE (stream_id IS NOT NULL);
 
 CREATE INDEX objects_catalog_modified ON public.objects USING btree (bucket_id, catalog_modified, object_key) WHERE (stream_id IS NOT NULL);
@@ -4616,6 +4751,12 @@ CREATE TRIGGER journal_stream AFTER UPDATE OF payload_revision, metadata, checks
 
 CREATE TRIGGER journal_update AFTER UPDATE ON public.objects FOR EACH ROW WHEN ((old.stream_id IS DISTINCT FROM new.stream_id)) EXECUTE FUNCTION public.journal_object_change();
 
+CREATE TRIGGER journal_version_insert AFTER INSERT ON public.object_versions FOR EACH ROW EXECUTE FUNCTION public.journal_version_insert_fn();
+
+CREATE TRIGGER journal_version_mode AFTER UPDATE ON public.buckets FOR EACH ROW WHEN ((old.version_mode <> new.version_mode)) EXECUTE FUNCTION public.journal_version_mode_fn();
+
+CREATE TRIGGER journal_version_remove AFTER DELETE ON public.object_versions FOR EACH ROW EXECUTE FUNCTION public.journal_version_remove_fn();
+
 CREATE TRIGGER member_authorization AFTER INSERT OR DELETE OR UPDATE ON public.project_members FOR EACH ROW EXECUTE FUNCTION public.invalidate_member_authorization();
 
 CREATE TRIGGER multipart_tail_requested AFTER UPDATE OF requested ON public.multipart_tails FOR EACH ROW WHEN ((new.requested AND (NOT old.requested))) EXECUTE FUNCTION public.notify_multipart_tail();
@@ -4658,6 +4799,8 @@ CREATE TRIGGER quota_upload_delete BEFORE DELETE ON public.uploads FOR EACH ROW 
 
 CREATE TRIGGER quota_upload_end AFTER UPDATE OF state ON public.uploads FOR EACH ROW EXECUTE FUNCTION public.quota_upload_end();
 
+CREATE TRIGGER quota_version AFTER INSERT OR DELETE ON public.object_versions FOR EACH ROW EXECUTE FUNCTION public.quota_version();
+
 CREATE TRIGGER raw_notify AFTER UPDATE OF quarantine_code ON public.raw_sources FOR EACH ROW EXECUTE FUNCTION public.mokyu_notify_health();
 
 CREATE TRIGGER redundancy_links_required AFTER INSERT OR DELETE OR UPDATE OF synchronous, state ON public.redundancy_links FOR EACH ROW EXECUTE FUNCTION public.count_required_targets();
@@ -4683,6 +4826,10 @@ CREATE TRIGGER token_grant_authorization AFTER INSERT OR DELETE OR UPDATE ON pub
 CREATE TRIGGER transfer_changes_backlog AFTER INSERT OR DELETE ON public.transfer_changes FOR EACH ROW EXECUTE FUNCTION public.count_redundancy_changes();
 
 CREATE TRIGGER user_authorization BEFORE UPDATE OF role, enabled, password_hash ON public.web_users FOR EACH ROW EXECUTE FUNCTION public.advance_authorization_revision();
+
+CREATE TRIGGER version_write_receipt AFTER INSERT ON public.object_versions FOR EACH ROW WHEN (((new.seq > 0) AND (new.stream_id IS NOT NULL))) EXECUTE FUNCTION public.version_write_receipt();
+
+CREATE TRIGGER versions_capture AFTER INSERT OR UPDATE OF stream_id ON public.objects FOR EACH ROW EXECUTE FUNCTION public.capture_object_version();
 
 ALTER TABLE ONLY public.api_tokens
     ADD CONSTRAINT api_tokens_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.web_users(id) ON DELETE CASCADE;
@@ -5055,6 +5202,18 @@ ALTER TABLE ONLY public.notification_consumers
 
 ALTER TABLE ONLY public.notification_targets
     ADD CONSTRAINT notification_targets_notification_id_fkey FOREIGN KEY (notification_id) REFERENCES public.notifications(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.object_version_clocks
+    ADD CONSTRAINT object_version_clocks_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id) ON DELETE CASCADE;
+
+ALTER TABLE ONLY public.object_versions
+    ADD CONSTRAINT object_versions_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);
+
+ALTER TABLE ONLY public.object_versions
+    ADD CONSTRAINT object_versions_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id);
+
+ALTER TABLE ONLY public.object_write_receipts
+    ADD CONSTRAINT object_write_receipts_stream_id_fkey FOREIGN KEY (stream_id) REFERENCES public.streams(id) ON DELETE CASCADE;
 
 ALTER TABLE ONLY public.objects
     ADD CONSTRAINT objects_bucket_id_fkey FOREIGN KEY (bucket_id) REFERENCES public.buckets(id);

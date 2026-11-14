@@ -70,6 +70,18 @@ pub(super) fn query(
             token: field("continuation-token")?,
             limit: limit("max-buckets", 10000, false)?,
         }))
+    } else if field("versioning")?.is_some() {
+        Some(Query::Versioning(wire::VersioningQuery {}))
+    } else if field("versions")?.is_some() {
+        Some(Query::Versions(wire::VersionsQuery {
+            prefix: field("prefix")?.unwrap_or_default(),
+            delimiter: field("delimiter")?,
+            key_marker: field("key-marker")?,
+            version_marker: field("version-id-marker")?,
+            max_keys: field("max-keys")?
+                .map(|v| v.parse().map_err(|_| s3s::s3_error!(InvalidArgument)))
+                .transpose()?,
+        }))
     } else if field("uploads")?.is_some() {
         Some(Query::ListUploads(wire::ListUploadsQuery {
             prefix: field("prefix")?,

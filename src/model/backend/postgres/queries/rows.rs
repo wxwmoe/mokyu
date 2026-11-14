@@ -9,6 +9,7 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for crate::app::Bucket {
             name: row.try_get("name")?,
             storage_id: row.try_get("storage_id")?,
             state: row.try_get("state")?,
+            version_mode: row.try_get("version_mode")?,
             settings_revision: row.try_get("settings_revision")?,
             image_revision: row.try_get("image_revision")?,
             uploads_paused: row.try_get("uploads_paused")?,

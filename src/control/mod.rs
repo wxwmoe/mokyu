@@ -9,6 +9,7 @@ pub(crate) mod cli;
 pub(crate) mod cluster;
 mod contract;
 mod external;
+mod history;
 pub(crate) mod image_styles;
 pub(crate) mod insights;
 pub(crate) mod journal;

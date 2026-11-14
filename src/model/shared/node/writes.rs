@@ -829,6 +829,8 @@ impl NodeWrites for Backend {
         let mut parts = Vec::with_capacity(count);
         for (operation, stream) in input.reads.into_iter().zip(streams) {
             let query = read::Query {
+                restore_version: false,
+                version_id: None,
                 run: input.run,
                 operation,
                 route: ReadRoute::Bucket {
@@ -1510,7 +1512,35 @@ impl NodeWrites for Backend {
                     && input.intent.size == Some(source.size),
                 Error::NodeOperationConflict
             );
-            authority.add(source.bucket_id, Action::Read);
+            if let Some(version) = input.intent.source_version.as_deref() {
+                authority.add(source.bucket_id, Action::ReadVersion);
+                if source.bucket_id == bucket.id && source.object_key == input.intent.key {
+                    authority.add(bucket.id, Action::RestoreVersion);
+                }
+                let row = if version == "null"
+                    && super::queries::history::mode(source.bucket_id, false)
+                        .fetch_one(&mut *tx)
+                        .await?
+                        == 0
+                {
+                    super::queries::history::current(&mut tx, source.bucket_id, &source.object_key)
+                        .await?
+                } else {
+                    super::queries::history::one(
+                        &mut tx,
+                        source.bucket_id,
+                        &source.object_key,
+                        Some(version),
+                    )
+                    .await?
+                };
+                ensure!(
+                    row.and_then(|v| v.stream) == Some(source.id),
+                    Error::NodeOperationConflict
+                );
+            } else {
+                authority.add(source.bucket_id, Action::Read);
+            }
             let src: Uuid = sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=?")
                 .bind(source.bucket_id)
                 .fetch_one(&mut *tx)
@@ -2189,6 +2219,7 @@ impl NodeWrites for Backend {
         }
         let saved = queries::quota_stream(stream).fetch_one(&mut *tx).await?;
         let result = write::Published {
+            version_id: queries::history::receipt(&mut tx, stream).await?,
             identity: Some((row.bucket_id, stream)),
             size: input.size,
             etag: input.etag,
@@ -2238,7 +2269,10 @@ pub(super) async fn settle_replica(
     published: bool,
 ) -> Result<()> {
     if let Some((node, op)) = node {
-        let row = lookup(tx, node, op).await?;
+        let mut row = lookup(tx, node, op).await?;
+        if published && let (Some(stream), Some(result)) = (row.stream_id, &mut row.published) {
+            result.version_id = queries::history::receipt(tx, stream).await?;
+        }
         ensure!(row.phase == "preparing", Error::OperationAborted);
         q::phase(
             node,

@@ -166,6 +166,7 @@ pub(crate) async fn begin(
             metadata: input.metadata,
             public: assignment.rule.public_read,
             size: input.size,
+            source_version: None,
             copy_read: None,
             part: None,
             completion: None,

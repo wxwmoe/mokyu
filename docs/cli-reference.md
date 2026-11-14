@@ -27,6 +27,10 @@
 | `bucket create NAME [--project UUID]` | 创建空逻辑桶，默认内置项目，返回桶信息 |
 | `bucket delete NAME` | 删除空桶，返回 deleted UUID；仍有对象、上传或待清理版本时拒绝 |
 | `bucket cors NAME FILE` | 用 JSON 文件替换 CORS，返回实际规则；`[]` 关闭 |
+| `bucket versioning NAME [enabled\|suspended]` | 查看、启用或暂停对象版本；默认关闭 |
+| `bucket versions NAME [--prefix PREFIX] [--key-marker KEY] [--version-marker ID] [--limit N]` | 按键及提交顺序列出历史和删除标记 |
+| `bucket restore-version NAME KEY VERSION_ID` | 将指定正文发布为新的当前版本 |
+| `bucket delete-version NAME KEY VERSION_ID` | 永久删除指定版本或删除标记 |
 | `bucket journal NAME [--enabled true\|false --revision N]` | 查看或修改桶的元数据日志开关，修改使用桶设置修订号。首次开启会扫描已存在的对象 |
 | `bucket mirroring NAME show` / `set FILE` | 读取或保存 `{revision,config}`；`FILE` 支持 `-` 标准输入，最多 64 KiB |
 | `bucket mirroring NAME preview KEY [--file FILE]` | 只计算源路径；省略文件时使用已保存规则 |

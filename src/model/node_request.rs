@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub(crate) enum Query {
+    Versioning,
+    Versions(super::history::Selection),
     Bucket,
     Acl {
         key: String,
@@ -39,6 +41,8 @@ pub(crate) enum Query {
 
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Catalog {
+    Versioning(i16),
+    Versions(super::history::Page),
     InvalidArgument,
     NoSuchUpload,
     Bucket,
@@ -147,7 +151,8 @@ impl Prepare {
                 || self.route.is_some() && self.include.contains(&read::MaterialType::Bucket);
             ensure!(
                 match query {
-                    Query::Bucket => bucket(),
+                    Query::Versioning | Query::Bucket => bucket(),
+                    Query::Versions(s) => bucket() && s.limit().is_ok(),
                     Query::Acl { key } =>
                         bucket() && !key.is_empty() && text(key) && !key.contains('\0'),
                     Query::Buckets {

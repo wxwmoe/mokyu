@@ -11,6 +11,8 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | PutObject | 流式 CDC、校验、元数据、ACL 和条件发布；失败保留旧对象 |
 | GetObject / HeadObject | 原始字节、ETag、长度、时间、元数据及请求的已有 checksum；匿名公共读可协商压缩；单段 Range 和条件请求 |
 | DeleteObject / DeleteObjects | 逻辑删除；单对象支持 If-Match ETag／`*`，条件与删除原子执行；批量最多 1000 项，逐项错误／Quiet；共享块由 GC 回收 |
+| GetBucketVersioning / PutBucketVersioning | 默认关闭；首次启用保留已有对象的 null 版本。暂停后覆盖同一键的 null 版本，保留有编号的历史。 |
+| ListObjectVersions | 按键和版本双游标列举正文及删除标记；支持前缀和分隔符。指定 versionId 可读取、复制或永久删除历史版本。 |
 | ListObjectsV2 | prefix/delimiter/start-after/continuation-token/encoding-type=url；max-keys 为 0～1000，C 排序，游标绑定桶和前缀 |
 | CreateMultipartUpload | 保存初始元数据、ACL 和校验模式，无需预知总大小 |
 | UploadPart | 编号 1～10000，可并行、乱序、替换；校验并持久保存每个字节的来源后返回 |
@@ -22,6 +24,8 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | GetObjectAcl / PutObjectAcl | private/public-read 及相应 owner/full-control、AllUsers READ XML；不支持任意 IAM ACL |
 | OPTIONS | 应用桶 CORS，不替代认证；规则通过 CLI/Web 配置 |
 
+启用版本后，覆盖和删除标记不会释放旧正文的桶及项目逻辑配额。永久删除指定版本才释放它的逻辑大小；共享区块仍受其他引用保护。历史读取和永久删除分别授权。暂停后同一键只保留一个 `null` 版本。
+
 以下操作不支持：
 
 | 操作或扩展 | 替代方式或限制 |
@@ -30,7 +34,7 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | GetBucketCors / PutBucketCors / DeleteBucketCors | 使用 CLI/Web |
 | GetBucketWebsite / PutBucketWebsite / DeleteBucketWebsite | 使用管理 Web/API |
 | ListObjects V1 / UploadPartCopy | 使用 ListObjectsV2、普通上传或 CopyObject |
-| Versioning、lifecycle、tagging、object lock、replication、IAM、STS | 不提供对应能力 |
+| lifecycle、tagging、object lock、replication、IAM、STS | 不提供对应能力 |
 | 浏览器 POST 表单上传、SSE、read partNumber、write offset、按大小／修改时间条件删除、批量条件删除 | 拒绝相关请求字段 |
 | expected-owner、request-payer、SSE-C/SSE-KMS／复制源 SSE、标签、重定向、任意 grant、MFA、保留策略 | 拒绝扩展字段；CopyObject 也不接受更换 checksum 算法，版本 ID 请求不提供历史版本读写 |
 

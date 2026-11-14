@@ -345,10 +345,10 @@ impl Scanner {
         let mut summary = summary.context("empty recovery summary")?;
         summary.complete = decoder.complete();
         ensure!(
-            summary.kind != FrameType::Mappings && (summary.kind != FrameType::Changes || sealed),
+            summary.kind != FrameType::Changes || sealed,
             "recovery segment is not sealed"
         );
-        if summary.kind == FrameType::Snapshot {
+        if matches!(summary.kind, FrameType::Snapshot | FrameType::Mappings) {
             ensure!(
                 summary.first == 1 && summary.previous == [0; 32],
                 "invalid snapshot page boundary"

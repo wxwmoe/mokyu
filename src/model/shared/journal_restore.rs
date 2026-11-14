@@ -365,6 +365,34 @@ impl RecoveryStore for Backend {
             .as_ref()
             .context("missing recovered object")?;
         let key = change.key.as_deref().context("missing recovered key")?;
+        use crate::model::{
+            history::{Subject, subject},
+            journal::record::History,
+        };
+        let (logical, history_id, order, when, marker, count) =
+            match (subject(key)?, obj.history.as_ref()) {
+                (Subject::Current(logical), None) => (logical, None, None, None, false, 1),
+                (
+                    Subject::History(logical, id),
+                    Some(History::Version {
+                        order,
+                        time,
+                        marker,
+                    }),
+                ) => (
+                    logical,
+                    Some(id),
+                    Some(*order),
+                    Some(*time),
+                    *marker == 1,
+                    0,
+                ),
+                (Subject::Mode, Some(History::State { mode })) => {
+                    ("", Some("mode"), Some(i64::from(*mode)), None, true, 0)
+                }
+                _ => anyhow::bail!("invalid recovery version"),
+            };
+        let identity = blake3::hash(key.as_bytes()).to_hex();
         let mime = obj
             .metadata
             .get("content_type")
@@ -376,6 +404,12 @@ impl RecoveryStore for Backend {
             job,
             change.bucket,
             key,
+            identity.as_str(),
+            logical,
+            history_id,
+            order,
+            when,
+            marker,
             obj.size,
             &obj.etag,
             &obj.metadata,
@@ -383,7 +417,7 @@ impl RecoveryStore for Backend {
             &obj.payload,
             obj.modified_us,
             mime,
-            q::category(key, mime),
+            q::category(logical, mime),
         )
         .execute(&mut *tx)
         .await?;
@@ -401,7 +435,7 @@ impl RecoveryStore for Backend {
             .execute(&mut *tx)
             .await?;
         }
-        q::advance(key, obj.size, job, change.bucket)
+        q::advance(key, obj.size * count, count, job, change.bucket)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -435,6 +469,27 @@ impl RecoveryStore for Backend {
                 == u64::try_from(objects)?,
             "recovered object count mismatch"
         );
+        let mode = q::restore_mode(job, source).fetch_one(&mut *tx).await?;
+        if mode != 0 {
+            q::version_rows(bucket, bucket, job, source)
+                .execute(&mut *tx)
+                .await?;
+            q::version_clock(bucket, bucket).execute(&mut *tx).await?;
+            q::missing_heads(bucket).execute(&mut *tx).await?;
+            q::retire_heads(bucket).execute(&mut *tx).await?;
+            q::version_heads(bucket).execute(&mut *tx).await?;
+            q::ready_heads(bucket, bucket).execute(&mut *tx).await?;
+            q::charge_history(&mut tx, bucket).await?;
+            super::queries::history::set_mode(
+                bucket,
+                crate::model::history::Versioning::from_code(mode)?.code(),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        q::stream_names(job, source, bucket)
+            .execute(&mut *tx)
+            .await?;
         if source == bucket {
             q::seed_recovered(target, job, source)
                 .execute(&mut *tx)

@@ -1,6 +1,8 @@
 mod connection;
 #[path = "../../shared/node/embedded_native.rs"]
 mod embedded_native;
+#[path = "../../shared/history.rs"]
+mod history;
 #[path = "../../shared/image.rs"]
 mod image_transactions;
 #[path = "../../shared/journal.rs"]
@@ -113,6 +115,9 @@ fn server_error(source: &anyhow::Error) -> Option<&sqlx::mysql::MySqlDatabaseErr
 pub(crate) fn error(source: &anyhow::Error) -> Option<crate::model::Error> {
     let error = server_error(source)?;
     match error.number() {
+        1644 if error.message() == "version_quota_exceeded" => {
+            Some(crate::model::Error::QuotaExceeded)
+        }
         3819 | 4025
             if error
                 .message()

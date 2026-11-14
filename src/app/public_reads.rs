@@ -1499,6 +1499,7 @@ mod tests {
                     name: "media".into(),
                     storage_id: Some(Uuid::new_v4()),
                     state: "active".into(),
+                    version_mode: 0,
                     settings_revision: 1,
                     image_revision: 0,
                     uploads_paused: false,

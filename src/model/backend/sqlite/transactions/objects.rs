@@ -150,6 +150,7 @@ pub(in super::super) async fn change_object_in(
     if let Some(id) = old {
         queries::retire_stream(id).execute(&mut **tx).await?;
     }
+    queries::history::deleted(tx, input.bucket, &input.key, old.is_none()).await?;
     complete_media_operation(tx, None).await?;
     Ok(true)
 }

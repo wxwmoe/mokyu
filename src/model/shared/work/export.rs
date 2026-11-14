@@ -82,6 +82,8 @@ pub(crate) async fn read(
         .parse()?,
     );
     let query = read::Query {
+        restore_version: false,
+        version_id: None,
         run: input.run,
         operation: input.read,
         route: crate::model::ReadRoute::Bucket {

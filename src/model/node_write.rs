@@ -19,6 +19,8 @@ pub(crate) struct Intent {
     pub public: bool,
     pub size: Option<i64>,
     pub copy_read: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_version: Option<String>,
     pub part: Option<Part>,
     pub completion: Option<super::node_complete::Manifest>,
 }
@@ -46,6 +48,10 @@ impl Intent {
                     .all(|value| !value.contains('\0'))
                 && self.size.is_none_or(|size| size >= 0)
                 && self.copy_read.is_none_or(|id| !id.is_nil())
+                && self
+                    .source_version
+                    .as_deref()
+                    .is_none_or(|v| self.copy_read.is_some() && super::history::valid_id(v))
                 && self.metadata.is_object()
                 && serde_json::to_vec(&self.metadata)?.len() <= 16 * 1024,
             "invalid write intent"
@@ -193,6 +199,8 @@ pub(crate) struct Reply {
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct Published {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<(Uuid, super::Id)>,
     pub size: i64,
     pub etag: String,
@@ -309,6 +317,7 @@ mod tests {
         let intent = Intent {
             access: "writer".into(),
             credential_revision: 1,
+            source_version: None,
             copy_read: None,
             part: None,
             completion: None,

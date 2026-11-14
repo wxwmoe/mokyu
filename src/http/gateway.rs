@@ -1,3 +1,4 @@
+pub(super) mod versions;
 use crate::{
     app::listing::encode_key,
     app::{App, Metadata, StoredStream, internal},
@@ -285,12 +286,9 @@ pub(super) fn check_request(cx: &S3AccessContext<'_>) -> S3Result<()> {
         .collect::<Result<Vec<_>>>()
         .map_err(internal)?
         .iter()
-        .any(|k| matches!(k.as_str(), "versionId" | "partNumber"))
+        .any(|k| k == "partNumber" || (k == "versionId" && cx.s3_op().name().ends_with("Acl")))
     {
-        return Err(s3_error!(
-            NotImplemented,
-            "versioning and part-number reads are unsupported"
-        ));
+        return Err(s3_error!(NotImplemented, "unsupported object subresource"));
     }
     if cx.s3_op().name() == "DeleteObject"
         && ["x-amz-if-match-last-modified-time", "x-amz-if-match-size"]
@@ -520,6 +518,7 @@ impl S3 for Gateway {
             self.0
                 .cache_received(id, b.id, req.input.key.clone(), etag.clone(), received);
             let mut out = PutObjectOutput {
+                version_id: self.0.objects.published_version(id).await?,
                 e_tag: Some(ETag::Strong(etag)),
                 ..Default::default()
             };
@@ -536,10 +535,13 @@ impl S3 for Gateway {
         async {
             let i = req.input;
             reject_features(&req.headers)?;
-            if i.version_id.is_some() {
-                return Err(s3_error!(NotImplemented, "versioning is unsupported").into());
-            }
             let b = self.read_bucket(&i.bucket, &req.extensions).await?;
+            let mut version=None;
+            let mut selected=if i.version_id.is_some() || (b.version_mode!=0 && req.credentials.is_some()) {
+                let p=self.0.authorize(req.credentials.as_ref().map(|c|c.access_key.as_str()),b.id,if i.version_id.is_some(){Action::ReadVersion}else{Action::Read}).await?;
+                let row=self.0.history_read(b.id,&i.key,i.version_id.as_deref(),&p).await?;
+                row.map(|(s,pin,id)|{version=Some(id);(s,pin)})
+            }else{None};
             if req.credentials.is_none() {
                 if i.response_content_type.is_some()
                     || i.response_content_disposition.is_some()
@@ -568,7 +570,7 @@ impl S3 for Gateway {
                 || i.if_unmodified_since.is_some();
             let deadline = crate::app::readiness::deadline();
             let permits = self.0.admit(false).await?;
-            let initial = if light {
+            let initial = if let Some((s,pin))=selected.take(){Ok((s,Some(pin)))}else if light {
                 self.0.metadata(b.id, &i.key).await.map(|s| (s, None))
             } else {
                 self.0
@@ -630,7 +632,7 @@ impl S3 for Gateway {
                 Err(error) => return Err(error),
             };
             loop {
-                if req.credentials.is_some() || !s.public_read {
+                if i.version_id.is_none() && (req.credentials.is_some() || !s.public_read) {
                     self.authorize_read(
                         req.credentials.as_ref().map(|c| c.access_key.as_str()),
                         b.id,
@@ -655,6 +657,7 @@ impl S3 for Gateway {
                         return Err(crate::app::readiness::pending());
                     }
                 }
+                if version.is_some(){return Err(crate::app::readiness::pending());}
                 let current = self.0.current(b.id, &i.key).await?;
                 s = current.0;
                 pin = Some(current.1);
@@ -679,6 +682,7 @@ impl S3 for Gateway {
                 .flatten()
                 .all(super::object::cache_control);
             let mut out = GetObjectOutput {
+                version_id:version,
                 content_length: Some((range.end - range.start) as i64),
                 content_range: requested
                     .map(|_| format!("bytes {}-{}/{}", range.start, range.end - 1, s.size)),
@@ -722,10 +726,33 @@ impl S3 for Gateway {
         async {
             let i = req.input;
             reject_features(&req.headers)?;
-            if i.version_id.is_some() {
-                return Err(s3_error!(NotImplemented, "versioning is unsupported").into());
-            }
             let b = self.read_bucket(&i.bucket, &req.extensions).await?;
+            let mut version = None;
+            let mut selected =
+                if i.version_id.is_some() || (b.version_mode != 0 && req.credentials.is_some()) {
+                    let p = self
+                        .0
+                        .authorize(
+                            req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                            b.id,
+                            if i.version_id.is_some() {
+                                Action::ReadVersion
+                            } else {
+                                Action::Read
+                            },
+                        )
+                        .await?;
+                    let row = self
+                        .0
+                        .history_read(b.id, &i.key, i.version_id.as_deref(), &p)
+                        .await?;
+                    row.map(|(s, pin, id)| {
+                        version = Some(id);
+                        (s, pin)
+                    })
+                } else {
+                    None
+                };
             if req.credentials.is_none() {
                 let read = super::object::read(
                     &self.0,
@@ -739,8 +766,12 @@ impl S3 for Gateway {
                 .await?;
                 return Ok(head_read(read, i.checksum_mode.is_some())?);
             }
-            let s = self.0.metadata(b.id, &i.key).await?;
-            if req.credentials.is_some() || !s.public_read {
+            let s = if let Some((s, _)) = selected.take() {
+                s
+            } else {
+                self.0.metadata(b.id, &i.key).await?
+            };
+            if i.version_id.is_none() && (req.credentials.is_some() || !s.public_read) {
                 self.authorize_read(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
@@ -761,6 +792,7 @@ impl S3 for Gateway {
             };
             let m: Metadata = serde_json::from_value(s.metadata)?;
             let mut out = HeadObjectOutput {
+                version_id: version,
                 content_length: Some((range.end - range.start) as i64),
                 accept_ranges: Some("bytes".into()),
                 e_tag: Some(ETag::Strong(s.etag)),
@@ -789,22 +821,36 @@ impl S3 for Gateway {
     ) -> S3Result<S3Response<DeleteObjectOutput>> {
         async {
             let i = req.input;
-            if i.version_id.is_some() {
-                return Err(s3_error!(NotImplemented).into());
-            }
             let b = self.0.bucket(&i.bucket, true).await?;
             let authority = self
                 .0
                 .authorize(
                     req.credentials.as_ref().map(|c| c.access_key.as_str()),
                     b.id,
-                    Action::Delete,
+                    if i.version_id.is_some() {
+                        Action::DeleteVersion
+                    } else {
+                        Action::Delete
+                    },
                 )
                 .await?;
-            self.0
-                .change_object(&authority.principal, b.id, &i.key, None, None, i.if_match)
+            let row = self
+                .0
+                .history_delete(
+                    &authority,
+                    b.id,
+                    &i.key,
+                    i.version_id.as_deref(),
+                    i.if_match,
+                )
                 .await?;
-            Ok(S3Response::new(DeleteObjectOutput::default()))
+            Ok(S3Response::new(DeleteObjectOutput {
+                delete_marker: row
+                    .as_ref()
+                    .and_then(|r| r.stream.is_none().then_some(true)),
+                version_id: row.map(|v| v.version_id).or(i.version_id),
+                ..Default::default()
+            }))
         }
         .await
         .map_err(internal)
@@ -830,11 +876,7 @@ impl S3 for Gateway {
             let mut deleted = Vec::new();
             let mut errors = Vec::new();
             for o in i.delete.objects {
-                if o.version_id.is_some()
-                    || o.e_tag.is_some()
-                    || o.size.is_some()
-                    || o.last_modified_time.is_some()
-                {
+                if o.e_tag.is_some() || o.size.is_some() || o.last_modified_time.is_some() {
                     errors.push(Error {
                         key: Some(o.key),
                         code: Some("NotImplemented".into()),
@@ -844,12 +886,20 @@ impl S3 for Gateway {
                 }
                 match self
                     .0
-                    .delete_object(&authority.principal, b.id, &o.key)
+                    .history_delete(&authority, b.id, &o.key, o.version_id.as_deref(), None)
                     .await
                 {
-                    Ok(()) => {
+                    Ok(row) => {
                         if i.delete.quiet != Some(true) {
                             deleted.push(DeletedObject {
+                                delete_marker: row
+                                    .as_ref()
+                                    .and_then(|r| r.stream.is_none().then_some(true)),
+                                delete_marker_version_id: row
+                                    .as_ref()
+                                    .filter(|r| r.stream.is_none())
+                                    .map(|r| r.version_id.clone()),
+                                version_id: o.version_id,
                                 key: Some(o.key),
                                 ..Default::default()
                             });
@@ -871,6 +921,97 @@ impl S3 for Gateway {
                 errors: Some(errors),
                 ..Default::default()
             }))
+        }
+        .await
+        .map_err(internal)
+    }
+    async fn get_bucket_versioning(
+        &self,
+        req: S3Request<GetBucketVersioningInput>,
+    ) -> S3Result<S3Response<GetBucketVersioningOutput>> {
+        async {
+            let b = self.0.bucket(&req.input.bucket, false).await?;
+            self.0
+                .authorize(
+                    req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                    b.id,
+                    Action::Settings,
+                )
+                .await?;
+            let status = match b.version_mode {
+                0 => None,
+                1 => Some(BucketVersioningStatus::from("Enabled".to_owned())),
+                2 => Some(BucketVersioningStatus::from("Suspended".to_owned())),
+                _ => anyhow::bail!("invalid bucket versioning state"),
+            };
+            Ok(S3Response::new(GetBucketVersioningOutput {
+                status,
+                ..Default::default()
+            }))
+        }
+        .await
+        .map_err(internal)
+    }
+    async fn put_bucket_versioning(
+        &self,
+        req: S3Request<PutBucketVersioningInput>,
+    ) -> S3Result<S3Response<PutBucketVersioningOutput>> {
+        async {
+            use crate::model::history::Versioning;
+            let i = req.input;
+            let b = self.0.bucket(&i.bucket, true).await?;
+            let permit = self
+                .0
+                .authorize(
+                    req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                    b.id,
+                    Action::Settings,
+                )
+                .await?;
+            anyhow::ensure!(
+                i.mfa.is_none() && i.versioning_configuration.mfa_delete.is_none(),
+                s3_error!(NotImplemented)
+            );
+            let mode = match i
+                .versioning_configuration
+                .status
+                .as_ref()
+                .map(|v| v.as_str())
+            {
+                Some("Enabled") => Versioning::Enabled,
+                Some("Suspended") => Versioning::Suspended,
+                _ => anyhow::bail!(s3_error!(InvalidArgument)),
+            };
+            self.0
+                .objects
+                .versioning(&permit.principal, b.id, Some(mode))
+                .await?;
+            Ok(S3Response::new(PutBucketVersioningOutput::default()))
+        }
+        .await
+        .map_err(internal)
+    }
+    async fn list_object_versions(
+        &self,
+        req: S3Request<ListObjectVersionsInput>,
+    ) -> S3Result<S3Response<ListObjectVersionsOutput>> {
+        async {
+            let i = req.input;
+            let b = self.0.bucket(&i.bucket, false).await?;
+            let p = self
+                .0
+                .authorize(
+                    req.credentials.as_ref().map(|c| c.access_key.as_str()),
+                    b.id,
+                    Action::ListVersions,
+                )
+                .await?;
+            let page = self
+                .0
+                .objects
+                .versions(&p, b.id, &versions::selection(&i))
+                .await?;
+            versions::listing(i, page)
         }
         .await
         .map_err(internal)
@@ -977,13 +1118,28 @@ impl S3 for Gateway {
             let b = self.0.bucket(&i.bucket, true).await?;
             let access = req.credentials.as_ref().map(|c| c.access_key.as_str());
             let mut authority = self.0.authorize(access, b.id, Action::Write).await?;
-            let (bucket, key) = copy_source(&i)?;
+            let (bucket, key, version_id) = copy_source(&i)?;
             let source_bucket = self.0.bucket(bucket, false).await?;
-            self.0
-                .authorize(access, source_bucket.id, Action::Read)
-                .await?;
-            authority.add(source_bucket.id, Action::Read);
-            let (source, _source_pin) = self.0.current(source_bucket.id, key).await?;
+            let action = if version_id.is_some() {
+                Action::ReadVersion
+            } else {
+                Action::Read
+            };
+            self.0.authorize(access, source_bucket.id, action).await?;
+            authority.add(source_bucket.id, action);
+            let (source, _source_pin) = if let Some(id) = version_id {
+                if b.id == source_bucket.id && i.key == key {
+                    authority.add(b.id, Action::RestoreVersion);
+                }
+                let (s, pin, _) = self
+                    .0
+                    .history_read(source_bucket.id, key, Some(id), &authority)
+                    .await?
+                    .ok_or_else(|| s3_error!(NoSuchVersion))?;
+                (s, pin)
+            } else {
+                self.0.current(source_bucket.id, key).await?
+            };
             conditions(
                 &source,
                 i.copy_source_if_match.as_ref(),
@@ -1030,6 +1186,8 @@ impl S3 for Gateway {
                 )
                 .await?;
             Ok(S3Response::new(CopyObjectOutput {
+                version_id: self.0.objects.published_version(id).await?,
+                copy_source_version_id: version_id.map(str::to_owned),
                 copy_object_result: Some(CopyObjectResult {
                     e_tag: Some(ETag::Strong(source.etag)),
                     last_modified: Some(stamp(Utc::now())),
@@ -1043,7 +1201,7 @@ impl S3 for Gateway {
     }
 }
 
-pub(super) fn copy_source(input: &CopyObjectInput) -> Result<(&str, &str)> {
+pub(super) fn copy_source(input: &CopyObjectInput) -> Result<(&str, &str, Option<&str>)> {
     if input.checksum_algorithm.is_some() {
         return Err(s3_error!(
             NotImplemented,
@@ -1065,12 +1223,12 @@ pub(super) fn copy_source(input: &CopyObjectInput) -> Result<(&str, &str)> {
     let CopySource::Bucket {
         bucket,
         key,
-        version_id: None,
+        version_id,
     } = &input.copy_source
     else {
         return Err(s3_error!(NotImplemented).into());
     };
-    Ok((bucket, key))
+    Ok((bucket, key, version_id.as_deref()))
 }
 
 #[cfg(test)]

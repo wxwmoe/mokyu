@@ -59,7 +59,7 @@ pub(in super::super) fn change_project_bucket_quota(
 }
 
 pub(in super::super) fn bucket_has_streams(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM streams WHERE bucket_id=?) OR EXISTS(SELECT 1 FROM uploads WHERE bucket_id=?)").bind(id).bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM streams WHERE bucket_id=?) OR EXISTS(SELECT 1 FROM uploads WHERE bucket_id=?) OR EXISTS(SELECT 1 FROM object_versions WHERE bucket_id=?)").bind(id).bind(id).bind(id)
 }
 
 pub(in super::super) fn delete_bucket_objects(id: Uuid) -> Statement<'static> {
@@ -284,7 +284,7 @@ impl BucketStore for Backend {
         admin: bool,
         token: Option<Uuid>,
     ) -> Result<Vec<BucketView>> {
-        Ok(sqlx::query_as("SELECT b.*,CAST(IIF(?,127,IIF(? IS NOT NULL,COALESCE(t.actions,0),COALESCE(a.actions,0))) AS INTEGER) actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=? LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=? WHERE ? OR (IIF(? IS NOT NULL,t.actions,a.actions)&1)<>0 ORDER BY b.name LIMIT 1000").bind(admin).bind(token).bind(user).bind(token).bind(admin).bind(token).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT b.*,CAST(IIF(?,2047,IIF(? IS NOT NULL,COALESCE(t.actions,0),COALESCE(a.actions,0))) AS INTEGER) actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=? LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=? WHERE ? OR (IIF(? IS NOT NULL,t.actions,a.actions)&1)<>0 ORDER BY b.name LIMIT 1000").bind(admin).bind(token).bind(user).bind(token).bind(admin).bind(token).fetch_all(&self.read).await?)
     }
     async fn list_objects(
         &self,

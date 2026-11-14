@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261114160500.
+-- Generated from the complete mysql migration chain through 20261114202600.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -128,6 +128,7 @@ CREATE TABLE `buckets` (
   `image_families` bigint NOT NULL DEFAULT '0',
   `image_policy` text /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */,
   `image_import_token` varchar(64) /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */ DEFAULT NULL,
+  `version_mode` smallint NOT NULL DEFAULT '0',
   PRIMARY KEY (`id`),
   UNIQUE KEY `name` (`name`),
   UNIQUE KEY `buckets_id_project` (`id`,`project_id`),
@@ -135,6 +136,7 @@ CREATE TABLE `buckets` (
   KEY `buckets_storage` (`storage_id`),
   CONSTRAINT `buckets_project` FOREIGN KEY (`project_id`) REFERENCES `projects` (`id`),
   CONSTRAINT `buckets_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT `buckets_chk_1` CHECK ((`version_mode` in (0,1,2))),
   CONSTRAINT `buckets_state` CHECK ((`state` in (_ascii'active',_ascii'purging')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 /*!80000 COLLATE=utf8mb4_0900_bin */ /*M!100603 COLLATE=utf8mb4_nopad_bin */;
 
@@ -460,11 +462,12 @@ CREATE TABLE `journal_entries` (
   `seq` bigint NOT NULL,
   `generation` bigint NOT NULL,
   `operation` varchar(8) COLLATE utf8mb4_bin NOT NULL,
-  `object_key` varbinary(1024) DEFAULT NULL,
+  `object_key` varbinary(1100) DEFAULT NULL,
   `stream_id` bigint DEFAULT NULL,
   `payload_revision` bigint DEFAULT NULL,
   `attributes` json DEFAULT NULL,
   `recorded_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `history_subject` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`bucket_id`,`seq`),
   KEY `journal_entries_stream` (`stream_id`),
   CONSTRAINT `journal_entries_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `journal_buckets` (`bucket_id`),
@@ -591,7 +594,7 @@ CREATE TABLE `journal_restore_buckets` (
   `generation` bigint NOT NULL,
   `watermark` bigint NOT NULL,
   `state` varchar(128) COLLATE utf8mb4_bin NOT NULL,
-  `next_key` varbinary(1024) DEFAULT NULL,
+  `next_key` varbinary(1100) DEFAULT NULL,
   `restored_objects` bigint NOT NULL DEFAULT '0',
   `restored_bytes` bigint NOT NULL DEFAULT '0',
   PRIMARY KEY (`job`,`source_bucket`),
@@ -603,7 +606,7 @@ CREATE TABLE `journal_restore_buckets` (
 CREATE TABLE `journal_restore_items` (
   `job` binary(16) NOT NULL,
   `source_bucket` binary(16) NOT NULL,
-  `object_key` varbinary(1024) NOT NULL,
+  `object_key` varbinary(1100) NOT NULL,
   `size` bigint NOT NULL,
   `etag` varchar(128) COLLATE utf8mb4_bin NOT NULL,
   `metadata` json NOT NULL,
@@ -612,6 +615,12 @@ CREATE TABLE `journal_restore_items` (
   `modified_us` bigint NOT NULL,
   `content_type` text COLLATE utf8mb4_bin NOT NULL,
   `category` varchar(128) COLLATE utf8mb4_bin NOT NULL,
+  `stage_key` varbinary(64) DEFAULT NULL,
+  `logical_key` varbinary(1100) DEFAULT NULL,
+  `history_id` varchar(32) COLLATE utf8mb4_bin DEFAULT NULL,
+  `history_seq` bigint DEFAULT NULL,
+  `history_time` bigint DEFAULT NULL,
+  `history_marker` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`job`,`source_bucket`,`object_key`),
   CONSTRAINT `journal_restore_items_ibfk_1` FOREIGN KEY (`job`, `source_bucket`) REFERENCES `journal_restore_buckets` (`job`, `source_bucket`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
@@ -641,7 +650,7 @@ CREATE TABLE `journal_restore_orphans` (
 CREATE TABLE `journal_restore_ranges` (
   `job` binary(16) NOT NULL,
   `source_bucket` binary(16) NOT NULL,
-  `object_key` varbinary(1024) NOT NULL,
+  `object_key` varbinary(1100) NOT NULL,
   `offset_bytes` bigint NOT NULL,
   `length` bigint NOT NULL,
   `source_offset` bigint NOT NULL,
@@ -676,7 +685,7 @@ CREATE TABLE `journal_snapshot_buckets` (
 CREATE TABLE `journal_snapshot_current` (
   `storage_id` binary(16) NOT NULL,
   `bucket_id` binary(16) NOT NULL,
-  `object_key` varbinary(1024) NOT NULL,
+  `object_key` varbinary(1100) NOT NULL,
   `generation` bigint NOT NULL,
   `seq` bigint NOT NULL,
   `deleted` tinyint(1) NOT NULL,
@@ -723,7 +732,7 @@ CREATE TABLE `journal_snapshot_members` (
   `bucket_id` binary(16) NOT NULL,
   `generation` bigint NOT NULL,
   `seq` bigint NOT NULL,
-  `object_key` varbinary(1024) NOT NULL,
+  `object_key` varbinary(1100) NOT NULL,
   `deleted` tinyint(1) NOT NULL,
   `encoded_bytes` bigint NOT NULL,
   PRIMARY KEY (`owner`,`family`,`bucket_id`,`seq`),
@@ -771,7 +780,7 @@ CREATE TABLE `journal_snapshot_usage` (
 CREATE TABLE `journal_snapshot_work` (
   `snapshot_id` binary(16) NOT NULL,
   `bucket_id` binary(16) NOT NULL,
-  `object_key` varbinary(1024) NOT NULL,
+  `object_key` varbinary(1100) NOT NULL,
   `generation` bigint NOT NULL,
   `seq` bigint NOT NULL,
   `deleted` tinyint(1) NOT NULL,
@@ -936,7 +945,7 @@ CREATE TABLE `member_bucket_grants` (
   KEY `member_grants_bucket` (`bucket_id`,`project_id`),
   CONSTRAINT `member_grants_bucket` FOREIGN KEY (`bucket_id`, `project_id`) REFERENCES `buckets` (`id`, `project_id`) ON DELETE CASCADE,
   CONSTRAINT `member_grants_member` FOREIGN KEY (`user_id`, `project_id`) REFERENCES `project_members` (`user_id`, `project_id`) ON DELETE CASCADE,
-  CONSTRAINT `member_grants_actions` CHECK ((`actions` <= 127))
+  CONSTRAINT `member_grants_actions` CHECK ((`actions` between 0 and 2047))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `member_external_grants` (
@@ -1397,6 +1406,34 @@ CREATE TABLE `notification_consumers` (
   CONSTRAINT `notification_consumers_role` CHECK ((`role` in (_utf8mb4'control',_utf8mb4'data',_utf8mb4'worker',_utf8mb4'node',_utf8mb4'storage')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
+CREATE TABLE `object_version_clocks` (
+  `bucket_id` binary(16) NOT NULL,
+  `version_seq` bigint NOT NULL DEFAULT '0',
+  PRIMARY KEY (`bucket_id`),
+  CONSTRAINT `object_version_clocks_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `object_versions` (
+  `bucket_id` binary(16) NOT NULL,
+  `object_key` varbinary(1024) NOT NULL,
+  `seq` bigint NOT NULL,
+  `version_id` varchar(36) COLLATE utf8mb4_bin NOT NULL,
+  `stream_id` bigint DEFAULT NULL,
+  `modified_us` bigint NOT NULL,
+  PRIMARY KEY (`bucket_id`,`object_key`,`seq`),
+  UNIQUE KEY `bucket_id` (`bucket_id`,`object_key`,`version_id`),
+  KEY `object_versions_stream` (`stream_id`),
+  CONSTRAINT `object_versions_ibfk_1` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`),
+  CONSTRAINT `object_versions_ibfk_2` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
+CREATE TABLE `object_write_receipts` (
+  `stream_id` bigint NOT NULL,
+  `version_id` varchar(36) COLLATE utf8mb4_bin NOT NULL,
+  PRIMARY KEY (`stream_id`),
+  CONSTRAINT `object_write_receipts_ibfk_1` FOREIGN KEY (`stream_id`) REFERENCES `streams` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
+
 CREATE TABLE `objects` (
   `bucket_id` binary(16) NOT NULL,
   `object_key` varbinary(1024) NOT NULL,
@@ -1407,6 +1444,7 @@ CREATE TABLE `objects` (
   `catalog_type` text /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */,
   `catalog_category` varchar(16) /*!80000 COLLATE utf8mb4_0900_bin */ /*M!100603 COLLATE utf8mb4_nopad_bin */ DEFAULT NULL,
   `catalog_public` tinyint(1) DEFAULT NULL,
+  `version_switch` tinyint(1) NOT NULL DEFAULT '0',
   PRIMARY KEY (`bucket_id`,`object_key`),
   KEY `objects_catalog_size` (`bucket_id`,`catalog_size`,`object_key`),
   KEY `objects_catalog_modified` (`bucket_id`,`catalog_modified`,`object_key`),
@@ -1954,7 +1992,7 @@ CREATE TABLE `s3_credential_grants` (
   KEY `credential_grants_bucket` (`bucket_id`),
   CONSTRAINT `credential_grants_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
   CONSTRAINT `credential_grants_credential` FOREIGN KEY (`access_key`) REFERENCES `s3_credentials` (`access_key_id`) ON DELETE CASCADE,
-  CONSTRAINT `credential_grants_actions` CHECK ((`actions` <= 127))
+  CONSTRAINT `credential_grants_actions` CHECK ((`actions` between 0 and 2047))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `s3_credentials` (
@@ -2733,7 +2771,7 @@ CREATE TABLE `token_bucket_grants` (
   KEY `token_grants_bucket` (`bucket_id`),
   CONSTRAINT `token_grants_bucket` FOREIGN KEY (`bucket_id`) REFERENCES `buckets` (`id`) ON DELETE CASCADE,
   CONSTRAINT `token_grants_token` FOREIGN KEY (`token_id`) REFERENCES `api_tokens` (`id`) ON DELETE CASCADE,
-  CONSTRAINT `token_grants_actions` CHECK ((`actions` <= 127))
+  CONSTRAINT `token_grants_actions` CHECK ((`actions` between 0 and 2047))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `token_external_grants` (
@@ -3089,11 +3127,11 @@ SET foreign_key_checks=@mokyu_schema_foreign_keys;
 
 CREATE SQL SECURITY DEFINER VIEW `journal_protected_addresses` AS select `journal_holds`.`address` AS `address`,`journal_holds`.`unit` AS `unit` from `journal_holds` union all select `journal_snapshot_holds`.`address` AS `address`,`journal_snapshot_holds`.`unit` AS `unit` from `journal_snapshot_holds` union all select `m`.`address` AS `address`,`m`.`unit` AS `unit` from (`journal_restore_materials` `m` join `journal_recoveries` `j` on((`j`.`id` = `m`.`job`))) where (`j`.`state` not in ('completed','cancelled'));
 
-CREATE SQL SECURITY DEFINER VIEW `user_bucket_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 67 when 'writer' then 95 when 'maintainer' then 127 else 0 end) & if((`m`.`scope` = 'all'),127,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_bucket_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
+CREATE SQL SECURITY DEFINER VIEW `user_bucket_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 67 when 'writer' then 479 when 'maintainer' then 2047 else 0 end) & if((`m`.`scope` = 'all'),2047,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_bucket_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
 
 CREATE SQL SECURITY DEFINER VIEW `user_external_access` AS select `m`.`user_id` AS `user_id`,`b`.`id` AS `bucket_id`,((case `m`.`role` when 'reader' then 3 when 'writer' then 31 when 'maintainer' then 31 else 0 end) & if((`m`.`scope` = 'all'),31,coalesce(`g`.`actions`,0))) AS `actions` from ((`project_members` `m` join `external_buckets` `b` on((`b`.`project_id` = `m`.`project_id`))) left join `member_external_grants` `g` on(((`g`.`user_id` = `m`.`user_id`) and (`g`.`bucket_id` = `b`.`id`))));
 
-CREATE SQL SECURITY DEFINER VIEW `token_bucket_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),127,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_bucket_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_bucket_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
+CREATE SQL SECURITY DEFINER VIEW `token_bucket_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),2047,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_bucket_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_bucket_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
 
 CREATE SQL SECURITY DEFINER VIEW `token_external_access` AS select `t`.`id` AS `token_id`,`g`.`bucket_id` AS `bucket_id`,(`g`.`actions` & if((`u`.`role` = 'admin'),31,coalesce(`a`.`actions`,0))) AS `actions` from (((`api_tokens` `t` join `web_users` `u` on((`u`.`id` = `t`.`user_id`))) join `token_external_grants` `g` on((`g`.`token_id` = `t`.`id`))) left join `user_external_access` `a` on(((`a`.`user_id` = `t`.`user_id`) and (`a`.`bucket_id` = `g`.`bucket_id`))));
 
@@ -3294,6 +3332,41 @@ CREATE TRIGGER `journal_update` AFTER UPDATE ON `objects` FOR EACH ROW BEGIN
     END IF;
 END;
 
+CREATE TRIGGER `journal_version_insert` AFTER INSERT ON `object_versions` FOR EACH ROW BEGIN
+    DECLARE journal SMALLINT;
+        SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.bucket_id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'put',CONCAT('~h/',NEW.version_id,'/',NEW.object_key),NEW.stream_id,s.payload_revision,JSON_OBJECT('size',COALESCE(s.size,0),'etag',COALESCE(s.etag,''),'metadata',COALESCE(JSON_EXTRACT(s.metadata,'$'),JSON_OBJECT()),'checksums',COALESCE(JSON_EXTRACT(s.checksums,'$'),JSON_OBJECT()),'payload',COALESCE(s.payload_type,'chunks'),'modified_us',NEW.modified_us,'history',JSON_OBJECT('order',NEW.seq,'time',NEW.modified_us,'marker',CASE WHEN NEW.stream_id IS NULL THEN 1 ELSE 0 END)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id LEFT JOIN streams s ON s.id=NEW.stream_id WHERE j.bucket_id=NEW.bucket_id;
+    ELSEIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.bucket_id;
+    END IF;
+END;
+
+CREATE TRIGGER `journal_version_mode` AFTER UPDATE ON `buckets` FOR EACH ROW BEGIN
+    DECLARE journal SMALLINT;
+    IF OLD.version_mode<>NEW.version_mode THEN
+        SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=NEW.id LOCK IN SHARE MODE;
+        IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=NEW.id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'put','~m',NULL,NULL,JSON_OBJECT('size',0,'etag','','metadata',JSON_OBJECT(),'checksums',JSON_OBJECT(),'payload','chunks','modified_us',0,'history',JSON_OBJECT('mode',NEW.version_mode)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id WHERE j.bucket_id=NEW.id;
+    ELSEIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=NEW.id;
+    END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `journal_version_remove` AFTER DELETE ON `object_versions` FOR EACH ROW BEGIN
+    DECLARE journal SMALLINT;
+        SELECT journal_mode INTO journal FROM bucket_change_gates WHERE bucket_id=OLD.bucket_id LOCK IN SHARE MODE;
+        IF journal=1 THEN
+        UPDATE journal_buckets SET last_seq=last_seq+1 WHERE bucket_id=OLD.bucket_id;
+        INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq,j.generation,'delete',CONCAT('~h/',OLD.version_id,'/',OLD.object_key),NULL,NULL,NULL,TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id WHERE j.bucket_id=OLD.bucket_id;
+    ELSEIF journal=2 THEN
+        UPDATE journal_buckets SET dirty=TRUE WHERE bucket_id=OLD.bucket_id;
+    END IF;
+END;
+
 CREATE TRIGGER `objects_capture_delete` AFTER DELETE ON `objects` FOR EACH ROW BEGIN
     DECLARE readers INTEGER DEFAULT 0;
     IF OLD.stream_id IS NOT NULL THEN
@@ -3399,6 +3472,49 @@ CREATE TRIGGER `objects_notice_update` AFTER UPDATE ON `objects` FOR EACH ROW BE
         WHEN node_notices.scope IN ('object','bucket') AND VALUES(scope) IN ('object','bucket') AND node_notices.resource_id=VALUES(resource_id) THEN 'bucket'
         ELSE 'reset' END,
         generation=VALUES(generation),event_id=VALUES(event_id),resource_id=VALUES(resource_id),object_key=VALUES(object_key),retry_at=NULL;
+    END IF;
+END;
+
+CREATE TRIGGER `object_versions_insert` AFTER INSERT ON `objects` FOR EACH ROW BEGIN
+    DECLARE mode_value SMALLINT;
+    IF NEW.stream_id IS NOT NULL THEN
+        SELECT version_mode INTO mode_value FROM buckets WHERE id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF mode_value>0 THEN
+            UPDATE object_version_clocks SET version_seq=version_seq+1 WHERE bucket_id=NEW.bucket_id;
+            IF mode_value=2 THEN
+                DELETE FROM object_versions WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND version_id='null';
+            END IF;
+            INSERT INTO object_versions(bucket_id,object_key,seq,version_id,stream_id,modified_us)
+                SELECT bucket_id,NEW.object_key,version_seq,IF(mode_value=1,REPLACE(UUID(),'-',''),'null'),NEW.stream_id,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',UTC_TIMESTAMP(6)) FROM object_version_clocks WHERE bucket_id=NEW.bucket_id;
+        END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `object_versions_update` AFTER UPDATE ON `objects` FOR EACH ROW BEGIN
+    DECLARE mode_value SMALLINT;
+    IF NOT (OLD.stream_id <=> NEW.stream_id) AND OLD.version_switch=NEW.version_switch THEN
+        SELECT version_mode INTO mode_value FROM buckets WHERE id=NEW.bucket_id LOCK IN SHARE MODE;
+        IF mode_value>0 THEN
+            UPDATE object_version_clocks SET version_seq=version_seq+1 WHERE bucket_id=NEW.bucket_id;
+            IF mode_value=2 THEN
+                DELETE FROM object_versions WHERE bucket_id=NEW.bucket_id AND object_key=NEW.object_key AND version_id='null';
+            END IF;
+            INSERT INTO object_versions(bucket_id,object_key,seq,version_id,stream_id,modified_us)
+                SELECT bucket_id,NEW.object_key,version_seq,IF(mode_value=1,REPLACE(UUID(),'-',''),'null'),NEW.stream_id,TIMESTAMPDIFF(MICROSECOND,'1970-01-01',UTC_TIMESTAMP(6)) FROM object_version_clocks WHERE bucket_id=NEW.bucket_id;
+        END IF;
+    END IF;
+END;
+
+CREATE TRIGGER `object_version_quota_delete` AFTER DELETE ON `object_versions` FOR EACH ROW BEGIN
+    IF OLD.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=OLD.bucket_id)>0 THEN
+        UPDATE quota_scopes SET used_bytes=used_bytes-(SELECT size FROM streams WHERE id=OLD.stream_id) WHERE ((scope='bucket' AND scope_id=OLD.bucket_id) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=OLD.bucket_id)));
+    END IF;
+END;
+
+CREATE TRIGGER `object_version_quota_insert` AFTER INSERT ON `object_versions` FOR EACH ROW BEGIN
+    IF NEW.stream_id IS NOT NULL AND (SELECT version_mode FROM buckets WHERE id=NEW.bucket_id)>0 THEN
+        IF EXISTS(SELECT 1 FROM quota_scopes WHERE ((scope='bucket' AND scope_id=NEW.bucket_id) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=NEW.bucket_id))) AND logical_bytes_limit IS NOT NULL AND used_bytes+reserved_bytes+(SELECT size FROM streams WHERE id=NEW.stream_id)>logical_bytes_limit AND (SELECT size FROM streams WHERE id=NEW.stream_id)>0) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='version_quota_exceeded'; END IF;
+        UPDATE quota_scopes SET used_bytes=used_bytes+(SELECT size FROM streams WHERE id=NEW.stream_id) WHERE ((scope='bucket' AND scope_id=NEW.bucket_id) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=NEW.bucket_id)));
     END IF;
 END;
 
@@ -3576,4 +3692,10 @@ END;
 
 CREATE TRIGGER `transfer_changes_backlog_insert` AFTER INSERT ON `transfer_changes` FOR EACH ROW BEGIN
     UPDATE redundancy_backlogs SET queued_keys=queued_keys+1 WHERE id=NEW.task_id;
+END;
+
+CREATE TRIGGER `version_write_receipt` AFTER INSERT ON `object_versions` FOR EACH ROW BEGIN
+    IF NEW.seq>0 AND NEW.stream_id IS NOT NULL THEN
+        INSERT INTO object_write_receipts(stream_id,version_id) VALUES(NEW.stream_id,NEW.version_id) ON DUPLICATE KEY UPDATE stream_id=NEW.stream_id;
+    END IF;
 END;

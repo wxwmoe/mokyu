@@ -19,10 +19,13 @@ impl Gateway {
             .access_key;
         let input = request.input;
         prepared.authorize(access, &input.bucket)?;
-        let (bucket, key) = gateway::copy_source(&input)?;
+        let (bucket, key, version) = gateway::copy_source(&input)?;
+        let restore = version.is_some() && bucket == input.bucket && key == input.key;
         let source = self
             .reads
             .open(wire::ReadRequest {
+                version_id: version.map(str::to_owned),
+                restore_version: restore,
                 route: Some(wire::ReadRoute {
                     route: Some(wire::read_route::Route::Bucket(wire::BucketRoute {
                         name: bucket.to_owned(),
@@ -73,6 +76,7 @@ impl Gateway {
         };
         let begin = wire::BeginWriteRequest {
             access_key: access.clone(),
+            source_version: version.map(str::to_owned),
             bucket: input.bucket,
             key: input.key,
             metadata_json: serde_json::to_vec(&metadata)?,
@@ -86,7 +90,9 @@ impl Gateway {
                 .map(|value| Ok(value.to_str()?.to_owned()))
                 .transpose()
         };
-        self.writes
+        let source_version = source.reply.version_id.clone();
+        let version_id = self
+            .writes
             .copy(
                 prepared,
                 begin,
@@ -96,6 +102,8 @@ impl Gateway {
             )
             .await?;
         Ok(S3Response::new(CopyObjectOutput {
+            version_id,
+            copy_source_version_id: source_version,
             copy_object_result: Some(CopyObjectResult {
                 e_tag: Some(ETag::Strong(object.etag)),
                 last_modified: Some(gateway::stamp(chrono::Utc::now())),

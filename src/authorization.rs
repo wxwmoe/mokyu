@@ -17,6 +17,14 @@ pub enum Action {
     Write,
     #[serde(rename = "object.delete")]
     Delete,
+    #[serde(rename = "object.versions.list")]
+    ListVersions,
+    #[serde(rename = "object.versions.read")]
+    ReadVersion,
+    #[serde(rename = "object.versions.delete")]
+    DeleteVersion,
+    #[serde(rename = "object.versions.restore")]
+    RestoreVersion,
     #[serde(rename = "object.acl")]
     Acl,
     #[serde(rename = "bucket.settings")]
@@ -25,11 +33,15 @@ pub enum Action {
     Inspect,
 }
 impl Action {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 11] = [
         Self::List,
         Self::Read,
         Self::Write,
         Self::Delete,
+        Self::ListVersions,
+        Self::ReadVersion,
+        Self::DeleteVersion,
+        Self::RestoreVersion,
         Self::Acl,
         Self::Settings,
         Self::Inspect,
@@ -40,6 +52,10 @@ impl Action {
             Self::Read => "object.read",
             Self::Write => "object.write",
             Self::Delete => "object.delete",
+            Self::ListVersions => "object.versions.list",
+            Self::ReadVersion => "object.versions.read",
+            Self::DeleteVersion => "object.versions.delete",
+            Self::RestoreVersion => "object.versions.restore",
             Self::Acl => "object.acl",
             Self::Settings => "bucket.settings",
             Self::Inspect => "storage.inspect",
@@ -50,7 +66,10 @@ impl Action {
             .into_iter()
             .filter(|action| match role {
                 "reader" => matches!(action, Self::List | Self::Read | Self::Inspect),
-                "writer" => !matches!(action, Self::Settings),
+                "writer" => !matches!(
+                    action,
+                    Self::Settings | Self::DeleteVersion | Self::RestoreVersion
+                ),
                 "maintainer" => true,
                 _ => false,
             })

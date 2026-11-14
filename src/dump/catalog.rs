@@ -122,7 +122,14 @@ impl Catalog {
 
     fn object(&self, c: &Change, g: i64) -> Result<()> {
         let db = &self.db;
-        let p = params![c.bucket, c.generation, c.key];
+        let Some(slot) = c.key.as_deref() else {
+            anyhow::bail!("missing journal key")
+        };
+        let crate::model::history::Subject::Current(key) = crate::model::history::subject(slot)?
+        else {
+            return Ok(());
+        };
+        let p = params![c.bucket, c.generation, key];
         let old: Option<i64> = db
             .query_row(
                 "SELECT seq FROM objects WHERE (bucket,generation,key)=(?1,?2,?3)",
@@ -142,7 +149,7 @@ impl Catalog {
                 params![
                     c.bucket,
                     c.generation,
-                    c.key,
+                    key,
                     c.seq,
                     c.attributes.as_ref().map(|a| a.size),
                     c.attributes.as_ref().map(serde_json::to_vec).transpose()?

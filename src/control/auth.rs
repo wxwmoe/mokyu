@@ -176,6 +176,8 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/quotas/{scope_type}/{scope_id}"
                 | "/api/v1/buckets/{bucket}/objects"
                 | "/api/v1/buckets/{bucket}/object"
+                | "/api/v1/buckets/{bucket}/versions"
+                | "/api/v1/buckets/{bucket}/versions/content"
                 | "/api/v1/buckets/{bucket}/object/content"
                 | "/api/v1/buckets/{bucket}/object/thumbnail"
                 | "/api/v1/buckets/{bucket}/object/text"
@@ -200,6 +202,7 @@ fn member_route(path: &str, method: &Method) -> bool {
                 | "/api/v1/buckets/{bucket}/tiering/state"
                 | "/api/v1/buckets/{bucket}/mirroring/preview"
                 | "/api/v1/buckets/{bucket}/mirroring/test"
+                | "/api/v1/buckets/{bucket}/versions/restore"
                 | "/api/v1/buckets/{bucket}/mirroring/unblock"
                 | "/api/v1/buckets/{bucket}/mirroring/tasks"
                 | "/api/v1/buckets/{bucket}/redundancy/{id}/command"
@@ -216,7 +219,10 @@ fn member_route(path: &str, method: &Method) -> bool {
                 "/api/v1/buckets/{bucket}/image-processing" | "/api/v1/buckets/{bucket}/tiering"
             )
             | ("PUT", "/api/v1/uploads/{id}/parts/{number}")
-            | ("DELETE", "/api/v1/uploads/{id}")
+            | (
+                "DELETE",
+                "/api/v1/buckets/{bucket}/versions" | "/api/v1/uploads/{id}"
+            )
             | ("PUT" | "DELETE", "/api/v1/api-tokens/{id}")
             | (
                 "DELETE",
@@ -225,6 +231,7 @@ fn member_route(path: &str, method: &Method) -> bool {
             | (
                 "GET" | "PUT",
                 "/api/v1/buckets/{bucket}/cors"
+                    | "/api/v1/buckets/{bucket}/versioning"
                     | "/api/v1/buckets/{bucket}/website"
                     | "/api/v1/buckets/{bucket}/settings"
                     | "/api/v1/buckets/{bucket}/mirroring"

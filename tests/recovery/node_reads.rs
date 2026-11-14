@@ -20,6 +20,8 @@ mod access;
 
 fn request(run: Run) -> read::Query {
     read::Query {
+        restore_version: false,
+        version_id: None,
         run,
         operation: Uuid::new_v4(),
         route: model::ReadRoute::Bucket {

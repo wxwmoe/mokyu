@@ -103,6 +103,8 @@ pub(crate) struct Permits {
 
 #[derive(Clone)]
 pub(crate) struct Query {
+    pub(crate) restore_version: bool,
+    pub(crate) version_id: Option<String>,
     pub(crate) run: Run,
     pub(crate) operation: Uuid,
     pub(crate) route: ReadRoute,
@@ -176,6 +178,8 @@ impl Query {
         let bytes = serde_json::to_vec(&(
             route,
             &self.access,
+            &self.version_id,
+            self.restore_version,
             self.head,
             self.web,
             self.mapping,
@@ -354,6 +358,8 @@ pub(crate) struct Reply {
     pub(crate) image_policy: Option<Version>,
     pub(crate) image_style: Option<Version>,
     pub(crate) source_key: String,
+    pub(crate) version_id: Option<String>,
+    pub(crate) delete_marker_us: Option<i64>,
     pub(crate) grants: Vec<Grant>,
     pub(crate) next: Option<Cursor>,
     pub(crate) offset: u64,
@@ -405,6 +411,8 @@ impl Reply {
             image_policy: None,
             image_style: None,
             source_key: String::new(),
+            version_id: None,
+            delete_marker_us: None,
             grants: Vec::new(),
             next: None,
             offset: 0,

@@ -832,6 +832,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/versioning": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["bucket_versioning"];
+        put: operations["set_bucket_versioning"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_versions"];
+        put?: never;
+        post?: never;
+        delete: operations["delete_version"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/versions/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["version_content"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/buckets/{bucket}/versions/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["restore_version"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/website": {
         parameters: {
             query?: never;
@@ -2693,7 +2757,7 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /** @enum {string} */
-        Action: "bucket.list" | "object.read" | "object.write" | "object.delete" | "object.acl" | "bucket.settings" | "storage.inspect";
+        Action: "bucket.list" | "object.read" | "object.write" | "object.delete" | "object.versions.list" | "object.versions.read" | "object.versions.delete" | "object.versions.restore" | "object.acl" | "bucket.settings" | "storage.inspect";
         /** @enum {string} */
         Anchor: "center" | "north" | "south" | "east" | "west" | "northwest" | "northeast" | "southwest" | "southeast";
         ApiInfo: {
@@ -3907,6 +3971,16 @@ export interface components {
             /** Format: date-time */
             touched_at: string;
         };
+        ObjectHistoryEntry: {
+            etag?: string | null;
+            key: string;
+            latest: boolean;
+            /** Format: int64 */
+            modified_us: number;
+            /** Format: int64 */
+            size?: number | null;
+            version_id: string;
+        };
         ObjectMetadata: {
             cache_control?: string | null;
             content_disposition?: string | null;
@@ -3917,6 +3991,10 @@ export interface components {
             user?: {
                 [key: string]: string;
             };
+        };
+        ObjectVersionSelection: {
+            key: string;
+            version_id: string;
         };
         Operation: {
             /** @enum {string} */
@@ -4293,6 +4371,9 @@ export interface components {
         ResetPassword: {
             must_change_password?: boolean;
             password: string;
+        };
+        Restored: {
+            version_id?: string | null;
         };
         RewriteRequest: {
             action: string;
@@ -5283,6 +5364,14 @@ export interface components {
             /** Format: int64 */
             revision: number;
         };
+        VersionPage: {
+            next_key?: string | null;
+            next_version?: string | null;
+            prefixes: string[];
+            rows: components["schemas"]["ObjectHistoryEntry"][];
+        };
+        /** @enum {string} */
+        Versioning: "off" | "enabled" | "suspended";
         Website: {
             error_document: string;
             index_document: string;
@@ -6905,6 +6994,156 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Transfer"];
+                };
+            };
+        };
+    };
+    bucket_versioning: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Versioning"];
+                };
+            };
+        };
+    };
+    set_bucket_versioning: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Versioning"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Versioning"];
+                };
+            };
+        };
+    };
+    list_versions: {
+        parameters: {
+            query?: {
+                prefix?: string;
+                delimiter?: string | null;
+                key_marker?: string | null;
+                version_marker?: string | null;
+                max_keys?: number | null;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionPage"];
+                };
+            };
+        };
+    };
+    delete_version: {
+        parameters: {
+            query: {
+                key: string;
+                version_id: string;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    version_content: {
+        parameters: {
+            query: {
+                key: string;
+                version_id: string;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    restore_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ObjectVersionSelection"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Restored"];
                 };
             };
         };

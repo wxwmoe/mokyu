@@ -173,6 +173,32 @@ pub enum Integrity {
 #[derive(Subcommand, Serialize, Deserialize)]
 pub enum Buckets {
     List,
+    Versioning {
+        name: String,
+        #[arg(value_enum)]
+        mode: Option<crate::model::history::Versioning>,
+    },
+    Versions {
+        name: String,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long)]
+        key_marker: Option<String>,
+        #[arg(long)]
+        version_marker: Option<String>,
+        #[arg(long, default_value_t = 50)]
+        limit: i32,
+    },
+    RestoreVersion {
+        name: String,
+        key: String,
+        version_id: String,
+    },
+    DeleteVersion {
+        name: String,
+        key: String,
+        version_id: String,
+    },
     Mirroring {
         name: String,
         #[command(subcommand)]
@@ -757,7 +783,12 @@ impl Command {
             Self::Init { .. }
             | Self::Status { .. }
             | Self::Audit { .. }
-            | Self::Bucket(Buckets::List | Buckets::Journal { enabled: None, .. })
+            | Self::Bucket(
+                Buckets::List
+                | Buckets::Versioning { mode: None, .. }
+                | Buckets::Versions { .. }
+                | Buckets::Journal { enabled: None, .. },
+            )
             | Self::Bucket(Buckets::Mirroring {
                 command:
                     Mirroring::Show

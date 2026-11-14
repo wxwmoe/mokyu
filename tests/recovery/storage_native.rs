@@ -4811,6 +4811,8 @@ async fn read_access(
         }],
     };
     let input = read::Query {
+        restore_version: false,
+        version_id: None,
         run,
         operation: Uuid::now_v7(),
         route: crate::model::ReadRoute::Bucket {

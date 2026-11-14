@@ -158,6 +158,13 @@ pub(in super::super) async fn publish_in(
         queries::retire_stream(old).execute(&mut **tx).await?;
     }
     if let Some((upload, hash, result, token)) = completion {
+        let mut result = result;
+        if let Some(row) =
+            super::super::queries::history::one(tx, stream.bucket_id, &stream.object_key, None)
+                .await?
+        {
+            result["version_id"] = row.version_id.into();
+        }
         if queries::complete_upload(upload, id, &hash, &result, token)
             .execute(&mut **tx)
             .await?

@@ -160,6 +160,7 @@ pub(super) async fn offer(
                 metadata: original.metadata.clone(),
                 public: original.public_read,
                 size: Some(source.size),
+                source_version: None,
                 copy_read: None,
                 part,
                 completion: None,

@@ -1,3 +1,5 @@
+#[path = "../../shared/history.rs"]
+mod history;
 #[path = "../../shared/node_handoff.rs"]
 mod node_handoff;
 #[path = "../../shared/storage_backup.rs"]

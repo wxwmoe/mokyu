@@ -151,6 +151,7 @@ mod maintenance;
 pub(super) use maintenance::*;
 mod integrity;
 pub(super) use integrity::*;
+pub(super) mod history;
 mod objects;
 pub(super) use objects::*;
 mod metrics;
