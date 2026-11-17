@@ -3,6 +3,7 @@ package mokyu.node.v1;
 
 service StorageControl {
   rpc Announce(StorageAnnouncement) returns (StorageRegistration);
+  rpc Sample(StorageSample) returns (StorageSampleReply);
 }
 
 service NodeStorage {
@@ -85,12 +86,24 @@ service StorageNode {
   rpc Inventory(stream StorageInput) returns (stream StorageOutput);
 }
 
+message StorageSample {
+  Run run = 1;
+  bytes sample_json = 2;
+  bytes report_json = 3;
+}
+message StorageSampleReply {
+  bool announce = 1;
+  bool report_accepted = 2;
+}
+
 message StorageAnnouncement {
+  int64 sampled_us = 3;
   Run run = 1;
   bytes announcement_json = 2;
 }
 
 message StorageRegistration {
+  bool supports_samples = 2;
   bytes registration_json = 1;
 }
 
@@ -815,6 +828,7 @@ message Welcome {
   string control_id = 5;
   optional string region = 6;
   bytes probe_ticket = 7;
+  int64 control_time_us = 8;
 }
 
 message PulseReply {

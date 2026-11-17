@@ -1438,6 +1438,31 @@ async fn native_snapshot_gc(
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires an isolated database and MOKYU_TEST_STORAGE_TLS"]
+async fn dashboard_reads_while_topology_is_locked() -> Result<()> {
+    use crate::{authorization::Principal, model::storage_cluster::StorageClusters};
+    let (backend, cluster, _nodes, _secrets) = live_fixture().await?;
+    let lock = super::super::queries::storage_cluster::begin(&backend).await?;
+    let read = async {
+        let (health, space, overview) = tokio::try_join!(
+            backend.health(&Principal::Local, cluster.id),
+            backend.space(&Principal::Local, cluster.id),
+            backend.overview()
+        )?;
+        ensure!(
+            health.online_primary == 2
+                && space.groups == 1
+                && overview.clusters.iter().any(|c| c.id == cluster.id),
+            "dashboard read inconsistent topology"
+        );
+        Ok::<_, anyhow::Error>(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(4), read).await??;
+    lock.rollback().await?;
+    Ok(())
+}
+
 #[cfg(feature = "fault-injection")]
 #[tokio::test]
 #[ignore = "requires an isolated database, MOKYU_TEST_STORAGE_TLS and MOKYU_TEST_FAULT_DIR"]
@@ -2460,6 +2485,75 @@ async fn native_namespace_initialization_releases_locks_and_rechecks_publication
     assert_eq!(storages[0].r#type, "mokyu");
     assert_eq!(storages[0].cluster_id, Some(cluster.id));
     tx.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated database and MOKYU_TEST_STORAGE_TLS"]
+async fn storage_samples_preserve_freshness_across_replays() -> Result<()> {
+    use crate::model::storage_cluster::{CapacitySample, StorageClusters};
+    let (backend, cluster, nodes, secrets) = live_fixture().await?;
+    let node = &nodes[0];
+    let original = node.announcement()?;
+    let media = original.media.media_id;
+    let sampled = chrono::Utc::now().timestamp_micros();
+    let sample = CapacitySample {
+        media,
+        observed_us: sampled,
+        capacity: original.capacity,
+        load: original.load.unwrap(),
+        revision: Some(cluster.revision),
+        pending: None,
+        history_after: cluster.revision,
+    };
+    let key = &secrets.credential_key;
+    backend
+        .sample_capacity(&node.state, key, node.run, sample.clone())
+        .await?;
+    let mut old = sample.clone();
+    old.capacity.available_bytes = 0;
+    for delta in [0, 1] {
+        old.observed_us = sampled - delta;
+        backend
+            .sample_capacity(&node.state, key, node.run, old.clone())
+            .await?;
+    }
+    let (_, targets) = backend.placement_snapshot(cluster.id).await?;
+    let target = targets.iter().find(|t| t.device.media_id == media).unwrap();
+    assert_eq!(target.device.observed_at, sampled);
+    assert_eq!(
+        target.device.announcement.capacity.available_bytes,
+        sample.capacity.available_bytes
+    );
+    let mut stale_run = node.run;
+    stale_run.boot = Uuid::now_v7();
+    assert!(
+        backend
+            .sample_capacity(&node.state, key, stale_run, sample.clone())
+            .await
+            .is_err()
+    );
+    let mut full = sample;
+    full.observed_us = chrono::Utc::now().timestamp_micros();
+    full.capacity.available_bytes = 0;
+    full.pending = Some(cluster.revision);
+    assert!(
+        backend
+            .sample_capacity(&node.state, key, node.run, full)
+            .await?
+    );
+    let (_, targets) = backend.placement_snapshot(cluster.id).await?;
+    assert_eq!(
+        targets
+            .iter()
+            .find(|t| t.device.media_id == media)
+            .unwrap()
+            .device
+            .announcement
+            .capacity
+            .writable(),
+        0
+    );
     Ok(())
 }
 

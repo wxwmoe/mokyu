@@ -237,11 +237,51 @@ fn storage_method(path: &str) -> bool {
             | "/mokyu.node.v1.NodeControl/ReportNode"
             | "/mokyu.node.v1.NodeControl/CloseNode"
             | "/mokyu.node.v1.StorageControl/Announce"
+            | "/mokyu.node.v1.StorageControl/Sample"
     )
 }
 
 #[tonic::async_trait]
 impl StorageControl for Service {
+    async fn sample(
+        &self,
+        request: Request<wire::StorageSample>,
+    ) -> Result<Response<wire::StorageSampleReply>, Status> {
+        let node = identity(&request)?;
+        let input = request.into_inner();
+        let run = super::read::run(input.run.clone())?;
+        let sample = serde_json::from_slice(&input.sample_json)
+            .map_err(|_| Status::invalid_argument("invalid storage sample"))?;
+        let announce = bounded(self.app.storage_clusters.sample_capacity(
+            &node,
+            &self.app.secrets.credential_key,
+            run,
+            sample,
+        ))
+        .await?;
+        let report_accepted = if input.report_json.is_empty() {
+            false
+        } else {
+            let (_, report, interval) = super::session::report(wire::NodeReportRequest {
+                run: input.run,
+                report_json: input.report_json,
+                sample_interval_seconds: 0,
+            })?;
+            bounded(self.app.node_sessions.report_session(
+                &node,
+                &self.app.secrets.credential_key,
+                run,
+                &report,
+                interval,
+            ))
+            .await?
+        };
+        Ok(Response::new(wire::StorageSampleReply {
+            announce,
+            report_accepted,
+        }))
+    }
+
     async fn announce(
         &self,
         request: Request<wire::StorageAnnouncement>,
@@ -258,14 +298,16 @@ impl StorageControl for Service {
         announcement
             .validate()
             .map_err(|error| Status::invalid_argument(error.to_string()))?;
-        let registration = bounded(self.app.storage_clusters.announce(
+        let registration = bounded(self.app.storage_clusters.announce_at(
             &node,
             &self.app.secrets.credential_key,
             run,
             announcement,
+            (input.sampled_us != 0).then_some(input.sampled_us),
         ))
         .await?;
         Ok(Response::new(wire::StorageRegistration {
+            supports_samples: true,
             registration_json: serde_json::to_vec(&registration)
                 .map_err(|_| Status::internal("encode storage registration"))?,
         }))
@@ -1555,7 +1597,7 @@ impl NodeSessions for Service {
             let epoch = snapshot.epoch;
             yield wire::SessionReply { message: Some(wire::session_reply::Message::Welcome(wire::Welcome {
                 run: Some(wire::Run { boot_id: run.boot.to_string(), fence: run.fence.to_string() }),
-                epoch: epoch as u64, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), control_id, region: app.config.instance.region.clone(), probe_ticket:probe_ticket(),
+                epoch: epoch as u64, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), control_id, region: app.config.instance.region.clone(), probe_ticket:probe_ticket(), control_time_us:chrono::Utc::now().timestamp_micros(),
             })) };
             let mut sent_hints = crate::cluster::notifications::Hints::default();
             let mut pending = false;

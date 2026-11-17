@@ -394,6 +394,14 @@ impl Client {
             .await
     }
 
+    pub(crate) async fn sample_storage(
+        &self,
+        input: wire::StorageSample,
+    ) -> Result<wire::StorageSampleReply, Status> {
+        self.unary(input, "/mokyu.node.v1.StorageControl/Sample")
+            .await
+    }
+
     pub(crate) async fn announce_storage(
         &self,
         input: wire::StorageAnnouncement,

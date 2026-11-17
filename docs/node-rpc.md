@@ -18,9 +18,9 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 
 ## storage 角色
 
-`storage` 同样使用节点身份 metadata，但只允许会话、Probe、SyncNode、ReportNode、CloseNode 和 `StorageControl/Announce`。control 在业务消息解码前拒绝它访问读取计划、密钥材料、上传和 worker 工作。storage 不持有部署 key，也不取得 data/worker 的业务权限。
+`storage` 同样使用节点身份 metadata，但只允许会话、Probe、SyncNode、ReportNode、CloseNode 和 `StorageControl` 的 Announce、Sample。control 在业务消息解码前拒绝它访问读取计划、密钥材料、上传和 worker 工作。storage 不持有部署 key，也不取得 data/worker 的业务权限。
 
-`StorageControl/Announce` 携带当前运行权和介质身份、地址、地区、存储分组、容量及已有清单。返回目标清单与一批历史；节点持久核对完整历史后才发布新 `cluster.json`。更换部署签发的身份时保留旧清单，正常入群不会隐式接管旧布局。
+`StorageControl/Announce` 携带当前运行权和介质身份、地址、地区、存储分组、容量及已有清单。常态每 5 秒重新采样容量和负载，Sample 使用运行权和采样时刻去重。采样序号取自会话 control 时间加本地单调时钟经过的微秒，数据库按实际采样时刻判断 15 秒新鲜度。拓扑、历史或清单修订需要追赶时补发完整宣告。运行报告每 10 秒到期，合并档可随容量样本发送。完整宣告返回目标清单与一批历史；节点持久核对完整历史后才发布新 `cluster.json`。更换部署签发的身份时保留旧清单，正常入群不会隐式接管旧布局。
 
 storage 长时间接收分片时按正文传输进度判断空闲超时，续期消息不会延长空闲时间。单次分片传输的总时限取 15 分钟和空闲时限中的较大值。写入成功需要取得所选确认档要求的分片回执。
 

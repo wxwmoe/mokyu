@@ -551,6 +551,29 @@ pub(crate) struct WriteLoad {
     pub active: Vec<Uuid>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CapacitySample {
+    pub media: Uuid,
+    pub observed_us: i64,
+    pub revision: Option<i64>,
+    pub pending: Option<i64>,
+    pub history_after: i64,
+    pub capacity: Capacity,
+    pub load: WriteLoad,
+}
+
+impl WriteLoad {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.slots > 0
+                && self.active.len() <= self.slots as usize
+                && self.admitting <= self.slots - self.active.len() as u32,
+            "invalid storage write load"
+        );
+        Ok(())
+    }
+}
 impl Announcement {
     pub fn validate(&self) -> Result<()> {
         ensure!(self.history_after >= 0, "invalid history cursor");
@@ -560,12 +583,7 @@ impl Announcement {
             stamp.validate()?;
         }
         if let Some(load) = &self.load {
-            ensure!(
-                load.slots > 0
-                    && load.active.len() <= load.slots as usize
-                    && load.admitting <= load.slots - load.active.len() as u32,
-                "invalid storage write load"
-            );
+            load.validate()?;
         }
         for manifest in self.manifest.iter().chain(self.pending_manifest.iter()) {
             manifest.validate()?;
@@ -943,7 +961,24 @@ pub(crate) trait StorageClusters:
         key: &Key,
         run: super::session::Run,
         input: Announcement,
+    ) -> Result<Registration> {
+        self.announce_at(node, key, run, input, None).await
+    }
+    async fn announce_at(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        input: Announcement,
+        observed: Option<i64>,
     ) -> Result<Registration>;
+    async fn sample_capacity(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: super::session::Run,
+        sample: CapacitySample,
+    ) -> Result<bool>;
 }
 
 #[cfg(test)]

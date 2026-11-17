@@ -16,7 +16,7 @@ use crate::{
     config::{Budget, node::NodeConfig},
     model::{
         node::NodeReport,
-        storage_cluster::{Announcement, Registration, Topology, WriteLoad},
+        storage_cluster::{Announcement, CapacitySample, Registration, Topology, WriteLoad},
     },
     rpc::{
         client::{Client, Session},
@@ -65,6 +65,7 @@ pub(super) struct Node {
     writes: Arc<Semaphore>,
     active_writes: Mutex<Vec<Uuid>>,
     streams: std::sync::atomic::AtomicUsize,
+    report_now: tokio::sync::Notify,
     backup_reads: std::sync::atomic::AtomicU64,
 }
 
@@ -114,7 +115,7 @@ impl Node {
         }))
     }
 
-    async fn announce(&self, run: wire::Run) -> Result<(), Status> {
+    async fn announce(&self, run: wire::Run, sampled_us: i64) -> Result<bool, Status> {
         let instance = &self.config.instance;
         let input = Announcement {
             media: self.files.media.clone(),
@@ -146,10 +147,12 @@ impl Node {
             .client
             .announce_storage(wire::StorageAnnouncement {
                 run: Some(run),
+                sampled_us,
                 announcement_json: serde_json::to_vec(&input)
                     .map_err(|_| Status::internal("encode storage announcement"))?,
             })
             .await?;
+        let supports = reply.supports_samples;
         let reply: Registration = serde_json::from_slice(&reply.registration_json)
             .map_err(|_| Status::data_loss("invalid storage registration"))?;
         self.files
@@ -158,7 +161,55 @@ impl Node {
             .map_err(|error| {
                 tracing::warn!(%error, "storage membership could not be persisted");
                 Status::failed_precondition("cannot persist storage membership")
-            })
+            })?;
+        Ok(supports)
+    }
+
+    fn sample(&self, issued: i64) -> Result<CapacitySample, Status> {
+        Ok(CapacitySample {
+            media: self.files.media.media_id,
+            observed_us: issued,
+            revision: self
+                .files
+                .manifest
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|head| head.revision),
+            pending: self
+                .files
+                .pending
+                .read()
+                .unwrap()
+                .as_ref()
+                .map(|head| head.revision),
+            history_after: self
+                .files
+                .history
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or(0, |head| head.revision),
+            capacity: self
+                .files
+                .capacity(self.boot)
+                .map_err(|_| Status::internal("cannot inspect storage capacity"))?,
+            load: self.write_load(),
+        })
+    }
+
+    async fn reporting<T>(
+        &self,
+        attempt: impl std::future::Future<Output = Result<T, Status>>,
+    ) -> Result<Option<T>, Status> {
+        let error = match tokio::time::timeout(Duration::from_secs(3), attempt).await {
+            Ok(Ok(value)) => return Ok(Some(value)),
+            Ok(Err(e)) if !crate::rpc::client::retryable(&e) => return Err(e),
+            Ok(Err(e)) => e,
+            Err(_) => Status::deadline_exceeded("storage report timed out"),
+        };
+        self.connection.lock().unwrap().error = Some(format!("{:?}", error.code()));
+        Ok(None)
     }
 
     async fn connected(
@@ -181,20 +232,31 @@ impl Node {
             current.control_id = Uuid::parse_str(&session.welcome.control_id).ok();
             current.epoch = session.welcome.epoch;
         }
+        let start = Instant::now();
+        let mut heartbeat = start;
+        let mut capacity = start;
+        let mut telemetry = start;
         let mut sequence = 0u64;
+        let mut full = true;
+        let mut supports = true;
+        let mut send_metadata = true;
+        let mut urgent = false;
         loop {
-            sequence = sequence
-                .checked_add(1)
-                .ok_or_else(|| Status::data_loss("storage heartbeat sequence exhausted"))?;
-            let state = session.pulse(sequence, false).await?;
-            if !matches!(state.deployment_mode.as_str(), "single_control" | "cluster") {
-                return Err(Status::permission_denied(
-                    "storage requires a clustered deployment",
-                ));
-            }
-            session.during(self.announce(run.clone())).await?;
-            {
+            let now = Instant::now();
+            if now >= heartbeat {
+                sequence = sequence
+                    .checked_add(1)
+                    .ok_or_else(|| Status::data_loss("storage heartbeat sequence exhausted"))?;
+                let state = session.pulse(sequence, false).await?;
+                if !matches!(state.deployment_mode.as_str(), "single_control" | "cluster") {
+                    return Err(Status::permission_denied(
+                        "storage requires a clustered deployment",
+                    ));
+                }
                 let mut current = self.connection.lock().unwrap();
+                urgent |= current.storage_closed != state.storage_closed
+                    || current.handoff_revision != state.handoff_revision
+                    || current.draining != state.draining;
                 current.deadline = session.valid_until;
                 current.mode = Some(state.deployment_mode);
                 current.mode_revision = state.mode_revision;
@@ -202,39 +264,141 @@ impl Node {
                 current.draining = state.draining;
                 current.handoff_revision = state.handoff_revision;
                 current.storage_closed = state.storage_closed;
-                current.phase = "registered";
-                current.error = None;
+                heartbeat = now + Duration::from_secs(10);
             }
-            *report_sequence += 1;
-            let report = NodeReport {
-                boot_id: self.boot,
-                sequence: *report_sequence,
-                sampled_at: chrono::Utc::now(),
-                metadata: Some(
+            let now = Instant::now();
+            let issued = if session.welcome.control_time_us > 0 {
+                session
+                    .welcome
+                    .control_time_us
+                    .saturating_add(start.elapsed().as_micros() as i64)
+                    .saturating_sub(250_000)
+            } else {
+                0
+            };
+            let report_due = now >= telemetry || urgent;
+            let bundle =
+                supports && !full && session.policy() == crate::rpc::latency::Policy::Coalesced;
+            // Meet the report deadline even when the two monotonic timers drift apart.
+            let capacity_due = now >= capacity || urgent || (bundle && report_due);
+            let mut sent_report = false;
+            if capacity_due {
+                capacity = now + Duration::from_secs(2);
+            }
+            if capacity_due && (full || !supports) {
+                if let Some(available) = session
+                    .during(self.reporting(self.announce(run.clone(), issued)))
+                    .await?
+                {
+                    supports = available;
+                    full = false;
+                    capacity = now + Duration::from_secs(5);
+                    let mut current = self.connection.lock().unwrap();
+                    current.phase = "registered";
+                    current.error = None;
+                }
+            } else if capacity_due {
+                let sample = self.sample(issued)?;
+                let entry = if bundle
+                    && (report_due
+                        || telemetry.saturating_duration_since(now) <= Duration::from_secs(1))
+                {
+                    Some(self.runtime_report(&run, report_sequence, send_metadata)?)
+                } else {
+                    None
+                };
+                let bundled = entry.filter(|r| r.report_json.len() < crate::rpc::REPORT_LIMIT / 2);
+                let bundled_report = bundled.is_some();
+                let request = wire::StorageSample {
+                    run: Some(run.clone()),
+                    sample_json: serde_json::to_vec(&sample)
+                        .map_err(|_| Status::internal("encode storage sample"))?,
+                    report_json: bundled.map_or_else(Vec::new, |r| r.report_json),
+                };
+                match session
+                    .during(self.reporting(self.client.sample_storage(request)))
+                    .await
+                {
+                    Ok(Some(reply)) => {
+                        self.connection.lock().unwrap().error = None;
+                        full = reply.announce;
+                        capacity = if full {
+                            Instant::now()
+                        } else {
+                            now + Duration::from_secs(5)
+                        };
+                        if bundled_report && reply.report_accepted {
+                            send_metadata = false;
+                            sent_report = true;
+                            telemetry = now + Duration::from_secs(10);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) if e.code() == Code::Unimplemented => {
+                        full = true;
+                        capacity = Instant::now();
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            if report_due && !sent_report {
+                let report = self.runtime_report(&run, report_sequence, send_metadata)?;
+                telemetry = match session
+                    .during(self.reporting(self.client.report(report)))
+                    .await?
+                {
+                    Some(accepted) => {
+                        send_metadata &= !accepted;
+                        now + Duration::from_secs(10)
+                    }
+                    None => now + Duration::from_secs(2),
+                };
+            }
+            urgent = false;
+            let next = heartbeat.min(capacity).min(telemetry);
+            tokio::select! {
+                _=tokio::time::sleep_until(next)=>{},
+                _=tokio::time::sleep_until(session.io_deadline())=>session.service_io().await?,
+                _=self.report_now.notified()=>{urgent=true;},
+                notice=session.notified()=>{notice?;},
+            }
+            if session.take_state_change() {
+                heartbeat = Instant::now();
+            }
+        }
+    }
+
+    fn runtime_report(
+        &self,
+        run: &wire::Run,
+        sequence: &mut i64,
+        metadata: bool,
+    ) -> Result<wire::NodeReportRequest, Status> {
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| Status::data_loss("storage report sequence exhausted"))?;
+        let report = NodeReport {
+            boot_id: self.boot,
+            sequence: *sequence,
+            sampled_at: chrono::Utc::now(),
+            metadata: if metadata {
+                Some(
                     self.metadata()
                         .map_err(|_| Status::internal("cannot report storage configuration"))?,
-                ),
-                status: self
-                    .status()
-                    .map_err(|_| Status::internal("cannot report storage status"))?,
-            };
-            session
-                .during(
-                    self.client.report(wire::NodeReportRequest {
-                        run: Some(run.clone()),
-                        report_json: serde_json::to_vec(&report)
-                            .map_err(|_| Status::internal("encode storage report"))?,
-                        sample_interval_seconds: 0,
-                    }),
                 )
-                .await?;
-            session
-                .during(async {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    Ok(())
-                })
-                .await?;
-        }
+            } else {
+                None
+            },
+            status: self
+                .status()
+                .map_err(|_| Status::internal("cannot report storage status"))?,
+        };
+        Ok(wire::NodeReportRequest {
+            run: Some(run.clone()),
+            report_json: serde_json::to_vec(&report)
+                .map_err(|_| Status::internal("encode storage report"))?,
+            sample_interval_seconds: 0,
+        })
     }
 
     async fn drive(&self) -> Result<()> {
@@ -345,6 +509,7 @@ pub(crate) async fn run(config: NodeConfig, budget: Budget) -> Result<()> {
         active_writes: Mutex::new(Vec::new()),
         backup_reads: Default::default(),
         streams: Default::default(),
+        report_now: Default::default(),
         budget,
         client,
         files,

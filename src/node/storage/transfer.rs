@@ -74,7 +74,11 @@ impl ActiveStream {
 }
 impl Drop for ActiveStream {
     fn drop(&mut self) {
-        self.0.streams.fetch_sub(1, Ordering::AcqRel);
+        if self.0.streams.fetch_sub(1, Ordering::AcqRel) == 1
+            && self.0.connection.lock().unwrap().storage_closed
+        {
+            self.0.report_now.notify_one();
+        }
     }
 }
 

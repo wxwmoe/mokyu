@@ -14,17 +14,35 @@ pub(in super::super) type Tx<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
 type ClusterRow = (Uuid, String, i64, Json<Policy>, Json<Manifest>);
 type DeviceRow = (Uuid, Uuid, Option<Uuid>, i64, Json<Announcement>);
 
-pub(in super::super) async fn begin(backend: &Backend) -> Result<Tx<'_>> {
+pub(in super::super) async fn begin_sample(backend: &Backend) -> Result<Tx<'_>> {
     let mut tx = backend.pool.begin().await?;
     backend.fence_control(&mut tx).await?;
+    check_mode(&mut tx).await?;
+    Ok(tx)
+}
+
+pub(in super::super) async fn begin_view(backend: &Backend) -> Result<Tx<'_>> {
+    let mut tx = backend.pool.begin().await?;
+    super::inventory_isolation().execute(&mut *tx).await?;
+    backend.fence_control(&mut tx).await?;
+    check_mode(&mut tx).await?;
+    Ok(tx)
+}
+
+async fn check_mode(tx: &mut Tx<'_>) -> Result<()> {
     let mode: String = sqlx::query_scalar("SELECT deployment_mode FROM mokyu_meta WHERE singleton")
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
     ensure!(
         matches!(mode.as_str(), "single_control" | "cluster"),
         Error::NodeInactive
     );
-    // Topology changes share one lock; payload writes use their own records.
+    Ok(())
+}
+
+pub(in super::super) async fn begin(backend: &Backend) -> Result<Tx<'_>> {
+    let mut tx = begin_sample(backend).await?;
+    // Topology changes share one lock; capacity samples lock their device row.
     sqlx::query("UPDATE storage_cluster_lock SET id=id WHERE id=1")
         .execute(&mut *tx)
         .await?;
@@ -172,9 +190,13 @@ pub(in super::super) fn assign(media: Uuid, cluster: Uuid) -> Statement<'static>
         .bind(media)
 }
 
-pub(in super::super) fn announce(node: Uuid, value: &Announcement) -> Statement<'_> {
+pub(in super::super) fn revision(id: Uuid) -> Scalar<'static, i64> {
+    sqlx::query_scalar("SELECT revision FROM storage_clusters WHERE id=$1").bind(id)
+}
+
+pub(in super::super) fn announce(node: Uuid, value: &Announcement, observed: i64) -> Statement<'_> {
     sqlx::query("INSERT INTO storage_devices(media_id,node_id,observed_at,announcement) VALUES($1,$2,$3,$4) ON CONFLICT(media_id) DO UPDATE SET node_id=excluded.node_id,observed_at=excluded.observed_at,announcement=excluded.announcement")
-        .bind(value.media.media_id).bind(node).bind(chrono::Utc::now().timestamp_micros()).bind(Json(value))
+        .bind(value.media.media_id).bind(node).bind(observed).bind(Json(value))
 }
 
 pub(in super::super) fn member_node(node: Uuid) -> Scalar<'static, bool> {

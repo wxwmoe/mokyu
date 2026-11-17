@@ -353,10 +353,11 @@ impl Service {
         grant: uuid::Uuid,
         receipt: crate::model::storage_payload::Receipt,
     ) -> Result<SignedReceipt> {
-        let accounting = self
-            .node
-            .files
-            .capacity(self.node.boot)?
+        let capacity = self.node.files.capacity(self.node.boot)?;
+        if capacity.writable() <= crate::content::fragment::UNIT as u64 {
+            self.node.report_now.notify_one();
+        }
+        let accounting = capacity
             .accounting
             .ok_or_else(|| Status::unavailable("storage accounting is not ready"))?;
         SignedReceipt::seal(

@@ -12,6 +12,15 @@ use uuid::Uuid;
 type Row = (Uuid, String, i64, Json<Policy>, Json<Manifest>);
 type DeviceRow = (Uuid, Uuid, Option<Uuid>, i64, Json<Announcement>);
 
+fn validate_sample_time(observed: i64) -> Result<()> {
+    let age = chrono::Utc::now().timestamp_micros().checked_sub(observed);
+    ensure!(
+        age.is_some_and(|age| (0..15_000_000).contains(&age)),
+        "storage capacity sample is outside its freshness window"
+    );
+    Ok(())
+}
+
 fn member_move(row: super::queries::storage_move::Row) -> MemberMove {
     MemberMove {
         id: row.0,
@@ -1123,7 +1132,7 @@ impl StorageClusters for Backend {
     }
 
     async fn health(&self, principal: &Principal, id: Uuid) -> Result<Health> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = q::begin_view(self).await?;
         q::admin(&mut tx, principal).await?;
         let value = cluster(q::cluster(id).fetch_one(&mut *tx).await?)?;
         let targets = q::targets(self, &mut tx, Some(id), None, false).await?;
@@ -1202,7 +1211,7 @@ impl StorageClusters for Backend {
     }
 
     async fn space(&self, principal: &Principal, id: Uuid) -> Result<Space> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = q::begin_view(self).await?;
         q::admin(&mut tx, principal).await?;
         let value = cluster(q::cluster(id).fetch_one(&mut *tx).await?)?;
         let targets = q::targets(self, &mut tx, Some(id), None, false).await?;
@@ -1313,7 +1322,7 @@ impl StorageClusters for Backend {
     }
 
     async fn overview(&self) -> Result<Overview> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = q::begin_view(self).await?;
         let clusters = q::clusters().fetch_all(&mut *tx).await?;
         let devices = q::devices().fetch_all(&mut *tx).await?;
         ensure!(
@@ -1584,13 +1593,78 @@ impl StorageClusters for Backend {
         Ok(value)
     }
 
-    async fn announce(
+    async fn sample_capacity(
+        &self,
+        node: &NodeState,
+        key: &Key,
+        run: Run,
+        sample: CapacitySample,
+    ) -> Result<bool> {
+        ensure!(node.role == "storage", Error::NodeAuthentication);
+        let mut tx = q::begin_sample(self).await?;
+        q::authenticate(&mut tx, node, key, run).await?;
+        let Some(row) = q::device_for_update(sample.media)
+            .fetch_optional(&mut *tx)
+            .await?
+        else {
+            return Ok(true);
+        };
+        let mut old = device(row);
+        ensure!(old.node_id == node.node_id, Error::NodeConflict);
+        let expected = if let Some(cluster) = old.cluster_id {
+            Some(q::revision(cluster).fetch_one(&mut *tx).await?)
+        } else {
+            None
+        };
+        let needs_announce = expected != sample.revision
+            || sample.pending.is_some()
+            || sample.history_after != expected.unwrap_or(0)
+            || sample.revision != old.announcement.manifest.as_ref().map(|m| m.revision)
+            || old.announcement.pending_manifest.is_some();
+        if sample.observed_us > old.observed_at {
+            validate_sample_time(sample.observed_us)?;
+            ensure!(
+                sample
+                    .capacity
+                    .accounting
+                    .is_none_or(|s| s.boot == run.boot),
+                "capacity belongs to another boot"
+            );
+            if let (Some(before), Some(after)) = (
+                old.announcement.capacity.accounting,
+                sample.capacity.accounting,
+            ) {
+                ensure!(
+                    before.boot != after.boot || before.revision <= after.revision,
+                    "storage capacity moved backwards"
+                );
+            }
+            sample.load.validate()?;
+            if let Some(stamp) = sample.capacity.accounting {
+                stamp.validate()?;
+            }
+            old.announcement.capacity = sample.capacity;
+            old.announcement.load = Some(sample.load);
+            q::announce(node.node_id, &old.announcement, sample.observed_us)
+                .execute(&mut *tx)
+                .await?;
+            q::authenticate(&mut tx, node, key, run).await?;
+        }
+        tx.commit().await?;
+        Ok(needs_announce)
+    }
+
+    async fn announce_at(
         &self,
         node: &NodeState,
         key: &Key,
         run: Run,
         input: Announcement,
+        observed: Option<i64>,
     ) -> Result<Registration> {
+        if let Some(time) = observed {
+            validate_sample_time(time)?;
+        }
         ensure!(node.role == "storage", Error::NodeAuthentication);
         input.validate()?;
         if let Some(stamp) = input.capacity.accounting {
@@ -1614,6 +1688,12 @@ impl StorageClusters for Backend {
             .fetch_optional(&mut *tx)
             .await?
             .map(device);
+        if observed.is_some_and(|at| old.as_ref().is_some_and(|device| at <= device.observed_at)) {
+            return Ok(Registration {
+                manifest: None,
+                history: Vec::new(),
+            });
+        }
         if let Some(old) = &old {
             if let (Some(before), Some(after)) = (
                 old.announcement.capacity.accounting,
@@ -1699,7 +1779,13 @@ impl StorageClusters for Backend {
             }
             reply.manifest = Some(value.manifest);
         }
-        q::announce(node.node_id, &input).execute(&mut *tx).await?;
+        q::announce(
+            node.node_id,
+            &input,
+            observed.unwrap_or_else(|| chrono::Utc::now().timestamp_micros()),
+        )
+        .execute(&mut *tx)
+        .await?;
         q::authenticate(&mut tx, node, key, run).await?;
         tx.commit().await?;
         Ok(reply)
