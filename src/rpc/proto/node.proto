@@ -94,7 +94,11 @@ message StorageOutput {
   bool complete = 3;
 }
 
+message LatencyProbe { bytes ticket = 1; }
+message LatencyReply {}
+
 service NodeControl {
+  rpc Probe(LatencyProbe) returns (LatencyReply);
   rpc PrepareRequest(PrepareRequestInput) returns (RequestReply);
   rpc SyncNode(SyncRequest) returns (SyncReply);
   rpc ReportNode(NodeReportRequest) returns (NodeReportReply);
@@ -732,6 +736,7 @@ message Hello {
   string boot_id = 2;
   string connection_id = 3;
   uint64 previous_epoch = 4;
+  optional string region = 5;
 }
 
 message Pulse {
@@ -741,6 +746,7 @@ message Pulse {
   repeated GrantRef release = 4;
   bool renew_run = 5;
   repeated string applied = 6;
+  uint32 latency_policy = 7;
 }
 
 message Ping { uint64 nonce = 1; }
@@ -788,9 +794,12 @@ message Welcome {
   uint64 valid_for_ms = 3;
   NodeState state = 4;
   string control_id = 5;
+  optional string region = 6;
+  bytes probe_ticket = 7;
 }
 
 message PulseReply {
+  bytes probe_ticket = 5;
   uint64 sequence = 1;
   uint64 valid_for_ms = 2;
   NodeState state = 3;

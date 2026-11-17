@@ -1,4 +1,8 @@
-use super::{MESSAGE_LIMIT, PROTOCOL, SESSION_LIMIT, wire};
+use super::{
+    MESSAGE_LIMIT, PROTOCOL, SESSION_LIMIT,
+    latency::{self, Path, Policy},
+    wire,
+};
 use crate::cluster::NodeState;
 use anyhow::{Context, Result, ensure};
 use hickory_resolver::{TokioResolver, proto::rr::RData};
@@ -34,11 +38,32 @@ struct Health {
     retry_at: Instant,
 }
 
+#[derive(Default)]
+struct UnaryPath {
+    control: Option<Uuid>,
+    generation: u64,
+    variable: bool,
+    latency: Option<Path>,
+    next_probe: Option<Instant>,
+}
+
+impl UnaryPath {
+    fn observe(&mut self, id: Option<Uuid>, initial: Policy) {
+        if self.control != id {
+            self.variable |= self.control.is_some();
+            self.generation = self.generation.wrapping_add(1);
+            self.control = id;
+            self.latency = id.map(|_| Path::new(initial, Instant::now()));
+            self.next_probe = None;
+        }
+    }
+}
+
 struct Peer {
     address: Ipv4Addr,
     endpoint: Endpoint,
     channel: OnceCell<Channel>,
-    control: Mutex<Option<Uuid>>,
+    route: Mutex<UnaryPath>,
     health: Mutex<Health>,
     statistics: Arc<crate::status::stats::Counters>,
 }
@@ -68,6 +93,9 @@ struct Addresses {
 
 pub(crate) struct Client {
     pub(crate) identity: NodeState,
+    region: Option<String>,
+    probe_ticket: Arc<Mutex<Vec<u8>>>,
+    active_session: Mutex<Option<(Ipv4Addr, Uuid, std::sync::Weak<Mutex<Path>>)>>,
     origin: hyper::Uri,
     domain: String,
     port: u16,
@@ -97,6 +125,9 @@ impl Client {
         let now = Instant::now();
         Ok(Self {
             identity,
+            region: None,
+            probe_ticket: Default::default(),
+            active_session: Default::default(),
             origin,
             domain,
             port,
@@ -112,6 +143,11 @@ impl Client {
             requests: Semaphore::new(64),
             metrics: Arc::default(),
         })
+    }
+
+    pub(crate) fn with_region(mut self, region: Option<String>) -> Self {
+        self.region = region;
+        self
     }
 
     fn endpoint(&self, address: Ipv4Addr) -> Result<Endpoint> {
@@ -173,7 +209,7 @@ impl Client {
                                 .endpoint(address)
                                 .map_err(|_| Status::unavailable("cannot configure control TLS"))?,
                             channel: OnceCell::new(),
-                            control: Mutex::new(None),
+                            route: Mutex::default(),
                             statistics: Arc::default(),
                             health: Mutex::new(Health {
                                 failures: 0,
@@ -751,6 +787,15 @@ impl Client {
                         .await
                         .map_err(|_| Status::unavailable("control channel is unavailable"))?;
                     let mut request = self.request(input.clone());
+                    {
+                        let route = peer.route.lock().unwrap();
+                        if let (false,Some(id),Some(latency)) = (route.variable,route.control,&route.latency) {
+                            request.metadata_mut().insert("x-mokyu-expected-control",id.to_string().parse().unwrap());
+                            if latency.measured(Instant::now()) && latency.policy(Instant::now()) == Policy::Coalesced {
+                                request.metadata_mut().insert("x-mokyu-coalesce","1".parse().unwrap());
+                            }
+                        }
+                    }
                     if let Some(id) = trace {
                         request.metadata_mut().insert("x-mokyu-trace", id.to_string().parse().unwrap());
                         tracing::trace!(target: "mokyu::rpc::timing", %id, path, address = %peer.address, attempts, bytes, "sending unary");
@@ -767,7 +812,10 @@ impl Client {
                             let control = response.metadata().get("x-mokyu-control-id")
                                 .and_then(|value| value.to_str().ok())
                                 .and_then(|value| Uuid::parse_str(value).ok());
-                            *peer.control.lock().unwrap() = control;
+                            let region = response.metadata().get_bin("x-mokyu-control-region-bin")
+                                .and_then(|value| value.to_bytes().ok());
+                            let remote = region.as_deref().and_then(|b| std::str::from_utf8(b).ok());
+                            self.observe_unary(&peer, channel, control, remote);
                             if let Some(id) = trace {
                                 tracing::trace!(target: "mokyu::rpc::timing", %id, path, ?control, address = %peer.address, attempts, bytes = response.get_ref().encoded_len(), elapsed_us = started.elapsed().as_micros() as u64, "received unary");
                             }
@@ -792,6 +840,11 @@ impl Client {
                         tokio::time::sleep(Duration::from_millis(100 + jitter)).await;
                     }
                     Err(error) if retryable(&error) => {
+                        {
+                            let mut route = peer.route.lock().unwrap();
+                            let generation = route.generation.wrapping_add(1);
+                            *route = UnaryPath { generation, ..Default::default() };
+                        }
                         let closed = transport_closed(&error);
                         if closed {
                             peer.succeeded();
@@ -815,6 +868,54 @@ impl Client {
         })
         .await
         .unwrap_or_else(|_| Err(Status::deadline_exceeded("control deadline exceeded")))
+    }
+
+    fn observe_unary(
+        &self,
+        peer: &Arc<Peer>,
+        channel: &Channel,
+        control: Option<Uuid>,
+        remote: Option<&str>,
+    ) {
+        let mut route = peer.route.lock().unwrap();
+        route.observe(control, Policy::initial(self.region.as_deref(), remote));
+        let Some(expected) = control else { return };
+        let now = Instant::now();
+        if route.next_probe.is_some_and(|next| next > now) {
+            return;
+        }
+        let ticket = self.probe_ticket.lock().unwrap().clone();
+        if ticket.len() != 32 {
+            return;
+        }
+        route.next_probe = Some(now + latency::INTERVAL);
+        let generation = route.generation;
+        drop(route);
+        let mut request = self.request(wire::LatencyProbe { ticket });
+        request.set_timeout(ATTEMPT);
+        let peer = peer.clone();
+        let mut client = wire::node_control_client::NodeControlClient::new(channel.clone());
+        tokio::spawn(async move {
+            let start = Instant::now();
+            if let Ok(Ok(reply)) = tokio::time::timeout(ATTEMPT, client.probe(request)).await {
+                let id = reply
+                    .metadata()
+                    .get("x-mokyu-control-id")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| Uuid::parse_str(s).ok());
+                let mut route = peer.route.lock().unwrap();
+                if generation != route.generation {
+                    return;
+                }
+                if id != Some(expected) {
+                    route.observe(id, Policy::Baseline);
+                    return;
+                }
+                if let Some(path) = &mut route.latency {
+                    path.record(Instant::now(), start.elapsed());
+                }
+            }
+        });
     }
 
     pub(crate) async fn open(
@@ -852,7 +953,7 @@ impl Client {
                         .max_decoding_message_size(SESSION_LIMIT).max_encoding_message_size(SESSION_LIMIT);
                     let (sender, mut receiver) = mpsc::channel(1);
                     sender.try_send(wire::SessionRequest { message: Some(wire::session_request::Message::Hello(wire::Hello {
-                        protocol: PROTOCOL, boot_id: boot.to_string(), connection_id: connection.to_string(), previous_epoch,
+                        protocol: PROTOCOL, boot_id: boot.to_string(), connection_id: connection.to_string(), previous_epoch, region: self.region.clone(),
                     })) }).map_err(|_| Status::data_loss("session hello could not be queued"))?;
                     let outgoing = async_stream::stream! { while let Some(message) = receiver.recv().await { yield message; } };
                     let mut incoming = client.node_session(self.request(outgoing)).await?.into_inner();
@@ -864,9 +965,12 @@ impl Client {
                         return Err(Status::data_loss("control returned a different node run"));
                     }
                     super::uuid(&run.fence)?;
-                    super::uuid(&welcome.control_id)?;
+                    let id = super::uuid(&welcome.control_id)?;
+                    let latency = Arc::new(Mutex::new(Path::new(Policy::initial(self.region.as_deref(),welcome.region.as_deref()),Instant::now())));
+                    *self.active_session.lock().unwrap() = Some((peer.address,id,Arc::downgrade(&latency)));
+                    *self.probe_ticket.lock().unwrap() = welcome.probe_ticket.clone();
                     let valid_until = lease_deadline(started, welcome.valid_for_ms)?;
-                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, last_received: Instant::now(), last_sent: Instant::now(), nonce: 0, receipts: Vec::new(), receipt_due: None, work_available: false, settings: Vec::new(), metrics: self.metrics.clone(), on_notice: None, applied: Default::default(), state_changed: false })
+                    Ok(Session { peer: peer.address, sender, incoming, welcome, valid_until, last_received: Instant::now(), last_sent: Instant::now(), last_probe: Instant::now(), latency, probe_ticket: self.probe_ticket.clone(), nonce: 0, receipts: Vec::new(), receipt_due: None, work_available: false, settings: Vec::new(), metrics: self.metrics.clone(), on_notice: None, applied: Default::default(), state_changed: false })
                 }).await.unwrap_or_else(|_| Err(Status::deadline_exceeded("session connection timed out")));
                 measured.finish(&result);
                 match result {
@@ -881,6 +985,10 @@ impl Client {
 
     pub(crate) fn statistics(&self) -> serde_json::Value {
         let mut value = self.metrics.snapshot();
+        value["session_path"] = self.active_session.lock().unwrap().as_ref().and_then(|(address,control,path)| {
+            let state = path.upgrade()?;
+            Some(serde_json::json!({"address":address,"control_id":control,"latency":state.lock().unwrap().snapshot()}))
+        }).unwrap_or_default();
         value["peers"] =
             self.addresses
                 .try_lock()
@@ -888,7 +996,8 @@ impl Client {
                 .map(|addresses| {
                     addresses.peers.iter().map(|peer| {
                 let state = peer.statistics.snapshot();
-                serde_json::json!({"address": peer.address, "control_id": *peer.control.lock().unwrap(), "attempts": state["started"],
+                let route = peer.route.lock().unwrap();
+                serde_json::json!({"address": peer.address, "control_id": route.control, "variable":route.variable,"latency":route.latency.as_ref().map(Path::snapshot), "attempts": state["started"],
                     "failed": state["failed"], "canceled": state["canceled"],
                     "duration_ms": state["duration_ms"]})
             }).collect::<Vec<_>>()
@@ -912,6 +1021,9 @@ pub(crate) struct Session {
     pub(crate) valid_until: Instant,
     last_received: Instant,
     last_sent: Instant,
+    last_probe: Instant,
+    latency: Arc<Mutex<Path>>,
+    probe_ticket: Arc<Mutex<Vec<u8>>>,
     nonce: u64,
     receipts: Vec<String>,
     receipt_due: Option<Instant>,
@@ -1025,7 +1137,7 @@ impl Session {
     }
 
     pub(crate) fn io_deadline(&self) -> Instant {
-        let idle = self.last_sent.min(self.last_received) + Duration::from_secs(10);
+        let idle = self.last_sent.min(self.last_received).min(self.last_probe) + latency::INTERVAL;
         self.receipt_due
             .map_or(idle, |at| at.min(idle))
             .min(self.valid_until)
@@ -1038,7 +1150,9 @@ impl Session {
         if self.receipt_due.is_some_and(|at| at <= Instant::now()) {
             self.flush_receipts().await?;
         }
-        if self.last_sent.min(self.last_received) + Duration::from_secs(10) <= Instant::now() {
+        if self.last_sent.min(self.last_received).min(self.last_probe) + latency::INTERVAL
+            <= Instant::now()
+        {
             self.ping().await?;
         }
         Ok(())
@@ -1051,6 +1165,7 @@ impl Session {
             .checked_add(1)
             .ok_or_else(|| Status::data_loss("ping sequence exhausted"))?;
         let nonce = self.nonce;
+        self.last_probe = Instant::now();
         let deadline = self
             .valid_until
             .min(Instant::now() + Duration::from_secs(10));
@@ -1062,6 +1177,10 @@ impl Session {
                 self.last_received = Instant::now();
                 match message.and_then(|r| r.message) {
                     Some(wire::session_reply::Message::Pong(pong)) if pong.nonce == nonce => {
+                        self.latency
+                            .lock()
+                            .unwrap()
+                            .record(self.last_received, self.last_received - self.last_probe);
                         return Ok(());
                     }
                     Some(wire::session_reply::Message::Notice(notice)) => {
@@ -1075,6 +1194,10 @@ impl Session {
         .unwrap_or_else(|_| Err(Status::deadline_exceeded("node ping timed out")));
         operation.finish(result.is_err());
         result
+    }
+
+    pub(crate) fn policy(&self) -> Policy {
+        self.latency.lock().unwrap().policy(Instant::now())
     }
 
     pub(crate) fn take_state_change(&mut self) -> bool {
@@ -1159,6 +1282,7 @@ impl Session {
                 renew,
                 release,
                 renew_run,
+                latency_policy: self.policy().code(),
                 applied,
             }))
             .await?;
@@ -1210,6 +1334,7 @@ impl Session {
             return Err(Status::data_loss("invalid resource acknowledgement"));
         }
         self.last_received = Instant::now();
+        *self.probe_ticket.lock().unwrap() = reply.probe_ticket.clone();
         Ok(reply)
     }
 }

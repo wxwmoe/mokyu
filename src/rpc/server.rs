@@ -54,6 +54,13 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     let unary = Arc::new(Semaphore::new((app.budget.data_slots * 4).clamp(4, 64)));
     let sessions = Arc::new(Semaphore::new(app.budget.request_connections.min(1024)));
     let service = Service { app: app.clone() };
+    let region = app.config.instance.region.as_ref().map(|region| {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode(region)
+            .parse::<hyper::header::HeaderValue>()
+            .unwrap()
+    });
     tonic::service::Routes::new(
         NodeControlServer::new(service.clone())
             .max_decoding_message_size(super::OBSERVATION_LIMIT)
@@ -103,6 +110,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     .layer(axum::middleware::from_fn(
         move |mut request: axum::extract::Request, next: axum::middleware::Next| {
             let control = app.node.get().map(|node| node.node_id);
+            let region = region.clone();
             let limits = if request.uri().path() == "/mokyu.node.v1.NodeSessions/NodeSession" {
                 sessions.clone()
             } else {
@@ -150,6 +158,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
                     && parts.headers.get("grpc-status").is_none_or(|value| value == "0")
                 {
                     parts.headers.insert("x-mokyu-control-id", control.to_string().parse().unwrap());
+                    if let Some(region) = region { parts.headers.insert("x-mokyu-control-region-bin", region); }
                 }
                 if let (Some(id), Some(started)) = (trace, started) {
                     tracing::trace!(target: "mokyu::rpc::timing", %id, ?control, elapsed_us = started.elapsed().as_micros() as u64, "handler returned");
@@ -223,6 +232,7 @@ fn storage_method(path: &str) -> bool {
     matches!(
         path,
         "/mokyu.node.v1.NodeSessions/NodeSession"
+            | "/mokyu.node.v1.NodeControl/Probe"
             | "/mokyu.node.v1.NodeControl/SyncNode"
             | "/mokyu.node.v1.NodeControl/ReportNode"
             | "/mokyu.node.v1.NodeControl/CloseNode"
@@ -1193,6 +1203,29 @@ fn state(snapshot: &session::Snapshot) -> wire::NodeState {
 
 #[tonic::async_trait]
 impl NodeControl for Service {
+    async fn probe(
+        &self,
+        request: Request<wire::LatencyProbe>,
+    ) -> Result<Response<wire::LatencyReply>, Status> {
+        let node = identity(&request)?;
+        let ticket = &request.get_ref().ticket;
+        let period = chrono::Utc::now().timestamp().div_euclid(60);
+        if ticket.len() != 32
+            || ![period, period - 1].into_iter().any(|slot| {
+                let expected = super::latency::probe_token(
+                    &self.app.secrets.credential_key.material,
+                    &node,
+                    slot,
+                );
+                aws_lc_rs::constant_time::verify_slices_are_equal(ticket, expected.as_bytes())
+                    .is_ok()
+            })
+        {
+            return Err(Status::unauthenticated("invalid latency probe"));
+        }
+        Ok(Response::new(wire::LatencyReply {}))
+    }
+
     async fn close_node(
         &self,
         request: Request<wire::CloseNodeRequest>,
@@ -1389,6 +1422,10 @@ impl NodeSessions for Service {
         if hello.protocol != PROTOCOL {
             return Err(Status::unimplemented("unsupported node protocol"));
         }
+        if let Some(region) = &hello.region {
+            crate::config::storage::label(region, "region")
+                .map_err(|_| Status::invalid_argument("invalid node region"))?;
+        }
         if hello.previous_epoch > i64::MAX as u64 {
             return Err(Status::invalid_argument("invalid node epoch"));
         }
@@ -1422,11 +1459,12 @@ impl NodeSessions for Service {
             .to_string();
         let mut handoff = app.control_admission.subscribe();
         let stream = async_stream::try_stream! {
+            let probe_ticket = || super::latency::probe_token(&app.secrets.credential_key.material, &node, chrono::Utc::now().timestamp().div_euclid(60)).as_bytes().to_vec();
             let run = snapshot.run;
             let epoch = snapshot.epoch;
             yield wire::SessionReply { message: Some(wire::session_reply::Message::Welcome(wire::Welcome {
                 run: Some(wire::Run { boot_id: run.boot.to_string(), fence: run.fence.to_string() }),
-                epoch: epoch as u64, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), control_id,
+                epoch: epoch as u64, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), control_id, region: app.config.instance.region.clone(), probe_ticket:probe_ticket(),
             })) };
             let mut sent_hints = crate::cluster::notifications::Hints::default();
             let mut pending = false;
@@ -1514,12 +1552,12 @@ impl NodeSessions for Service {
                 if !pulse.renew_run {
                     if pulse.draining { Err(Status::invalid_argument("draining requires run renewal"))?; }
                     let (remaining,grants) = bounded(app.node_sessions.maintain_session(&node,&app.secrets.credential_key,run,epoch,pulse.sequence as i64,resources)).await?;
-                    yield wire::SessionReply { message:Some(wire::session_reply::Message::Pulse(wire::PulseReply { sequence:pulse.sequence, valid_for_ms:remaining as u64, state:None, grants:grants.into_iter().map(super::read::grant_result).collect() })) };
+                    yield wire::SessionReply { message:Some(wire::session_reply::Message::Pulse(wire::PulseReply { sequence:pulse.sequence, valid_for_ms:remaining as u64, state:None, probe_ticket:probe_ticket(), grants:grants.into_iter().map(super::read::grant_result).collect() })) };
                     continue;
                 }
                 let snapshot = bounded(app.node_sessions.pulse_session(&node, &app.secrets.credential_key, run, epoch, pulse.sequence as i64, pulse.draining, resources)).await?;
                 yield wire::SessionReply { message: Some(wire::session_reply::Message::Pulse(wire::PulseReply {
-                    sequence: pulse.sequence, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)),
+                    sequence: pulse.sequence, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), probe_ticket:probe_ticket(),
                     grants: snapshot.grants.into_iter().map(super::read::grant_result).collect(),
                 })) };
             }

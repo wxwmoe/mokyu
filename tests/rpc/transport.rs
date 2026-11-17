@@ -523,6 +523,7 @@ async fn node_rpc_balances_tls_origins_and_recovers_sessions() -> Result<()> {
                 boot_id: boot.to_string(),
                 connection_id: connection.to_string(),
                 previous_epoch,
+                region: None,
             })),
         };
         assert_eq!(
@@ -540,6 +541,7 @@ async fn node_rpc_balances_tls_origins_and_recovers_sessions() -> Result<()> {
             boot_id: "x".repeat(SESSION_LIMIT + 1),
             connection_id: connection.to_string(),
             previous_epoch: 0,
+            region: None,
         })),
     };
     let stream = futures_util::stream::iter([too_large]);

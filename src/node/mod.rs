@@ -157,7 +157,7 @@ impl NodeContext {
                 .context("control_url is required")?,
             identity,
         )?;
-        let client = Arc::new(client);
+        let client = Arc::new(client.with_region(config.instance.region.clone()));
         Ok(Arc::new(Self {
             config,
             budget: OnceLock::new(),

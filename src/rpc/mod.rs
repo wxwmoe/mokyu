@@ -1,4 +1,5 @@
 pub(crate) mod client;
+pub(crate) mod latency;
 mod metrics;
 mod multipart;
 mod native;

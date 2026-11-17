@@ -337,7 +337,8 @@ pub(crate) async fn run(config: NodeConfig, budget: Budget) -> Result<()> {
         "node identity does not match storage role"
     );
     let files = files::Files::open(&config.instance, &budget, lock).await?;
-    let client = Client::new(config.instance.control_url.as_deref().unwrap(), identity)?;
+    let client = Client::new(config.instance.control_url.as_deref().unwrap(), identity)?
+        .with_region(config.instance.region.clone());
     let node = Arc::new(Node {
         config,
         writes: Arc::new(Semaphore::new(budget.storage_upload_slots)),

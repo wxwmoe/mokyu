@@ -18,7 +18,7 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 
 ## storage 角色
 
-`storage` 同样使用节点身份 metadata，但只允许会话、SyncNode、ReportNode、CloseNode 和 `StorageControl/Announce`。control 在业务消息解码前拒绝它访问读取计划、密钥材料、上传和 worker 工作。storage 不持有部署 key，也不取得 data/worker 的业务权限。
+`storage` 同样使用节点身份 metadata，但只允许会话、Probe、SyncNode、ReportNode、CloseNode 和 `StorageControl/Announce`。control 在业务消息解码前拒绝它访问读取计划、密钥材料、上传和 worker 工作。storage 不持有部署 key，也不取得 data/worker 的业务权限。
 
 `StorageControl/Announce` 携带当前运行权和介质身份、地址、地区、存储分组、容量及已有清单。返回目标清单与一批历史；节点持久核对完整历史后才发布新 `cluster.json`。更换部署签发的身份时保留旧清单，正常入群不会隐式接管旧布局。
 
@@ -240,6 +240,10 @@ worker/node 通过 `NodeWork/Exchange` 领取回源任务与受保护的来源�
 图片 GET 的访问热度归到当前读取的原始物理来源，打包或分层后重新解析对应区块、整包或 raw。仅做跳转或 HEAD 不记作已经读取正文。
 
 ## 地址选择
+
+`Hello` 和 `Welcome` 交换可选的 `instance.region`。同地区先用低延迟档，跨地区先用合并档，地区缺省先用基准档。会话从匹配的 Ping/Pong 取样，Unary 在使用中的各地址每十秒至多补一次独立探测。Probe 使用已认证会话签发的短期票据，无需查询数据库。响应的 control 身份变动时重新采样，代理逐请求选择实例时使用基准窗口。
+
+取得五个样本后按 RTT 中位数选择档位，30 ms 以内取低延迟档，60 ms 以上取合并档。随后须连续两组各五个样本越过同一阈值才换档，连续 60 秒没有样本即回到基准档。节点状态的 `rpc.session_path` 和 `rpc.peers` 可分别查看会话和 Unary 的实际处理方、样本及当前档位。
 
 节点状态的 `rpc.peers[].control_id` 来自该地址最近一次成功 Unary 的响应。会话对端由 Welcome 单独标识。启用 `mokyu::rpc::timing=trace` 可用同一请求 ID 对照各次传输、实际 control、处理耗时和消息字节数。
 
