@@ -22,6 +22,10 @@ control 在 `instance.listen_control` 同一端口提供管理 HTTP 和 gRPC。�
 
 `StorageControl/Announce` 携带当前运行权和介质身份、地址、地区、存储分组、容量及已有清单。返回目标清单与一批历史；节点持久核对完整历史后才发布新 `cluster.json`。更换部署签发的身份时保留旧清单，正常入群不会隐式接管旧布局。
 
+storage 长时间接收分片时按正文传输进度判断空闲超时，续期消息不会延长空闲时间。单次分片传输的总时限取 15 分钟和空闲时限中的较大值。写入成功需要取得所选确认档要求的分片回执。
+
+`NodeStorage/PrepareUpload` 可连同首个序号的映射返回。`AdvanceWindow` 先持久化已收分片回执，再申请接续窗口。只收到确认时，data 单独重领窗口。最后一批回执在校验输入长度并读到 EOF 后提交。对单窗载荷，data 到 control 的原生协议由三次往返缩为两次。服务端按剩余授权时间、近期写速率和每次 256 个映射的上限限制预领，正文直接写入 storage。
+
 storage 的专用 HTTPS/HTTP2 端点提供以下物理操作。`Inspect` 使用该节点凭据，要求有效 control 会话，返回身份、已提交清单和容量。其余操作使用 control 签名的短期授权，调用方不取得 storage 的节点凭据或部署 key。监听、原生 TLS 和代理模式见[存储群集](storage-clusters.md)。物理文件完成不等于上层对象已经发布。
 
 | `StorageNode` 方法 | 请求与结果 |

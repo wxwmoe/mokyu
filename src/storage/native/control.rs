@@ -988,7 +988,7 @@ impl Control {
         run: crate::model::session::Run,
         input: &crate::model::storage_native::access::Upload,
         region: Option<&str>,
-    ) -> Result<Intent> {
+    ) -> Result<(Intent, i64)> {
         if let Some(region) = region {
             crate::config::storage::label(region, "region")?;
         }
@@ -996,7 +996,8 @@ impl Control {
             .payloads
             .authorize_upload(node, &self.secrets.credential_key, run, input)
             .await?;
-        Ok(self
+        let expires = access.expires;
+        let intent = self
             .reserve(WriteRequest {
                 namespace: input.storage,
                 cluster: access.cluster,
@@ -1009,7 +1010,8 @@ impl Control {
             })
             .await?
             .payload
-            .intent)
+            .intent;
+        Ok((intent, expires))
     }
 
     async fn upload_access(
@@ -1043,9 +1045,21 @@ impl Control {
         input: &crate::model::storage_native::access::Upload,
         operation: Uuid,
         sequence: u32,
+        desired: u32,
+        sequence_ms: u32,
     ) -> Result<Vec<Piece>> {
         let expires = self.upload_access(node, run, input, operation).await?;
-        self.write_window_until(operation, sequence, 1, expires)
+        let now = chrono::Utc::now().timestamp_micros();
+        let remaining_ms = expires.saturating_sub(now).min(90_000_000) / 1000;
+        let count = if sequence_ms == 0 {
+            1
+        } else {
+            desired.clamp(1, 4).min(
+                (remaining_ms.saturating_sub(5_000).max(0) as u64 / u64::from(sequence_ms))
+                    .clamp(1, 4) as u32,
+            )
+        };
+        self.write_window_until(operation, sequence, count, expires)
             .await
     }
 
@@ -1310,7 +1324,7 @@ impl Control {
             .await
     }
 
-    async fn write_window_until(
+    pub(crate) async fn write_window_until(
         &self,
         operation: Uuid,
         first: u32,
@@ -1318,6 +1332,16 @@ impl Control {
         expires: i64,
     ) -> Result<Vec<Piece>> {
         let value = self.payloads.get(operation).await?;
+        let remaining = value
+            .intent
+            .sequences()
+            .checked_sub(u64::from(first))
+            .context("native window past end")?;
+        let count = u64::from(count)
+            .min(remaining)
+            .min((crate::model::storage_payload::BATCH_LIMIT / value.intent.layout.width()) as u64)
+            as u32;
+        ensure!(count > 0, "empty native window");
         let snapshot = self.snapshot(value.intent.cluster).await?;
         let reserved = self.payloads.reserve_targets(operation).await?;
         let mappings = self

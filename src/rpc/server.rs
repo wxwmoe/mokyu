@@ -330,20 +330,34 @@ impl NodeStorage for Service {
     async fn prepare_upload(
         &self,
         request: Request<wire::NativeUploadRequest>,
-    ) -> Result<Response<wire::StorageResult>, Status> {
+    ) -> Result<Response<wire::NativePrepared>, Status> {
         let node = identity(&request)?;
         let input = request.into_inner();
         let run = super::read::run(input.run)?;
         let upload = serde_json::from_slice(&input.input_json)
             .map_err(|_| Status::invalid_argument("invalid native upload request"))?;
-        let intent = bounded(self.app.native_storage.node_upload(
+        let (intent, expires) = bounded(self.app.native_storage.node_upload(
             &node,
             run,
             &upload,
             input.region.as_deref(),
         ))
         .await?;
-        Ok(Response::new(wire::StorageResult {
+        let window_json = if input.first_window {
+            let first = bounded(self.app.native_storage.write_window_until(
+                intent.operation,
+                0,
+                1,
+                expires,
+            ))
+            .await?;
+            serde_json::to_vec(&first)
+                .map_err(|_| Status::internal("encode native write window"))?
+        } else {
+            Vec::new()
+        };
+        Ok(Response::new(wire::NativePrepared {
+            window_json,
             result_json: serde_json::to_vec(&intent)
                 .map_err(|_| Status::internal("encode native write intent"))?,
         }))
@@ -365,11 +379,88 @@ impl NodeStorage for Service {
             &upload,
             operation,
             input.sequence,
+            1,
+            0,
         ))
         .await?;
         Ok(Response::new(wire::StorageResult {
             result_json: serde_json::to_vec(&plan)
                 .map_err(|_| Status::internal("encode native write window"))?,
+        }))
+    }
+
+    async fn advance_window(
+        &self,
+        request: Request<wire::NativeAdvance>,
+    ) -> Result<Response<wire::NativeAdvanced>, Status> {
+        let node = identity(&request)?;
+        let actual = self.app.node.get().map(|node| node.node_id);
+        let expected = request
+            .metadata()
+            .get("x-mokyu-expected-control")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let wide = expected.is_some()
+            && actual == expected
+            && request
+                .metadata()
+                .get("x-mokyu-coalesce")
+                .is_some_and(|v| v == "1");
+        let input = request.into_inner();
+        let next = input
+            .next
+            .ok_or_else(|| Status::invalid_argument("missing next window"))?;
+        let run = super::read::run(next.run)?;
+        let operation = super::uuid(&next.operation_id)?;
+        let upload = serde_json::from_slice(&next.input_json)
+            .map_err(|_| Status::invalid_argument("invalid native upload request"))?;
+        let completed: Vec<model::storage_transfer::Completion> =
+            serde_json::from_slice(&input.receipts_json)
+                .map_err(|_| Status::invalid_argument("invalid native receipts"))?;
+        let previous = next
+            .sequence
+            .checked_sub(1)
+            .ok_or_else(|| Status::invalid_argument("invalid next sequence"))?;
+        if completed.is_empty()
+            || !completed
+                .iter()
+                .any(|c| c.receipt.receipt.header.sequence == previous)
+            || completed
+                .iter()
+                .any(|c| c.receipt.receipt.header.sequence > previous)
+        {
+            return Err(Status::invalid_argument(
+                "receipts do not precede the next window",
+            ));
+        }
+        bounded(
+            self.app
+                .native_storage
+                .node_accept(&node, run, &upload, operation, &completed),
+        )
+        .await?;
+        #[cfg(feature = "fault-injection")]
+        crate::faults::point("native-window-accepted").await;
+        let next = bounded(self.app.native_storage.node_write_window(
+            &node,
+            run,
+            &upload,
+            operation,
+            next.sequence,
+            if wide { input.desired } else { 1 },
+            input.sequence_ms,
+        ))
+        .await;
+        // The previous transaction is durable even when allocation must be retried.
+        let window_json = match next {
+            Ok(plan) => {
+                serde_json::to_vec(&plan).map_err(|_| Status::internal("encode next window"))?
+            }
+            Err(_) => Vec::new(),
+        };
+        Ok(Response::new(wire::NativeAdvanced {
+            accepted_through: previous,
+            window_json,
         }))
     }
 

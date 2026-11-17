@@ -341,8 +341,16 @@ impl Client {
     pub(crate) async fn storage_upload(
         &self,
         input: wire::NativeUploadRequest,
-    ) -> Result<wire::StorageResult, Status> {
+    ) -> Result<wire::NativePrepared, Status> {
         self.unary(input, "/mokyu.node.v1.NodeStorage/PrepareUpload")
+            .await
+    }
+
+    pub(crate) async fn storage_advance(
+        &self,
+        input: wire::NativeAdvance,
+    ) -> Result<wire::NativeAdvanced, Status> {
+        self.unary(input, "/mokyu.node.v1.NodeStorage/AdvanceWindow")
             .await
     }
 

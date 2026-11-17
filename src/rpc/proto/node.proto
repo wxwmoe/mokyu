@@ -8,7 +8,8 @@ service StorageControl {
 service NodeStorage {
   rpc Read(NativeReadRequest) returns (NativeReadReply);
   rpc RenewRead(NativeReadRenewal) returns (StorageRequest);
-  rpc PrepareUpload(NativeUploadRequest) returns (StorageResult);
+  rpc PrepareUpload(NativeUploadRequest) returns (NativePrepared);
+  rpc AdvanceWindow(NativeAdvance) returns (NativeAdvanced);
   rpc WriteWindow(NativeWriteWindow) returns (StorageResult);
   rpc AcceptUpload(NativeUploadResult) returns (StorageResult);
   rpc RenewUpload(NativeReadRenewal) returns (StorageRequest);
@@ -21,10 +22,28 @@ message NativeMaintenanceRequest {
   bytes input_json = 2;
 }
 
+message NativePrepared {
+  bytes result_json = 1;
+  bytes window_json = 2;
+}
+
+message NativeAdvance {
+  NativeWriteWindow next = 1;
+  bytes receipts_json = 2;
+  uint32 desired = 3;
+  uint32 sequence_ms = 4;
+}
+
+message NativeAdvanced {
+  uint32 accepted_through = 1;
+  bytes window_json = 2;
+}
+
 message NativeUploadRequest {
   Run run = 1;
   bytes input_json = 2;
   optional string region = 3;
+  bool first_window = 4;
 }
 
 message NativeWriteWindow {

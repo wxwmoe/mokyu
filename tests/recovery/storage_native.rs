@@ -4485,7 +4485,7 @@ async fn work_access(
         path: path.clone(),
         size: bytes.len() as u64,
     };
-    let intent = control.node_upload(&node, run, &input, None).await?;
+    let (intent, _) = control.node_upload(&node, run, &input, None).await?;
     input.size += 1;
     assert!(control.node_upload(&node, run, &input, None).await.is_err());
     input.size -= 1;
@@ -4517,7 +4517,7 @@ async fn work_access(
             .is_err()
     );
     for piece in control
-        .node_write_window(&node, run, &input, intent.operation, 0)
+        .node_write_window(&node, run, &input, intent.operation, 0, 1, 0)
         .await?
     {
         let receipt = pool

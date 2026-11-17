@@ -19,13 +19,15 @@ use tokio::{
 };
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 
+const WRITE_DEADLINE: Duration = Duration::from_secs(15 * 60);
+
 #[async_trait::async_trait]
 pub(crate) trait Renewal: Send + Sync {
     async fn renew(&self, grant: &SignedGrant) -> Result<SignedGrant>;
 }
 
 pub(crate) struct Pool {
-    clients: Mutex<HashMap<String, StorageNodeClient<Channel>>>,
+    clients: Mutex<HashMap<(String, bool), StorageNodeClient<Channel>>>,
     timeout: Duration,
 }
 
@@ -140,14 +142,23 @@ impl Pool {
     }
 
     fn client(&self, url: &str) -> Result<StorageNodeClient<Channel>> {
+        self.channel(url, false)
+    }
+
+    fn channel(&self, url: &str, writing: bool) -> Result<StorageNodeClient<Channel>> {
         crate::config::storage::url(url)?;
+        let key = (url.to_owned(), writing);
         let mut clients = self.clients.lock().unwrap();
-        if let Some(client) = clients.get(url) {
+        if let Some(client) = clients.get(&key) {
             return Ok(client.clone());
         }
         let endpoint = Endpoint::from_shared(url.to_owned())?
             .connect_timeout(self.timeout.min(Duration::from_secs(10)))
-            .timeout(self.timeout)
+            .timeout(if writing {
+                self.timeout.max(WRITE_DEADLINE)
+            } else {
+                self.timeout
+            })
             .concurrency_limit(crate::model::storage_transfer::STREAMS_PER_CONNECTION)
             .buffer_size(crate::model::storage_transfer::STREAMS_PER_CONNECTION)
             .initial_stream_window_size(1024 * 1024)
@@ -162,7 +173,7 @@ impl Pool {
                 clients.remove(&old);
             }
         }
-        clients.insert(url.to_owned(), client.clone());
+        clients.insert(key, client.clone());
         Ok(client)
     }
 
@@ -203,10 +214,17 @@ impl Pool {
         };
         let expected = header.clone();
         let forwarding = targets.len() > 1;
-        let mut client = self.client(&target.url)?;
+        let mut client = self.channel(&target.url, true)?;
         let (send, receive) = mpsc::channel(2);
+        let progress = Arc::new(Mutex::new(Instant::now()));
+        let last_frame = progress.clone();
         let input = futures_util::stream::unfold(receive, |mut receive| async move {
             receive.recv().await.map(|value| (value, receive))
+        })
+        .inspect(move |frame: &wire::StorageInput| {
+            if !frame.data.is_empty() || frame.complete {
+                *last_frame.lock().unwrap() = Instant::now();
+            }
         });
         let request = async {
             let response = if forwarding {
@@ -276,7 +294,15 @@ impl Pool {
             .context("storage writer stopped")?;
             Ok::<_, anyhow::Error>(*digest.finalize().as_bytes())
         };
-        let (receipts, digest) = tokio::try_join!(request, feed)?;
+        let transfer = tokio::time::timeout(self.timeout.max(WRITE_DEADLINE), async {
+            tokio::try_join!(request, feed)
+        });
+        let (receipts, digest) = tokio::select! {
+            result = transfer => result.map_err(|_| tonic::Status::deadline_exceeded("storage write exceeded its deadline"))??,
+            _ = write_stalled(&progress, self.timeout) => {
+                return Err(tonic::Status::deadline_exceeded("storage write made no progress").into());
+            }
+        };
         ensure!(
             receipts.len() == targets.len(),
             "storage forwarding omitted a receipt"
@@ -404,6 +430,16 @@ impl Pool {
             })
             .await?;
         Ok(())
+    }
+}
+
+async fn write_stalled(progress: &Mutex<Instant>, idle: Duration) {
+    loop {
+        let deadline = *progress.lock().unwrap() + idle;
+        if deadline <= Instant::now() {
+            return;
+        }
+        tokio::time::sleep_until(deadline).await;
     }
 }
 

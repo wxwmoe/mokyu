@@ -84,6 +84,16 @@ impl Sink {
 #[async_trait::async_trait]
 pub(crate) trait Writes: Renewal {
     async fn window(&self, operation: Uuid, sequence: u32) -> Result<Vec<Piece>>;
+    async fn advance(
+        &self,
+        operation: Uuid,
+        sequence: u32,
+        previous: &[Completion],
+        _sequence_ms: u32,
+    ) -> Result<Vec<Piece>> {
+        self.accept(operation, previous).await?;
+        self.window(operation, sequence).await
+    }
     async fn accept(&self, operation: Uuid, completed: &[Completion]) -> Result<()>;
 }
 
@@ -102,8 +112,19 @@ pub(crate) async fn write(
     control: &dyn Writes,
     pool: &Pool,
     intent: &Intent,
+    body: BoxStream<'_, Result<Bytes>>,
+    region: Option<&str>,
+) -> Result<()> {
+    write_prepared(control, pool, intent, body, region, Vec::new()).await
+}
+
+pub(crate) async fn write_prepared(
+    control: &dyn Writes,
+    pool: &Pool,
+    intent: &Intent,
     mut body: BoxStream<'_, Result<Bytes>>,
     region: Option<&str>,
+    first_window: Vec<Piece>,
 ) -> Result<()> {
     intent.validate()?;
     ensure!(intent.layout.supported(), "unsupported native write layout");
@@ -111,11 +132,39 @@ pub(crate) async fn write(
         .then(|| crate::content::erasure::codec(&intent.layout))
         .transpose()?;
     let mut pending = Bytes::new();
-    let mut final_receipts = None;
+    let mut window = std::collections::VecDeque::from(first_window);
+    let mut receipts: Vec<Completion> = Vec::new();
+    let mut sequence_ms = 0;
     for sequence in 0..intent.sequences() as u32 {
-        let pieces = control.window(intent.operation, sequence).await?;
+        if window.is_empty() {
+            let next = if receipts.is_empty() {
+                control.window(intent.operation, sequence).await?
+            } else {
+                control
+                    .advance(intent.operation, sequence, &receipts, sequence_ms)
+                    .await?
+            };
+            receipts.clear();
+            ensure!(
+                next.len() <= crate::model::storage_payload::BATCH_LIMIT,
+                "native window exceeds fragment limit"
+            );
+            window = next.into();
+        }
+        let started = tokio::time::Instant::now();
+        let pieces: Vec<_> = window
+            .drain(..window.len().min(intent.layout.width()))
+            .collect();
         ensure!(
-            pieces.len() == intent.layout.width(),
+            pieces.len() == intent.layout.width()
+                && pieces.iter().enumerate().all(|(slot, p)| {
+                    let h = &p.mapping.header;
+                    h.sequence == sequence
+                        && usize::from(h.copy)
+                            * usize::from(intent.layout.data_shards + intent.layout.parity_shards)
+                            + usize::from(h.shard)
+                            == slot
+                }),
             "native write plan is incomplete"
         );
         let mut groups: Vec<Vec<_>> = Vec::new();
@@ -268,15 +317,20 @@ pub(crate) async fn write(
                 result
             }
         };
-        let completed = completed.into_iter().flatten().collect::<Vec<_>>();
-        if u64::from(sequence) + 1 == intent.sequences() {
-            final_receipts = Some(completed);
-        } else {
-            control.accept(intent.operation, &completed).await?;
+        receipts.extend(completed.into_iter().flatten());
+        sequence_ms = started.elapsed().as_millis().clamp(1, u128::from(u32::MAX)) as u32;
+        if !window.is_empty()
+            && receipts.iter().any(|r| {
+                r.authorization.grant.expires
+                    <= chrono::Utc::now().timestamp() + i64::from(sequence_ms).div_euclid(1000) + 5
+            })
+        {
+            control.accept(intent.operation, &receipts).await?;
+            receipts.clear();
         }
     }
     ensure!(
-        pending.is_empty(),
+        pending.is_empty() && window.is_empty(),
         "native object exceeds its planned length"
     );
     while let Some(bytes) = body.next().await {
@@ -285,11 +339,6 @@ pub(crate) async fn write(
             "native object exceeds its planned length"
         );
     }
-    control
-        .accept(
-            intent.operation,
-            &final_receipts.context("native stream has no final receipts")?,
-        )
-        .await?;
+    control.accept(intent.operation, &receipts).await?;
     Ok(())
 }

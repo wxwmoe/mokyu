@@ -482,8 +482,16 @@ impl Store {
                         size,
                     },
                 };
-                let intent = writer.prepare(self.region.clone()).await?;
-                writer::write(&writer, &self.pool, &intent, body, self.region.as_deref()).await?;
+                let (intent, first) = writer.prepare(self.region.clone()).await?;
+                writer::write_prepared(
+                    &writer,
+                    &self.pool,
+                    &intent,
+                    body,
+                    self.region.as_deref(),
+                    first,
+                )
+                .await?;
                 intent
             }
             _ => anyhow::bail!("native upload authority is missing"),
@@ -608,6 +616,12 @@ fn native_failures_preserve_business_and_transport_errors() {
         (
             anyhow::Error::new(status),
             s3s::S3ErrorCode::OperationAborted,
+        ),
+        (
+            anyhow::Error::new(tonic::Status::deadline_exceeded(
+                "storage write made no progress",
+            )),
+            s3s::S3ErrorCode::ServiceUnavailable,
         ),
         (
             anyhow::Error::new(tonic::Status::unavailable("storage disconnected")),
