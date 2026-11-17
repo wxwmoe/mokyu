@@ -38,6 +38,7 @@ struct Peer {
     address: Ipv4Addr,
     endpoint: Endpoint,
     channel: OnceCell<Channel>,
+    control: Mutex<Option<Uuid>>,
     health: Mutex<Health>,
     statistics: Arc<crate::status::stats::Counters>,
 }
@@ -172,6 +173,7 @@ impl Client {
                                 .endpoint(address)
                                 .map_err(|_| Status::unavailable("cannot configure control TLS"))?,
                             channel: OnceCell::new(),
+                            control: Mutex::new(None),
                             statistics: Arc::default(),
                             health: Mutex::new(Health {
                                 failures: 0,
@@ -701,7 +703,8 @@ impl Client {
         } else {
             super::read::REQUEST_LIMIT
         };
-        if input.encoded_len() > limit {
+        let bytes = input.encoded_len();
+        if bytes > limit {
             return Err(Status::resource_exhausted(
                 "node request exceeds message limit",
             ));
@@ -711,6 +714,8 @@ impl Client {
             .try_acquire()
             .map_err(|_| Status::resource_exhausted("node control requests are busy"))?;
         let deadline = Instant::now() + DEADLINE;
+        let trace = tracing::enabled!(target: "mokyu::rpc::timing", tracing::Level::TRACE)
+            .then(Uuid::new_v4);
         tokio::time::timeout_at(deadline, async {
             let mut excluded = HashSet::new();
             let mut failures = 0;
@@ -721,6 +726,7 @@ impl Client {
                     Err(error) => return Err(error),
                 };
                 excluded.insert(peer.address);
+                let started = Instant::now();
                 let mut measured = self.metrics.attempt(&peer.statistics, attempts > 0);
                 attempts += 1;
                 let attempt = deadline.min(Instant::now() + ATTEMPT);
@@ -745,6 +751,10 @@ impl Client {
                         .await
                         .map_err(|_| Status::unavailable("control channel is unavailable"))?;
                     let mut request = self.request(input.clone());
+                    if let Some(id) = trace {
+                        request.metadata_mut().insert("x-mokyu-trace", id.to_string().parse().unwrap());
+                        tracing::trace!(target: "mokyu::rpc::timing", %id, path, address = %peer.address, attempts, bytes, "sending unary");
+                    }
                     request.set_timeout(attempt.saturating_duration_since(Instant::now()));
                     client
                         .unary(
@@ -753,11 +763,23 @@ impl Client {
                             tonic_prost::ProstCodec::<I, O>::default(),
                         )
                         .await
-                        .map(|response| response.into_inner())
+                        .map(|response| {
+                            let control = response.metadata().get("x-mokyu-control-id")
+                                .and_then(|value| value.to_str().ok())
+                                .and_then(|value| Uuid::parse_str(value).ok());
+                            *peer.control.lock().unwrap() = control;
+                            if let Some(id) = trace {
+                                tracing::trace!(target: "mokyu::rpc::timing", %id, path, ?control, address = %peer.address, attempts, bytes = response.get_ref().encoded_len(), elapsed_us = started.elapsed().as_micros() as u64, "received unary");
+                            }
+                            response.into_inner()
+                        })
                 })
                 .await
                 .unwrap_or_else(|_| Err(Status::deadline_exceeded("control attempt timed out")));
                 measured.finish(&result);
+                if let (Some(id), Err(error)) = (trace, &result) {
+                    tracing::trace!(target: "mokyu::rpc::timing", %id, path, address = %peer.address, attempts, code = ?error.code(), elapsed_us = started.elapsed().as_micros() as u64, "unary attempt failed");
+                }
                 match result {
                     Ok(reply) => {
                         peer.succeeded();
@@ -866,7 +888,7 @@ impl Client {
                 .map(|addresses| {
                     addresses.peers.iter().map(|peer| {
                 let state = peer.statistics.snapshot();
-                serde_json::json!({"address": peer.address, "attempts": state["started"],
+                serde_json::json!({"address": peer.address, "control_id": *peer.control.lock().unwrap(), "attempts": state["started"],
                     "failed": state["failed"], "canceled": state["canceled"],
                     "duration_ms": state["duration_ms"]})
             }).collect::<Vec<_>>()

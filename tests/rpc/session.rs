@@ -28,6 +28,15 @@ async fn node_sessions_push_reports_and_close() -> Result<()> {
     assert_eq!(session.last_sent, sent);
     let state = session.pulse(1, false).await?;
     let changed = client.sync(run.clone(), vec![]).await?;
+    assert!(
+        client.statistics()["peers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|peer| peer["control_id"]
+                .as_str()
+                .is_some_and(|id| Uuid::parse_str(id).is_ok()))
+    );
     assert_eq!(state.revisions, changed.state.unwrap().revisions);
     assert!(
         changed

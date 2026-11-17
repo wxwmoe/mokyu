@@ -8,6 +8,7 @@ use anyhow::Context as _;
 use std::{pin::Pin, sync::Arc, time::Duration};
 use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status, Streaming};
+use uuid::Uuid;
 use wire::{
     node_control_server::{NodeControl, NodeControlServer},
     node_multipart_server::{NodeMultipart, NodeMultipartServer},
@@ -52,7 +53,7 @@ impl hyper::body::Body for AdmittedBody {
 pub(crate) fn router(app: Arc<App>) -> axum::Router {
     let unary = Arc::new(Semaphore::new((app.budget.data_slots * 4).clamp(4, 64)));
     let sessions = Arc::new(Semaphore::new(app.budget.request_connections.min(1024)));
-    let service = Service { app };
+    let service = Service { app: app.clone() };
     tonic::service::Routes::new(
         NodeControlServer::new(service.clone())
             .max_decoding_message_size(super::OBSERVATION_LIMIT)
@@ -101,6 +102,7 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
     .into_axum_router()
     .layer(axum::middleware::from_fn(
         move |mut request: axum::extract::Request, next: axum::middleware::Next| {
+            let control = app.node.get().map(|node| node.node_id);
             let limits = if request.uri().path() == "/mokyu.node.v1.NodeSessions/NodeSession" {
                 sessions.clone()
             } else {
@@ -120,6 +122,13 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
                     )
                     .into_http::<axum::body::Body>();
                 }
+                let trace = request.headers().get("x-mokyu-trace")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| Uuid::parse_str(value).ok());
+                let started = trace.map(|id| {
+                    tracing::trace!(target: "mokyu::rpc::timing", %id, ?control, node = %node.node_id, path = request.uri().path(), "received request");
+                    tokio::time::Instant::now()
+                });
                 request.extensions_mut().insert(node);
                 let permit = match limits.try_acquire_owned() {
                     Ok(permit) => permit,
@@ -136,7 +145,15 @@ pub(crate) fn router(app: Arc<App>) -> axum::Router {
                                 .into_http::<axum::body::Body>();
                         }
                     };
-                let (parts, inner) = response.into_parts();
+                let (mut parts, inner) = response.into_parts();
+                if let Some(control) = control
+                    && parts.headers.get("grpc-status").is_none_or(|value| value == "0")
+                {
+                    parts.headers.insert("x-mokyu-control-id", control.to_string().parse().unwrap());
+                }
+                if let (Some(id), Some(started)) = (trace, started) {
+                    tracing::trace!(target: "mokyu::rpc::timing", %id, ?control, elapsed_us = started.elapsed().as_micros() as u64, "handler returned");
+                }
                 axum::response::Response::from_parts(
                     parts,
                     axum::body::Body::new(AdmittedBody {

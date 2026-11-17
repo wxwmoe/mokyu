@@ -241,6 +241,8 @@ worker/node 通过 `NodeWork/Exchange` 领取回源任务与受保护的来源�
 
 ## 地址选择
 
+节点状态的 `rpc.peers[].control_id` 来自该地址最近一次成功 Unary 的响应。会话对端由 Welcome 单独标识。启用 `mokyu::rpc::timing=trace` 可用同一请求 ID 对照各次传输、实际 control、处理耗时和消息字节数。
+
 客户端要求 HTTPS 域名 origin，不接受 IP、用户信息、路径或 query。解析完整 A 集合（最多 32 个），按 TTL 刷新，刷新间隔限制在 1～300 秒；DNS 失败时仅在上一次集合到期后的 300 秒内继续使用已知地址。
 
 Unary 在可用地址间轮询，每个地址复用自己的 Channel；失败地址按退避暂停选择。NodeSession 使用独立 TCP/TLS 连接。连接实际 IP 时，仍使用原域名做 TLS SNI、证书验证与 HTTP authority。连接期限 3 秒，每次尝试最多 5 秒，整个操作最多 15 秒，传输失败最多尝试 3 个地址；`Unavailable`、`DeadlineExceeded` 和可识别的客户端传输超时进入有限重试，服务端主动取消不重试。
