@@ -1088,6 +1088,9 @@ impl Session {
                 self.settings.push(revision.clone());
             }
         }
+        if notice.work_available {
+            tracing::trace!(target:"mokyu::rpc::timing", peer=%self.peer, "work notice received");
+        }
         self.work_available |= notice.work_available;
         self.state_changed |= notice.state_changed;
         let handler = self.on_notice.as_ref();

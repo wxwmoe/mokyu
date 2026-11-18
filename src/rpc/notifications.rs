@@ -4,6 +4,82 @@ use std::collections::{HashSet, VecDeque};
 use tonic::Status;
 use uuid::Uuid;
 
+#[derive(Default)]
+pub(super) struct HintSchedule {
+    sent: crate::cluster::notifications::Hints,
+    work: Option<tokio::time::Instant>,
+    settings: Option<tokio::time::Instant>,
+}
+
+impl HintSchedule {
+    fn work_due(
+        &self,
+        policy: super::latency::Policy,
+        now: tokio::time::Instant,
+    ) -> tokio::time::Instant {
+        use std::time::Duration;
+        self.work.map_or(now, |last| {
+            last + match policy {
+                super::latency::Policy::Low => Duration::from_millis(100),
+                _ => Duration::from_secs(1),
+            }
+        })
+    }
+
+    pub(super) fn deadline(
+        &self,
+        hints: &crate::cluster::notifications::Hints,
+        policy: super::latency::Policy,
+        now: tokio::time::Instant,
+    ) -> Option<tokio::time::Instant> {
+        if hints.state != self.sent.state || hints.urgent_work != self.sent.urgent_work {
+            return Some(now);
+        }
+        let work = (hints.work != self.sent.work).then(|| self.work_due(policy, now));
+        let settings = (hints.settings != self.sent.settings).then(|| self.settings.unwrap_or(now));
+        work.into_iter().chain(settings).min()
+    }
+
+    pub(super) fn take(
+        &mut self,
+        hints: &crate::cluster::notifications::Hints,
+        policy: super::latency::Policy,
+        now: tokio::time::Instant,
+    ) -> wire::Notice {
+        let state_changed = hints.state != self.sent.state;
+        self.sent.state = hints.state;
+        let work_available = hints.urgent_work != self.sent.urgent_work
+            || hints.work != self.sent.work && self.work_due(policy, now) <= now;
+        if work_available {
+            self.work = Some(now);
+            self.sent.work = hints.work;
+            self.sent.urgent_work = hints.urgent_work;
+        }
+        let mut settings = Vec::new();
+        if hints.settings != self.sent.settings && self.settings.is_none_or(|due| due <= now) {
+            settings = hints
+                .settings
+                .iter()
+                .filter(|(section, revision)| self.sent.settings.get(*section) != Some(*revision))
+                .filter_map(|(name, revision)| {
+                    Some(wire::Revision {
+                        section: super::section(name)? as i32,
+                        revision: *revision as u64,
+                    })
+                })
+                .collect();
+            self.sent.settings.clone_from(&hints.settings);
+            self.settings = Some(now + std::time::Duration::from_secs(1));
+        }
+        wire::Notice {
+            state_changed,
+            work_available,
+            settings,
+            ..Default::default()
+        }
+    }
+}
+
 pub(super) fn notice(deliveries: &[Delivery]) -> wire::Notice {
     wire::Notice {
         changes: deliveries
@@ -111,6 +187,41 @@ impl Applied {
 mod tests {
     use super::*;
     use crate::model::notification::Consumer;
+
+    #[test]
+    fn work_and_settings_have_independent_anchored_deadlines() {
+        use super::super::latency::Policy;
+        use std::time::Duration;
+        let start = tokio::time::Instant::now();
+        for (policy, ms) in [
+            (Policy::Low, 100),
+            (Policy::Coalesced, 1000),
+            (Policy::Baseline, 1000),
+        ] {
+            let mut schedule = HintSchedule::default();
+            let mut hints = crate::cluster::notifications::Hints::default();
+            hints.settings.insert("io".into(), 1);
+            assert_eq!(schedule.take(&hints, policy, start).settings.len(), 1);
+            let first = start + Duration::from_millis(1);
+            hints.work += 1;
+            assert_eq!(schedule.deadline(&hints, policy, first), Some(first));
+            assert!(schedule.take(&hints, policy, first).work_available);
+            let due = first + Duration::from_millis(ms);
+            for i in 1..6 {
+                hints.work += 1;
+                assert_eq!(
+                    schedule.deadline(&hints, policy, first + Duration::from_millis(i)),
+                    Some(due)
+                );
+            }
+            assert!(schedule.take(&hints, policy, due).work_available);
+            assert_eq!(schedule.deadline(&hints, policy, due), None);
+            hints.urgent_work += 1;
+            hints.state += 1;
+            let notice = schedule.take(&hints, policy, due);
+            assert!(notice.state_changed && notice.work_available);
+        }
+    }
 
     #[test]
     fn a_coalesced_reset_is_confirmed_after_invalidating_once() {

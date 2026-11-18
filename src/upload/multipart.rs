@@ -544,7 +544,7 @@ impl App {
                 }
                 for owner in owners {
                     self.notifications
-                        .hint(&crate::model::notification::Signal::Work(Some(owner)));
+                        .hint(&crate::model::notification::Signal::OwnerReady(owner));
                 }
                 if tokio::time::Instant::now() >= deadline {
                     return Err(tail_pending().into());

@@ -27,6 +27,7 @@ pub(crate) struct Batch {
 pub(crate) struct Hints {
     pub(crate) state: u64,
     pub(crate) work: u64,
+    pub(crate) urgent_work: u64,
     pub(crate) settings: std::collections::BTreeMap<String, i64>,
 }
 
@@ -61,6 +62,10 @@ impl Drop for Subscription {
 pub(crate) struct Hub {
     subscribers: Mutex<HashMap<Consumer, Outbox>>,
     tasks: Mutex<HashSet<Uuid>>,
+    task_wake: Notify,
+    task_peak: AtomicU64,
+    work_notices: AtomicU64,
+    empty_claims: AtomicU64,
     memory: Arc<Semaphore>,
     wake: Notify,
     resets: watch::Sender<u64>,
@@ -78,6 +83,10 @@ impl Default for Hub {
         Self {
             subscribers: Mutex::default(),
             tasks: Mutex::default(),
+            task_wake: Notify::new(),
+            task_peak: AtomicU64::new(0),
+            work_notices: AtomicU64::new(0),
+            empty_claims: AtomicU64::new(0),
             memory: Arc::new(Semaphore::new(BYTES)),
             wake: Notify::new(),
             resets: watch::channel(0).0,
@@ -131,15 +140,16 @@ impl Hub {
             let mut tasks = self.tasks.lock().unwrap();
             if tasks.len() < 256 {
                 tasks.insert(*task);
+                self.task_peak.fetch_max(tasks.len() as u64, Relaxed);
             } else {
                 self.dropped_hints.fetch_add(1, Relaxed);
             }
-            self.wake.notify_one();
+            self.task_wake.notify_one();
             return;
         }
         let subscribers = self.subscribers.lock().unwrap();
         for (consumer, outbox) in subscribers.iter() {
-            if matches!(signal, Signal::Work(Some(node)) if *node != consumer.node)
+            if matches!(signal, Signal::Work(Some(node)) | Signal::OwnerReady(node) if *node != consumer.node)
                 || matches!(signal, Signal::Work(None) if !matches!(outbox.role.as_str(), "worker" | "node"))
             {
                 continue;
@@ -147,6 +157,10 @@ impl Hub {
             if outbox.hints.send_if_modified(|hints| match signal {
                 Signal::State => {
                     hints.state = hints.state.wrapping_add(1);
+                    true
+                }
+                Signal::OwnerReady(_) => {
+                    hints.urgent_work = hints.urgent_work.wrapping_add(1);
                     true
                 }
                 Signal::Work(_) => {
@@ -232,8 +246,17 @@ impl Hub {
         self.applied.fetch_add(count, Relaxed);
     }
 
+    pub(crate) fn work_notice(&self) {
+        self.work_notices.fetch_add(1, Relaxed);
+    }
+
+    pub(crate) fn empty_claim(&self) {
+        self.empty_claims.fetch_add(1, Relaxed);
+    }
+
     pub(crate) fn snapshot(&self) -> serde_json::Value {
         serde_json::json!({"listening":self.connected.load(Relaxed), "sessions":self.subscribers.lock().unwrap().len(),
+            "task_queue_peak":self.task_peak.load(Relaxed), "work_notices":self.work_notices.load(Relaxed), "empty_claims":self.empty_claims.load(Relaxed),
             "reconnects":self.reconnects.load(Relaxed), "hints":self.hints.load(Relaxed), "dropped_hints":self.dropped_hints.load(Relaxed), "queued_bytes":BYTES-self.memory.available_permits(), "sent":self.sent.load(Relaxed), "applied":self.applied.load(Relaxed), "backpressure":self.backpressure.load(Relaxed)})
     }
 }
@@ -286,7 +309,27 @@ pub(crate) async fn run(app: Arc<App>) -> Result<()> {
         #[allow(unreachable_code)]
         Ok::<(), anyhow::Error>(())
     };
-    tokio::select! { result = listener => result, result = dispatch(&app) => result }
+    tokio::select! { result = listener => result, result = dispatch(&app) => result, result = resolve_tasks(&app) => result }
+}
+
+async fn resolve_tasks(app: &App) -> Result<()> {
+    loop {
+        app.notifications.task_wake.notified().await;
+        let tasks: Vec<_> = app.notifications.tasks.lock().unwrap().drain().collect();
+        if tasks.is_empty() {
+            continue;
+        }
+        // IDs arriving during this lookup share the next query.
+        match app.cluster()?.task_targets(&tasks).await {
+            Ok(targets) => {
+                tracing::trace!(target:"mokyu::rpc::timing", tasks=tasks.len(), "task targets resolved");
+                for target in targets {
+                    app.notifications.hint(&Signal::Work(target));
+                }
+            }
+            Err(error) => tracing::warn!(%error, "task targets will be checked by the next scan"),
+        }
+    }
 }
 
 async fn dispatch(app: &App) -> Result<()> {
@@ -312,13 +355,6 @@ async fn dispatch(app: &App) -> Result<()> {
             {
                 app.notices.control_consumer(consumer, false).await?;
                 renewed = Instant::now();
-            }
-            let tasks: Vec<_> = app.notifications.tasks.lock().unwrap().drain().collect();
-            if !tasks.is_empty() {
-                // Scope can change later in the publishing transaction.
-                for target in app.cluster()?.task_targets(&tasks).await? {
-                    app.notifications.hint(&Signal::Work(target));
-                }
             }
             for _ in 0..8 {
                 let mut consumers = app.notifications.consumers();

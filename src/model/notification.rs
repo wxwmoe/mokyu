@@ -10,6 +10,7 @@ pub(crate) enum Signal {
     Reconnected,
     State,
     Work(Option<Uuid>),
+    OwnerReady(Uuid),
     Task(Uuid),
     Settings { section: String, revision: i64 },
     Control,
@@ -28,7 +29,7 @@ impl Signal {
                 .parse::<Uuid>()
                 .ok()
                 .filter(|node| !node.is_nil())
-                .map(|node| Self::Work(Some(node)));
+                .map(Self::OwnerReady);
         }
         if let Some(task) = payload.strip_prefix("task:") {
             return task

@@ -1599,13 +1599,14 @@ impl NodeSessions for Service {
                 run: Some(wire::Run { boot_id: run.boot.to_string(), fence: run.fence.to_string() }),
                 epoch: epoch as u64, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), control_id, region: app.config.instance.region.clone(), probe_ticket:probe_ticket(), control_time_us:chrono::Utc::now().timestamp_micros(),
             })) };
-            let mut sent_hints = crate::cluster::notifications::Hints::default();
-            let mut pending = false;
-            let mut next_notice = tokio::time::Instant::now();
-            let mut deadline = next_notice + Duration::from_secs(30);
+            let mut hints = crate::cluster::notifications::Hints::default();
+            let mut schedule = super::notifications::HintSchedule::default();
+            let mut policy = super::latency::Policy::initial(hello.region.as_deref(), app.config.instance.region.as_deref());
+            let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
             let mut outstanding = std::collections::HashMap::new();
             let mut last_ping = 0;
             loop {
+                let due = schedule.deadline(&hints, policy, tokio::time::Instant::now());
                 let receipt_deadline = outstanding.values().copied().min().unwrap_or(deadline);
                 let next = tokio::select! {
                     biased;
@@ -1633,19 +1634,17 @@ impl NodeSessions for Service {
                         yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(wire::Notice { reset: true, ..Default::default() })) };
                         continue;
                     }
-                    _ = tokio::time::sleep_until(next_notice), if pending => {
-                        pending = false;
-                        next_notice = tokio::time::Instant::now() + Duration::from_secs(1);
-                        let hints = notifications.hints.borrow_and_update().clone();
-                        let settings = hints.settings.iter().filter(|(section, revision)| sent_hints.settings.get(*section) != Some(*revision)).filter_map(|(name, revision)| Some(wire::Revision { section:super::section(name)? as i32, revision:*revision as u64 })).collect();
-                        let notice = wire::Notice { state_changed:hints.state != sent_hints.state, work_available:hints.work != sent_hints.work, settings, ..Default::default() };
-                        sent_hints = hints;
+                    _ = tokio::time::sleep_until(due.unwrap_or(deadline)), if due.is_some() => {
+                        let notice = schedule.take(&hints, policy, tokio::time::Instant::now());
+                        if notice.work_available {
+                            app.notifications.work_notice();
+                            tracing::trace!(target:"mokyu::rpc::timing", node=%node.node_id, ?policy, "work notice sent");
+                        }
                         yield wire::SessionReply { message: Some(wire::session_reply::Message::Notice(notice)) };
                         continue;
                     }
                     _ = notifications.hints.changed() => {
-                        notifications.hints.borrow_and_update();
-                        pending = true;
+                        hints = notifications.hints.borrow_and_update().clone();
                         continue;
                     }
                 }?;
@@ -1689,6 +1688,7 @@ impl NodeSessions for Service {
                     continue;
                 }
                 let snapshot = bounded(app.node_sessions.pulse_session(&node, &app.secrets.credential_key, run, epoch, pulse.sequence as i64, pulse.draining, resources)).await?;
+                policy = super::latency::Policy::from_code(pulse.latency_policy);
                 yield wire::SessionReply { message: Some(wire::session_reply::Message::Pulse(wire::PulseReply {
                     sequence: pulse.sequence, valid_for_ms: snapshot.valid_for_ms as u64, state: Some(state(&snapshot)), probe_ticket:probe_ticket(),
                     grants: snapshot.grants.into_iter().map(super::read::grant_result).collect(),
@@ -1830,7 +1830,7 @@ impl NodeMultipart for Service {
                 for &owner in &pending.0 {
                     self.app
                         .notifications
-                        .hint(&crate::model::notification::Signal::Work(Some(owner)));
+                        .hint(&crate::model::notification::Signal::OwnerReady(owner));
                 }
             }
             result
@@ -2153,6 +2153,7 @@ impl NodeWork for Service {
         } else {
             None
         };
+        let claiming = input.max_items > 0;
         input.protected = self.app.active.lock().unwrap().keys().copied().collect();
         let value = bounded(self.app.node_work.exchange_work(
             &node,
@@ -2160,6 +2161,10 @@ impl NodeWork for Service {
             input,
         ))
         .await?;
+        if claiming && value.plan.is_none() {
+            self.app.notifications.empty_claim();
+        }
+        tracing::trace!(target:"mokyu::rpc::timing", node=%node.node_id, operation=%value.operation, assigned=value.plan.is_some(), "work exchange completed");
         if value.wake_shared {
             self.app.work_queued();
         }

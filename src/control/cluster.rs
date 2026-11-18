@@ -175,7 +175,7 @@ pub(super) async fn handoff(
     if changed {
         use crate::model::notification::Signal;
         app.notifications.hint(&Signal::State);
-        app.notifications.hint(&Signal::Work(Some(id)));
+        app.notifications.hint(&Signal::OwnerReady(id));
     }
     Ok(view)
 }
