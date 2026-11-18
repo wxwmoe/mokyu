@@ -151,12 +151,21 @@ impl super::writer::Writes for Writer {
             operation_id: operation.to_string(),
             sequence,
         };
+        let desired = 4;
+        #[cfg(feature = "fault-injection")]
+        let desired = if crate::faults::requested("native-window-1") {
+            1
+        } else if crate::faults::requested("native-window-2") {
+            2
+        } else {
+            desired
+        };
         let result = self
             .client
             .storage_advance(wire::NativeAdvance {
                 next: Some(next),
                 receipts_json: serde_json::to_vec(previous)?,
-                desired: 4,
+                desired,
                 sequence_ms,
             })
             .await;

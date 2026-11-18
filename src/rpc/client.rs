@@ -1466,6 +1466,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn proxy_replacement_discards_the_previous_control_samples() {
+        let mut route = UnaryPath::default();
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        route.observe(Some(a), Policy::Low);
+        let now = Instant::now();
+        for _ in 0..5 {
+            route
+                .latency
+                .as_mut()
+                .unwrap()
+                .record(now, Duration::from_millis(180));
+        }
+        assert_eq!(
+            route.latency.as_ref().unwrap().policy(now),
+            Policy::Coalesced
+        );
+        let previous = route.generation;
+        route.next_probe = Some(now + Duration::from_secs(10));
+        route.observe(Some(b), Policy::Low);
+        assert!(route.variable && route.generation != previous && route.next_probe.is_none());
+        let fresh = route.latency.as_ref().unwrap();
+        assert!(!fresh.measured(Instant::now()));
+        assert_eq!(fresh.policy(Instant::now()), Policy::Low);
+        route.observe(None, Policy::Baseline);
+        assert!(route.control.is_none() && route.latency.is_none());
+    }
+
+    #[test]
     fn only_explicit_read_capacity_errors_wait_for_resources() {
         let mut busy = Status::resource_exhausted("node read capacity is busy");
         assert!(!capacity_busy(&busy));

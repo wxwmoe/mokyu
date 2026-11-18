@@ -3014,12 +3014,18 @@ async fn listing_pages(backend: &Backend, layout: &Intent) -> Result<()> {
     Ok(())
 }
 
-async fn live_fixture() -> Result<(
+type LiveFixture = (
     std::sync::Arc<Backend>,
     crate::model::storage_cluster::Cluster,
     Vec<crate::node::storage::TestNode>,
     std::sync::Arc<crate::config::Secrets>,
-)> {
+);
+
+async fn live_fixture() -> Result<LiveFixture> {
+    live_layout(Default::default()).await
+}
+
+async fn live_layout(layout: crate::model::storage_cluster::Layout) -> Result<LiveFixture> {
     use crate::{
         authorization::Principal,
         model::{
@@ -3041,7 +3047,7 @@ async fn live_fixture() -> Result<(
     let backend = Arc::new(physical::test_backend().await?);
     let principal = Principal::Local;
     let mut nodes = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..layout.width() {
         let state = backend
             .provision_node(
                 &principal,
@@ -3077,7 +3083,10 @@ async fn live_fixture() -> Result<(
             key,
             Create {
                 name: format!("native-{}", Uuid::now_v7()),
-                policy: Default::default(),
+                policy: crate::model::storage_cluster::Policy {
+                    layout,
+                    ..Default::default()
+                },
             },
         )
         .await?;
@@ -3120,6 +3129,100 @@ async fn live_fixture() -> Result<(
         .await?;
     }
     Ok((backend, cluster, nodes, secrets))
+}
+
+#[tokio::test]
+#[ignore = "requires an isolated database and MOKYU_TEST_STORAGE_TLS"]
+async fn prepared_windows_preserve_erasure_protection() -> Result<()> {
+    use crate::storage::native::{
+        control::{Control, WriteRequest},
+        reader,
+        transport::Pool,
+        writer,
+    };
+    use bytes::Bytes;
+    use futures_util::{StreamExt, TryStreamExt};
+    use std::{collections::HashSet, sync::Arc, time::Duration};
+    let layout = crate::model::storage_cluster::Layout {
+        data_shards: 4,
+        parity_shards: 2,
+        extra_copies: 0,
+        ..Default::default()
+    };
+    let (backend, cluster, _nodes, secrets) = live_layout(layout).await?;
+    let (namespace, _) = native_backend(&backend, &cluster, true).await?;
+    let control = Arc::new(Control::new(backend.clone(), backend, secrets));
+    let pool = Arc::new(Pool::new(Duration::from_secs(30)));
+    let owner = Uuid::now_v7();
+    let path = format!("objects/{}", owner.simple());
+    let body = Bytes::from(
+        (0..4 * 1024 * 1024 + 193)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let object = control
+        .reserve(WriteRequest {
+            namespace,
+            cluster: cluster.id,
+            path: &path,
+            owner,
+            condition: Condition::Create,
+            area: Area::Blocks,
+            total: body.len() as u64,
+            region: None,
+        })
+        .await?;
+    let intent = &object.payload.intent;
+    let until = chrono::Utc::now().timestamp_micros() + 60_000_000;
+    let first = control
+        .write_window_until(intent.operation, 0, 4, until)
+        .await?;
+    assert_eq!(first.len(), 6);
+    assert_eq!(
+        first
+            .iter()
+            .map(|p| p.mapping.header.media)
+            .collect::<HashSet<_>>()
+            .len(),
+        6
+    );
+    writer::write_prepared(
+        control.as_ref(),
+        &pool,
+        intent,
+        futures_util::stream::iter([Ok(body.clone())]).boxed(),
+        None,
+        first,
+    )
+    .await?;
+    assert!(
+        control
+            .write_window_until(intent.operation, 1, 4, until)
+            .await
+            .is_err()
+    );
+    control.publish(namespace, intent.payload, owner).await?;
+    let mappings = control.read_window(intent.operation, 0, 1).await?;
+    assert_eq!(mappings.iter().filter(|m| m.receipt.is_some()).count(), 6);
+    let plan = control
+        .plan_read(
+            namespace,
+            &path,
+            None,
+            None,
+            Some(0..body.len() as u64),
+            None,
+            until,
+        )
+        .await?;
+    let bytes = reader::read(pool, control, plan, 4)?
+        .try_fold(Vec::new(), |mut all, chunk| async move {
+            all.extend_from_slice(&chunk);
+            Ok(all)
+        })
+        .await?;
+    assert_eq!(bytes.as_slice(), body.as_ref());
+    Ok(())
 }
 
 #[tokio::test]
