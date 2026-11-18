@@ -18,6 +18,7 @@ pub(crate) enum Phase {
     PublicRead,
     RestoreAcl,
     StartMultipart,
+    PrepareMultipartPart,
     CompleteMultipart,
     StartAbort,
     Abort,
@@ -35,7 +36,8 @@ impl Phase {
             Self::WriteAcl => Self::PublicRead,
             Self::PublicRead => Self::RestoreAcl,
             Self::RestoreAcl => Self::StartMultipart,
-            Self::StartMultipart => Self::CompleteMultipart,
+            Self::StartMultipart => Self::PrepareMultipartPart,
+            Self::PrepareMultipartPart => Self::CompleteMultipart,
             Self::CompleteMultipart => Self::StartAbort,
             Self::StartAbort => Self::Abort,
             Self::Abort => Self::Cleanup,
@@ -257,7 +259,14 @@ impl Report {
                 old.file == new.file
                     && old.version == new.version
                     && old.upload == new.upload
-                    && old.etag == new.etag
+                    && (old.etag == new.etag
+                        || (matches!(
+                            self.phase,
+                            Phase::PrepareMultipartPart | Phase::CompleteMultipart
+                        ) && old.file == TestFile::Multipart
+                            && old.upload.is_some()
+                            && !old.cleaned
+                            && old.etag.is_none()))
                     && (!old.cleaned || new.cleaned),
                 "external artifact identity changed"
             );
@@ -325,6 +334,28 @@ mod tests {
             virtual_hosted: false,
             allow_http: false,
         })
+    }
+
+    #[test]
+    fn completed_part_etag_is_immutable_across_recovery() {
+        let mut before = report();
+        before.phase = Phase::PrepareMultipartPart;
+        before.artifacts.push(Artifact {
+            file: TestFile::Multipart,
+            upload: Some("upload".into()),
+            version: None,
+            etag: None,
+            cleaned: false,
+        });
+        let mut checkpoint = before.clone();
+        checkpoint.phase = Phase::CompleteMultipart;
+        checkpoint.artifacts[0].etag = Some("opaque-part".into());
+        before.advance(&checkpoint).unwrap();
+        let mut retry = checkpoint.clone();
+        retry.blocked = Some(Problem::UncertainResult);
+        checkpoint.advance(&retry).unwrap();
+        retry.artifacts[0].etag = Some("another-part".into());
+        assert!(checkpoint.advance(&retry).is_err());
     }
 
     #[test]

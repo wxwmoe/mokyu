@@ -140,6 +140,14 @@ impl Probe {
         if status.is_success() {
             return Ok(Some(reply));
         }
+        if cap == Cap::MultipartComplete {
+            let request_id = text(reply.headers(), "x-amz-request-id").filter(|id| id.len() <= 128);
+            let retry_after =
+                text(reply.headers(), "retry-after").and_then(|value| value.parse::<u64>().ok());
+            let body = self.client.bounded(reply.into_body(), LIMIT).await;
+            let code = body.as_deref().ok().and_then(error_code);
+            tracing::warn!(test = %self.plan.id, status = status.as_u16(), ?code, ?request_id, ?retry_after, "external multipart completion failed");
+        }
         if mutation && status.is_server_error() && status != StatusCode::NOT_IMPLEMENTED {
             self.check(cap, State::Unknown, Some(status.as_u16()));
             self.blocked(Problem::UncertainResult);
@@ -159,7 +167,7 @@ impl Probe {
             Phase::PublicRead => self.public_read().await,
             Phase::RestoreAcl => self.restore_acl().await,
             Phase::StartMultipart => self.start(TestFile::Multipart).await,
-            Phase::CompleteMultipart => self.complete().await,
+            Phase::PrepareMultipartPart | Phase::CompleteMultipart => self.complete().await,
             Phase::StartAbort => self.start(TestFile::Abort).await,
             Phase::Abort => self.abort_test().await,
             Phase::Cleanup => self.cleanup().await,
@@ -777,31 +785,49 @@ impl Probe {
         let upload = self.plan.report.artifacts[index].upload.clone().unwrap();
         let key = self.key(file);
         let payload = self.payload();
-        if self.plan.recover {
+        let preparing = self.plan.report.phase == Phase::PrepareMultipartPart;
+        if self.plan.recover && !preparing {
             if let Some(headers) = self.owned(file, &payload).await? {
                 self.artifact(file, &headers)?;
                 self.plan.report.artifacts[index].cleaned = true;
                 self.check(Cap::MultipartComplete, State::Passed, Some(200));
-            } else if self.plan.report.blocked.is_none() {
-                self.blocked(Problem::UncertainResult);
+                return Ok(());
             }
-            return Ok(());
+            if self.plan.report.blocked.is_some() {
+                return Ok(());
+            }
+            if self.plan.report.artifacts[index].etag.is_none() {
+                self.blocked(Problem::UncertainResult);
+                return Ok(());
+            }
         }
-        let Some(reply) = self
-            .request(
-                Cap::MultipartParts,
-                Method::PUT,
-                Some(&key),
-                &[("uploadId", &upload), ("partNumber", "1")],
-                HeaderMap::new(),
-                payload.clone(),
-                false,
-            )
-            .await?
-        else {
-            return Ok(());
+        let etag = if let Some(etag) = &self.plan.report.artifacts[index].etag {
+            etag.clone()
+        } else {
+            if !preparing && self.plan.report.checks[&Cap::MultipartParts].state != State::Skipped {
+                return Ok(());
+            }
+            let Some(reply) = self
+                .request(
+                    Cap::MultipartParts,
+                    Method::PUT,
+                    Some(&key),
+                    &[("uploadId", &upload), ("partNumber", "1")],
+                    HeaderMap::new(),
+                    payload.clone(),
+                    false,
+                )
+                .await?
+            else {
+                return Ok(());
+            };
+            let etag = text(reply.headers(), "etag").context("external part ETag missing")?;
+            self.plan.report.artifacts[index].etag = Some(etag.clone());
+            if preparing {
+                return Ok(());
+            }
+            etag
         };
-        let etag = text(reply.headers(), "etag").context("external part ETag missing")?;
         let Some(reply) = self
             .request(
                 Cap::MultipartParts,
@@ -814,6 +840,9 @@ impl Probe {
             )
             .await?
         else {
+            if self.plan.recover {
+                self.blocked(Problem::UncertainResult);
+            }
             return Ok(());
         };
         self.check(Cap::MultipartParts, State::Unknown, Some(200));
@@ -841,6 +870,7 @@ impl Probe {
         })?;
         let mut headers = HeaderMap::new();
         headers.insert(header::CONTENT_TYPE, "application/xml".parse()?);
+        headers.insert(header::IF_NONE_MATCH, "*".parse()?);
         let Some(reply) = self
             .request(
                 Cap::MultipartComplete,
@@ -853,10 +883,17 @@ impl Probe {
             )
             .await?
         else {
+            if self.plan.recover && self.plan.report.blocked.is_none() {
+                self.blocked(Problem::UncertainResult);
+            }
             return Ok(());
         };
         self.check(Cap::MultipartComplete, State::Unknown, Some(200));
+        let request_id = text(reply.headers(), "x-amz-request-id").filter(|id| id.len() <= 128);
         let body = self.client.bounded(reply.into_body(), LIMIT).await?;
+        if let Some(code) = error_code(&body) {
+            tracing::warn!(test = %self.plan.id, status = 200, %code, ?request_id, "external multipart completion failed");
+        }
         ensure!(
             s3::complete_response(true, &body)?,
             "external completion failed"
@@ -985,7 +1022,7 @@ impl Probe {
     }
 }
 
-fn acl_disabled(bytes: &[u8]) -> bool {
+fn error_code(bytes: &[u8]) -> Option<String> {
     let mut xml = s3s::xml::Deserializer::new(bytes);
     let mut code = None;
     let result = xml.named_element("Error", |xml| {
@@ -1000,9 +1037,15 @@ fn acl_disabled(bytes: &[u8]) -> bool {
             Ok(())
         })
     });
-    result.is_ok()
-        && xml.expect_eof().is_ok()
-        && code.as_deref() == Some("AccessControlListNotSupported")
+    result.ok()?;
+    xml.expect_eof().ok()?;
+    code.filter(|s| {
+        !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    })
+}
+
+fn acl_disabled(bytes: &[u8]) -> bool {
+    error_code(bytes).as_deref() == Some("AccessControlListNotSupported")
 }
 
 fn text(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -1081,7 +1124,7 @@ mod tests {
         };
         let id = uuid::Uuid::new_v4();
         let mut report = Report::new(snapshot.connection.clone());
-        for _ in 0..9 {
+        for _ in 0..16 {
             let result = execute(
                 Plan {
                     id,

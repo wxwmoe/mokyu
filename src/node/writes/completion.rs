@@ -36,12 +36,7 @@ impl Writes {
         manifest: Manifest,
     ) -> Result<CompleteMultipartUploadOutput> {
         let credential = request.authorize(&request.access, &bucket)?;
-        let permit = Arc::new(
-            self.completions
-                .clone()
-                .try_acquire_owned()
-                .map_err(|_| multipart::completion_busy())?,
-        );
+        let permit = Arc::new(self.completions.acquire().await?);
         request.memory = permit.clone();
         let id = Uuid::now_v7().to_string();
         let held = self.reads.cache.snapshot();

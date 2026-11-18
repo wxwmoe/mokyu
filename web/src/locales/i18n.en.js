@@ -1701,6 +1701,7 @@ export default {
   externalPhase_write: "Write and verify a file",
   externalPhase_conditional_write: "Check conditional requests",
   externalPhase_start_multipart: "Start multipart upload",
+  externalPhase_prepare_multipart_part: "Upload a test part",
   externalPhase_complete_multipart: "Complete and verify upload",
   externalPhase_start_abort: "Prepare cancellation test",
   externalPhase_abort: "Cancel multipart upload",

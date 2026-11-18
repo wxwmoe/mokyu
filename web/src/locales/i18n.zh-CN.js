@@ -1701,6 +1701,7 @@ export default {
   externalPhase_write: "写入并校验文件",
   externalPhase_conditional_write: "检查条件请求",
   externalPhase_start_multipart: "创建分片上传",
+  externalPhase_prepare_multipart_part: "上传测试分片",
   externalPhase_complete_multipart: "完成并校验上传",
   externalPhase_start_abort: "准备取消测试",
   externalPhase_abort: "取消分片上传",

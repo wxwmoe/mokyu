@@ -40,7 +40,12 @@ impl App {
     }
 
     pub(crate) async fn admit_put(&self) -> Result<(OwnedSemaphorePermit, OwnedSemaphorePermit)> {
-        let permit = put_permit(&self.uploads, &self.upload_waiters).await?;
+        let permit = put_permit(
+            &self.uploads,
+            &self.upload_waiters,
+            Duration::from_millis(25),
+        )
+        .await?;
         Ok((permit, self.data_slot()?))
     }
     pub async fn bucket(&self, name: &str, write: bool) -> Result<Bucket> {
@@ -71,12 +76,16 @@ impl App {
     }
 }
 
-async fn put_permit(uploads: &Arc<Semaphore>, waiters: &Semaphore) -> Result<OwnedSemaphorePermit> {
+pub(crate) async fn put_permit(
+    uploads: &Arc<Semaphore>,
+    waiters: &Semaphore,
+    wait: Duration,
+) -> Result<OwnedSemaphorePermit> {
     if let Ok(permit) = uploads.clone().try_acquire_owned() {
         return Ok(permit);
     }
     let _waiter = waiters.try_acquire().map_err(|_| s3_error!(SlowDown))?;
-    tokio::time::timeout(Duration::from_millis(25), uploads.clone().acquire_owned())
+    tokio::time::timeout(wait, uploads.clone().acquire_owned())
         .await
         .map_err(|_| s3_error!(SlowDown))?
         .map_err(|_| s3_error!(SlowDown).into())
@@ -90,11 +99,15 @@ mod tests {
     async fn put_waiters_are_bounded_and_released() {
         let uploads = Arc::new(Semaphore::new(1));
         let waiters = Semaphore::new(1);
-        let active = put_permit(&uploads, &waiters).await.unwrap();
-        let mut queued = Box::pin(put_permit(&uploads, &waiters));
+        let active = put_permit(&uploads, &waiters, Duration::from_millis(25))
+            .await
+            .unwrap();
+        let mut queued = Box::pin(put_permit(&uploads, &waiters, Duration::from_millis(25)));
         assert!(futures_util::poll!(queued.as_mut()).is_pending());
         assert_eq!(waiters.available_permits(), 0);
-        let error = put_permit(&uploads, &waiters).await.unwrap_err();
+        let error = put_permit(&uploads, &waiters, Duration::from_millis(25))
+            .await
+            .unwrap_err();
         assert_eq!(
             error.downcast_ref::<s3s::S3Error>().unwrap().code(),
             &s3s::S3ErrorCode::SlowDown
@@ -102,9 +115,13 @@ mod tests {
         drop(queued);
         assert_eq!(waiters.available_permits(), 1);
 
-        assert!(put_permit(&uploads, &waiters).await.is_err());
+        assert!(
+            put_permit(&uploads, &waiters, Duration::from_millis(25))
+                .await
+                .is_err()
+        );
         assert_eq!(waiters.available_permits(), 1);
-        let mut next = Box::pin(put_permit(&uploads, &waiters));
+        let mut next = Box::pin(put_permit(&uploads, &waiters, Duration::from_millis(25)));
         assert!(futures_util::poll!(next.as_mut()).is_pending());
         drop(active);
         let permit = next.await.unwrap();

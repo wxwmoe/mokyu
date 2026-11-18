@@ -32,14 +32,14 @@ const MAX_OBJECT: i64 = 5 * 1024 * 1024 * 1024;
 #[derive(Clone)]
 pub(super) struct Limits {
     pub(super) slots: Arc<Semaphore>,
-    completions: Arc<Semaphore>,
+    completions: Arc<crate::upload::multipart::CompletionSlots>,
     io: Arc<Semaphore>,
 }
 
 pub(crate) struct Writes {
     reads: Arc<Reads>,
     pub(super) slots: Arc<Semaphore>,
-    completions: Arc<Semaphore>,
+    completions: Arc<crate::upload::multipart::CompletionSlots>,
     pub(super) io: Arc<Semaphore>,
     parallelism: u32,
 }
@@ -200,7 +200,9 @@ impl Writes {
             shared
                 .get_or_insert_with(|| Limits {
                     slots: Arc::new(Semaphore::new(budget.upload_concurrency)),
-                    completions: Arc::new(Semaphore::new(budget.upload_concurrency)),
+                    completions: Arc::new(crate::upload::multipart::CompletionSlots::new(
+                        budget.upload_concurrency,
+                    )),
                     io: Arc::new(Semaphore::new(budget.storage_upload_slots)),
                 })
                 .clone()

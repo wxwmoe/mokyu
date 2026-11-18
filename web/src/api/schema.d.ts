@@ -3230,7 +3230,7 @@ export interface components {
         /** @enum {string} */
         ExternalTestFile: "write" | "multipart" | "abort";
         /** @enum {string} */
-        ExternalTestPhase: "inspect" | "write" | "conditional_write" | "read_acl" | "write_acl" | "public_read" | "restore_acl" | "start_multipart" | "complete_multipart" | "start_abort" | "abort" | "cleanup" | "done";
+        ExternalTestPhase: "inspect" | "write" | "conditional_write" | "read_acl" | "write_acl" | "public_read" | "restore_acl" | "start_multipart" | "prepare_multipart_part" | "complete_multipart" | "start_abort" | "abort" | "cleanup" | "done";
         /** @enum {string} */
         ExternalTestProblem: "unavailable" | "invalid_response" | "identity_conflict" | "uncertain_result" | "cleanup_pending";
         ExternalTestReport: {

@@ -564,7 +564,7 @@ impl App {
             .get::<crate::status::stats::RequestContext>()
             .cloned();
         let token = Uuid::new_v4();
-        let permit = self.completions.clone().try_acquire_owned();
+        let permit = self.completions.acquire().await;
         let work = if let Ok(permit) = permit {
             let claimed = self
                 .multipart
@@ -1217,6 +1217,32 @@ pub(crate) fn completion_retry() -> s3s::S3Error {
         InternalError,
         "Multipart completion is still in progress. Please retry the same request."
     )
+}
+
+pub(crate) struct CompletionSlots {
+    active: Arc<tokio::sync::Semaphore>,
+    waiting: tokio::sync::Semaphore,
+}
+
+impl CompletionSlots {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            active: Arc::new(tokio::sync::Semaphore::new(limit)),
+            waiting: tokio::sync::Semaphore::new(limit),
+        }
+    }
+
+    pub async fn acquire(
+        &self,
+    ) -> std::result::Result<tokio::sync::OwnedSemaphorePermit, s3s::S3Error> {
+        crate::app::buckets::put_permit(
+            &self.active,
+            &self.waiting,
+            std::time::Duration::from_millis(500),
+        )
+        .await
+        .map_err(|_| completion_busy())
+    }
 }
 
 pub(crate) fn completion_busy() -> s3s::S3Error {

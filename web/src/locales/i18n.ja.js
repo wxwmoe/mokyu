@@ -1701,6 +1701,7 @@ export default {
   externalPhase_write: "ファイルの書き込みと検証",
   externalPhase_conditional_write: "条件付きリクエストの確認",
   externalPhase_start_multipart: "マルチパートアップロードの開始",
+  externalPhase_prepare_multipart_part: "テスト用パートをアップロード",
   externalPhase_complete_multipart: "アップロードの完了と検証",
   externalPhase_start_abort: "中止テストの準備",
   externalPhase_abort: "マルチパートアップロードの中止",
