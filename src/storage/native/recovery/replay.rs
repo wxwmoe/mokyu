@@ -5,9 +5,12 @@ use crate::{
     storage::{
         Disk,
         journal::{
-            Format, FrameType, ROOT, snapshot,
+            Format, FrameType, ROOT,
+            catalog::Catalog,
+            snapshot,
             source::{Cut, Source},
-            stream::{Memory, Sink},
+            stream::Sink,
+            view::View,
         },
         marker::EpochCut,
     },
@@ -354,7 +357,7 @@ impl Scanner {
         head: &Proof,
         disk: &Arc<Disk>,
         fixed: Option<&Cut>,
-    ) -> Result<(crate::storage::journal::replay::Catalog, Cut)> {
+    ) -> Result<(View, Cut)> {
         let (rows, cut, _) = self
             .replay_epochs(catalog, source, head, disk, fixed)
             .await?;
@@ -368,7 +371,7 @@ impl Scanner {
         head: &Proof,
         disk: &Arc<Disk>,
         fixed: Option<&Cut>,
-    ) -> Result<(crate::storage::journal::replay::Catalog, Cut)> {
+    ) -> Result<(View, Cut)> {
         self.map(catalog, source, head, disk, fixed, true).await
     }
 
@@ -380,7 +383,7 @@ impl Scanner {
         disk: &Arc<Disk>,
         fixed: Option<&Cut>,
         install: bool,
-    ) -> Result<(crate::storage::journal::replay::Catalog, Cut)> {
+    ) -> Result<(View, Cut)> {
         let (rows, cut, epochs) = self
             .replay_epochs(catalog, source, head, disk, fixed)
             .await?;
@@ -434,7 +437,7 @@ impl Scanner {
         head: &Proof,
         disk: &Arc<Disk>,
         fixed: Option<&Cut>,
-    ) -> Result<(crate::storage::journal::replay::Catalog, Cut, Vec<EpochCut>)> {
+    ) -> Result<(View, Cut, Vec<EpochCut>)> {
         ensure!(
             head.publication.namespace == source.connection.id
                 && head.publication.identity.as_ref() == Some(&source.connection.identity_marker),
@@ -447,12 +450,12 @@ impl Scanner {
             disk,
             key: Key::new("aes-256-gcm", source.material)?,
         };
-        let mut memory = Memory::default();
-        let (cut, epochs) = replay.walk(head, &mut memory).await?;
+        let mut rows = Catalog::temporary(None)?;
+        let (cut, epochs) = replay.walk(head, &mut rows).await?;
         ensure!(
             fixed.is_none_or(|p| *p == cut),
             "fixed recovery point changed"
         );
-        Ok((memory.catalog, cut, epochs))
+        Ok((View::open(rows)?, cut, epochs))
     }
 }

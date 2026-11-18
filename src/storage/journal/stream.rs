@@ -2,15 +2,16 @@
 use super::{
     Format, Frame, FrameType,
     batch::{Decoder, Record},
-    replay::Catalog,
     snapshot::{self, BucketCut, Page, Row},
 };
 use anyhow::{Context, Result, ensure};
 use futures_util::{Stream, TryStreamExt};
 use object_store::{GetOptions, ObjectStore, path::Path};
-use std::{collections::BTreeMap, io, pin::Pin};
+use std::{io, pin::Pin};
 use tokio::io::AsyncReadExt;
 use tokio_util::io::StreamReader;
+#[cfg(test)]
+use {super::replay::Catalog, std::collections::BTreeMap};
 
 pub(crate) trait Sink {
     fn scope(&mut self, cuts: &[BucketCut], excluded: &[BucketCut]) -> Result<()>;
@@ -22,11 +23,13 @@ pub(crate) trait Sink {
     fn pop(&mut self) -> Result<Option<(u64, String)>>;
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct Memory {
     pub catalog: Catalog,
     paths: BTreeMap<u64, String>,
 }
+#[cfg(test)]
 impl Sink for Memory {
     fn scope(&mut self, cuts: &[BucketCut], excluded: &[BucketCut]) -> Result<()> {
         self.catalog.replace_scope(cuts, excluded)

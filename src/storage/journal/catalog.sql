@@ -7,6 +7,14 @@ CREATE TABLE objects(bucket BLOB, generation INTEGER, key TEXT, seq INTEGER, siz
 CREATE TABLE spans(bucket BLOB, seq INTEGER, offset INTEGER, source_offset INTEGER, length INTEGER, material BLOB, PRIMARY KEY(bucket,seq,offset));
 CREATE TABLE materials(ref BLOB PRIMARY KEY, size INTEGER, pack BLOB, ordinal INTEGER, block_key BLOB, value BLOB NOT NULL);
 CREATE TABLE keys(id BLOB PRIMARY KEY, value BLOB NOT NULL);
+CREATE TEMP VIEW invalid_spans AS
+  SELECT s.bucket,s.seq FROM spans s
+  LEFT JOIN materials m ON m.ref=s.material
+  LEFT JOIN materials p ON p.ref=m.pack
+  LEFT JOIN keys k ON k.id=m.block_key
+  WHERE m.ref IS NULL OR m.size-s.length<s.source_offset
+     OR (m.pack IS NOT NULL AND p.ref IS NULL)
+     OR (m.block_key IS NOT NULL AND k.id IS NULL);
 CREATE TEMP TABLE paths(first BLOB PRIMARY KEY,path TEXT NOT NULL);
 CREATE TEMP TABLE marks(bucket BLOB PRIMARY KEY,seq INTEGER,excluded INTEGER);
 CREATE TEMP TABLE pages(bucket BLOB,generation INTEGER,seq INTEGER,n INTEGER,end INTEGER,digest BLOB,PRIMARY KEY(bucket,generation,seq));

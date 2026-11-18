@@ -12,23 +12,41 @@ use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
-pub(super) struct Catalog {
+pub(crate) struct Catalog {
     pub db: Connection,
+    online: bool,
+    selected: Option<std::collections::BTreeSet<Uuid>>,
     records: u64,
     last_report: std::time::Instant,
 }
 
 impl Catalog {
+    pub const SCHEMA: &str = include_str!("catalog.sql");
+
+    pub fn temporary(selected: Option<&std::collections::BTreeSet<Uuid>>) -> Result<Self> {
+        // SQLite's unnamed temporary database is private to this connection and removed on close.
+        let db = Connection::open("")?;
+        db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA temp_store=FILE; PRAGMA cache_size=-2048; PRAGMA temp.cache_size=-2048; BEGIN;")?;
+        db.execute_batch(Self::SCHEMA)?;
+        let mut catalog = Self::new(db);
+        catalog.online = true;
+        catalog.selected = selected.cloned();
+        Ok(catalog)
+    }
+
     pub fn new(db: Connection) -> Self {
         Self {
             db,
+            online: false,
+            selected: None,
             records: 0,
             last_report: std::time::Instant::now(),
         }
     }
     fn record(&mut self) {
         self.records += 1;
-        if self.records.is_multiple_of(256)
+        if !self.online
+            && self.records.is_multiple_of(256)
             && self.last_report.elapsed() >= std::time::Duration::from_secs(3)
         {
             eprintln!("Read {} metadata records", self.records);
@@ -38,17 +56,16 @@ impl Catalog {
     fn ranges(&self, b: Uuid, g: i64, s: i64, offset: i64, spans: Vec<Span>) -> Result<()> {
         let (n, mut end, digest) = self
             .db
-            .query_row(
+            .prepare_cached(
                 "SELECT n,end,digest FROM pages WHERE (bucket,generation,seq)=(?1,?2,?3)",
-                params![b, g, s],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, [u8; 32]>(2)?,
-                    ))
-                },
-            )
+            )?
+            .query_row(params![b, g, s], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, [u8; 32]>(2)?,
+                ))
+            })
             .optional()?
             .unwrap_or_default();
         ensure!(
@@ -84,10 +101,9 @@ impl Catalog {
                 serde_json::to_vec(&span.material)?
             ])?;
         }
-        self.db.execute(
-            "INSERT OR REPLACE INTO pages VALUES(?1,?2,?3,?4,?5,?6)",
-            params![b, g, s, count, end, digest],
-        )?;
+        self.db
+            .prepare_cached("INSERT OR REPLACE INTO pages VALUES(?1,?2,?3,?4,?5,?6)")?
+            .execute(params![b, g, s, count, end, digest])?;
         Ok(())
     }
 
@@ -95,17 +111,16 @@ impl Catalog {
         let p = params![c.bucket, g, c.seq];
         let (n, end, hash) = self
             .db
-            .query_row(
+            .prepare_cached(
                 "SELECT n,end,digest FROM pages WHERE (bucket,generation,seq)=(?1,?2,?3)",
-                p,
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, [u8; 32]>(2)?,
-                    ))
-                },
-            )
+            )?
+            .query_row(p, |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, [u8; 32]>(2)?,
+                ))
+            })
             .optional()?
             .unwrap_or_default();
         ensure!(
@@ -113,10 +128,9 @@ impl Catalog {
             "incomplete journal range map"
         );
         c.validate_metadata(end)?;
-        self.db.execute(
-            "DELETE FROM pages WHERE (bucket,generation,seq)=(?1,?2,?3)",
-            p,
-        )?;
+        self.db
+            .prepare_cached("DELETE FROM pages WHERE (bucket,generation,seq)=(?1,?2,?3)")?
+            .execute(p)?;
         Ok(())
     }
 
@@ -125,36 +139,30 @@ impl Catalog {
         let Some(slot) = c.key.as_deref() else {
             anyhow::bail!("missing journal key")
         };
-        let crate::model::history::Subject::Current(key) = crate::model::history::subject(slot)?
-        else {
-            return Ok(());
+        let key = match crate::model::history::subject(slot)? {
+            _ if self.online => slot,
+            crate::model::history::Subject::Current(key) => key,
+            _ => return Ok(()),
         };
         let p = params![c.bucket, c.generation, key];
         let old: Option<i64> = db
-            .query_row(
-                "SELECT seq FROM objects WHERE (bucket,generation,key)=(?1,?2,?3)",
-                p,
-                |r| r.get(0),
-            )
+            .prepare_cached("SELECT seq FROM objects WHERE (bucket,generation,key)=(?1,?2,?3)")?
+            .query_row(p, |r| r.get(0))
             .optional()?;
         if old.is_none_or(|s| s <= c.seq) {
             if let Some(s) = old.filter(|&s| s != c.seq || g == 0) {
-                db.execute(
-                    "DELETE FROM spans WHERE bucket=?1 AND seq=?2",
-                    params![c.bucket, s],
-                )?;
+                db.prepare_cached("DELETE FROM spans WHERE bucket=?1 AND seq=?2")?
+                    .execute(params![c.bucket, s])?;
             }
-            db.execute(
-                "INSERT OR REPLACE INTO objects VALUES(?1,?2,?3,?4,?5,?6)",
-                params![
+            db.prepare_cached("INSERT OR REPLACE INTO objects VALUES(?1,?2,?3,?4,?5,?6)")?
+                .execute(params![
                     c.bucket,
                     c.generation,
                     key,
                     c.seq,
                     c.attributes.as_ref().map(|a| a.size),
                     c.attributes.as_ref().map(serde_json::to_vec).transpose()?
-                ],
-            )?;
+                ])?;
             if g == 0 {
                 self.store_spans(c, g)?;
             }
@@ -163,7 +171,7 @@ impl Catalog {
     }
 
     fn store_spans(&self, c: &Change, g: i64) -> Result<()> {
-        self.db.execute("INSERT INTO spans SELECT bucket,seq,offset,source_offset,length,material FROM ranges WHERE (bucket,generation,seq)=(?1,?2,?3)",params![c.bucket,g,c.seq])?;
+        self.db.prepare_cached("INSERT INTO spans SELECT bucket,seq,offset,source_offset,length,material FROM ranges WHERE (bucket,generation,seq)=(?1,?2,?3)")?.execute(params![c.bucket,g,c.seq])?;
         Ok(())
     }
     fn apply_change(&self, c: &Change) -> Result<()> {
@@ -214,6 +222,14 @@ impl Catalog {
             "UPDATE buckets SET seq=?3 WHERE id=?1 AND generation=?2",
             params![id, g, s],
         )?;
+        if self.online && c.attributes.as_ref().is_some_and(|a| a.size > 0) {
+            let invalid = db
+                .prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM invalid_spans WHERE bucket=? AND seq=?)",
+                )?
+                .query_row(params![id, s], |row| row.get::<_, bool>(0))?;
+            ensure!(!invalid, "missing or invalid journal range material");
+        }
         match c.operation {
             Operation::Put | Operation::Delete => self.object(c, g)?,
             Operation::Pause | Operation::Resume => {
@@ -240,16 +256,15 @@ impl Catalog {
     }
 
     fn clear_ranges(&self, b: Uuid, g: i64, s: i64) -> Result<()> {
-        self.db.execute(
-            "DELETE FROM ranges WHERE (bucket,generation,seq)=(?1,?2,?3)",
-            params![b, g, s],
-        )?;
+        self.db
+            .prepare_cached("DELETE FROM ranges WHERE (bucket,generation,seq)=(?1,?2,?3)")?
+            .execute(params![b, g, s])?;
         Ok(())
     }
 }
 
 #[cfg(test)]
-#[path = "../../tests/dump/catalog.rs"]
+#[path = "../../../tests/dump/catalog.rs"]
 mod tests;
 
 impl Sink for Catalog {
@@ -325,11 +340,10 @@ impl Sink for Catalog {
         };
         let state = self
             .db
-            .query_row(
-                "SELECT name,seq FROM buckets WHERE id=? AND generation=?",
-                params![b, g],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
-            )
+            .prepare_cached("SELECT name,seq FROM buckets WHERE id=? AND generation=?")?
+            .query_row(params![b, g], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })
             .optional()?;
         if let Some((name, watermark)) = state {
             ensure!(s <= watermark, "snapshot object beyond cut");
@@ -353,6 +367,16 @@ impl Sink for Catalog {
         self.clear_ranges(b, 0, s)
     }
     fn stage(&mut self, record: Record, f: &Format<'_>) -> Result<()> {
+        let bucket = match &record {
+            Record::Change { value, .. } => Some(value.bucket),
+            Record::Ranges { bucket, .. } => Some(*bucket),
+            _ => None,
+        };
+        if let (Some(selected), Some(id)) = (&self.selected, bucket)
+            && !selected.contains(&id)
+        {
+            return Ok(());
+        }
         self.record();
         let db = &self.db;
         match record {
@@ -477,7 +501,9 @@ impl Sink for Catalog {
           CREATE INDEX span_material ON spans(material);
           DELETE FROM materials WHERE pack IS NOT NULL AND ref NOT IN(SELECT material FROM spans);
           CREATE INDEX pack_members ON materials(pack,ordinal);")?;
-        let bad=db.query_row("SELECT EXISTS(SELECT 1 FROM spans s LEFT JOIN materials m ON m.ref=s.material LEFT JOIN materials p ON p.ref=m.pack LEFT JOIN keys k ON k.id=m.block_key WHERE m.ref IS NULL OR m.size-s.length<s.source_offset OR (m.pack IS NOT NULL AND p.ref IS NULL) OR (m.block_key IS NOT NULL AND k.id IS NULL))",[],|r|r.get::<_,bool>(0))?;
+        let bad = db.query_row("SELECT EXISTS(SELECT 1 FROM invalid_spans)", [], |r| {
+            r.get::<_, bool>(0)
+        })?;
         ensure!(!bad, "missing or invalid journal range material");
         let mut packs =
             db.prepare("SELECT DISTINCT pack FROM materials WHERE pack IS NOT NULL ORDER BY pack")?;

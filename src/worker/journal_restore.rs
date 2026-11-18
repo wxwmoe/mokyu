@@ -8,10 +8,7 @@ use crate::{
         restore::{Progress, Selection, Unlocked},
     },
     storage::{
-        journal::{
-            import::{Import, path},
-            source,
-        },
+        journal::{import::Import, source},
         marker, model,
     },
 };
@@ -149,7 +146,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
         } else {
             let (_, latest) = unlocked
                 .source
-                .read_locked(origin.as_ref(), None, None, local.as_ref())
+                .view_locked(origin.as_ref(), None, None, local.as_ref())
                 .await?;
             ensure!(
                 latest == unlocked.cut,
@@ -163,7 +160,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
         None => {
             let (catalog, cut) = unlocked
                 .source
-                .read_locked(
+                .view_locked(
                     origin.as_ref(),
                     Some(&unlocked.cut),
                     (!exclusive_takeover).then_some(&selected),
@@ -178,23 +175,24 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
     }
     let mut required = BTreeSet::new();
     for bucket in buckets.keys() {
-        required.extend(
-            catalog.required_keys(
-                catalog
-                    .buckets
-                    .get(bucket)
-                    .context("bucket missing at selected recovery point")?,
-            )?,
+        ensure!(
+            catalog.buckets.contains_key(bucket),
+            "bucket missing at selected recovery point"
         );
+        required.extend(catalog.required_keys(*bucket)?);
     }
     // Native physical IDs are unique within a deployment. Check before taking ownership.
     if unlocked.claim.is_none() {
         use crate::model::journal::record::Kind;
-        let mut ids: BTreeMap<Kind, BTreeSet<Uuid>> = BTreeMap::new();
         for bucket in &selected {
-            for object in catalog.buckets[bucket].objects.values() {
-                for span in &object.ranges {
-                    match &catalog.materials[&span.material] {
+            let mut after = Vec::new();
+            loop {
+                let page = catalog.materials_after(*bucket, &after)?;
+                let Some((last, _)) = page.last() else { break };
+                after.clone_from(last);
+                let mut ids = BTreeMap::<Kind, BTreeSet<Uuid>>::new();
+                for (_, material) in page {
+                    match material {
                         Material::Chunk { chunk } => {
                             ids.entry(Kind::Member).or_default().insert(chunk.uuid);
                             ids.entry(Kind::Chunk)
@@ -205,44 +203,39 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                             ids.entry(Kind::Member).or_default().insert(chunk.uuid);
                             let reference = crate::model::journal::record::Reference {
                                 kind: Kind::Pack,
-                                id: *pack,
+                                id: pack,
                                 member: None,
                             };
-                            if let Material::Pack { pack } = catalog
-                                .materials
-                                .get(&reference)
-                                .context("missing recovery pack")?
-                            {
-                                ids.entry(Kind::Pack).or_default().insert(pack.location_id);
-                            }
+                            let Material::Pack { pack } = catalog.material(reference)? else {
+                                anyhow::bail!("invalid recovery pack");
+                            };
+                            ids.entry(Kind::Pack).or_default().insert(pack.location_id);
                         }
                         Material::Raw { source } => {
                             ids.entry(Kind::Raw).or_default().insert(source.location_id);
                         }
                         Material::Fragment { id, .. } => {
-                            ids.entry(Kind::Fragment).or_default().insert(*id);
+                            ids.entry(Kind::Fragment).or_default().insert(id);
                         }
                         Material::Pack { .. } => anyhow::bail!("invalid standalone pack range"),
                     }
                 }
-            }
-        }
-        for (kind, ids) in ids {
-            let ids: Vec<_> = ids.into_iter().collect();
-            for page in ids.chunks(256) {
-                ensure!(
-                    !app.journal
-                        .recovery_location_conflict(target, kind, page)
-                        .await?,
-                    "recovery data is already registered on another storage in this deployment"
-                );
+                for (kind, ids) in ids {
+                    let ids: Vec<_> = ids.into_iter().collect();
+                    ensure!(
+                        !app.journal
+                            .recovery_location_conflict(target, kind, &ids)
+                            .await?,
+                        "recovery data is already registered on another storage in this deployment"
+                    );
+                }
             }
         }
     }
     for key in &required {
         ensure!(
             !app.journal
-                .recovery_key_conflict(&catalog.keys[key])
+                .recovery_key_conflict(&catalog.key(*key, &unlocked.source)?)
                 .await?,
             "historical key is in use for new encryption"
         );
@@ -360,7 +353,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
     }
     let mut keys = BTreeMap::new();
     for kid in required {
-        let k = &catalog.keys[&kid];
+        let k = &catalog.key(kid, &unlocked.source)?;
         let protected = codec::protect(
             &k.material,
             &app.secrets.credential_key,
@@ -391,11 +384,12 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
             .then(|| source::client(&to))
             .transpose()?,
         keys,
-        locations: BTreeMap::new(),
+        catalog: &catalog,
     };
     let mut errors = Vec::new();
     for (bucket, name) in &buckets {
         let src = &catalog.buckets[bucket];
+        let generation = src.generation.parse()?;
         let (_, published, after) = app
             .journal
             .recovery_bucket(
@@ -403,30 +397,33 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                 token,
                 *bucket,
                 name,
-                src.generation,
-                src.sequence,
+                generation,
+                src.sequence.parse()?,
                 exclusive_takeover,
             )
             .await?;
         if !published {
             let result: Result<()> = async {
-                for (key, change) in src.objects.range::<String, _>((
-                    after
-                        .as_ref()
-                        .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
-                    std::ops::Bound::Unbounded,
-                )) {
-                    ensure!(
-                        change.key.as_ref() == Some(key),
-                        "recovery object identity changed"
-                    );
-                    let mut locations = Vec::with_capacity(change.ranges.len());
-                    for span in &change.ranges {
-                        locations.push(import.location(&catalog, span.material).await?);
+                let mut after = after.unwrap_or_default();
+                loop {
+                    let mut batch = Vec::with_capacity(64);
+                    let mut spans = 0;
+                    while batch.len() < 64 && spans < 512 {
+                        let Some(change) = catalog.next_object(*bucket, generation, &after)? else {
+                            break;
+                        };
+                        let mut locations = Vec::with_capacity(change.ranges.len());
+                        for span in &change.ranges {
+                            locations.push(import.location(span.material).await?);
+                        }
+                        after = change.key.clone().context("missing recovery object key")?;
+                        spans += locations.len();
+                        batch.push((change, locations));
                     }
-                    app.journal
-                        .recovery_item(id, token, change, &locations)
-                        .await?;
+                    if batch.is_empty() {
+                        break;
+                    }
+                    app.journal.recovery_items(id, token, &batch).await?;
                 }
                 app.journal
                     .recovery_publish(id, token, *bucket, project, target)
@@ -445,24 +442,30 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
     }
     ensure!(errors.is_empty(), "{}", errors.join(", "));
     if exclusive_takeover {
-        let known = catalog
-            .materials
-            .values()
-            .filter(|m| !matches!(m, Material::Member { .. }))
-            .map(|m| path(m, true, source_layout))
-            .collect::<Result<BTreeSet<_>>>()?;
         let mut files = origin.list(None);
         let mut candidates = 0;
         while let Some(file) = files.try_next().await? {
             let key = file.location.as_ref();
-            if known.contains(key) {
-                continue;
-            }
             let addr = source_layout.parse_chunk_or_pack(key).or_else(|| {
                 key.strip_prefix("objects/")
                     .and_then(|name| source_layout.parse_name(name))
             });
             if let Some(addr) = addr {
+                use crate::model::journal::record::{Kind, Reference};
+                let kind = if key.starts_with("objects/") {
+                    Kind::Raw
+                } else if key.starts_with("packs/") {
+                    Kind::Pack
+                } else {
+                    Kind::Chunk
+                };
+                if catalog.known(Reference {
+                    kind,
+                    id: addr,
+                    member: None,
+                })? {
+                    continue;
+                }
                 app.journal
                     .recovery_orphan(id, token, addr, key, i64::try_from(file.size)?)
                     .await?;
@@ -627,19 +630,26 @@ async fn process(app: &App, id: Uuid) -> Result<()> {
         return Ok(());
     }
     let mut progress = app.journal.recovery(id).await?.progress.0;
-    let result = {
-        let work = restore(app, id, token, &mut progress);
-        tokio::pin!(work);
-        let mut timer = tokio::time::interval(Duration::from_secs(15));
-        timer.tick().await;
+    let renew = async {
+        let interval = Duration::from_secs(15);
+        let mut timer = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
+        timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            tokio::select! {
-                result = &mut work => break result,
-                _ = timer.tick() => {
-                    if !app.journal.recovery_claim(id, token).await? { return Ok(()) }
+            timer.tick().await;
+            match app.journal.recovery_claim(id, token).await {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                // Publication can hold SQLite's writer until the fenced transaction commits.
+                Err(error) if matches!(error.downcast_ref(), Some(sqlx::Error::PoolTimedOut)) => {
+                    tracing::debug!(job=%id, "waiting to renew recovery lease");
                 }
+                Err(error) => return Err(error),
             }
         }
+    };
+    let result = tokio::select! {
+        result = restore(app, id, token, &mut progress) => result,
+        result = renew => return result,
     };
     let error = result.err().map(|e| {
         e.to_string()

@@ -1,7 +1,8 @@
+#[cfg(test)]
+use super::replay::Catalog;
 use super::{
     Format, FrameType, ROOT,
     batch::Decoder,
-    replay::Catalog,
     segment_path, snapshot,
     stream::{self, Sink},
 };
@@ -198,6 +199,30 @@ impl Source {
         })
     }
 
+    pub async fn view(&self, store: &dyn ObjectStore) -> Result<(super::view::View, Cut)> {
+        let local = super::local::Local::new(&self.connection)?;
+        let _pin = match &local {
+            Some(local) => Some(local.lock(false).await?),
+            None => None,
+        };
+        self.view_locked(store, None, None, local.as_ref()).await
+    }
+
+    pub async fn view_locked(
+        &self,
+        store: &dyn ObjectStore,
+        fixed: Option<&Cut>,
+        buckets: Option<&std::collections::BTreeSet<Uuid>>,
+        local: Option<&super::local::Local>,
+    ) -> Result<(super::view::View, Cut)> {
+        let mut catalog = super::catalog::Catalog::temporary(buckets)?;
+        let cut = self
+            .walk(store, fixed, buckets, local, &mut catalog)
+            .await?;
+        Ok((super::view::View::open(catalog)?, cut))
+    }
+
+    #[cfg(test)]
     pub async fn read(
         &self,
         store: &dyn ObjectStore,
@@ -205,6 +230,7 @@ impl Source {
     ) -> Result<(Catalog, Cut)> {
         self.read_selected(store, fixed, None).await
     }
+    #[cfg(test)]
     pub async fn read_selected(
         &self,
         store: &dyn ObjectStore,
@@ -220,6 +246,7 @@ impl Source {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn read_locked(
         &self,
         store: &dyn ObjectStore,

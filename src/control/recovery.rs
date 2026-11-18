@@ -224,14 +224,12 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
         )
         .await
     } else {
-        source
-            .read(store.as_ref().unwrap().backend.as_ref(), None)
-            .await
+        source.view(store.as_ref().unwrap().backend.as_ref()).await
     }
     .map_err(|e| probe_error(e, "RecoveryIncomplete"))?;
     let mut progress = Progress::default();
     for b in catalog.buckets.values() {
-        let summary = b.summary()?;
+        let summary = b.clone();
         if app.buckets.by_name(&b.name, false).await?.is_some() {
             progress.conflicts.push(b.name.clone())
         }
@@ -242,11 +240,11 @@ pub(crate) async fn probe(app: &App, principal: &Principal, input: Probe) -> Res
         .sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     let mut required = BTreeSet::new();
     for b in catalog.buckets.values() {
-        required.extend(catalog.required_keys(b)?);
+        required.extend(catalog.required_keys(b.id)?);
     }
     progress.required_keys = u32::try_from(required.len())?;
     for id in required {
-        let key = &catalog.keys[&id];
+        let key = &catalog.key(id, &source)?;
         if app.journal.recovery_key_conflict(key).await? {
             progress.conflicts.push(id.to_string())
         }

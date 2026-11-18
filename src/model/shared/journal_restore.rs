@@ -348,115 +348,129 @@ impl RecoveryStore for Backend {
         tx.commit().await?;
         Ok(result)
     }
-    async fn recovery_item(
+    async fn recovery_items(
         &self,
         job: Uuid,
         token: Uuid,
-        change: &Change,
-        locations: &[Location],
+        items: &[(Change, Vec<Location>)],
     ) -> Result<()> {
-        change.validate()?;
-        ensure!(
-            change.ranges.len() == locations.len(),
-            "missing recovery locations"
-        );
-        let obj = change
-            .attributes
-            .as_ref()
-            .context("missing recovered object")?;
-        let key = change.key.as_deref().context("missing recovered key")?;
-        use crate::model::{
-            history::{Subject, subject},
-            journal::record::History,
-        };
-        let mut stage_meta = obj.metadata.clone();
-        let (logical, history_id, order, when, marker, count) =
-            match (subject(key)?, obj.history.as_ref()) {
-                (Subject::Current(logical), None) => (logical, None, None, None, false, 1),
-                (
-                    Subject::History(logical, id),
-                    Some(History::Version {
-                        order,
-                        time,
-                        marker,
-                    }),
-                ) => (
-                    logical,
-                    Some(id),
-                    Some(*order),
-                    Some(*time),
-                    *marker == 1,
-                    0,
-                ),
-                (
-                    Subject::Window,
-                    Some(History::Window {
-                        seconds,
-                        floor,
-                        gaps,
-                    }),
-                ) => {
-                    stage_meta = serde_json::to_value(gaps)?;
-                    ("", Some("window"), Some(*seconds), Some(*floor), true, 0)
-                }
-                (Subject::Point(logical, _), Some(History::Point { tick, time, marker })) => (
-                    logical,
-                    Some("point"),
-                    Some(*tick),
-                    Some(*time),
-                    *marker == 1,
-                    0,
-                ),
-                (Subject::Mode, Some(History::State { mode })) => {
-                    ("", Some("mode"), Some(i64::from(*mode)), None, true, 0)
-                }
-                _ => anyhow::bail!("invalid recovery version"),
-            };
-        let identity = blake3::hash(key.as_bytes()).to_hex();
-        let mime = obj
-            .metadata
-            .get("content_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("application/octet-stream");
+        let bucket = items.first().context("empty recovery batch")?.0.bucket;
+        let mut last = "";
+        let mut bytes = 0i64;
+        let mut objects = 0;
         let mut tx = q::begin(self).await?;
         q::fence(job, token).fetch_one(&mut *tx).await?;
-        q::stage(
-            job,
-            change.bucket,
-            key,
-            identity.as_str(),
-            logical,
-            history_id,
-            order,
-            when,
-            marker,
-            obj.size,
-            &obj.etag,
-            &stage_meta,
-            &obj.checksums,
-            &obj.payload,
-            obj.modified_us,
-            mime,
-            q::category(logical, mime),
-            obj.origin,
-        )
-        .execute(&mut *tx)
-        .await?;
-        for (span, loc) in change.ranges.iter().zip(locations) {
-            q::range(
+        for (change, locations) in items {
+            change.validate()?;
+            ensure!(
+                change.ranges.len() == locations.len(),
+                "missing recovery locations"
+            );
+            let obj = change
+                .attributes
+                .as_ref()
+                .context("missing recovered object")?;
+            let key = change.key.as_deref().context("missing recovered key")?;
+            ensure!(
+                change.bucket == bucket && key > last,
+                "unordered recovery batch"
+            );
+            use crate::model::{
+                history::{Subject, subject},
+                journal::record::History,
+            };
+            let mut stage_meta = obj.metadata.clone();
+            let (logical, history_id, order, when, marker, count) =
+                match (subject(key)?, obj.history.as_ref()) {
+                    (Subject::Current(logical), None) => (logical, None, None, None, false, 1),
+                    (
+                        Subject::History(logical, id),
+                        Some(History::Version {
+                            order,
+                            time,
+                            marker,
+                        }),
+                    ) => (
+                        logical,
+                        Some(id),
+                        Some(*order),
+                        Some(*time),
+                        *marker == 1,
+                        0,
+                    ),
+                    (
+                        Subject::Window,
+                        Some(History::Window {
+                            seconds,
+                            floor,
+                            gaps,
+                        }),
+                    ) => {
+                        stage_meta = serde_json::to_value(gaps)?;
+                        ("", Some("window"), Some(*seconds), Some(*floor), true, 0)
+                    }
+                    (Subject::Point(logical, _), Some(History::Point { tick, time, marker })) => (
+                        logical,
+                        Some("point"),
+                        Some(*tick),
+                        Some(*time),
+                        *marker == 1,
+                        0,
+                    ),
+                    (Subject::Mode, Some(History::State { mode })) => {
+                        ("", Some("mode"), Some(i64::from(*mode)), None, true, 0)
+                    }
+                    _ => anyhow::bail!("invalid recovery version"),
+                };
+            let identity = blake3::hash(key.as_bytes()).to_hex();
+            let mime = obj
+                .metadata
+                .get("content_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("application/octet-stream");
+            q::stage(
                 job,
                 change.bucket,
                 key,
-                span.offset,
-                span.length,
-                span.source_offset,
-                loc.kind,
-                loc.native,
+                identity.as_str(),
+                logical,
+                history_id,
+                order,
+                when,
+                marker,
+                obj.size,
+                &obj.etag,
+                &stage_meta,
+                &obj.checksums,
+                &obj.payload,
+                obj.modified_us,
+                mime,
+                q::category(logical, mime),
+                obj.origin,
             )
             .execute(&mut *tx)
             .await?;
+            for (span, loc) in change.ranges.iter().zip(locations) {
+                q::range(
+                    job,
+                    change.bucket,
+                    key,
+                    span.offset,
+                    span.length,
+                    span.source_offset,
+                    loc.kind,
+                    loc.native,
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+            last = key;
+            bytes = bytes
+                .checked_add(obj.size * count)
+                .context("recovered size overflow")?;
+            objects += count;
         }
-        q::advance(key, obj.size * count, count, job, change.bucket)
+        q::advance(last, bytes, objects, job, bucket)
             .execute(&mut *tx)
             .await?;
         tx.commit().await?;
@@ -550,6 +564,15 @@ impl RecoveryStore for Backend {
         }
         q::complete_bucket(job, source).execute(&mut *tx).await?;
         q::remove_items(job, source).execute(&mut *tx).await?;
+        // Publishing can outlast the lease while this transaction holds its row lock.
+        ensure!(
+            q::claim(token, job, token)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                == 1,
+            "recovery lease lost during publication"
+        );
         tx.commit().await?;
         Ok(())
     }

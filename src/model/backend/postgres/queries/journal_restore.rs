@@ -426,7 +426,7 @@ pub(in super::super) fn ready_heads(bucket: Uuid, owner: Uuid) -> Statement<'sta
     sqlx::query("UPDATE streams SET state='ready' WHERE bucket_id=$1 AND id IN (SELECT stream_id FROM objects WHERE bucket_id=$2 AND stream_id IS NOT NULL)").bind(bucket).bind(owner)
 }
 pub(in super::super) fn stream_names(job: Uuid, source: Uuid, bucket: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE streams SET object_key=(SELECT i.logical_key FROM journal_restore_items i WHERE i.job=$1 AND i.source_bucket=$2 AND i.stage_key=streams.object_key) WHERE bucket_id=$3").bind(job).bind(source).bind(bucket)
+    sqlx::query("UPDATE streams AS s SET object_key=i.logical_key FROM journal_restore_items AS i WHERE i.job=$1 AND i.source_bucket=$2 AND s.bucket_id=$3 AND s.object_key=i.stage_key").bind(job).bind(source).bind(bucket)
 }
 pub(in super::super) fn complete_bucket(job: Uuid, source: Uuid) -> Statement<'static> {
     sqlx::query(

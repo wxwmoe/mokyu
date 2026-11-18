@@ -1,10 +1,10 @@
+use super::view::Summary;
 use super::{
     Format,
     batch::{ObjectRanges, Record},
 };
 use crate::model::journal::record::{BlockKey, Change, Kind, Material, Operation, Reference};
 use anyhow::{Context, Result, ensure};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -29,18 +29,6 @@ pub(crate) struct Bucket {
     pub sequence: i64,
     pub paused: bool,
     pub objects: BTreeMap<String, Change>,
-}
-
-#[derive(Clone, Deserialize, Serialize, utoipa::ToSchema)]
-#[schema(as = MetadataRecoveryBucket)]
-pub(crate) struct Summary {
-    pub id: Uuid,
-    pub name: String,
-    pub generation: String,
-    pub sequence: String,
-    pub stopped: bool,
-    pub objects: String,
-    pub logical_bytes: String,
 }
 
 impl Bucket {

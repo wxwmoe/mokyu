@@ -1,14 +1,17 @@
 //! Authenticated records shared by the metadata journal and its snapshots.
 pub(crate) mod batch;
+pub(crate) mod catalog;
 pub(crate) mod history;
 pub(crate) mod import;
 pub(crate) mod local;
 pub(crate) mod recovery;
 pub(crate) mod remote;
+#[cfg(test)]
 pub(crate) mod replay;
 pub(crate) mod snapshot;
 pub(crate) mod source;
 pub(crate) mod stream;
+pub(crate) mod view;
 
 use crate::content::codec::Key;
 use anyhow::{Context, Result, ensure};

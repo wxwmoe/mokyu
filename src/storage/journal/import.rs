@@ -1,4 +1,4 @@
-use super::{replay::Catalog, source};
+use super::{source, view::View};
 use crate::{
     app::App,
     content::{codec, pack},
@@ -96,7 +96,7 @@ pub(crate) struct Import<'a> {
     pub destination: Arc<dyn ObjectStore>,
     pub client: Option<Client>,
     pub keys: BTreeMap<Uuid, codec::Key>,
-    pub locations: BTreeMap<Reference, Id>,
+    pub catalog: &'a View,
 }
 
 impl Import<'_> {
@@ -106,7 +106,7 @@ impl Import<'_> {
             .journal
             .recovery_material(self.job, self.token, self.target, mat, pack)
             .await?;
-        self.locations.insert(mat.reference(), id);
+        self.catalog.remember(mat.reference(), id)?;
         Ok(id)
     }
 
@@ -421,25 +421,22 @@ impl Import<'_> {
         Ok(())
     }
 
-    pub async fn location(&mut self, catalog: &Catalog, reference: Reference) -> Result<Location> {
-        let mat = catalog
-            .materials
-            .get(&reference)
-            .context("missing journal material")?;
+    pub async fn location(&mut self, reference: Reference) -> Result<Location> {
+        let material = self.catalog.material(reference)?;
+        let mat = &material;
         let kind = role(mat);
-        if let Some(id) = self.locations.get(&reference) {
-            return Ok(Location { native: *id, kind });
+        if let Some(id) = self.catalog.location(reference)? {
+            return Ok(Location { native: id, kind });
         }
+        let pack_material;
         let mut physical = mat;
         if let Material::Member { pack, .. } = mat {
-            physical = catalog
-                .materials
-                .get(&Reference {
-                    kind: Kind::Pack,
-                    id: *pack,
-                    member: None,
-                })
-                .context("missing recovery pack")?;
+            pack_material = self.catalog.material(Reference {
+                kind: Kind::Pack,
+                id: *pack,
+                member: None,
+            })?;
+            physical = &pack_material;
         }
         let from = path(physical, true, self.source_layout)?;
         let to = path(physical, false, self.target_layout)?;
@@ -468,7 +465,7 @@ impl Import<'_> {
                 let size = u64::try_from(pack.stored_size.context("missing pack size")?)?;
                 let member = mat.pack_member()?.map(|(_, entry)| entry);
                 let pack_ref = physical.reference();
-                let (id, body) = if let Some(id) = self.locations.get(&pack_ref).copied() {
+                let (id, body) = if let Some(id) = self.catalog.location(pack_ref)? {
                     let member = member.as_ref().context("missing recovery member")?;
                     let span = member
                         .position
@@ -535,9 +532,9 @@ impl Import<'_> {
             Material::Member { .. } => unreachable!(),
         }
         Ok(Location {
-            native: *self
-                .locations
-                .get(&reference)
+            native: self
+                .catalog
+                .location(reference)?
                 .context("missing verified pack member")?,
             kind,
         })

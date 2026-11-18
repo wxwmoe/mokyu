@@ -267,12 +267,14 @@ pub(crate) fn range_digest(previous: [u8; 32], ranges: &[Span]) -> Result<[u8; 3
     Ok(*digest.finalize().as_bytes())
 }
 
+#[cfg(test)]
 #[derive(Default)]
 pub(crate) struct ObjectRanges {
     ranges: Vec<Span>,
     digest: [u8; 32],
     next: i64,
 }
+#[cfg(test)]
 impl ObjectRanges {
     pub fn append(&mut self, offset: i64, ranges: Vec<Span>) -> Result<()> {
         ensure!(

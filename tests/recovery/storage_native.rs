@@ -896,7 +896,9 @@ async fn native_journal_publishes_evidence_before_watermarks() -> Result<()> {
         .await?;
     assert_eq!(restored_cut, expected_cut);
     assert_eq!(restored.buckets.len(), expected.buckets.len());
-    assert_eq!(restored.materials.len(), expected.materials.len());
+    for reference in expected.materials.keys() {
+        assert!(restored.known(*reference)?);
+    }
     assert!(
         scanner
             .recover(

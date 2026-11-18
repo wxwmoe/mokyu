@@ -1,5 +1,4 @@
 mod body;
-mod catalog;
 mod export;
 mod multipart;
 mod origin;
@@ -9,11 +8,8 @@ mod resume;
 mod selection;
 mod verify;
 
-use self::{
-    catalog::Catalog,
-    origin::{Backend, Location, setting},
-};
-use crate::storage::journal::{local::Local, source::Cut};
+use self::origin::{Backend, Location, setting};
+use crate::storage::journal::{catalog::Catalog, local::Local, source::Cut};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -135,7 +131,7 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
         .tempfile_in(&dir)?;
     let mut catalog = Catalog::new(Connection::open(file.path())?);
     catalog.db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE; PRAGMA cache_size=-2048; PRAGMA temp.cache_size=-2048; BEGIN IMMEDIATE;")?;
-    catalog.db.execute_batch(include_str!("schema.sql"))?;
+    catalog.db.execute_batch(Catalog::SCHEMA)?;
     let cut = backend
         .source
         .walk(&*backend.store, None, None, local.as_ref(), &mut catalog)

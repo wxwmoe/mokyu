@@ -4,8 +4,8 @@ use crate::{
     content::codec,
     model::Id,
     storage::journal::{
-        replay::Summary,
         source::{Cut, Source},
+        view::Summary,
     },
 };
 use anyhow::{Result, ensure};
@@ -197,12 +197,11 @@ pub(crate) trait RecoveryStore: Send + Sync {
         sequence: i64,
         in_place: bool,
     ) -> Result<(Uuid, bool, Option<String>)>;
-    async fn recovery_item(
+    async fn recovery_items(
         &self,
         job: Uuid,
         token: Uuid,
-        change: &Change,
-        locations: &[Location],
+        items: &[(Change, Vec<Location>)],
     ) -> Result<()>;
     async fn recovery_publish(
         &self,
