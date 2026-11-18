@@ -64,6 +64,7 @@ message NativeUploadResult {
 message NativeReadRequest {
   Run run = 1;
   bytes request_json = 2;
+  optional bytes first_window_json = 3;
 }
 
 message NativeReadReply { bytes plan_json = 1; }

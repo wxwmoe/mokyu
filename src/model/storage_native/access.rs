@@ -28,17 +28,42 @@ pub(crate) struct Read {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ReadRequest {
     pub access: Read,
+    #[serde(skip)]
+    pub first: Option<FirstWindow>,
     pub version: Option<Uuid>,
     #[serde(default)]
     pub lease: Option<super::ReadLease>,
     pub region: Option<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum FirstWindow {
+    Full,
+    Bounded(Range<u64>),
+    Offset(u64),
+    Suffix(u64),
+}
+
+impl FirstWindow {
+    pub fn resolve(&self, size: u64, window: u64) -> Option<Range<u64>> {
+        use object_store::GetRange;
+        let range = match self {
+            Self::Full => 0..size,
+            Self::Bounded(r) => GetRange::Bounded(r.clone()).as_range(size).ok()?,
+            Self::Offset(p) => GetRange::Offset(*p).as_range(size).ok()?,
+            Self::Suffix(n) => GetRange::Suffix(*n).as_range(size).ok()?,
+        };
+        (!range.is_empty()).then(|| range.start..range.end.min(range.start.saturating_add(window)))
+    }
+}
+
 impl ReadRequest {
     pub fn validate(&self) -> Result<()> {
         self.access.validate()?;
         ensure!(
-            self.version.is_none_or(|id| !id.is_nil())
+            (self.first.is_none() || (self.access.range.is_none() && self.lease.is_none()))
+                && self.version.is_none_or(|id| !id.is_nil())
                 && self
                     .lease
                     .as_ref()
@@ -401,6 +426,20 @@ impl Read {
             }
         }
         Err(s3s::s3_error!(AccessDenied).into())
+    }
+}
+
+#[cfg(test)]
+mod first_window_tests {
+    use super::FirstWindow;
+    #[test]
+    fn clip_the_first_grant_to_the_requested_bytes() {
+        assert_eq!(FirstWindow::Full.resolve(0, 8), None);
+        assert_eq!(FirstWindow::Full.resolve(19, 8), Some(0..8));
+        assert_eq!(FirstWindow::Bounded(9..27).resolve(19, 8), Some(9..17));
+        assert_eq!(FirstWindow::Bounded(4..5).resolve(19, 8), Some(4..5));
+        assert_eq!(FirstWindow::Suffix(3).resolve(19, 8), Some(16..19));
+        assert_eq!(FirstWindow::Offset(20).resolve(19, 8), None);
     }
 }
 

@@ -293,6 +293,7 @@ impl Store {
         range: Option<Range<u64>>,
         version: Option<Uuid>,
         lease: Option<&crate::model::storage_native::ReadLease>,
+        first: Option<&access::FirstWindow>,
     ) -> Result<(reader::Plan, Arc<dyn Renewal>)> {
         let (plan, renewal): (_, Arc<dyn Renewal>) = match &self.authority {
             Authority::Control(control) => (
@@ -323,7 +324,7 @@ impl Store {
                     grant.check()?;
                     windows.push(Uuid::parse_str(&grant.reference.id)?);
                 }
-                let reader = Arc::new(remote::Reader {
+                let mut reader = remote::Reader {
                     client: client.clone(),
                     run: run.run.clone(),
                     region: self.region.clone(),
@@ -335,8 +336,11 @@ impl Store {
                         path: path.into(),
                         range,
                     },
-                });
-                (reader.plan(version, lease.cloned()).await?, reader)
+                };
+                (
+                    reader.plan(version, lease.cloned(), first).await?,
+                    Arc::new(reader),
+                )
             }
             Authority::Upload {
                 client,
@@ -356,7 +360,7 @@ impl Store {
                     grant.check()?;
                 }
                 let work = matches!(&self.authority, Authority::Work { .. });
-                let reader = Arc::new(remote::Reader {
+                let mut reader = remote::Reader {
                     client: client.clone(),
                     run: run.run.clone(),
                     region: self.region.clone(),
@@ -368,8 +372,11 @@ impl Store {
                         path: path.into(),
                         range,
                     },
-                });
-                (reader.plan(version, lease.cloned()).await?, reader)
+                };
+                (
+                    reader.plan(version, lease.cloned(), first).await?,
+                    Arc::new(reader),
+                )
             }
             _ => anyhow::bail!("native read authority is missing"),
         };
@@ -510,8 +517,22 @@ impl Store {
             .map(Uuid::parse_str)
             .transpose()
             .map_err(|error| failure(path, error.into()))?;
-        let (plan, _) = self
-            .plan(&name, None, version, None)
+        let first = (!options.head
+            && options
+                .if_match
+                .as_ref()
+                .is_none_or(|etag| version.is_some_and(|v| etag == &format!("\"{v}\"")))
+            && options.if_none_match.is_none()
+            && options.if_modified_since.is_none()
+            && options.if_unmodified_since.is_none())
+        .then(|| match &options.range {
+            None => access::FirstWindow::Full,
+            Some(object_store::GetRange::Bounded(r)) => access::FirstWindow::Bounded(r.clone()),
+            Some(object_store::GetRange::Offset(p)) => access::FirstWindow::Offset(*p),
+            Some(object_store::GetRange::Suffix(n)) => access::FirstWindow::Suffix(*n),
+        });
+        let (plan, renewal) = self
+            .plan(&name, None, version, None, first.as_ref())
             .await
             .map_err(|error| failure(path, error))?;
         let meta = metadata(path.clone(), &plan.object).map_err(|error| failure(path, error))?;
@@ -527,17 +548,53 @@ impl Store {
         let requested = range.clone();
         let window = plan.window;
         let version = plan.object.version;
-        let lease = plan.lease;
+        let lease = plan.lease.clone();
         let path = path.clone();
         let head = options.head;
         let body = async_stream::try_stream! {
-            let mut offset = requested.start;
-            while !head && offset < requested.end {
-                let end = requested.end.min(offset.saturating_add(window));
-                let (plan, renewal) = store.plan(&name, Some(offset..end), Some(version), Some(&lease)).await.map_err(|error| failure(&path, error))?;
-                let mut body = reader::read(store.pool.clone(), renewal, plan, crate::model::storage_cluster::MEMBER_LIMIT).map_err(|error| failure(&path, error))?;
-                while let Some(bytes) = body.try_next().await.map_err(|error| failure(&path, error))? { yield bytes; }
-                offset = end;
+            let fetch = |start: u64| {
+                let end = requested.end.min(start.saturating_add(window));
+                store.plan(&name, Some(start..end), Some(version), Some(&lease), None)
+            };
+            if !head && !requested.is_empty() {
+                let mut current = if plan.range.is_some() {
+                    (plan, renewal)
+                } else {
+                    fetch(requested.start).await.map_err(|e| failure(&path, e))?
+                };
+                loop {
+                    let (plan, renewal) = current;
+                    let end = plan.range.as_ref().context("missing native read range")
+                        .map_err(|e| failure(&path, e))?.end;
+                    let mut body = reader::read(
+                        store.pool.clone(), renewal, plan, crate::model::storage_cluster::MEMBER_LIMIT,
+                    ).map_err(|e| failure(&path, e))?;
+                    // Poll one control request alongside the current body. Dropping the read cancels both.
+                    let next = fetch(end);
+                    tokio::pin!(next);
+                    let mut ready = None;
+                    loop {
+                        let bytes = tokio::select! {
+                            biased;
+                            result = &mut next, if end < requested.end && ready.is_none() => {
+                                ready = Some(result);
+                                continue;
+                            }
+                            result = body.try_next() => result,
+                        }.map_err(|e| failure(&path, e))?;
+                        match bytes {
+                            Some(bytes) => yield bytes,
+                            None => break,
+                        }
+                    }
+                    if end >= requested.end {
+                        break;
+                    }
+                    current = match ready {
+                        Some(result) => result,
+                        None => next.await,
+                    }.map_err(|e| failure(&path, e))?;
+                }
             }
         };
         Ok(GetResult {

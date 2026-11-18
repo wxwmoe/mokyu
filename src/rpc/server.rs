@@ -559,8 +559,15 @@ impl NodeStorage for Service {
         let node = identity(&request)?;
         let input = request.into_inner();
         let run = super::read::run(input.run)?;
-        let request = serde_json::from_slice(&input.request_json)
-            .map_err(|_| Status::invalid_argument("invalid native read request"))?;
+        let mut request: crate::model::storage_native::access::ReadRequest =
+            serde_json::from_slice(&input.request_json)
+                .map_err(|_| Status::invalid_argument("invalid native read request"))?;
+        request.first = input
+            .first_window_json
+            .as_deref()
+            .map(serde_json::from_slice)
+            .transpose()
+            .map_err(|_| Status::invalid_argument("invalid first read window"))?;
         let plan = bounded(self.app.native_storage.node_read(&node, run, &request)).await?;
         Ok(Response::new(wire::NativeReadReply {
             plan_json: serde_json::to_vec(&plan)

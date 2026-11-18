@@ -32,9 +32,10 @@ fn read_error(status: tonic::Status) -> anyhow::Error {
 
 impl Reader {
     pub async fn plan(
-        &self,
+        &mut self,
         version: Option<Uuid>,
         lease: Option<crate::model::storage_native::ReadLease>,
+        first: Option<&crate::model::storage_native::access::FirstWindow>,
     ) -> Result<Plan> {
         let reply = self
             .client
@@ -42,10 +43,12 @@ impl Reader {
                 run: Some(self.run.clone()),
                 request_json: serde_json::to_vec(&ReadRequest {
                     access: self.access.clone(),
+                    first: None,
                     version,
                     lease,
                     region: self.region.clone(),
                 })?,
+                first_window_json: first.map(serde_json::to_vec).transpose()?,
             })
             .await
             .map_err(read_error)?;
@@ -53,10 +56,13 @@ impl Reader {
         plan.validate()?;
         anyhow::ensure!(
             plan.object.path == self.access.path
-                && plan.range == self.access.range
+                && (plan.range == self.access.range
+                    || first
+                        .is_some_and(|r| plan.range == r.resolve(plan.object.size, plan.window)))
                 && version.is_none_or(|id| id == plan.object.version),
             "native read reply differs from its request"
         );
+        self.access.range = plan.range.clone();
         Ok(plan)
     }
 }

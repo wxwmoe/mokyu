@@ -959,12 +959,36 @@ impl Control {
             .payloads
             .authorize_read(node, &self.secrets.credential_key, run, scope)
             .await?;
+        let plan = self
+            .plan_read(
+                scope.storage,
+                &scope.path,
+                request.version,
+                request.lease.as_ref(),
+                scope.range.clone(),
+                request.region.as_deref(),
+                expires,
+            )
+            .await?;
+        let Some(range) = request
+            .first
+            .as_ref()
+            .and_then(|r| r.resolve(plan.object.size, plan.window))
+        else {
+            return Ok(plan);
+        };
+        let mut access = scope.clone();
+        access.range = Some(range.clone());
+        let expires = self
+            .payloads
+            .authorize_read(node, &self.secrets.credential_key, run, &access)
+            .await?;
         self.plan_read(
             scope.storage,
             &scope.path,
-            request.version,
-            request.lease.as_ref(),
-            scope.range.clone(),
+            Some(plan.object.version),
+            Some(&plan.lease),
+            Some(range),
             request.region.as_deref(),
             expires,
         )
@@ -1243,6 +1267,17 @@ impl Control {
                 !copies.is_empty(),
                 s3s::s3_error!(ServiceUnavailable, "no durable storage copy is online")
             );
+            let local = copies
+                .iter()
+                .take_while(|(_, target)| {
+                    region.is_some()
+                        && target.device.announcement.topology.region.as_deref() == region
+                })
+                .count();
+            let prefer_local = intent.layout.data_shards == 1
+                && intent.layout.parity_shards == 0
+                && (1..copies.len()).contains(&local);
+            let rotating = if prefer_local { local } else { copies.len() };
             let mut offset = start;
             while offset < end {
                 let (wanted, physical, contiguous) = crate::content::erasure::locate(
@@ -1253,14 +1288,17 @@ impl Control {
                     .min(end - offset)
                     .min(contiguous);
                 let preferred = if plan.parallelism > 1 && intent.layout.data_shards == 1 {
-                    plan.parts.len() % copies.len()
+                    plan.parts.len() % rotating
                 } else {
                     0
                 };
                 let mut direct = Vec::new();
                 let mut recovery = Vec::new();
-                for index in 0..copies.len() {
-                    let (mapping, target) = copies[(preferred + index) % copies.len()];
+                for &(mapping, target) in copies[preferred..rotating]
+                    .iter()
+                    .chain(&copies[..preferred])
+                    .chain(&copies[rotating..])
+                {
                     let same = mapping.header.shard == wanted;
                     if !same && intent.layout.parity_shards == 0 {
                         continue;
@@ -1304,6 +1342,7 @@ impl Control {
                 plan.parts.push(Part {
                     offset,
                     length,
+                    prefer_local,
                     copies: direct,
                     recovery,
                 });

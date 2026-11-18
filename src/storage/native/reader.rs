@@ -45,6 +45,8 @@ pub(crate) use crate::model::storage_native::Metadata;
 pub(crate) struct Part {
     pub offset: u64,
     pub length: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prefer_local: bool,
     pub copies: Vec<Destination>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recovery: Vec<Destination>,
@@ -223,14 +225,30 @@ pub(crate) fn read(
     );
     let lanes = lanes.min(plan.parallelism as usize);
     let slots = Arc::new(tokio::sync::Semaphore::new(lanes));
+    let stalled = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     Ok(
-        futures_util::stream::iter(plan.parts.into_iter().map(move |value| {
+        futures_util::stream::iter(plan.parts.into_iter().map(move |mut value| {
             let (pool, renewal, slots) = (pool.clone(), renewal.clone(), slots.clone());
+            let stalled = stalled.clone();
             async move {
                 if !value.recovery.is_empty() || value.copies.is_empty() {
                     return Ok(vec![coded(pool, renewal, value, slots).await?]);
                 }
                 let _permit = slots.acquire().await?;
+                if value.prefer_local && value.copies.len() > 1 {
+                    for target in &value.copies[..value.copies.len() - 1] {
+                        let media = target.authorization.grant.media;
+                        if stalled.lock().unwrap().contains(&media) {
+                            continue;
+                        }
+                        if let Ok(chunks) = responsive(&pool, renewal.clone(), target).await {
+                            return Ok(chunks);
+                        }
+                        stalled.lock().unwrap().insert(media);
+                    }
+                    // Retry slower copies without a stall deadline if the last alternative fails.
+                    value.copies.rotate_right(1);
+                }
                 part(pool, renewal, value)
                     .await?
                     .try_collect::<Vec<_>>()
@@ -242,6 +260,20 @@ pub(crate) fn read(
         .try_flatten()
         .boxed(),
     )
+}
+
+async fn responsive(
+    pool: &Pool,
+    renewal: Arc<dyn Renewal>,
+    target: &Destination,
+) -> Result<Vec<Bytes>> {
+    let stall = std::time::Duration::from_millis(250);
+    let mut stream = tokio::time::timeout(stall, pool.read(target.clone(), renewal)).await??;
+    let mut chunks = Vec::new();
+    while let Some(bytes) = tokio::time::timeout(stall, stream.try_next()).await?? {
+        chunks.push(bytes);
+    }
+    Ok(chunks)
 }
 
 async fn coded(

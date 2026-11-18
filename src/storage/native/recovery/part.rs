@@ -88,6 +88,7 @@ impl Scanner {
                 reader::Part {
                     offset: start,
                     length,
+                    prefer_local: false,
                     copies,
                     recovery,
                 },
