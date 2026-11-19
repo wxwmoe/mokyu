@@ -384,13 +384,16 @@ impl Budget {
         runtime: &RuntimeSettings,
         profiles: &[crate::storage::profile::StorageProfile],
     ) -> Result<Self> {
-        let (environment, cpus, memory) = Self::environment();
-        let inflight = instance
-            .stream_memory_budget
-            .as_deref()
-            .map(bytes)
-            .transpose()?
-            .unwrap_or(memory / 4);
+        Self::runtime(instance, runtime, profiles, false, Self::environment())
+    }
+
+    pub(super) fn runtime(
+        instance: &Instance,
+        runtime: &RuntimeSettings,
+        profiles: &[crate::storage::profile::StorageProfile],
+        upload_node: bool,
+        (environment, cpus, memory): (Environment, usize, u64),
+    ) -> Result<Self> {
         let aws_chunk = bytes(&runtime.requests.s3_chunk_limit)?;
         // Reserve room for a newly created default backend as well as existing profiles.
         let mut workspace = crate::content::compression::Config::default().workspace_bytes()?;
@@ -415,6 +418,35 @@ impl Budget {
                     .context("AWS chunk limit overflow")?,
             )
             .context("AWS chunk limit overflow")?;
+        let pack_required = crate::content::pack::buffer_bytes(0, maximum, workspace)
+            .div_ceil(1024 * 1024)
+            * 1024
+            * 1024;
+        let write_memory = instance
+            .write_memory_size
+            .as_deref()
+            .map(cache_bytes)
+            .transpose()?;
+        let response_cache = instance
+            .response_cache_size
+            .as_deref()
+            .map(cache_bytes)
+            .transpose()?;
+        let inflight = match instance.stream_memory_budget.as_deref() {
+            Some(value) => bytes(value)?,
+            None if upload_node => {
+                let available = (memory - memory / 4)
+                    .saturating_sub(pack_required.saturating_mul(2))
+                    .saturating_sub(write_memory.unwrap_or(if instance.testing {
+                        64 << 20
+                    } else {
+                        0
+                    }))
+                    .saturating_sub(response_cache.unwrap_or(0));
+                (memory / 4).max((512 << 20).min(memory / 2).min(available))
+            }
+            None => memory / 4,
+        };
         ensure!(
             slot_bytes <= usize::MAX as u64 && slot_bytes <= inflight / 2 && inflight <= memory / 2,
             "stream_memory_budget must allow two data slots ({} bytes each) and leave half of memory for runtime/cache/OS",
@@ -428,25 +460,16 @@ impl Budget {
         let remaining = memory
             .saturating_sub(slots as u64 * slot_bytes)
             .saturating_sub(memory / 4);
-        let pack_required = crate::content::pack::buffer_bytes(0, maximum, workspace)
-            .div_ceil(1024 * 1024)
-            * 1024
-            * 1024;
         let write_capacity = remaining
             .saturating_sub(pack_required.saturating_mul(2))
             .min(memory / 4);
-        let write_memory_bytes = instance
-            .write_memory_size
-            .as_deref()
-            .map(cache_bytes)
-            .transpose()?
-            .unwrap_or_else(|| {
-                if instance.testing {
-                    (64 << 20).min(write_capacity) / 4096 * 4096
-                } else {
-                    0
-                }
-            });
+        let write_memory_bytes = write_memory.unwrap_or_else(|| {
+            if instance.testing {
+                (64 << 20).min(write_capacity) / 4096 * 4096
+            } else {
+                0
+            }
+        });
         ensure!(
             write_memory_bytes == 0 || write_memory_bytes >= 4096,
             "write_memory_size must be 0B or at least 4KiB"
@@ -462,9 +485,8 @@ impl Budget {
             .saturating_sub(pack_required.saturating_mul(2))
             .min(memory / 4)
             .min(u64::from(u32::MAX) * 4096);
-        let response_cache_bytes = match instance.response_cache_size.as_deref() {
-            Some(value) => {
-                let size = cache_bytes(value)?;
+        let response_cache_bytes = match response_cache {
+            Some(size) => {
                 ensure!(
                     size <= cache_maximum && (size == 0 || size >= 4 * 1024 * 1024),
                     "response_cache_size must be 0B or at least 4MiB and fit alongside stream and pack budgets"

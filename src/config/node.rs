@@ -15,12 +15,22 @@ impl NodeConfig {
     pub(crate) fn load(path: &Path, role: &str) -> Result<(Self, Budget)> {
         let text = std::fs::read_to_string(path).context("cannot read configuration")?;
         let config = Self::parse(&text, role)?;
-        let budget = if role == "storage" {
-            Budget::for_storage(&config.instance)?
-        } else {
-            Budget::for_runtime(&config.instance, &RuntimeSettings::default(), &[])?
-        };
+        let budget = config.budget(role, &RuntimeSettings::default())?;
         Ok((config, budget))
+    }
+
+    pub(crate) fn budget(&self, role: &str, runtime: &RuntimeSettings) -> Result<Budget> {
+        if role == "storage" {
+            Budget::for_storage(&self.instance)
+        } else {
+            Budget::runtime(
+                &self.instance,
+                runtime,
+                &[],
+                matches!(role, "data" | "node"),
+                Budget::environment(),
+            )
+        }
     }
 
     pub(crate) fn parse(text: &str, role: &str) -> Result<Self> {
@@ -65,6 +75,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn upload_budget_respects_pack_space_and_explicit_limits() {
+        let plan = |instance: &Instance, memory_mib: u64, upload_node| {
+            Budget::runtime(
+                instance,
+                &RuntimeSettings::default(),
+                &[],
+                upload_node,
+                (Default::default(), 8, memory_mib << 20),
+            )
+        };
+        let mut instance = Instance::default();
+        let standard = plan(&instance, 1536, false).unwrap();
+        let upload = plan(&instance, 1536, true).unwrap();
+        assert_eq!(
+            standard.data_slots as u64,
+            (384 << 20) / standard.slot_bytes
+        );
+        assert_eq!(upload.data_slots as u64, (512 << 20) / upload.slot_bytes);
+        assert!(upload.upload_concurrency > standard.upload_concurrency);
+        assert_eq!(
+            plan(&instance, 4096, true).unwrap().data_slots,
+            plan(&instance, 4096, false).unwrap().data_slots
+        );
+
+        instance.response_cache_size = Some("208MiB".into());
+        instance.write_memory_size = Some("208MiB".into());
+        let tight = plan(&instance, 1024, true).unwrap();
+        assert_eq!(
+            tight.data_slots,
+            plan(&instance, 1024, false).unwrap().data_slots
+        );
+        assert_eq!(
+            (tight.write_memory_bytes, tight.response_cache_bytes),
+            (208 << 20, 208 << 20)
+        );
+
+        instance.stream_memory_budget = Some("128MiB".into());
+        assert_eq!(plan(&instance, 1024, true).unwrap().upload_concurrency, 1);
+        instance.stream_memory_budget = Some("768MiB".into());
+        assert!(plan(&instance, 1024, true).is_err());
+    }
+
+    #[test]
     fn data_limit_uses_the_same_validation_on_every_node_role() {
         for role in ["data", "worker", "node"] {
             let config = "[instance]\ncontrol_url='https://control.example'\n";
@@ -97,8 +150,7 @@ mod tests {
             }
             assert!(config.configured_fields.contains("instance.control_url"));
             assert!(!config.configured_fields.contains("instance.cpu_jobs"));
-            let budget =
-                Budget::for_runtime(&config.instance, &RuntimeSettings::default(), &[]).unwrap();
+            let budget = config.budget(role, &RuntimeSettings::default()).unwrap();
             assert_eq!(budget.database_connections, 0);
             assert_eq!(budget.database_read_connections, 0);
             for forbidden in [

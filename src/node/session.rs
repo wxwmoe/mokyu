@@ -267,7 +267,9 @@ impl NodeContext {
         let next = settings
             .update(&self.config.instance, &reply)
             .map_err(invalid_settings)?;
-        let budget = crate::config::Budget::for_runtime(&self.config.instance, &next.runtime, &[])
+        let budget = self
+            .config
+            .budget(&self.client.identity.role, &next.runtime)
             .map_err(invalid_settings)?;
         if self
             .budget

@@ -102,6 +102,8 @@ storage 专用配置见 [存储群集](storage-clusters.md#注册-storage)：`st
 
 示例配置配合 Compose 的 Mokyu 容器 `1GiB` 内存限制，显式设置 `stream_memory_budget = "256MiB"`、`response_cache_size = "64MiB"` 和 `write_memory_size = "64MiB"`；PostgreSQL 容器内存另计。省略响应缓存或写入内存字段的配置仍关闭对应内存用途。默认压缩参数下，流式预算可提供 5 个数据槽位，实际预留约 `216MiB`，runtime/OS 预留 `256MiB`，pack 读取与工作区各自动分得约 `212MiB`。S3 storage 的默认 `pack_max_size = "32MiB"` 每个 pack 需约 `140MiB` 额度；local storage 不创建 pack。pack 大小在 storage profile 中配置，节点 pack 内存无需单独填写；更改容器限制、压缩参数或 pack 大小时应一起核对这些预算。
 
+远端 `mokyu data` 和 `mokyu node` 省略 `instance.stream_memory_budget` 时，先按有效内存的四分之一计算。低于 512 MiB 时，会利用剩余空间提高到最多 512 MiB，同时给系统、写入内存、响应缓存和区块包保留额度，流式预算最多占有效内存的一半。流式预算越大，可同时处理的上传通常越多，实际并发还受 CPU 数量限制。单容器、单主控和独立 worker 默认仍取有效内存的四分之一。需要固定上传并发所用的内存时，可显式指定这个参数。
+
 CORS 策略在节点内按内容共享，额度在运行设置中配置，确认方式由后端读策略决定，详见 [CORS 共享缓存](#cors-共享缓存)。
 
 写入内存从同一总预算划出，最多占进程内存四分之一，并保留 stream、响应缓存及默认 pack 的额度。raw 在已知长度且能一次领取完整额度时进入 RAM，未知或过大的长度沿用有界文件暂存；chunks 按完整区块领取。待上传唯一副本不参与淘汰，最后一个读取者释放正文后才返还内存，空对象至少计 `4KiB`。local、群集和 durable/buffered 不使用 RAM 提前确认；写内存为 `0B` 不影响既有流式工作区。
