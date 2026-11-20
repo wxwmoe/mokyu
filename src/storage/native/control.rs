@@ -1342,7 +1342,8 @@ impl Control {
                 plan.parts.push(Part {
                     offset,
                     length,
-                    prefer_local,
+                    prefer_local: prefer_local
+                        || (intent.layout.parity_shards > 0 && (1..copies.len()).contains(&local)),
                     copies: direct,
                     recovery,
                 });

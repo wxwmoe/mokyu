@@ -326,9 +326,9 @@ async fn coded(
             Ok::<_, anyhow::Error>((index, out))
         }
     };
-    let direct = async {
+    let read_direct = || async {
         let mut error = anyhow::anyhow!("data fragment is offline");
-        for target in part.copies {
+        for target in part.copies.iter().cloned() {
             match fetch(target).await {
                 Ok((_, bytes)) => return Ok(Bytes::from(bytes)),
                 Err(e) => error = e,
@@ -336,7 +336,7 @@ async fn coded(
         }
         Err(error)
     };
-    let mut direct = Box::pin(direct);
+    let mut direct = Box::pin(read_direct());
     let enough = part
         .recovery
         .iter()
@@ -360,17 +360,43 @@ async fn coded(
     }
     let fallback = async {
         let mut pending = futures_util::stream::FuturesUnordered::new();
+        let mut deferred = Vec::new();
+        let mut preferred = std::collections::HashSet::new();
+        let needed = usize::from(layout.data_shards);
         for target in part.recovery {
-            pending.push(fetch(target));
+            let index = target
+                .authorization
+                .grant
+                .action
+                .read_range()
+                .context("read grant required")?
+                .0
+                .header
+                .shard;
+            if part.prefer_local && (preferred.len() == needed || !preferred.insert(index)) {
+                deferred.push(target);
+            } else {
+                pending.push(fetch(target));
+            }
         }
+        let hedge = tokio::time::sleep(std::time::Duration::from_millis(20));
+        tokio::pin!(hedge);
         let mut shards = vec![None; usize::from(layout.data_shards + layout.parity_shards)];
         let mut good = 0;
         let mut last = None;
-        while let Some(result) = pending.next().await {
+        while !pending.is_empty() {
+            let result = tokio::select! {
+                Some(result) = pending.next() => result,
+                _ = &mut hedge, if !deferred.is_empty() => {
+                    pending.extend(deferred.drain(..).map(&fetch));
+                    continue;
+                }
+            };
             let (index, bytes) = match result {
                 Ok(v) => v,
                 Err(e) => {
                     last = Some(e);
+                    pending.extend(deferred.drain(..).map(&fetch));
                     continue;
                 }
             };
@@ -393,7 +419,10 @@ async fn coded(
     if direct_done || slots.available_permits() == 0 {
         // A stalled preferred read cannot hold the last lane needed to reconstruct it.
         drop(direct);
-        return fallback.await;
+        return match fallback.await {
+            Err(_) if !direct_done => read_direct().await,
+            result => result,
+        };
     }
     tokio::select! {
         result=&mut direct => match result { Ok(bytes)=>Ok(bytes), Err(_)=>fallback.await },
