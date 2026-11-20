@@ -296,18 +296,20 @@ impl BucketStore for Backend {
         let mut query = sqlx::QueryBuilder::new(
             "SELECT s.* FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=",
         );
+        let (start, inclusive) = if key < prefix {
+            (prefix, true)
+        } else {
+            (key, inclusive)
+        };
         query
             .push_bind(bucket)
-            .push(" AND o.object_key>=")
-            .push_bind(prefix.as_bytes());
+            .push(" AND o.object_key")
+            .push(if inclusive { ">=" } else { ">" })
+            .push_bind(start.as_bytes());
         if let Some(end) = crate::app::listing::successor(prefix) {
             query.push(" AND o.object_key<").push_bind(end.into_bytes());
         }
-        query
-            .push(" AND o.object_key")
-            .push(if inclusive { ">=" } else { ">" })
-            .push_bind(key.as_bytes())
-            .push(" ORDER BY o.object_key LIMIT 64");
+        query.push(" ORDER BY o.object_key LIMIT 64");
         Ok(query.build_query_as().fetch_all(&self.read).await?)
     }
     async fn create(&self, principal: &Principal, input: CreateBucket) -> Result<Bucket> {
