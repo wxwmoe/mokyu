@@ -492,7 +492,7 @@ pub(in super::super) async fn create_bucket_with_quota(
 }
 
 pub(in super::super) fn packed_encoding(uid: Uuid, chunk: Id, storage: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,state,encryption_algorithm,encoding_fingerprint) VALUES($1,$2,$3,'deleted','none',decode(repeat('00',32),'hex'))").bind(uid).bind(chunk).bind(storage)
+    sqlx::query("INSERT INTO chunk_encodings(encoding_id,chunk_id,storage_id,standalone_compressed,state,created_at,encryption_algorithm,encoding_fingerprint) VALUES($1,$2,$3,FALSE,'deleted',clock_timestamp(),'none',decode(repeat('00',32),'hex'))").bind(uid).bind(chunk).bind(storage)
 }
 pub(in super::super) fn seed_recovered(
     storage: Uuid,
