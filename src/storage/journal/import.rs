@@ -5,7 +5,7 @@ use crate::{
     model::{
         Id,
         journal::{
-            record::{Kind, Material, Reference},
+            record::{Change, Kind, Material, Reference},
             restore::Location,
         },
     },
@@ -49,10 +49,10 @@ impl CarrierDigest {
         }
     }
 }
-fn role(m: &Material) -> &'static str {
-    match m {
-        Material::Raw { .. } => "raw",
-        Material::Fragment { .. } => "fragment",
+fn role(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Raw => "raw",
+        Kind::Fragment => "fragment",
         _ => "chunk",
     }
 }
@@ -100,7 +100,7 @@ pub(crate) struct Import<'a> {
 }
 
 impl Import<'_> {
-    async fn save(&mut self, mat: &Material, pack: Option<(Id, i32, i64)>) -> Result<Id> {
+    async fn save(&self, mat: &Material, pack: Option<(Id, i32, i64)>) -> Result<Id> {
         let id = self
             .app
             .journal
@@ -389,7 +389,7 @@ impl Import<'_> {
         Ok(selected)
     }
     async fn raw(
-        &mut self,
+        &self,
         mat: &Material,
         source: &crate::model::raw::RawSource,
         from: &str,
@@ -409,7 +409,11 @@ impl Import<'_> {
             None,
         )
         .await?;
-        let id = self.save(mat, None).await?;
+        let id = self
+            .app
+            .journal
+            .recovery_material(self.job, self.token, self.target, mat, None)
+            .await?;
         let mut verified = pages.finish().await?;
         while let Some(group) = verified.next().await? {
             self.app.raw.put_pages(id, &group).await?;
@@ -418,16 +422,52 @@ impl Import<'_> {
             .raw
             .seal_pages(id, source.size, expected, None)
             .await?;
+        self.catalog.remember(mat.reference(), id)?;
         Ok(())
     }
 
-    pub async fn location(&mut self, reference: Reference) -> Result<Location> {
-        let material = self.catalog.material(reference)?;
-        let mat = &material;
-        let kind = role(mat);
+    pub async fn resolve(&self, batch: &mut [(Change, Vec<Location>)]) -> Result<()> {
+        let lanes = self.app.budget.storage_read_slots.clamp(1, 4);
+        if lanes > 1 {
+            let mut small = BTreeMap::new();
+            for span in batch.iter().flat_map(|(change, _)| &change.ranges) {
+                let r = span.material;
+                if r.kind == Kind::Raw
+                    && self.catalog.location(r)?.is_none()
+                    && let Material::Raw { source } = self.catalog.material(r)?
+                    && (0..=codec::MAX as i64).contains(&source.size)
+                {
+                    small.entry(source.location_id).or_insert(r);
+                }
+            }
+            let mut pending =
+                futures_util::stream::iter(small.into_values().map(|r| self.location(r)))
+                    .buffer_unordered(lanes);
+            let mut failure = None;
+            while let Some(result) = pending.next().await {
+                if let Err(error) = result {
+                    failure.get_or_insert(error);
+                }
+            }
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        }
+        for (change, locations) in batch {
+            for span in &change.ranges {
+                locations.push(self.location(span.material).await?);
+            }
+        }
+        Ok(())
+    }
+
+    async fn location(&self, reference: Reference) -> Result<Location> {
+        let kind = role(reference.kind);
         if let Some(id) = self.catalog.location(reference)? {
             return Ok(Location { native: id, kind });
         }
+        let material = self.catalog.material(reference)?;
+        let mat = &material;
         let pack_material;
         let mut physical = mat;
         if let Material::Member { pack, .. } = mat {

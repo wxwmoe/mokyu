@@ -370,7 +370,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
         );
     }
     let source_layout = crate::storage::location::Layout::for_local(local.is_some());
-    let mut import = Import {
+    let import = Import {
         source_layout,
         target_layout: crate::storage::location::Layout::for_local(to.r#type == "local"),
         app,
@@ -412,17 +412,15 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                         let Some(change) = catalog.next_object(*bucket, generation, &after)? else {
                             break;
                         };
-                        let mut locations = Vec::with_capacity(change.ranges.len());
-                        for span in &change.ranges {
-                            locations.push(import.location(span.material).await?);
-                        }
+                        let locations = Vec::with_capacity(change.ranges.len());
                         after = change.key.clone().context("missing recovery object key")?;
-                        spans += locations.len();
+                        spans += change.ranges.len();
                         batch.push((change, locations));
                     }
                     if batch.is_empty() {
                         break;
                     }
+                    import.resolve(&mut batch).await?;
                     app.journal.recovery_items(id, token, &batch).await?;
                 }
                 app.journal
