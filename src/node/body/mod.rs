@@ -964,7 +964,7 @@ pub(super) fn stream(
                     let mut remote=file.remote_source();
                     let mut local_io=if remote.is_some() {drop(io);None} else {Some(io)};
                     let start=source_offset as u64;
-                    let proof=current.page_hashes(segment)?.map(|bytes|segments::Proof::new(&(segment.source_offset as u64..(segment.source_offset + segment.length) as u64),bytes.to_vec(),reads.reader.cpu.clone()).map(Arc::new)).transpose()?;
+                    let proof=current.page_hashes(segment)?.map(|bytes|segments::Proof::new(&(segment.source_offset as u64..(segment.source_offset + segment.length) as u64),bytes.to_vec(),source.page_size,reads.reader.cpu.clone()).map(Arc::new)).transpose()?;
                     if strict && proof.is_none(){Err(crate::model::Error::SourceUnavailable)?;}
 
                     let from_backend=remote.is_some();

@@ -383,6 +383,7 @@ impl Import<'_> {
         let mut pages = crate::storage::raw_manifest::Spool::new(
             &self.app.config.instance.data_path,
             Some(self.app.storage.disk.clone()),
+            source.page_size,
         );
         self.copy_carrier(
             from,

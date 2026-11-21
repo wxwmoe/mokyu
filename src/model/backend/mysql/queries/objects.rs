@@ -272,11 +272,9 @@ impl ObjectStore for Backend {
         transactions::audit_object_batch(&self.pool, bucket, detail, partial).await
     }
     async fn storage(&self, bucket: Uuid) -> Result<Option<Uuid>> {
-        Ok(
-            object_bucket_storage(bucket)
-                .fetch_optional(&self.pool)
-                .await?,
-        )
+        Ok(object_bucket_storage(bucket)
+            .fetch_optional(&self.pool)
+            .await?)
     }
     async fn move_object(
         &self,

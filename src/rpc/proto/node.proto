@@ -507,6 +507,7 @@ message PrepareRawRequest {
   bytes content_hash = 5;
   bool local = 6;
   bytes page_hashes = 7;
+  uint32 page_size = 8;
 }
 
 message FilesReply {

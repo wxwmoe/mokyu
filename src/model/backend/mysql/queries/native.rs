@@ -7,7 +7,7 @@ use crate::{
 use sqlx::types::Json;
 use uuid::Uuid;
 pub(in super::super) fn upload(id: Uuid) -> Rows<'static, RemoteUpload> {
-    sqlx::query_as("SELECT n.upload_id AS remote_upload,u.state AS remote_state,n.source_location AS remote_source,n.storage_id AS remote_storage,n.profile_revision AS remote_profile,n.upstream AS remote_upstream,n.manifest_hash AS remote_manifest FROM native_uploads n JOIN uploads u ON u.id=n.upload_id WHERE n.upload_id=? FOR UPDATE").bind(id)
+    sqlx::query_as("SELECT n.upload_id AS remote_upload,u.state AS remote_state,n.source_location AS remote_source,n.storage_id AS remote_storage,n.profile_revision AS remote_profile,COALESCE((SELECT r.page_size FROM raw_sources r WHERE r.location_id=n.source_location),262144) AS page_size,n.upstream AS remote_upstream,n.manifest_hash AS remote_manifest FROM native_uploads n JOIN uploads u ON u.id=n.upload_id WHERE n.upload_id=? FOR UPDATE").bind(id)
 }
 pub(in super::super) fn open(
     id: Uuid,

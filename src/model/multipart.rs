@@ -298,6 +298,8 @@ pub(crate) struct RemoteUpload {
     pub source: Uuid,
     #[sqlx(rename = "remote_storage")]
     pub storage: Uuid,
+    #[serde(default = "crate::content::raw_pages::Size::legacy")]
+    pub page_size: crate::content::raw_pages::Size,
     #[sqlx(rename = "remote_profile")]
     pub profile: i64,
     #[sqlx(rename = "remote_upstream")]

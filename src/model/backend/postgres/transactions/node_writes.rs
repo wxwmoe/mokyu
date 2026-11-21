@@ -1915,6 +1915,9 @@ pub(in super::super) async fn prepare_node_raw(
             == 1,
         Error::OperationAborted
     );
+    let matching_pages = candidate
+        .as_ref()
+        .is_none_or(|r| r.page_size == input.input.page_size);
     let committed = candidate.is_some();
     let source = if let Some(candidate) = candidate {
         queries::raw_attach(stream, candidate.id, size)
@@ -1938,24 +1941,35 @@ pub(in super::super) async fn prepare_node_raw(
         .fetch_one(&mut *tx)
         .await?
     };
-    for (index, bytes) in input
-        .input
-        .page_hashes
-        .chunks(crate::content::raw_pages::GROUP * 32)
-        .enumerate()
-    {
-        super::super::raw_pages::put(
-            &mut tx,
-            source.into(),
-            &crate::content::raw_pages::Group {
-                index: index as i64,
-                hashes: bytes.to_vec(),
-            },
-        )
-        .await?;
+
+    if !committed && input.input.page_size.is_legacy() {
+        sqlx::query(super::super::queries::raw_pages::SET_SIZE)
+            .bind(input.input.page_size)
+            .bind(crate::model::Id::from(source))
+            .execute(&mut *tx)
+            .await?;
     }
-    if size <= write::MAX_PART_BYTES {
-        super::super::raw_pages::seal(&mut tx, source.into(), size, &input.input.digest).await?;
+    if matching_pages {
+        for (index, bytes) in input
+            .input
+            .page_hashes
+            .chunks(crate::content::raw_pages::GROUP * 32)
+            .enumerate()
+        {
+            super::super::raw_pages::put(
+                &mut tx,
+                source.into(),
+                &crate::content::raw_pages::Group {
+                    index: index as i64,
+                    hashes: bytes.to_vec(),
+                },
+            )
+            .await?;
+        }
+        if size <= write::MAX_PART_BYTES {
+            super::super::raw_pages::seal(&mut tx, source.into(), size, &input.input.digest)
+                .await?;
+        }
     }
     queries::insert_node_raw_write(node.node_id, &input, &hash, source, committed)
         .execute(&mut *tx)
@@ -2002,7 +2016,7 @@ pub(in super::super) async fn stage_node_raw_pages(
             && !raw.committed,
         Error::NodeOperationConflict
     );
-    input.group.validate_size(raw.size)?;
+    input.group.validate_size(raw.size, raw.page_size)?;
     super::super::raw_pages::put(&mut tx, raw.source_id.into(), &input.group).await?;
     tx.commit().await?;
     Ok(())

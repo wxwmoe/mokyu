@@ -1,15 +1,15 @@
 use super::queries::raw_pages as q;
 use crate::{
-    content::raw_pages::{self, GROUP, Group, HASH},
+    content::raw_pages::{GROUP, Group, HASH, Size},
     model::Id,
 };
 use anyhow::{Result, ensure};
 
-type Source = (String, i64, Option<Vec<u8>>, Option<i64>);
+type Source = (String, i64, Option<Vec<u8>>, Option<i64>, Size);
 
 pub(super) async fn put(db: &mut q::Connection, source: Id, group: &Group) -> Result<()> {
     group.validate()?;
-    let (_, _, _, sealed): Source = sqlx::query_as(q::LOCK)
+    let (_, _, _, sealed, _): Source = sqlx::query_as(q::LOCK)
         .bind(source)
         .fetch_one(&mut *db)
         .await?;
@@ -36,11 +36,11 @@ pub(super) async fn seal(
     size: i64,
     digest: &[u8],
 ) -> Result<()> {
-    let count = raw_pages::count(size)?;
-    let (state, current_size, current_digest, sealed): Source = sqlx::query_as(q::LOCK)
+    let (state, current_size, current_digest, sealed, page_size): Source = sqlx::query_as(q::LOCK)
         .bind(source)
         .fetch_one(&mut *db)
         .await?;
+    let count = page_size.count(size)?;
     ensure!(
         digest.len() == 16
             && (state == "writing"
@@ -84,18 +84,18 @@ pub(super) async fn inherit(
     source: Id,
     target: &crate::model::raw::RawSource,
 ) -> Result<()> {
-    let (_, _, _, existing): Source = sqlx::query_as(q::LOCK)
+    let (_, _, _, existing, target_page): Source = sqlx::query_as(q::LOCK)
         .bind(target.id)
         .fetch_one(&mut *db)
         .await?;
     if existing.is_some() {
         return Ok(());
     }
-    let (_, _, _, pages): Source = sqlx::query_as(q::LOCK)
+    let (_, _, _, pages, source_page): Source = sqlx::query_as(q::LOCK)
         .bind(source)
         .fetch_one(&mut *db)
         .await?;
-    if pages == Some(raw_pages::count(target.size)?) {
+    if source_page == target_page && pages == Some(target_page.count(target.size)?) {
         sqlx::query(q::CLEAR)
             .bind(target.id)
             .execute(&mut *db)
@@ -123,15 +123,11 @@ pub(super) async fn read(
     first: i64,
     count: usize,
 ) -> Result<Option<Vec<u8>>> {
-    let pages = raw_pages::count(size)?;
     let end = first
         .checked_add(i64::try_from(count)?)
         .ok_or_else(|| anyhow::anyhow!("raw page overflow"))?;
-    ensure!(
-        first >= 0 && end <= pages && count <= 16384,
-        "invalid raw page window"
-    );
-    let rows: Vec<(Option<i64>, Option<i64>, Option<Vec<u8>>)> = sqlx::query_as(q::READ)
+    ensure!(first >= 0 && count <= 16384, "invalid raw page window");
+    let rows: Vec<(Option<i64>, Size, Option<i64>, Option<Vec<u8>>)> = sqlx::query_as(q::READ)
         .bind(first / GROUP as i64)
         .bind(if count == 0 {
             -1
@@ -143,6 +139,8 @@ pub(super) async fn read(
         .fetch_all(db)
         .await?;
     ensure!(!rows.is_empty(), "raw page source missing");
+    let pages = rows[0].1.count(size)?;
+    ensure!(end <= pages, "invalid raw page window");
     if rows[0].0.is_none() {
         return Ok(None);
     }
@@ -152,7 +150,7 @@ pub(super) async fn read(
     }
     let mut out = Vec::with_capacity(count * HASH);
     let mut next = first;
-    for (sealed, index, data) in rows {
+    for (sealed, _, index, data) in rows {
         ensure!(
             sealed == Some(pages) && index == Some(next / GROUP as i64),
             "raw page group missing"

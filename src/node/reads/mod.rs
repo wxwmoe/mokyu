@@ -476,7 +476,7 @@ impl Prepared {
         let read::Source::Raw { source } = &segment.source else {
             anyhow::bail!("page proof requires a raw source")
         };
-        let page = crate::content::raw_pages::PAGE as i64;
+        let page = source.page_size as i64;
         let first = segment.source_offset / page;
         let count = (segment.source_offset + segment.length - 1) / page - first + 1;
         let id = read::Segment::pages_id(source, first, count);

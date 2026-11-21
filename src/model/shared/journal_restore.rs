@@ -297,6 +297,7 @@ impl RecoveryStore for Backend {
                     source.location_id,
                     target,
                     source.size,
+                    source.page_size,
                     source.digest.as_deref(),
                     target,
                 )

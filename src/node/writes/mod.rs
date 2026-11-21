@@ -923,6 +923,7 @@ impl Writes {
         let plan = node
             .client
             .prepare_raw(wire::PrepareRawRequest {
+                page_size: crate::content::raw_pages::Size::default() as u32,
                 page_hashes,
                 local: charge.is_some(),
                 run: Some(operation.request.run.run.clone()),

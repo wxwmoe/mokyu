@@ -515,6 +515,7 @@ mod tests {
     fn raw_upload_can_change_medium_only_before_a_scan() {
         let id = Uuid::new_v4();
         let pending = RawSource {
+            page_size: Default::default(),
             id: Id::Uuid(id),
             home_storage_id: None,
             address: None,

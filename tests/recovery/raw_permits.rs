@@ -58,6 +58,7 @@ async fn read(storage: &Arc<Storage>, source: &RawSource, expected: &[u8]) -> Re
 
 async fn write(storage: &Arc<Storage>, target: Uuid, data: &[u8]) -> Result<RawSource> {
     let source = RawSource {
+        page_size: Default::default(),
         id: Id::default(),
         home_storage_id: None,
         address: None,
@@ -277,6 +278,7 @@ async fn raw_permit_order_cancellation_and_retry() -> Result<()> {
     storage.refresh_store(remote.id).await?;
     let target = storage.store_backend(remote.id)?;
     let mut upload = RemoteUpload {
+        page_size: Default::default(),
         upload: Uuid::new_v4(),
         state: "active".into(),
         source: Uuid::now_v7(),

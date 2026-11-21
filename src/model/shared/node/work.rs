@@ -625,7 +625,7 @@ impl NodeWork for Backend {
             Error::OperationAborted
         );
         if let Some(group) = input.group {
-            group.validate_size(raw.size)?;
+            group.validate_size(raw.size, raw.page_size)?;
             super::raw_pages::put(&mut db, raw.id, &group).await?;
         } else {
             super::raw_pages::seal(

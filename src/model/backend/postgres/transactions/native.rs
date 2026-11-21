@@ -697,7 +697,7 @@ pub(crate) async fn stage_pages(
     key: &Key,
     input: native::Pages,
 ) -> Result<()> {
-    use crate::content::raw_pages::{self, GROUP, HASH};
+    use crate::content::raw_pages::{GROUP, HASH};
     let mut tx = backend.pool.begin().await?;
     backend.fence_control(&mut tx).await?;
     let row = node_write_owned(&mut tx, node, key, input.run, input.operation).await?;
@@ -706,10 +706,14 @@ pub(crate) async fn stage_pages(
     let source = queries::remote_output_lock(upload, input.operation)
         .fetch_one(&mut *tx)
         .await?;
+    let page_size = queries::remote_upload(upload)
+        .fetch_one(&mut *tx)
+        .await?
+        .page_size;
     let record = queries::node_completion(upload).fetch_one(&mut *tx).await?;
     ensure!(
         input.group.hashes.len() == GROUP * HASH
-            && (0..raw_pages::count(record.summary.size)? / GROUP as i64)
+            && (0..page_size.count(record.summary.size)? / GROUP as i64)
                 .contains(&input.group.index),
         Error::NodeOperationConflict
     );
@@ -732,6 +736,10 @@ pub(crate) async fn adopt(
     let source = queries::remote_output_lock(upload, input.operation)
         .fetch_one(&mut *tx)
         .await?;
+    let page_size = queries::remote_upload(upload)
+        .fetch_one(&mut *tx)
+        .await?
+        .page_size;
     let record = queries::node_completion(upload).fetch_one(&mut *tx).await?;
     let prepare = crate::model::node_raw::Prepare {
         run: input.run,
@@ -742,9 +750,10 @@ pub(crate) async fn adopt(
             digest: input.digest,
             hash: row.profile.deduplication_enabled.then_some(input.hash),
             page_hashes: input.page_tail.clone(),
+            page_size,
         },
     };
-    let pages = crate::content::raw_pages::count(record.summary.size)?;
+    let pages = page_size.count(record.summary.size)?;
     let group_size = crate::content::raw_pages::GROUP as i64;
     ensure!(
         input.page_tail.len() == (pages % group_size) as usize * 32,

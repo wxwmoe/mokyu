@@ -1,4 +1,4 @@
-use crate::content::raw_pages::{Builder, GROUP, Group, HASH};
+use crate::content::raw_pages::{Builder, GROUP, Group, HASH, Size};
 use anyhow::Result;
 use std::{path::Path, sync::Arc};
 use tokio::{
@@ -36,9 +36,9 @@ impl Drop for Scratch {
 }
 
 impl<'a> Spool<'a> {
-    pub(super) fn new(root: &'a Path, disk: Option<Arc<super::Disk>>) -> Self {
+    pub(super) fn new(root: &'a Path, disk: Option<Arc<super::Disk>>, page_size: Size) -> Self {
         Self {
-            builder: Default::default(),
+            builder: Box::new(Builder::new(page_size)),
             scratch: Scratch::default(),
             groups: 0,
             root,

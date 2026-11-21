@@ -1,5 +1,5 @@
 use crate::{
-    content::{codec, pack, raw_pages},
+    content::{codec, pack},
     model::{
         Error,
         node_read::{Mapping, Source},
@@ -337,7 +337,7 @@ impl Read {
                     let size = u64::try_from(source.size)?;
                     ensure!(end <= size, codec::IntegrityError::Length);
                     // Range integrity reads the complete intersecting pages, including their boundaries.
-                    let page = raw_pages::PAGE as u64;
+                    let page = source.page_size as u64;
                     (
                         Layout::S3.object(source.address()),
                         start / page * page..end.div_ceil(page).saturating_mul(page).min(size),
@@ -454,6 +454,7 @@ mod tests {
         let storage = Uuid::now_v7();
         let mut plan = crate::model::node_native::Completion {
             upload: crate::model::multipart::RemoteUpload {
+                page_size: Default::default(),
                 upload: Uuid::now_v7(),
                 state: "completing".into(),
                 source: Uuid::now_v7(),
@@ -525,12 +526,13 @@ mod tests {
         request.range = None;
         assert!(request.check(&mut []).is_err());
         let source = RawSource {
+            page_size: Default::default(),
             id: Id::Integer(1),
             location_id: Uuid::now_v7(),
             address: None,
             home_storage_id: None,
             storage_id: storage,
-            size: 3 * raw_pages::PAGE as i64,
+            size: 3 * crate::content::raw_pages::Size::KiB256 as i64,
             digest: Some(vec![0; 16]),
             state: "ready".into(),
             medium: "shared".into(),
@@ -548,13 +550,17 @@ mod tests {
                 page_revision: None,
                 offset: 0,
                 length: 1,
-                source_offset: raw_pages::PAGE as i64 + 31,
+                source_offset: crate::content::raw_pages::Size::KiB256 as i64 + 31,
                 source: Source::Raw { source },
             }],
         };
         let mut ranges = Vec::new();
         request.include("prefix", &mapping, &mut ranges)?;
-        assert_eq!(ranges, [raw_pages::PAGE as u64..2 * raw_pages::PAGE as u64]);
+        assert_eq!(
+            ranges,
+            [crate::content::raw_pages::Size::KiB256 as u64
+                ..2 * crate::content::raw_pages::Size::KiB256 as u64]
+        );
         request.range = Some(0..1);
         assert!(request.check(&mut ranges).is_err());
         ranges.clear();

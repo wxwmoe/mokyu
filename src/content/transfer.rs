@@ -439,6 +439,7 @@ mod tests {
             unit: Id::Uuid(Uuid::now_v7()),
             revision: 1,
             source: RawSource {
+                page_size: Default::default(),
                 id: Id::Uuid(Uuid::now_v7()),
                 home_storage_id: None,
                 address: None,

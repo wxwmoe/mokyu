@@ -757,10 +757,10 @@ impl Mapping {
         let Some(part) = self.segments.first() else {
             return false;
         };
-        if !matches!(part.source, Source::Raw { .. }) {
+        let Source::Raw { source } = &part.source else {
             return false;
-        }
-        let page = crate::content::raw_pages::PAGE as i64;
+        };
+        let page = source.page_size as i64;
         let start = part.source_offset;
         let end = start + part.length;
         let middle_page = start / page + (((end - 1) / page) - start / page) / 2 + 1;

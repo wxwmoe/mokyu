@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub(crate) const PREPARE_LIMIT: usize = 160 * 1024 + 1024;
+pub(crate) const PREPARE_LIMIT: usize = 640 * 1024 + 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -12,6 +12,11 @@ pub(crate) struct Input {
     pub size: i64,
     pub digest: [u8; 16],
     pub hash: Option<[u8; 32]>,
+    #[serde(
+        default = "crate::content::raw_pages::Size::legacy",
+        skip_serializing_if = "crate::content::raw_pages::Size::is_legacy"
+    )]
+    pub page_size: crate::content::raw_pages::Size,
     pub page_hashes: Vec<u8>,
 }
 
@@ -25,8 +30,7 @@ impl Input {
             if self.size > super::node_write::MAX_PART_BYTES {
                 self.page_hashes.is_empty()
             } else {
-                self.page_hashes.len()
-                    == usize::try_from(crate::content::raw_pages::count(self.size)?)? * 32
+                self.page_hashes.len() == usize::try_from(self.page_size.count(self.size)?)? * 32
             },
             "invalid raw page count"
         );

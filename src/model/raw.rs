@@ -20,6 +20,11 @@ pub(crate) struct RawSource {
     pub home_storage_id: Option<Uuid>,
     pub storage_id: Uuid,
     pub size: i64,
+    #[serde(
+        default = "crate::content::raw_pages::Size::legacy",
+        skip_serializing_if = "crate::content::raw_pages::Size::is_legacy"
+    )]
+    pub page_size: crate::content::raw_pages::Size,
     pub digest: Option<Vec<u8>>,
     pub state: String,
     pub medium: String,
@@ -40,6 +45,7 @@ macro_rules! raw_rows {
                 location_id: row.try_get("raw_location")?,
                 storage_id: row.try_get("raw_storage")?,
                 size: row.try_get("raw_size")?,
+                page_size: row.try_get("raw_page_size")?,
                 digest: row.try_get("raw_digest")?,
                 state: row.try_get("raw_state")?,
                 medium: row.try_get("raw_medium")?,
@@ -397,6 +403,7 @@ mod tests {
     fn rejects_unavailable_sources_and_overflowing_ranges() {
         let mut range = RawRange {
             source: RawSource {
+                page_size: Default::default(),
                 id: Id::from(1),
                 home_storage_id: None,
                 address: None,

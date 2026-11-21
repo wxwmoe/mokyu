@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261121095744.
+-- Generated from the complete sqlite migration chain through 20261121095755.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -1442,7 +1442,8 @@ CREATE TABLE "raw_sources" (
     quarantined_at INTEGER,
     quarantine_code TEXT,
     created_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)),
-    unreferenced_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), pending_upload INTEGER NOT NULL DEFAULT false, processing_task BLOB REFERENCES tasks(id) ON DELETE SET NULL, page_count INTEGER CHECK (page_count >= 0),
+    unreferenced_at INTEGER NOT NULL DEFAULT (CAST(unixepoch('subsec')*1000000 AS INTEGER)), pending_upload INTEGER NOT NULL DEFAULT false, processing_task BLOB REFERENCES tasks(id) ON DELETE SET NULL, page_count INTEGER CHECK (page_count >= 0), page_size INTEGER NOT NULL DEFAULT 1048576
+    CONSTRAINT raw_source_page_size CHECK (page_size IN (262144,1048576)),
     CHECK (state<>'ready' OR digest IS NOT NULL),
     CHECK ((medium='memory')=(boot_id IS NOT NULL))
 ) STRICT;

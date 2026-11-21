@@ -307,6 +307,7 @@ mod tests {
     fn work_scope_separates_sources_outputs_and_metadata() -> Result<()> {
         let storage = Uuid::now_v7();
         let source = crate::model::raw::RawSource {
+            page_size: Default::default(),
             id: crate::model::Id::Integer(1),
             location_id: Uuid::now_v7(),
             address: None,

@@ -819,7 +819,7 @@ pub(in super::super) async fn raw_progress(
                 index: *index,
                 hashes: hashes.clone(),
             };
-            group.validate_size(plan.target.size)?;
+            group.validate_size(plan.target.size, plan.target.page_size)?;
             super::super::raw_pages::put(db, plan.target.id, &group).await?;
         }
         RawProgress::Started { upload } => {

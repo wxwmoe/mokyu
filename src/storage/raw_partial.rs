@@ -6,11 +6,7 @@ use super::{
     partial_map::Map,
     raw_segments::{self, Acquire, Proof, Remote, Retain},
 };
-use crate::{
-    content::{codec::IntegrityError, raw_pages::PAGE},
-    model::raw::RawSource,
-    runtime::locks::Locks,
-};
+use crate::{content::codec::IntegrityError, model::raw::RawSource, runtime::locks::Locks};
 use anyhow::{Context, Result, ensure};
 use bytes::Bytes;
 use futures_util::{StreamExt, stream::BoxStream};
@@ -211,14 +207,15 @@ impl Partial {
         };
         ensure!(map.same(&self.source), "partial raw source changed");
         map.written.mark(start..end);
+        let page_size = self.source.page_size as u64;
         if verified {
             ensure!(
-                start.is_multiple_of(PAGE as u64)
-                    && (end.is_multiple_of(PAGE as u64) || end == map.size()),
+                start.is_multiple_of(page_size)
+                    && (end.is_multiple_of(page_size) || end == map.size()),
                 IntegrityError::Length
             );
             map.verified
-                .mark(start / PAGE as u64..end.div_ceil(PAGE as u64));
+                .mark(start / page_size..end.div_ceil(page_size));
         }
         let encoded = map.encode()?;
         let growth = (end - start).div_ceil(4096) * 4096
@@ -248,9 +245,9 @@ impl Partial {
         file.seek(std::io::SeekFrom::Start(start)).await?;
         file.write_all(data).await?;
         if !verified && let Some(proof) = proof {
-            for page in start / PAGE as u64..end.div_ceil(PAGE as u64) {
-                let at = page * PAGE as u64;
-                let until = (at + PAGE as u64).min(map.size());
+            for page in start / page_size..end.div_ceil(page_size) {
+                let at = page * page_size;
+                let until = (at + page_size).min(map.size());
                 if !map.verified.covers(page..page + 1)
                     && map.written.covers(at..until)
                     && proof.contains(page)
@@ -443,7 +440,7 @@ impl Partial {
         recovery: Arc<super::read_retry::Recovery>,
     ) -> BoxStream<'static, Result<(Bytes, bool)>> {
         Box::pin(async_stream::try_stream! {
-            let page=PAGE as u64;let size=self.source.size as u64;
+            let page=self.source.page_size as u64;let size=self.source.size as u64;
             let range=if strict {requested.start/page*page..requested.end.div_ceil(page).saturating_mul(page).min(size)}else{requested.clone()};
             let id=self.source.location_id;
             let mut pos=range.start;

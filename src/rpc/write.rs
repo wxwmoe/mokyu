@@ -45,6 +45,13 @@ pub(super) fn prepare_raw(
 ) -> Result<crate::model::node_raw::Prepare, Status> {
     let value = crate::model::node_raw::Input {
         local: input.local,
+        page_size: if input.page_size == 0 {
+            crate::content::raw_pages::Size::MiB1
+        } else {
+            i64::from(input.page_size)
+                .try_into()
+                .map_err(|_| invalid())?
+        },
         page_hashes: input.page_hashes,
         size: input.size.try_into().map_err(|_| invalid())?,
         digest: input.digest.try_into().map_err(|_| invalid())?,
@@ -313,6 +320,7 @@ mod tests {
             size: 0,
             digest: vec![0; 16],
             content_hash: vec![1; 32],
+            page_size: 0,
             page_hashes: Vec::new(),
         };
         assert!(prepare_raw(input.clone()).is_ok());

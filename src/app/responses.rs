@@ -1538,6 +1538,7 @@ mod tests {
     fn raw_mapping_requires_a_complete_healthy_source_and_current_representation() {
         let row = crate::model::raw::RawRange {
             source: crate::model::raw::RawSource {
+                page_size: Default::default(),
                 id: 1.into(),
                 home_storage_id: None,
                 address: None,

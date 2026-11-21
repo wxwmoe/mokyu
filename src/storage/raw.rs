@@ -873,7 +873,8 @@ pub(crate) async fn verify_manifest(
     cache: Option<&mut Option<super::raw_cache::Write>>,
     disk: &Arc<super::Disk>,
 ) -> Result<super::raw_manifest::Verified> {
-    let mut spool = super::raw_manifest::Spool::new(&disk.root, Some(disk.clone()));
+    let mut spool =
+        super::raw_manifest::Spool::new(&disk.root, Some(disk.clone()), source.page_size);
     verify(file, source, cache, Some(&mut spool)).await?;
     spool.finish().await
 }

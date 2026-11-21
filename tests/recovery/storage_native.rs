@@ -4649,6 +4649,7 @@ async fn work_access(
         .run;
     let bytes = bytes::Bytes::from_static(b"native work");
     let source = crate::model::raw::RawSource {
+        page_size: Default::default(),
         id: crate::model::Id::Integer(1),
         location_id: Uuid::now_v7(),
         address: None,
@@ -4981,7 +4982,7 @@ async fn read_access(
         },
     )
     .await?;
-    let page = crate::content::raw_pages::PAGE as i64;
+    let page = crate::content::raw_pages::Size::KiB256 as i64;
     let mapping = read::Mapping {
         stream,
         revision: 1,
@@ -4994,6 +4995,7 @@ async fn read_access(
             source_offset: page + 31,
             source: read::Source::Raw {
                 source: crate::model::raw::RawSource {
+                    page_size: Default::default(),
                     id: stream,
                     location_id: location,
                     address: None,

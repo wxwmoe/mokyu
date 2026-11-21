@@ -652,7 +652,9 @@ impl Writes {
                     let mut full =
                         Integrity::new(&hyper::HeaderMap::new(), value.algorithm.as_deref())?;
                     let mut hash = blake3::Hasher::new();
-                    let mut pages = Box::<crate::content::raw_pages::Builder>::default();
+                    let mut pages = Box::new(crate::content::raw_pages::Builder::new(
+                        plan.upload.page_size,
+                    ));
                     let mut rest = Bytes::new();
                     for part in &plan.parts {
                         let mut size = 0i64;

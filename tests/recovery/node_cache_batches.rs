@@ -340,11 +340,15 @@ async fn cached(
     let operation = opening.operation;
     backend.begin_write(node, key, opening).await?;
     let input = raw::Input {
+        page_size: Default::default(),
         local: true,
         size,
         digest: [index + 32; 16],
         hash: Some([index + 32; 32]),
-        page_hashes: vec![index + 32; crate::content::raw_pages::count(size)? as usize * 32],
+        page_hashes: vec![
+            index + 32;
+            crate::content::raw_pages::Size::default().count(size)? as usize * 32
+        ],
     };
     let source = backend
         .prepare_raw(

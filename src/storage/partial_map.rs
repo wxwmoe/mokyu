@@ -1,4 +1,4 @@
-use crate::{content::raw_pages::PAGE, model::raw::RawSource};
+use crate::{content::raw_pages::Size, model::raw::RawSource};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{ops::Range, path::Path};
@@ -45,6 +45,8 @@ pub(super) struct Map {
     address: Uuid,
     revision: i64,
     size: u64,
+    #[serde(default = "Size::legacy")]
+    page_size: Size,
     digest: [u8; 16],
     pub(super) written: Runs,
     pub(super) verified: Runs,
@@ -57,6 +59,7 @@ impl Map {
             address: source.address(),
             revision: source.revision,
             size: source.size.try_into()?,
+            page_size: source.page_size,
             digest: source
                 .digest
                 .as_deref()
@@ -71,6 +74,7 @@ impl Map {
             && self.address == r.address()
             && self.revision == r.revision
             && self.size == r.size as u64
+            && self.page_size == r.page_size
             && Some(self.digest.as_slice()) == r.digest.as_deref()
     }
     pub(super) fn id(&self) -> Uuid {
@@ -106,9 +110,10 @@ impl Map {
         let map: Self = serde_json::from_slice(&data[40..])?;
         ensure!(
             map.written.valid(map.size)
-                && map.verified.valid(map.size.div_ceil(PAGE as u64))
+                && map.verified.valid(map.size.div_ceil(map.page_size as u64))
                 && map.verified.0.iter().all(|r| map.written.covers(
-                    r.start * PAGE as u64..r.end.saturating_mul(PAGE as u64).min(map.size)
+                    r.start * map.page_size as u64
+                        ..r.end.saturating_mul(map.page_size as u64).min(map.size)
                 )),
             "invalid partial raw coverage"
         );

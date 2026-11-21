@@ -1,4 +1,4 @@
--- Generated from the complete postgres migration chain through 20261114231000.
+-- Generated from the complete postgres migration chain through 20261121095755.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET LOCAL check_function_bodies = false;
@@ -2547,6 +2547,8 @@ CREATE TABLE public.raw_sources (
     pending_upload boolean DEFAULT false NOT NULL,
     processing_task uuid,
     page_count bigint,
+    page_size bigint DEFAULT 1048576 NOT NULL,
+    CONSTRAINT raw_source_page_size CHECK ((page_size = ANY (ARRAY[(262144)::bigint, (1048576)::bigint]))),
     CONSTRAINT raw_sources_check CHECK (((state <> 'ready'::text) OR (digest IS NOT NULL))),
     CONSTRAINT raw_sources_check1 CHECK (((medium = 'memory'::text) = (boot_id IS NOT NULL))),
     CONSTRAINT raw_sources_content_hash_check CHECK (((content_hash IS NULL) OR (octet_length(content_hash) = 32))),

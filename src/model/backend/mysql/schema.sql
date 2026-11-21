@@ -1,4 +1,4 @@
--- Generated from the complete mysql migration chain through 20261114231000.
+-- Generated from the complete mysql migration chain through 20261121095755.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 SET @mokyu_schema_foreign_keys=@@foreign_key_checks;
@@ -1847,6 +1847,7 @@ CREATE TABLE `raw_sources` (
   `pending_upload` tinyint(1) NOT NULL DEFAULT '0',
   `processing_task` binary(16) DEFAULT NULL,
   `page_count` bigint DEFAULT NULL,
+  `page_size` bigint NOT NULL DEFAULT '1048576',
   PRIMARY KEY (`id`),
   UNIQUE KEY `raw_sources_location` (`location_id`),
   UNIQUE KEY `raw_sources_content` (`storage_id`,`content_hash`,`size`),
@@ -1857,6 +1858,7 @@ CREATE TABLE `raw_sources` (
   CONSTRAINT `raw_sources_owner` FOREIGN KEY (`owner_stream`) REFERENCES `streams` (`id`) ON DELETE SET NULL,
   CONSTRAINT `raw_sources_processing_fk` FOREIGN KEY (`processing_task`) REFERENCES `tasks` (`id`) ON DELETE SET NULL,
   CONSTRAINT `raw_sources_storage` FOREIGN KEY (`storage_id`) REFERENCES `storages` (`id`),
+  CONSTRAINT `raw_source_page_size` CHECK ((`page_size` in (262144,1048576))),
   CONSTRAINT `raw_sources_chk_2` CHECK ((`durability` in (_ascii'durable',_ascii'buffered',_ascii'volatile'))),
   CONSTRAINT `raw_sources_chk_3` CHECK ((`state` in (_ascii'writing',_ascii'ready',_ascii'unavailable',_ascii'deleting'))),
   CONSTRAINT `raw_sources_chk_4` CHECK ((`size` >= 0)),
@@ -1865,7 +1867,7 @@ CREATE TABLE `raw_sources` (
   CONSTRAINT `raw_sources_chk_7` CHECK (((`state` <> _ascii'ready') or (`digest` is not null))),
   CONSTRAINT `raw_sources_chk_8` CHECK (((`medium` = _ascii'memory') = (`boot_id` is not null))),
   CONSTRAINT `raw_sources_chk_9` CHECK ((`page_count` >= 0)),
-  CONSTRAINT `raw_sources_medium` CHECK ((`medium` in (_utf8mb4'local',_utf8mb4'memory',_utf8mb4'shared')))
+  CONSTRAINT `raw_sources_medium` CHECK ((`medium` in (_ascii'local',_ascii'memory',_ascii'shared')))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin;
 
 CREATE TABLE `raw_uploads` (

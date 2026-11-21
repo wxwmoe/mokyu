@@ -1166,6 +1166,7 @@ mod tests {
         let mut raw = (*base).clone();
         raw.raw = Some(RawRange {
             source: RawSource {
+                page_size: Default::default(),
                 id: Id::Integer(7),
                 location_id: Uuid::new_v4(),
                 home_storage_id: None,

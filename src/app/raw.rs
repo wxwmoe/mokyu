@@ -136,10 +136,7 @@ impl App {
         permits: (OwnedSemaphorePermit, OwnedSemaphorePermit),
         capture: Option<Arc<Mutex<super::responses::Mapping>>>,
     ) -> Result<s3s::dto::StreamingBlob> {
-        use crate::{
-            content::raw_pages::PAGE,
-            storage::{raw_segments as segments, read_buffer},
-        };
+        use crate::storage::{raw_segments as segments, read_buffer};
         let mut ranges = Vec::new();
         let mut cursor = span.start;
         let mut prefetched = super::reads::raw(stream.id, stream.payload_revision);
@@ -235,16 +232,17 @@ impl App {
                 }
                 let mut digest=capture.as_ref().filter(|_|mode=="inline" && complete).map(|_|Md5::new());
                 let mut offset=physical.start;
+                let page=row.source.page_size as u64;
                 while offset<physical.end {
-                    let end=if (mode=="inline" || partial.is_some()) && physical.end-offset > 128*1024*1024 {
-                        ((offset/(PAGE as u64))+128)*(PAGE as u64)
+                    let end=if (mode=="inline" || partial.is_some()) && physical.end-offset > 128*page {
+                        ((offset/page)+128)*page
                     }else{physical.end};
                     let span=offset..end;
                     let strict=mode=="inline";
                     let proof=if strict || partial.is_some() {
-                        let first=(offset/PAGE as u64) as i64;let count=((end-1)/PAGE as u64-first as u64+1) as usize;
+                        let first=(offset/page) as i64;let count=((end-1)/page-first as u64+1) as usize;
                         let hashes=app.raw.page_hashes(row.source.id,row.source.size,first,count).await?;
-                        hashes.map(|bytes|segments::Proof::new(&span,bytes,app.storage.cpu.clone()).map(Arc::new)).transpose()?
+                        hashes.map(|bytes|segments::Proof::new(&span,bytes,row.source.page_size,app.storage.cpu.clone()).map(Arc::new)).transpose()?
                     }else{None};
                     if strict && proof.is_none(){Err(crate::model::Error::SourceUnavailable)?;}
                     let mut rejected=None;

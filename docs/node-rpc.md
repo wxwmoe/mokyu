@@ -68,7 +68,7 @@ storage 的专用 HTTPS/HTTP2 端点提供以下物理操作。`Inspect` 使用�
 | `NodeWrites/CommitRaw` | Unary；确认 raw 来源已达到所选持久化条件并建立引用，重复确认返回相同回执 |
 | `NodeWrites/CheckRawFiles` | Unary；按当前运行权检查最多 128 个本地 raw 文件的保留和回收状态；仅允许 data |
 | `NodeWork/Exchange` | Unary；提交上一批任务结果并领取下一批工作，返回所需材料和任务保护 |
-| `NodeMultipart/StageNativePages` | Unary，按顺序暂存原生 Multipart 最终来源的 1 MiB 页摘要组，完成时校对组数、页数及整源身份 |
+| `NodeMultipart/StageNativePages` | Unary，按顺序暂存原生 Multipart 最终物理来源的页摘要组，完成时校对组数、页数及整源身份 |
 | `NodeWork/CheckpointRawPages` | Unary，完整检查从指定物理来源核验正文后，按当前任务运行权补建并封存页摘要清单 |
 | `NodeWork/CheckpointTransfer` | Unary；持久化 raw 传输的上传与分片回执，核对当前节点运行权、任务、来源与目标许可 |
 | `NodeWork/ReadMigration` | Unary；取得任务绑定源版本的首个读取窗口，只允许候选所属节点和有效任务执行权 |
@@ -199,7 +199,7 @@ CommitChunks 携带本批新增物理编码的 ID 和密文字节摘要，省略
 
 HTTP PUT 的可靠 chunks 接收按 CDC 边界流式形成最多 8 MiB 的批次，同时保留两个批次；上传受节点额度和实际返回的存储许可共同限制。完整正文、流式签名尾块和校验和通过后才调用 PublishWrite；零字节对象不调用区块接口。发布使本节点对应对象及其别名的公共快照失效。已经确认的发布回执不因写租约随后结束而改判失败。
 
-inline raw 普通 PUT 先使用节点本地请求暂存空间接收并校验完整文件，上限 5 GiB。PrepareRaw 包含长度、16 字节 MD5、按 1 MiB 页顺序排列的 `page_hashes`、`local`，以及 inline 整文件去重需要的 32 字节 BLAKE3；同一操作必须重放相同输入。去重命中直接建立引用并返回已确认状态，不上传对象、不占存储上传许可。未命中且 `local=false` 时，control 先持久化最终 raw 身份，再返回上传许可；节点流式 PUT 到最终 S3 key，成功后在 PublishWrite 中携带已分配的 `raw_source_id`，一次往返确认来源和发布结果。响应丢失时沿用相同操作、来源和条件重试，可以从其他 control 取回持久回执。该流式 PUT 将存储的 `request_timeout` 用作无传输进展或等待响应的超时，持续传输不受整文件总时长限制；失败重试从本地文件重新发送，仍受重试次数和期限限制。PrepareRaw 和带来源的 PublishWrite 均可按原操作重试，上传许可同样通过 NodeSession 续期；取消或过期不会抹去外部上传的清理记录。请求暂存与本地缓存共享磁盘容量和最低剩余空间约束，暂存空间不足返回可重试错误。
+inline raw 普通 PUT 先使用节点本地请求暂存空间接收并校验完整文件，上限 5 GiB。PrepareRaw 包含长度、16 字节 MD5、来源校验页长（新来源 256 KiB）、按页顺序排列的 `page_hashes`、`local`，以及 inline 整文件去重需要的 32 字节 BLAKE3；同一操作必须重放相同输入。去重命中直接建立引用并返回已确认状态，不上传对象、不占存储上传许可。未命中且 `local=false` 时，control 先持久化最终 raw 身份，再返回上传许可；节点流式 PUT 到最终 S3 key，成功后在 PublishWrite 中携带已分配的 `raw_source_id`，一次往返确认来源和发布结果。响应丢失时沿用相同操作、来源和条件重试，可以从其他 control 取回持久回执。该流式 PUT 将存储的 `request_timeout` 用作无传输进展或等待响应的超时，持续传输不受整文件总时长限制；失败重试从本地文件重新发送，仍受重试次数和期限限制。PrepareRaw 和带来源的 PublishWrite 均可按原操作重试，上传许可同样通过 NodeSession 续期；取消或过期不会抹去外部上传的清理记录。请求暂存与本地缓存共享磁盘容量和最低剩余空间约束，暂存空间不足返回可重试错误。
 
 普通 PUT 启用写缓存时使用 `local=true`，节点先同步本地文件和目录，再通过 PublishWrite 一并确认来源、所属节点、排空任务和发布结果。raw 后台去重先计算摘要并查询重复来源，再上传；chunks 按接受时的编码策略在原节点执行 CDC，可直接生成最终区块包。唯一缓存只能由所属节点处理，同节点读取校验本地文件，其他节点沿用短暂等待和可重试响应。节点本地持久化不提供节点丢失冗余。
 

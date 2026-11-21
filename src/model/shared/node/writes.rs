@@ -183,6 +183,7 @@ pub(super) struct Raw {
     source_id: Id,
     location_id: Uuid,
     size: i64,
+    page_size: crate::content::raw_pages::Size,
     digest: Vec<u8>,
     content_hash: Option<Vec<u8>>,
     committed: bool,
@@ -504,7 +505,7 @@ impl NodeWrites for Backend {
                 && !raw.committed,
             Error::NodeOperationConflict
         );
-        input.group.validate_size(raw.size)?;
+        input.group.validate_size(raw.size, raw.page_size)?;
         super::raw_pages::put(&mut tx, raw.source_id, &input.group).await?;
         tx.commit().await?;
         Ok(())
@@ -1828,6 +1829,9 @@ impl NodeWrites for Backend {
                     == 1,
                 Error::OperationAborted
             );
+            let matching_pages = duplicate
+                .as_ref()
+                .is_none_or(|r| r.page_size == input.input.page_size);
             let committed = duplicate.is_some();
             let (id, location) = if let Some(source) = duplicate {
                 queries::raw_attach(stream, source.id, size)
@@ -1850,24 +1854,34 @@ impl NodeWrites for Backend {
                     location,
                 )
             };
-            for (index, hashes) in input
-                .input
-                .page_hashes
-                .chunks(crate::content::raw_pages::GROUP * 32)
-                .enumerate()
-            {
-                super::raw_pages::put(
-                    &mut tx,
-                    id,
-                    &crate::content::raw_pages::Group {
-                        index: index as i64,
-                        hashes: hashes.to_vec(),
-                    },
-                )
-                .await?;
+
+            if !committed && input.input.page_size.is_legacy() {
+                sqlx::query(super::queries::raw_pages::SET_SIZE)
+                    .bind(input.input.page_size)
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
             }
-            if size <= write::MAX_PART_BYTES {
-                super::raw_pages::seal(&mut tx, id, size, &input.input.digest).await?;
+            if matching_pages {
+                for (index, hashes) in input
+                    .input
+                    .page_hashes
+                    .chunks(crate::content::raw_pages::GROUP * 32)
+                    .enumerate()
+                {
+                    super::raw_pages::put(
+                        &mut tx,
+                        id,
+                        &crate::content::raw_pages::Group {
+                            index: index as i64,
+                            hashes: hashes.to_vec(),
+                        },
+                    )
+                    .await?;
+                }
+                if size <= write::MAX_PART_BYTES {
+                    super::raw_pages::seal(&mut tx, id, size, &input.input.digest).await?;
+                }
             }
             q::add_raw(
                 node.node_id,

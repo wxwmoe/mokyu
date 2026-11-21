@@ -61,7 +61,7 @@ pub(in super::super) fn touch(node: Uuid, run: Run, id: Uuid, renew: bool) -> St
     sqlx::query(if renew {"UPDATE node_writes SET expires_at=CAST(unixepoch('subsec')*1000000 AS INTEGER)+90000000 WHERE lease_id=? AND node_id=? AND boot_id=? AND fence=? AND phase='active' AND expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)"} else {"UPDATE node_writes SET expires_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE lease_id=? AND node_id=? AND boot_id=? AND fence=? AND phase='active'"}).bind(id).bind(node).bind(run.boot).bind(run.fence)
 }
 pub(in super::super) fn raw(node: Uuid, op: Uuid) -> Rows<'static, Raw> {
-    sqlx::query_as("SELECT * FROM node_write_raw WHERE node_id=? AND operation_id=?")
+    sqlx::query_as("SELECT n.*,(SELECT page_size FROM raw_sources r WHERE r.id=n.source_id) AS page_size FROM node_write_raw n WHERE node_id=? AND operation_id=?")
         .bind(node)
         .bind(op)
 }

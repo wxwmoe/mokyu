@@ -250,13 +250,14 @@ pub(in super::super) struct NodeRawWrite {
     pub request_hash: Vec<u8>,
     pub source_id: Uuid,
     pub size: i64,
+    pub page_size: crate::content::raw_pages::Size,
     pub digest: Vec<u8>,
     pub content_hash: Option<Vec<u8>>,
     pub committed: bool,
 }
 
 pub(in super::super) fn node_raw_write(node: Uuid, operation: Uuid) -> Rows<'static, NodeRawWrite> {
-    sqlx::query_as("SELECT request_hash,source_id,size,digest,content_hash,committed FROM node_write_raw WHERE node_id=$1 AND operation_id=$2 FOR UPDATE").bind(node).bind(operation)
+    sqlx::query_as("SELECT request_hash,source_id,size,digest,content_hash,committed,(SELECT page_size FROM raw_sources r WHERE r.id=node_write_raw.source_id) AS page_size FROM node_write_raw WHERE node_id=$1 AND operation_id=$2 FOR UPDATE").bind(node).bind(operation)
 }
 
 pub(in super::super) fn insert_node_raw_write<'q>(
@@ -530,7 +531,7 @@ pub(in super::super) fn raw_gc_candidates(
     minimum: i64,
     limit: i64,
 ) -> Rows<'static, RawSource> {
-    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r LEFT JOIN tier_locations th ON th.unit=2 AND th.physical_id=r.id WHERE COALESCE(th.storage_id,r.storage_id)=$1 AND NOT EXISTS(SELECT 1 FROM journal_protected_addresses h WHERE h.unit='raw' AND h.address=COALESCE((SELECT th.address FROM tier_locations th WHERE th.unit=2 AND th.physical_id=r.id),r.id)) AND r.owner_stream IS NULL AND r.unreferenced_at<now()-$2*interval '1 second' AND r.created_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=COALESCE(th.address,r.id) AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=r.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit=2 AND mv.physical_id=r.id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit=2 AND th.physical_id=r.id AND th.activated_at>floor(extract(epoch from clock_timestamp()))::bigint-$3::bigint) ORDER BY r.unreferenced_at,r.id LIMIT $4").bind(storage).bind(grace).bind(minimum).bind(limit)
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.page_size AS raw_page_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r LEFT JOIN tier_locations th ON th.unit=2 AND th.physical_id=r.id WHERE COALESCE(th.storage_id,r.storage_id)=$1 AND NOT EXISTS(SELECT 1 FROM journal_protected_addresses h WHERE h.unit='raw' AND h.address=COALESCE((SELECT th.address FROM tier_locations th WHERE th.unit=2 AND th.physical_id=r.id),r.id)) AND r.owner_stream IS NULL AND r.unreferenced_at<now()-$2*interval '1 second' AND r.created_at<now()-$3*interval '1 second' AND NOT EXISTS(SELECT 1 FROM node_read_sources n JOIN node_read_windows w ON w.id=n.window_id JOIN stream_leases l ON l.id=w.read_id WHERE n.kind='raw' AND n.location_id=COALESCE(th.address,r.id) AND l.expires_at>clock_timestamp()) AND NOT EXISTS(SELECT 1 FROM raw_ranges WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM transfer_sources p JOIN transfer_runs t ON t.task_id=p.task_id WHERE p.source_type='raw' AND p.source_id=r.id AND t.phase NOT IN ('complete','cancelled')) AND NOT EXISTS(SELECT 1 FROM multipart_files WHERE source_id=r.id) AND NOT EXISTS(SELECT 1 FROM uploads WHERE raw_source_id=r.id) AND NOT EXISTS(SELECT 1 FROM tier_moves mv WHERE mv.unit=2 AND mv.physical_id=r.id) AND NOT EXISTS(SELECT 1 FROM tier_locations th WHERE th.unit=2 AND th.physical_id=r.id AND th.activated_at>floor(extract(epoch from clock_timestamp()))::bigint-$3::bigint) ORDER BY r.unreferenced_at,r.id LIMIT $4").bind(storage).bind(grace).bind(minimum).bind(limit)
 }
 
 pub(in super::super) fn raw_gc_claim(

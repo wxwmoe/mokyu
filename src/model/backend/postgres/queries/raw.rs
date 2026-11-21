@@ -7,7 +7,7 @@ pub(in super::super) fn missing_raw_pages(source: Id) -> Scalar<'static, bool> {
 const RAW_COPY_READY: &str = "r.state='ready' AND r.quarantine_code IS NULL AND r.durability='durable' AND NOT r.pending_upload AND r.medium IN ('local','shared') AND r.size>=0 AND length(r.digest)=16";
 
 pub(in super::super) fn raw_page(stream: Id, start: i64, end: i64) -> Rows<'static, RawRange> {
-    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=$1 AND e.offset_bytes+e.length>=$2 AND e.offset_bytes<=$3 ORDER BY e.offset_bytes LIMIT 128")
+    sqlx::query_as("SELECT (SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.id) AS tier_material,r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.page_size AS raw_page_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset FROM raw_ranges e JOIN raw_sources r ON r.id=e.source_id WHERE e.stream_id=$1 AND e.offset_bytes+e.length>=$2 AND e.offset_bytes<=$3 ORDER BY e.offset_bytes LIMIT 128")
             .bind(stream).bind(start).bind(end)
 }
 
@@ -104,7 +104,7 @@ pub(in super::super) fn raw_insert(
     durability: &'static str,
 ) -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
-        "INSERT INTO raw_sources(owner_stream,storage_id,profile_revision,medium,durability) VALUES($1,$2,$3,$4,$5) RETURNING id",
+        "INSERT INTO raw_sources(page_size,owner_stream,storage_id,profile_revision,medium,durability) VALUES(262144,$1,$2,$3,$4,$5) RETURNING id",
     )
 
     .bind(stream)
@@ -155,7 +155,7 @@ pub(in super::super) fn raw_sources_lock(
              FROM ranges
          )
          SELECT r.id AS raw_id, r.id AS raw_location, r.storage_id AS raw_storage, r.size AS raw_size,
-                r.digest AS raw_digest, r.state AS raw_state, r.medium AS raw_medium,
+                r.page_size AS raw_page_size, r.digest AS raw_digest, r.state AS raw_state, r.medium AS raw_medium,
                 r.pending_upload AS raw_pending, r.revision AS raw_revision, r.quarantine_code AS raw_quarantine,
                 layout.valid AND bounds.source_end<=r.size AS covered
          FROM (SELECT source_id,max(source_end) AS source_end FROM ranges GROUP BY source_id) bounds
@@ -225,7 +225,7 @@ impl RawStore for Backend {
     }
 
     async fn buffered_source(&self, source: Id) -> Result<Option<RawSource>> {
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=$1 AND r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL").bind(source).fetch_optional(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.page_size AS raw_page_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=$1 AND r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL").bind(source).fetch_optional(&self.pool).await?)
     }
     async fn buffered_duplicate(
         &self,
@@ -233,7 +233,7 @@ impl RawStore for Backend {
         hash: &[u8],
         size: i64,
     ) -> Result<Option<RawSource>> {
-        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.content_hash=$2 AND r.size=$3 AND r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL").bind(storage).bind(hash).bind(size).fetch_optional(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.page_size AS raw_page_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.content_hash=$2 AND r.size=$3 AND r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL").bind(storage).bind(hash).bind(size).fetch_optional(&self.pool).await?)
     }
     async fn buffer(&self, source: Id) -> Result<()> {
         ensure!(sqlx::query("UPDATE raw_sources SET durability='buffered' WHERE id=$1 AND state='writing' AND owner_stream IS NOT NULL").bind(source).execute(&self.pool).await?.rows_affected()==1, crate::model::Error::OperationAborted);
@@ -248,7 +248,7 @@ impl RawStore for Backend {
         urgent: &[Uuid],
     ) -> Result<Vec<RawSource>> {
         let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-            "SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r JOIN storage_profiles sp ON sp.storage_id=r.storage_id WHERE r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL AND r.id>",
+            "SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.page_size AS raw_page_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r JOIN storage_profiles sp ON sp.storage_id=r.storage_id WHERE r.durability IN ('buffered','volatile') AND r.state='ready' AND r.quarantine_code IS NULL AND r.id>",
         );
         query.push_bind(after);
         if let Some(before) = before {
@@ -664,7 +664,7 @@ pub(in super::super) fn raw_lock_stream(stream: Id) -> Scalar<'static, Id> {
 }
 
 pub(in super::super) fn raw_source(id: Id) -> Rows<'static, RawSource> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=$1 FOR UPDATE").bind(id)
+    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.page_size AS raw_page_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.id=$1 FOR UPDATE").bind(id)
 }
 
 pub(in super::super) fn raw_duplicate(
@@ -672,7 +672,7 @@ pub(in super::super) fn raw_duplicate(
     hash: &[u8],
     size: i64,
 ) -> Rows<'_, RawSource> {
-    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.content_hash=$2 AND r.size=$3 FOR UPDATE")
+    sqlx::query_as("SELECT r.id AS raw_id,r.id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.page_size AS raw_page_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine FROM raw_sources r WHERE r.storage_id=$1 AND r.content_hash=$2 AND r.size=$3 FOR UPDATE")
         .bind(storage).bind(hash).bind(size)
 }
 
@@ -946,7 +946,7 @@ pub(in super::super) fn renew_completion(upload: Uuid, token: Uuid) -> Statement
 }
 
 pub(in super::super) fn remote_upload(upload: Uuid) -> Rows<'static, RemoteUpload> {
-    sqlx::query_as("SELECT u.id AS remote_upload,u.state AS remote_state,r.id AS remote_source,r.storage_id AS remote_storage,r.profile_revision AS remote_profile,r.upload_id AS remote_upstream,u.remote_manifest_hash AS remote_manifest FROM uploads u JOIN raw_sources r ON r.id=u.raw_source_id WHERE u.id=$1").bind(upload)
+    sqlx::query_as("SELECT u.id AS remote_upload,u.state AS remote_state,r.id AS remote_source,r.storage_id AS remote_storage,r.profile_revision AS remote_profile,r.page_size,r.upload_id AS remote_upstream,u.remote_manifest_hash AS remote_manifest FROM uploads u JOIN raw_sources r ON r.id=u.raw_source_id WHERE u.id=$1").bind(upload)
 }
 
 pub(in super::super) fn remote_upload_lock(upload: Uuid) -> Rows<'static, (String, Option<Uuid>)> {
@@ -958,7 +958,7 @@ pub(in super::super) fn insert_remote(
     storage: Uuid,
     revision: i64,
 ) -> Statement<'static> {
-    sqlx::query("WITH candidate AS (INSERT INTO raw_sources(storage_id,profile_revision,medium) SELECT b.storage_id,p.revision,'shared' FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=s.id WHERE u.id=$1 AND b.storage_id=$2 AND p.revision=$3 AND s.type IN ('s3','mokyu') AND NOT p.cdc_enabled AND NOT p.compression_enabled AND s.block_key_id IS NULL AND NOT p.pack_enabled AND s.enabled AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id AND stream_id IS NOT NULL) RETURNING id) UPDATE uploads SET raw_source_id=(SELECT id FROM candidate) WHERE id=$1 AND EXISTS(SELECT 1 FROM candidate)").bind(upload).bind(storage).bind(revision)
+    sqlx::query("WITH candidate AS (INSERT INTO raw_sources(page_size,storage_id,profile_revision,medium) SELECT 262144,b.storage_id,p.revision,'shared' FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=s.id WHERE u.id=$1 AND b.storage_id=$2 AND p.revision=$3 AND s.type IN ('s3','mokyu') AND NOT p.cdc_enabled AND NOT p.compression_enabled AND s.block_key_id IS NULL AND NOT p.pack_enabled AND s.enabled AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id AND stream_id IS NOT NULL) RETURNING id) UPDATE uploads SET raw_source_id=(SELECT id FROM candidate) WHERE id=$1 AND EXISTS(SELECT 1 FROM candidate)").bind(upload).bind(storage).bind(revision)
 }
 
 pub(in super::super) fn claim_remote(upload: Uuid, token: Uuid) -> Statement<'static> {
@@ -997,7 +997,7 @@ pub(in super::super) async fn remote_part(
     upload: Uuid,
     number: i32,
 ) -> Result<RemotePart> {
-    Ok(sqlx::query_as("SELECT u.id AS remote_upload,u.state AS remote_state,r.id AS remote_source,r.storage_id AS remote_storage,r.profile_revision AS remote_profile,r.upload_id AS remote_upstream,u.remote_manifest_hash AS remote_manifest,s.*,p.part_number,p.remote_token FROM parts p JOIN uploads u ON u.id=p.upload_id JOIN raw_sources r ON r.id=u.raw_source_id JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number=$2").bind(upload).bind(number).fetch_one(db).await?)
+    Ok(sqlx::query_as("SELECT u.id AS remote_upload,u.state AS remote_state,r.id AS remote_source,r.storage_id AS remote_storage,r.profile_revision AS remote_profile,r.page_size,r.upload_id AS remote_upstream,u.remote_manifest_hash AS remote_manifest,s.*,p.part_number,p.remote_token FROM parts p JOIN uploads u ON u.id=p.upload_id JOIN raw_sources r ON r.id=u.raw_source_id JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number=$2").bind(upload).bind(number).fetch_one(db).await?)
 }
 
 pub(in super::super) fn remote_part_finish<'a>(

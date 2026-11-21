@@ -103,6 +103,7 @@ where
 async fn verify_local<F, Fut>(
     path: &std::path::Path,
     size: u64,
+    page_size: crate::content::raw_pages::Size,
     expected: &[u8],
     checkpoint: &F,
     disk: Option<&Arc<super::Disk>>,
@@ -114,6 +115,7 @@ where
     let mut pages = super::raw_manifest::Spool::new(
         path.parent().context("raw destination has no parent")?,
         disk.cloned(),
+        page_size,
     );
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(value) => value,
@@ -148,6 +150,7 @@ async fn verify_remote<F, Fut>(
     backend: &dyn ObjectStore,
     key: &object_store::path::Path,
     size: u64,
+    page_size: crate::content::raw_pages::Size,
     expected: &[u8],
     fill: &mut Option<super::raw_cache::Write>,
     checkpoint: &F,
@@ -157,7 +160,7 @@ where
     F: Fn(RawProgress) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
-    let mut pages = super::raw_manifest::Spool::new(scratch, disk.cloned());
+    let mut pages = super::raw_manifest::Spool::new(scratch, disk.cloned(), page_size);
     let head = match backend.head(key).await {
         Ok(value) => value,
         Err(object_store::Error::NotFound { .. }) => return Ok(false),
@@ -214,7 +217,16 @@ where
     };
     match target {
         Target::Local(destination) => {
-            if !verify_local(&destination, size, &digest, &checkpoint, disk).await? {
+            if !verify_local(
+                &destination,
+                size,
+                plan.target.page_size,
+                &digest,
+                &checkpoint,
+                disk,
+            )
+            .await?
+            {
                 let parent = destination
                     .parent()
                     .context("raw destination has no parent")?;
@@ -289,22 +301,52 @@ where
                 file.set_len(size).await?;
                 file.sync_all().await?;
                 drop(file);
-                verify_local(&partial, size, &digest, &checkpoint, disk).await?;
+                verify_local(
+                    &partial,
+                    size,
+                    plan.target.page_size,
+                    &digest,
+                    &checkpoint,
+                    disk,
+                )
+                .await?;
                 tokio::fs::rename(&partial, &destination).await?;
                 super::raw::sync_directory(parent).await?;
             }
         }
         Target::Native { scratch, store } => {
             let key = super::raw::remote_path(plan.target.address());
-            if !verify_remote(scratch, store, &key, size, &digest, fill, &checkpoint, disk).await? {
+            if !verify_remote(
+                scratch,
+                store,
+                &key,
+                size,
+                plan.target.page_size,
+                &digest,
+                fill,
+                &checkpoint,
+                disk,
+            )
+            .await?
+            {
                 store
                     .stage_copy(&key, size, || replay(&input, 0, size, digest))
                     .await?;
                 copied.bytes = size;
                 copied.requests = 1;
                 ensure!(
-                    verify_remote(scratch, store, &key, size, &digest, fill, &checkpoint, disk)
-                        .await?,
+                    verify_remote(
+                        scratch,
+                        store,
+                        &key,
+                        size,
+                        plan.target.page_size,
+                        &digest,
+                        fill,
+                        &checkpoint,
+                        disk
+                    )
+                    .await?,
                     "native transfer missing after write"
                 );
             }
@@ -321,6 +363,7 @@ where
                 backend.as_ref(),
                 &key,
                 size,
+                plan.target.page_size,
                 &digest,
                 fill,
                 &checkpoint,
@@ -456,6 +499,7 @@ where
                     backend.as_ref(),
                     &key,
                     size,
+                    plan.target.page_size,
                     &digest,
                     fill,
                     &checkpoint,
@@ -493,6 +537,7 @@ mod tests {
 
     fn plan(bytes: &[u8]) -> RawCopy {
         let source = RawSource {
+            page_size: Default::default(),
             id: Id::Uuid(Uuid::now_v7()),
             home_storage_id: None,
             address: None,

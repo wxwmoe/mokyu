@@ -268,10 +268,11 @@ pub(in super::super) fn insert_raw<'a>(
     uid: Uuid,
     storage: Uuid,
     size: i64,
+    page_size: crate::content::raw_pages::Size,
     digest: Option<&'a [u8]>,
     profile: Uuid,
 ) -> Statement<'a> {
-    sqlx::query("INSERT INTO raw_sources(location_id,storage_id,size,digest,profile_revision,medium,state) SELECT ?,?,?,?,p.revision,CASE WHEN s.type='local' THEN 'local' ELSE 'shared' END,'ready' FROM storage_profiles p JOIN storages s ON s.id=p.storage_id WHERE p.storage_id=?").bind(uid).bind(storage).bind(size).bind(digest).bind(profile)
+    sqlx::query("INSERT INTO raw_sources(page_size,location_id,storage_id,size,digest,profile_revision,medium,state) SELECT ?,?,?,?,?,p.revision,CASE WHEN s.type='local' THEN 'local' ELSE 'shared' END,'ready' FROM storage_profiles p JOIN storages s ON s.id=p.storage_id WHERE p.storage_id=?").bind(page_size).bind(uid).bind(storage).bind(size).bind(digest).bind(profile)
 }
 
 pub(in super::super) fn insert_fragment<'a>(

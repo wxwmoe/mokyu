@@ -493,6 +493,7 @@ mod tests {
         };
         let id = Uuid::new_v4();
         let source = crate::model::raw::RawSource {
+            page_size: Default::default(),
             id: 1.into(),
             location_id: id,
             home_storage_id: None,

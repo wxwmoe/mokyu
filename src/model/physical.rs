@@ -185,6 +185,7 @@ impl PhysicalSource {
                 }
                 (Self::Raw(a), Self::Raw(b)) => {
                     a.id == b.id
+                        && a.page_size == b.page_size
                         && a.size == b.size
                         && a.digest == b.digest
                         && !a.pending_upload
@@ -240,6 +241,7 @@ mod tier_material_tests {
     #[test]
     fn relocating_raw_preserves_quarantine_and_rejects_other_content() {
         let raw = super::super::raw::RawSource {
+            page_size: Default::default(),
             id: 1i64.into(),
             location_id: Uuid::from_u128(1),
             home_storage_id: None,

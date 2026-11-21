@@ -405,8 +405,12 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let disk = limited_disk(dir.path(), 8192).await?;
         let budget = disk.data.as_ref().unwrap();
-        let mut spool = super::super::raw_manifest::Spool::new(dir.path(), Some(disk.clone()));
-        let block = vec![1; crate::content::raw_pages::PAGE];
+        let mut spool = super::super::raw_manifest::Spool::new(
+            dir.path(),
+            Some(disk.clone()),
+            Default::default(),
+        );
+        let block = vec![1; crate::content::raw_pages::Size::KiB256 as usize];
         for _ in 0..crate::content::raw_pages::GROUP {
             spool.feed(&block).await?;
         }

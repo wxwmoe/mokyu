@@ -771,7 +771,7 @@ impl NativeParts for Backend {
             .await?
             .summary;
         let groups =
-            crate::content::raw_pages::count(sum.size)? / crate::content::raw_pages::GROUP as i64;
+            value.upload.page_size.count(sum.size)? / crate::content::raw_pages::GROUP as i64;
         ensure!(
             input.group.index < groups
                 && input.group.hashes.len() == crate::content::raw_pages::GROUP * 32,
@@ -801,7 +801,7 @@ impl NativeParts for Backend {
             .await?
             .summary
             .size;
-        let pages = crate::content::raw_pages::count(size)?;
+        let pages = value.upload.page_size.count(size)?;
         let group = crate::content::raw_pages::GROUP as i64;
         ensure!(
             input.page_tail.len() == (pages % group) as usize * 32,
@@ -813,6 +813,7 @@ impl NativeParts for Backend {
             digest: input.digest,
             hash: row.profile.deduplication_enabled.then_some(input.hash),
             page_hashes: input.page_tail.clone(),
+            page_size: value.upload.page_size,
         };
         let hash = crate::model::node_chunk::hash(&data)?;
         if let Some(raw) = ledger::raw(node.node_id, input.operation)

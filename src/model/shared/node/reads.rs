@@ -72,11 +72,9 @@ async fn node_read_permits(
         };
         let pin = part.source.pin()?;
         let count = match &part.source {
-            read::Source::Raw { .. } if part.length > crate::content::raw_pages::PAGE as i64 => {
-                (part.length as usize)
-                    .div_ceil(8 * crate::content::raw_pages::PAGE)
-                    .max(2)
-            }
+            read::Source::Raw { .. } if part.length > 1024 * 1024 => (part.length as usize)
+                .div_ceil(crate::storage::raw_segments::SEGMENT as usize)
+                .max(2),
             _ if !seen.insert(pin) => 0,
             _ => 1,
         };

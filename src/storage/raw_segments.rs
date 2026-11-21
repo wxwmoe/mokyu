@@ -1,6 +1,6 @@
 use crate::content::{
     codec::IntegrityError,
-    raw_pages::{HASH, PAGE},
+    raw_pages::{HASH, Size},
 };
 use anyhow::{Context, Result, ensure};
 use bytes::{Bytes, BytesMut};
@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-pub(crate) const SEGMENT: u64 = 8 * PAGE as u64;
+pub(crate) const SEGMENT: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone)]
 pub(crate) struct Remote {
@@ -30,6 +30,7 @@ pub(crate) struct Remote {
 }
 
 pub(crate) struct Proof {
+    page_size: Size,
     pub(crate) first: u64,
     pub(crate) hashes: Vec<u8>,
     cpu: Arc<tokio::sync::Semaphore>,
@@ -39,16 +40,22 @@ impl Proof {
     pub(crate) fn new(
         range: &Range<u64>,
         hashes: Vec<u8>,
+        page_size: Size,
         cpu: Arc<tokio::sync::Semaphore>,
     ) -> Result<Self> {
-        let page = PAGE as u64;
+        let page = page_size as u64;
         let first = range.start / page;
         ensure!(
             range.end > range.start
                 && hashes.len() as u64 == ((range.end - 1) / page - first + 1) * HASH as u64,
             IntegrityError::RawMetadata
         );
-        Ok(Self { first, hashes, cpu })
+        Ok(Self {
+            first,
+            hashes,
+            page_size,
+            cpu,
+        })
     }
 
     async fn verify(self: &Arc<Self>, start: u64, bytes: Bytes) -> Result<Bytes> {
@@ -66,7 +73,7 @@ impl Proof {
         page >= self.first && page - self.first < (self.hashes.len() / HASH) as u64
     }
     pub(super) fn check(&self, start: u64, bytes: &[u8]) -> Result<()> {
-        let index = (start / PAGE as u64)
+        let index = (start / self.page_size as u64)
             .checked_sub(self.first)
             .context(IntegrityError::RawMetadata)?;
         let offset = usize::try_from(index)?
@@ -106,15 +113,15 @@ impl Drop for Job {
     }
 }
 
-fn bounds(request: &Range<u64>, strict: bool, size: u64) -> (Range<u64>, u64) {
-    let page = PAGE as u64;
-    let span = if strict {
+fn bounds(request: &Range<u64>, proof_page: Option<Size>, size: u64) -> (Range<u64>, u64) {
+    let page = proof_page.unwrap_or(Size::MiB1) as u64;
+    let span = if proof_page.is_some() {
         request.start / page * page..request.end.div_ceil(page).saturating_mul(page).min(size)
     } else {
         request.clone()
     };
     let length = span.end - span.start;
-    let stride = if request.end - request.start <= page {
+    let stride = if request.end - request.start <= 1024 * 1024 {
         length
     } else if length <= SEGMENT {
         length.div_ceil(page).div_ceil(2) * page
@@ -136,7 +143,7 @@ impl Remote {
     ) -> BoxStream<'static, Result<Bytes>> {
         Box::pin(async_stream::try_stream! {
             ensure_range(&self, &requested)?;
-            let (span,stride) = bounds(&requested, proof.is_some(),self.size);
+            let (span,stride) = bounds(&requested, proof.as_ref().map(|p|p.page_size),self.size);
             let width = width.clamp(1,crate::model::node_read::LANES);
             let mut next = span.start;
             let mut jobs = VecDeque::new();
@@ -150,7 +157,7 @@ impl Remote {
                     let range = next..end;
                     let remote=remote.clone();let proof=proof.clone();let requested=requested.clone();
                     let acquire=acquire.clone();let retain=retain.clone();
-                    let piece=if proof.is_some(){PAGE}else{256*1024};
+                    let piece=proof.as_ref().map_or(256*1024,|p|p.page_size as usize);
                     let bytes=(range.end-range.start) as usize;
                     // A granted segment can finish even while an earlier one owns the HTTP cursor.
                     let (tx,incoming)=mpsc::channel(bytes.div_ceil(piece)+1);
@@ -233,11 +240,8 @@ impl Remote {
         let mut pos = span.start;
         while pos < span.end {
             let output = tx.reserve().await.context("raw reader closed")?;
-            let n = (span.end - pos).min(if proof.is_some() {
-                PAGE as u64
-            } else {
-                256 * 1024
-            }) as usize;
+            let n = (span.end - pos).min(proof.as_ref().map_or(256 * 1024, |p| p.page_size as u64))
+                as usize;
             let immediate = proof.is_none() && pos == span.start;
             let mut page = BytesMut::new();
             while page.len() < n {
@@ -318,11 +322,11 @@ pub(crate) fn local<'a>(
 ) -> BoxStream<'a, Result<Bytes>> {
     Box::pin(async_stream::try_stream! {
         if !(requested.start<requested.end && requested.end<=size){ Err(IntegrityError::Length)?; }
-        let (span,_)=bounds(&requested,proof.is_some(),size);
+        let (span,_)=bounds(&requested,proof.as_ref().map(|p|p.page_size),size);
         file.seek(std::io::SeekFrom::Start(span.start)).await?;
         let mut pos=span.start;
         while pos<span.end {
-            let n=(span.end-pos).min(if proof.is_some(){PAGE as u64}else{256*1024}) as usize;
+            let n=(span.end-pos).min(proof.as_ref().map_or(256*1024,|p|p.page_size as u64)) as usize;
             let memory=retain(n).await?;
             let mut data=vec![0;n];
             file.read_exact(&mut data).await?;
@@ -358,12 +362,15 @@ mod tests {
     use super::*;
     #[test]
     fn exact_small_reads_and_adjacent_parallel_ranges() {
-        let p = PAGE as u64;
-        assert_eq!(bounds(&(p - 1..p + 1), false, 9 * p), (p - 1..p + 1, 2));
-        assert_eq!(bounds(&(p - 1..p + 1), true, 9 * p), (0..2 * p, 2 * p));
-        assert_eq!(bounds(&(11..p + 12), false, 9 * p), (11..p + 12, p));
+        let p = Size::MiB1 as u64;
+        assert_eq!(bounds(&(p - 1..p + 1), None, 9 * p), (p - 1..p + 1, 2));
         assert_eq!(
-            bounds(&(p..9 * p + 3), true, 9 * p + 3),
+            bounds(&(p - 1..p + 1), Some(Size::MiB1), 9 * p),
+            (0..2 * p, 2 * p)
+        );
+        assert_eq!(bounds(&(11..p + 12), None, 9 * p), (11..p + 12, p));
+        assert_eq!(
+            bounds(&(p..9 * p + 3), Some(Size::MiB1), 9 * p + 3),
             (p..9 * p + 3, 8 * p)
         );
     }

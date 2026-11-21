@@ -112,6 +112,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
         run: session.run,
         operation,
         input: raw::Input {
+            page_size: Default::default(),
             local: false,
             size: 3,
             digest: hex::decode("900150983cd24fb0d6963f7d28e17f72")?
@@ -361,6 +362,7 @@ async fn postgres_node_raw_replays_deduplicates_and_fences_uploads() -> Result<(
     let request = raw::Prepare {
         operation: empty_id,
         input: raw::Input {
+            page_size: Default::default(),
             local: false,
             size: 0,
             digest: hex::decode("d41d8cd98f00b204e9800998ecf8427e")?

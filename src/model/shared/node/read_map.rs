@@ -115,8 +115,7 @@ pub(super) async fn node_read_materials(
             cached,
         )?;
     }
-    use crate::content::raw_pages::{HASH, PAGE};
-    let page = PAGE as i64;
+    use crate::content::raw_pages::HASH;
     let mut remaining = (max_bytes / HASH).clamp(1, 16384) as i64;
     let mut end = mapping.end;
     for segment in &mut mapping.segments {
@@ -135,6 +134,7 @@ pub(super) async fn node_read_materials(
             end = segment.offset;
             break;
         }
+        let page = source.page_size as i64;
         let first = segment.source_offset / page;
         let last = (segment.source_offset + segment.length - 1) / page;
         let take = (last - first + 1).min(remaining);
