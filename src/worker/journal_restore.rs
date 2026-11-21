@@ -434,6 +434,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                 continue;
             }
         }
+        app.journal.recovery_clean_items(id, token, *bucket).await?;
         if !progress.recovered_buckets.contains(name) {
             progress.recovered_buckets.push(name.clone());
         }

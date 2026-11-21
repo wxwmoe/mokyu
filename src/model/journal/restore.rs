@@ -211,6 +211,7 @@ pub(crate) trait RecoveryStore: Send + Sync {
         project: Uuid,
         target: Uuid,
     ) -> Result<()>;
+    async fn recovery_clean_items(&self, job: Uuid, token: Uuid, source: Uuid) -> Result<()>;
     async fn recovery_orphan(
         &self,
         job: Uuid,

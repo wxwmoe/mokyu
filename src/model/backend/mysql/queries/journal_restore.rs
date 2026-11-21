@@ -447,10 +447,8 @@ pub(in super::super) fn complete_bucket(job: Uuid, source: Uuid) -> Statement<'s
     .bind(source)
 }
 
-pub(in super::super) fn remove_items(job: Uuid, source: Uuid) -> Statement<'static> {
-    sqlx::query("DELETE FROM journal_restore_items WHERE job=? AND source_bucket=?")
-        .bind(job)
-        .bind(source)
+pub(in super::super) fn remove_items(job: Uuid, source: Uuid, limit: i64) -> Statement<'static> {
+    sqlx::query("DELETE FROM journal_restore_items WHERE job=? AND source_bucket=? ORDER BY object_key LIMIT ?").bind(job).bind(source).bind(limit)
 }
 
 pub(in super::super) fn orphan<'a>(

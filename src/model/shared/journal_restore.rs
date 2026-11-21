@@ -563,7 +563,6 @@ impl RecoveryStore for Backend {
                 .await?;
         }
         q::complete_bucket(job, source).execute(&mut *tx).await?;
-        q::remove_items(job, source).execute(&mut *tx).await?;
         // Publishing can outlast the lease while this transaction holds its row lock.
         ensure!(
             q::claim(token, job, token)
@@ -575,6 +574,23 @@ impl RecoveryStore for Backend {
         );
         tx.commit().await?;
         Ok(())
+    }
+    async fn recovery_clean_items(&self, job: Uuid, token: Uuid, source: Uuid) -> Result<()> {
+        const BATCH: i64 = 1024;
+        loop {
+            let mut tx = q::begin(self).await?;
+            q::fence(job, token).fetch_one(&mut *tx).await?;
+            let (_, published, _) = q::planned(job, source).fetch_one(&mut *tx).await?;
+            ensure!(published, "recovered bucket is not published");
+            let removed = q::remove_items(job, source, BATCH)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            tx.commit().await?;
+            if removed < BATCH as u64 {
+                return Ok(());
+            }
+        }
     }
     async fn recovery_orphan(
         &self,
