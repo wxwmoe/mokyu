@@ -159,12 +159,11 @@ impl Import<'_> {
         size: u64,
         expected: &[u8],
         mut pages: Option<&mut crate::storage::raw_manifest::Spool<'_>>,
-        member: Option<std::ops::Range<u64>>,
-    ) -> Result<Vec<u8>> {
+        mut consume: impl FnMut(u64, &[u8]) -> Result<()> + Send,
+    ) -> Result<()> {
         let packed = pages.is_none();
         let mut hasher = CarrierDigest::new(packed);
         let mut header = Vec::new();
-        let mut selected = Vec::new();
         let copy = !(self.same && from == to);
         let existed = if copy {
             match self.destination.head(&Path::from(to)).await {
@@ -290,15 +289,7 @@ impl Import<'_> {
                     let n = bytes.len().min(8 - header.len());
                     header.extend_from_slice(&bytes[..n]);
                 }
-                if let Some(span) = &member {
-                    let start = read - bytes.len() as u64;
-                    let a = start.max(span.start);
-                    let b = read.min(span.end);
-                    if a < b {
-                        selected
-                            .extend_from_slice(&bytes[(a - start) as usize..(b - start) as usize]);
-                    }
-                }
+                consume(read - bytes.len() as u64, &bytes)?;
                 hasher.update(&bytes);
                 if let Some(out) = &mut local {
                     tokio::io::AsyncWriteExt::write_all(out, &bytes).await?;
@@ -379,14 +370,7 @@ impl Import<'_> {
                 .abort_upload(to, upload)
                 .await;
         }
-        result?;
-        ensure!(
-            member
-                .as_ref()
-                .is_none_or(|s| s.end - s.start == selected.len() as u64),
-            "incomplete recovered member"
-        );
-        Ok(selected)
+        result
     }
     async fn raw(
         &self,
@@ -406,7 +390,7 @@ impl Import<'_> {
             u64::try_from(source.size)?,
             expected,
             Some(&mut pages),
-            None,
+            |_, _| Ok(()),
         )
         .await?;
         let id = self
@@ -426,7 +410,7 @@ impl Import<'_> {
         Ok(())
     }
 
-    pub async fn resolve(&self, batch: &mut [(Change, Vec<Location>)]) -> Result<()> {
+    pub async fn resolve(&self, bucket: Uuid, batch: &mut [(Change, Vec<Location>)]) -> Result<()> {
         let lanes = self.app.budget.storage_read_slots.clamp(1, 4);
         if lanes > 1 {
             let mut small = BTreeMap::new();
@@ -441,7 +425,7 @@ impl Import<'_> {
                 }
             }
             let mut pending =
-                futures_util::stream::iter(small.into_values().map(|r| self.location(r)))
+                futures_util::stream::iter(small.into_values().map(|r| self.location(r, bucket)))
                     .buffer_unordered(lanes);
             let mut failure = None;
             while let Some(result) = pending.next().await {
@@ -455,13 +439,13 @@ impl Import<'_> {
         }
         for (change, locations) in batch {
             for span in &change.ranges {
-                locations.push(self.location(span.material).await?);
+                locations.push(self.location(span.material, bucket).await?);
             }
         }
         Ok(())
     }
 
-    async fn location(&self, reference: Reference) -> Result<Location> {
+    async fn location(&self, reference: Reference, bucket: Uuid) -> Result<Location> {
         let kind = role(reference.kind);
         if let Some(id) = self.catalog.location(reference)? {
             return Ok(Location { native: id, kind });
@@ -505,8 +489,8 @@ impl Import<'_> {
                 let size = u64::try_from(pack.stored_size.context("missing pack size")?)?;
                 let member = mat.pack_member()?.map(|(_, entry)| entry);
                 let pack_ref = physical.reference();
-                let (id, body) = if let Some(id) = self.catalog.location(pack_ref)? {
-                    let member = member.as_ref().context("missing recovery member")?;
+                if let Some(id) = self.catalog.location(pack_ref)? {
+                    let member = member.context("missing recovery member")?;
                     let span = member
                         .position
                         .range(member.raw_size, size, pack.member_count)?;
@@ -518,25 +502,10 @@ impl Import<'_> {
                         None,
                     )
                     .await?;
-                    (id, Some(body))
-                } else {
-                    let _memory = self.app.storage.pack_buffers(0).await?;
-                    let span = member
-                        .as_ref()
-                        .map(|m| m.position.range(m.raw_size, size, pack.member_count))
-                        .transpose()?;
-                    let expected = pack.digest.as_deref().context("missing pack digest")?;
-                    let body = self
-                        .copy_carrier(&from, &to, size, expected, None, span)
-                        .await?;
-                    let body = member.as_ref().map(|_| body);
-                    (self.save(physical, None).await?, body)
-                };
-                if let Some(member) = member {
                     pack::frame::decode_entry(
                         pack,
                         &member,
-                        body.context("missing recovery bytes")?,
+                        body,
                         &self.keys,
                         &self.app.storage.compression,
                         true,
@@ -545,11 +514,70 @@ impl Import<'_> {
                         mat,
                         Some((
                             id,
-                            i32::try_from(member.position.ordinal)?,
-                            i64::try_from(member.position.offset)?,
+                            member.position.ordinal.try_into()?,
+                            member.position.offset.try_into()?,
                         )),
                     )
                     .await?;
+                } else {
+                    let _memory = self.app.storage.pack_buffers(0).await?;
+                    let mut members = Vec::new();
+                    for material in self.catalog.pack_members(pack_ref, bucket)? {
+                        let (_, entry) = material.pack_member()?.context("missing pack member")?;
+                        let span = entry
+                            .position
+                            .range(entry.raw_size, size, pack.member_count)?;
+                        members.push((material, entry, span));
+                    }
+                    let mut next = 0;
+                    let mut encoded = Vec::new();
+                    self.copy_carrier(
+                        &from,
+                        &to,
+                        size,
+                        pack.digest.as_deref().context("missing pack digest")?,
+                        None,
+                        |offset, bytes| {
+                            let end = offset + bytes.len() as u64;
+                            while let Some((_, entry, span)) = members.get(next) {
+                                if span.start >= end {
+                                    break;
+                                }
+                                let start = span.start.max(offset);
+                                let stop = span.end.min(end);
+                                encoded.extend_from_slice(
+                                    &bytes[(start - offset) as usize..(stop - offset) as usize],
+                                );
+                                if stop < span.end {
+                                    break;
+                                }
+                                pack::frame::decode_entry(
+                                    pack,
+                                    entry,
+                                    std::mem::take(&mut encoded),
+                                    &self.keys,
+                                    &self.app.storage.compression,
+                                    true,
+                                )?;
+                                next += 1;
+                            }
+                            Ok(())
+                        },
+                    )
+                    .await?;
+                    ensure!(next == members.len(), "incomplete recovered pack members");
+                    let id = self.save(physical, None).await?;
+                    for (material, entry, _) in members {
+                        self.save(
+                            &material,
+                            Some((
+                                id,
+                                entry.position.ordinal.try_into()?,
+                                entry.position.offset.try_into()?,
+                            )),
+                        )
+                        .await?;
+                    }
                 }
             }
             Material::Fragment { size, hash, .. } => {

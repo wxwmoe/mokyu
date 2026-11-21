@@ -144,6 +144,17 @@ impl View {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    pub fn pack_members(&self, pack: Reference, bucket: Uuid) -> Result<Vec<Material>> {
+        let db = self.db.lock().unwrap();
+        let mut q = db.prepare_cached("SELECT m.value FROM materials m WHERE m.pack=? AND EXISTS(SELECT 1 FROM spans s WHERE s.bucket=? AND s.material=m.ref) ORDER BY m.ordinal")?;
+        let mut rows = q.query(params![serde_json::to_vec(&pack)?, bucket])?;
+        let mut members = Vec::new();
+        while let Some(row) = rows.next()? {
+            members.push(serde_json::from_slice(row.get_ref(0)?.as_blob()?)?);
+        }
+        Ok(members)
+    }
+
     pub fn materials_after(&self, bucket: Uuid, after: &[u8]) -> Result<Vec<(Vec<u8>, Material)>> {
         let db = self.db.lock().unwrap();
         let mut q=db.prepare_cached("SELECT refs.material,m.value FROM

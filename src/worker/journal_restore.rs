@@ -420,7 +420,7 @@ async fn restore(app: &App, id: Uuid, token: Uuid, progress: &mut Progress) -> R
                     if batch.is_empty() {
                         break;
                     }
-                    import.resolve(&mut batch).await?;
+                    import.resolve(*bucket, &mut batch).await?;
                     app.journal.recovery_items(id, token, &batch).await?;
                 }
                 app.journal
