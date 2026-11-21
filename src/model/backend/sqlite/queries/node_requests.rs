@@ -77,13 +77,37 @@ pub(in super::super) fn node_catalog_buckets<'a>(
 ) -> Rows<'a, node_request::Bucket> {
     sqlx::query_as("SELECT b.name,strftime('%Y-%m-%dT%H:%M:%fZ',b.created_at/1000000.0,'unixepoch') AS created_at FROM buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=? AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND c.project_id=b.project_id AND (g.actions&1)<>0 AND substr(b.name,1,length(?))=? AND b.name>? AND (? IS NULL OR ?=?) ORDER BY b.name LIMIT ?").bind(access).bind(prefix).bind(prefix).bind(after).bind(region).bind(region).bind(expected).bind(limit)
 }
-pub(in super::super) fn node_catalog_objects<'a>(
+pub(in super::super) async fn node_catalog_objects(
+    connection: &mut sqlx::SqliteConnection,
     bucket: Uuid,
-    prefix: &'a str,
-    key: &'a str,
+    prefix: &str,
+    key: &str,
     inclusive: bool,
-) -> Rows<'a, node_request::Object> {
-    sqlx::query_as("SELECT CAST(o.object_key AS TEXT) AS `key`,s.size,s.etag,strftime('%Y-%m-%dT%H:%M:%fZ',s.touched_at/1000000.0,'unixepoch') AS modified_at FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=? AND s.state='ready' AND substr(o.object_key,1,length(?))=? AND (o.object_key>? OR (? AND o.object_key=?)) ORDER BY o.object_key LIMIT 64").bind(bucket).bind(prefix.as_bytes()).bind(prefix.as_bytes()).bind(key.as_bytes()).bind(inclusive).bind(key.as_bytes())
+    limit: i64,
+    ready_only: bool,
+) -> anyhow::Result<Vec<crate::model::node_request::Object>> {
+    use sqlx::Row as _;
+    let mut query = super::buckets::object_page(
+        "SELECT o.object_key,s.size,s.etag,s.touched_at",
+        bucket,
+        prefix,
+        key,
+        inclusive,
+        ready_only,
+        limit,
+    );
+    Ok(query
+        .build()
+        .try_map(|row| {
+            Ok(crate::model::node_request::Object {
+                key: super::object_key(&row)?,
+                size: row.try_get("size")?,
+                etag: row.try_get("etag")?,
+                modified_at: super::date(&row, "touched_at")?,
+            })
+        })
+        .fetch_all(connection)
+        .await?)
 }
 pub(in super::super) fn node_upload_page<'a>(
     bucket: Uuid,

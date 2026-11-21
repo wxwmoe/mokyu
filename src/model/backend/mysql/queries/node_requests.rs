@@ -74,13 +74,16 @@ pub(in super::super) fn node_catalog_buckets<'a>(
 ) -> Rows<'a, node_request::Bucket> {
     sqlx::query_as("SELECT b.name,b.created_at AS created_at FROM buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=? AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>CURRENT_TIMESTAMP(6)) AND c.project_id=b.project_id AND (g.actions&1)<>0 AND LEFT(b.name,OCTET_LENGTH(?))=? AND b.name>? AND (? IS NULL OR ?=?) ORDER BY b.name LIMIT ?").bind(access).bind(prefix).bind(prefix).bind(after).bind(region).bind(region).bind(expected).bind(limit)
 }
-pub(in super::super) fn node_catalog_objects<'a>(
+pub(in super::super) async fn node_catalog_objects(
+    connection: &mut sqlx::MySqlConnection,
     bucket: Uuid,
-    prefix: &'a str,
-    key: &'a str,
+    prefix: &str,
+    key: &str,
     inclusive: bool,
-) -> Rows<'a, node_request::Object> {
-    sqlx::query_as("SELECT CAST(o.object_key AS CHAR CHARACTER SET utf8mb4) AS `key`,s.size,s.etag,s.touched_at AS modified_at FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=? AND s.state='ready' AND LEFT(o.object_key,OCTET_LENGTH(?))=? AND (o.object_key>? OR (? AND o.object_key=?)) ORDER BY o.object_key LIMIT 64").bind(bucket).bind(prefix.as_bytes()).bind(prefix.as_bytes()).bind(key.as_bytes()).bind(inclusive).bind(key.as_bytes())
+    limit: i64,
+    ready_only: bool,
+) -> anyhow::Result<Vec<crate::model::node_request::Object>> {
+    Ok(sqlx::query_as("SELECT CAST(o.object_key AS CHAR CHARACTER SET utf8mb4) AS `key`,s.size,s.etag,s.touched_at AS modified_at FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=? AND (NOT ? OR s.state='ready') AND LEFT(o.object_key,OCTET_LENGTH(?))=? AND (o.object_key>? OR (? AND o.object_key=?)) ORDER BY o.object_key LIMIT ?").bind(bucket).bind(ready_only).bind(prefix.as_bytes()).bind(prefix.as_bytes()).bind(key.as_bytes()).bind(inclusive).bind(key.as_bytes()).bind(limit).fetch_all(connection).await?)
 }
 pub(in super::super) fn node_upload_page<'a>(
     bucket: Uuid,

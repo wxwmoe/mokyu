@@ -321,6 +321,27 @@ impl BucketStore for Backend {
             .fetch_all(&self.pool)
             .await?)
     }
+    async fn list_s3_objects(
+        &self,
+        bucket: Uuid,
+        prefix: &str,
+        key: &str,
+        inclusive: bool,
+        limit: i64,
+    ) -> Result<Vec<crate::model::node_request::Object>> {
+        let mut connection = self.pool.acquire().await?;
+        super::node_requests::node_catalog_objects(
+            &mut connection,
+            bucket,
+            prefix,
+            key,
+            inclusive,
+            limit,
+            false,
+        )
+        .await
+    }
+
     async fn list_objects(
         &self,
         bucket: Uuid,

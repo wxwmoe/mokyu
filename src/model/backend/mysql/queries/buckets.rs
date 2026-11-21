@@ -293,6 +293,27 @@ impl BucketStore for Backend {
     ) -> Result<Vec<BucketView>> {
         Ok(sqlx::query_as("SELECT b.*,CAST(IF(?,2047,IF(? IS NOT NULL,COALESCE(t.actions,0),COALESCE(a.actions,0))) AS UNSIGNED) actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=? LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=? WHERE ? OR (IF(? IS NOT NULL,t.actions,a.actions)&1)<>0 ORDER BY b.name LIMIT 1000").bind(admin).bind(token).bind(user).bind(token).bind(admin).bind(token).fetch_all(&self.pool).await?)
     }
+    async fn list_s3_objects(
+        &self,
+        bucket: Uuid,
+        prefix: &str,
+        key: &str,
+        inclusive: bool,
+        limit: i64,
+    ) -> Result<Vec<crate::model::node_request::Object>> {
+        let mut connection = self.pool.acquire().await?;
+        super::node_requests::node_catalog_objects(
+            &mut connection,
+            bucket,
+            prefix,
+            key,
+            inclusive,
+            limit,
+            false,
+        )
+        .await
+    }
+
     async fn list_objects(
         &self,
         bucket: Uuid,

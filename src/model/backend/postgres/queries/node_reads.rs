@@ -12,12 +12,15 @@ pub(in super::super) fn credential_buckets<'q>(
         .bind(access).bind(prefix).bind(after).bind(region).bind(expected_region).bind(limit)
 }
 
-pub(in super::super) fn node_catalog_objects<'q>(
+pub(in super::super) async fn node_catalog_objects(
+    connection: &mut sqlx::PgConnection,
     bucket: Uuid,
-    prefix: &'q str,
-    key: &'q str,
+    prefix: &str,
+    key: &str,
     inclusive: bool,
-) -> Rows<'q, crate::model::node_request::Object> {
+    limit: i64,
+    _ready_only: bool,
+) -> anyhow::Result<Vec<crate::model::node_request::Object>> {
     let pattern = format!(
         "{}%",
         prefix
@@ -25,7 +28,7 @@ pub(in super::super) fn node_catalog_objects<'q>(
             .replace('%', "\\%")
             .replace('_', "\\_")
     );
-    sqlx::query_as("SELECT o.object_key AS key,s.size,s.etag,s.touched_at AS modified_at FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND o.object_key LIKE $2 AND (o.object_key>$3 OR ($4 AND o.object_key=$3)) ORDER BY o.object_key LIMIT 64").bind(bucket).bind(pattern).bind(key).bind(inclusive)
+    Ok(sqlx::query_as("SELECT o.object_key AS key,s.size,s.etag,s.touched_at AS modified_at FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=$1 AND o.object_key LIKE $2 AND (o.object_key>$3 OR ($4 AND o.object_key=$3)) ORDER BY o.object_key LIMIT $5").bind(bucket).bind(pattern).bind(key).bind(inclusive).bind(limit).fetch_all(connection).await?)
 }
 
 pub(in super::super) fn node_object_acl(bucket: Uuid, key: &str) -> Scalar<'_, bool> {

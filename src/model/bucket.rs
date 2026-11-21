@@ -185,6 +185,14 @@ pub(crate) trait BucketStore: Send + Sync {
         key: &str,
         inclusive: bool,
     ) -> Result<Vec<StoredStream>>;
+    async fn list_s3_objects(
+        &self,
+        bucket: Uuid,
+        prefix: &str,
+        key: &str,
+        inclusive: bool,
+        limit: i64,
+    ) -> Result<Vec<crate::model::node_request::Object>>;
     async fn create(&self, principal: &Principal, input: CreateBucket) -> Result<Bucket>;
     async fn delete(
         &self,

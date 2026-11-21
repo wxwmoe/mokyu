@@ -1,5 +1,36 @@
 use super::*;
 
+pub(super) fn object_page(
+    columns: &'static str,
+    bucket: Uuid,
+    prefix: &str,
+    key: &str,
+    inclusive: bool,
+    ready_only: bool,
+    limit: i64,
+) -> sqlx::QueryBuilder<sqlx::Sqlite> {
+    let mut query = sqlx::QueryBuilder::new(columns);
+    query.push(" FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=");
+    let (start, inclusive) = if key < prefix {
+        (prefix, true)
+    } else {
+        (key, inclusive)
+    };
+    query
+        .push_bind(bucket)
+        .push(" AND o.object_key")
+        .push(if inclusive { ">=" } else { ">" })
+        .push_bind(start.as_bytes());
+    if let Some(end) = crate::app::listing::successor(prefix) {
+        query.push(" AND o.object_key<").push_bind(end.into_bytes());
+    }
+    if ready_only {
+        query.push(" AND s.state='ready'");
+    }
+    query.push(" ORDER BY o.object_key LIMIT ").push_bind(limit);
+    query
+}
+
 impl<'r> sqlx::FromRow<'r, SqliteRow> for ReceivedPart {
     fn from_row(row: &'r SqliteRow) -> sqlx::Result<Self> {
         Ok(Self {
@@ -286,6 +317,27 @@ impl BucketStore for Backend {
     ) -> Result<Vec<BucketView>> {
         Ok(sqlx::query_as("SELECT b.*,CAST(IIF(?,2047,IIF(? IS NOT NULL,COALESCE(t.actions,0),COALESCE(a.actions,0))) AS INTEGER) actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=? LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=? WHERE ? OR (IIF(? IS NOT NULL,t.actions,a.actions)&1)<>0 ORDER BY b.name LIMIT 1000").bind(admin).bind(token).bind(user).bind(token).bind(admin).bind(token).fetch_all(&self.read).await?)
     }
+    async fn list_s3_objects(
+        &self,
+        bucket: Uuid,
+        prefix: &str,
+        key: &str,
+        inclusive: bool,
+        limit: i64,
+    ) -> Result<Vec<crate::model::node_request::Object>> {
+        let mut connection = self.read.acquire().await?;
+        super::node_requests::node_catalog_objects(
+            &mut connection,
+            bucket,
+            prefix,
+            key,
+            inclusive,
+            limit,
+            false,
+        )
+        .await
+    }
+
     async fn list_objects(
         &self,
         bucket: Uuid,
@@ -293,23 +345,7 @@ impl BucketStore for Backend {
         key: &str,
         inclusive: bool,
     ) -> Result<Vec<StoredStream>> {
-        let mut query = sqlx::QueryBuilder::new(
-            "SELECT s.* FROM objects o JOIN streams s ON s.id=o.stream_id WHERE o.bucket_id=",
-        );
-        let (start, inclusive) = if key < prefix {
-            (prefix, true)
-        } else {
-            (key, inclusive)
-        };
-        query
-            .push_bind(bucket)
-            .push(" AND o.object_key")
-            .push(if inclusive { ">=" } else { ">" })
-            .push_bind(start.as_bytes());
-        if let Some(end) = crate::app::listing::successor(prefix) {
-            query.push(" AND o.object_key<").push_bind(end.into_bytes());
-        }
-        query.push(" ORDER BY o.object_key LIMIT 64");
+        let mut query = object_page("SELECT s.*", bucket, prefix, key, inclusive, false, 64);
         Ok(query.build_query_as().fetch_all(&self.read).await?)
     }
     async fn create(&self, principal: &Principal, input: CreateBucket) -> Result<Bucket> {

@@ -1036,7 +1036,7 @@ impl S3 for Gateway {
             }
             let list = self
                 .0
-                .list(
+                .list_s3(
                     b.id,
                     i.prefix.as_deref().unwrap_or(""),
                     i.delimiter.as_deref().unwrap_or(""),
@@ -1049,7 +1049,7 @@ impl S3 for Gateway {
                 i,
                 list.objects
                     .into_iter()
-                    .map(|s| (s.object_key, s.size, s.etag, s.touched_at)),
+                    .map(|s| (s.key, s.size, s.etag, s.modified_at)),
                 list.prefixes,
                 list.next,
             )

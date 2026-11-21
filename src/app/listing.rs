@@ -92,6 +92,14 @@ impl<T> Page<T> {
         (!self.done).then_some((&self.cursor.key, self.cursor.inclusive))
     }
 
+    pub(crate) fn batch_size(&self) -> i64 {
+        if !self.cursor.delimiter.is_empty() {
+            // Many adjacent keys can collapse into one common prefix.
+            return 64;
+        }
+        (self.limit - self.result.objects.len() + 1) as i64
+    }
+
     pub(crate) fn append(&mut self, rows: Vec<T>, key: impl Fn(&T) -> &str) -> Result<()> {
         if rows.is_empty() {
             self.done = true;
@@ -159,6 +167,26 @@ impl<T> Page<T> {
 }
 
 impl App {
+    pub(crate) async fn list_s3(
+        &self,
+        bucket: Uuid,
+        prefix: &str,
+        delimiter: &str,
+        after: Option<&str>,
+        token: Option<&str>,
+        limit: usize,
+    ) -> Result<Listing<crate::model::node_request::Object>> {
+        let mut page = Page::new(bucket, prefix, delimiter, after, token, limit)?;
+        while let Some((key, inclusive)) = page.position() {
+            let rows = self
+                .buckets
+                .list_s3_objects(bucket, prefix, key, inclusive, page.batch_size())
+                .await?;
+            page.append(rows, |row| &row.key)?;
+        }
+        Ok(page.finish())
+    }
+
     pub async fn list(
         &self,
         bucket: Uuid,

@@ -287,10 +287,16 @@ impl NodeRequests for Backend {
                                 limit,
                             )?;
                             while let Some((key, inclusive)) = page.position() {
-                                let rows =
-                                    q::node_catalog_objects(bucket.id, &prefix, key, inclusive)
-                                        .fetch_all(&mut *tx)
-                                        .await?;
+                                let rows = q::node_catalog_objects(
+                                    &mut tx,
+                                    bucket.id,
+                                    &prefix,
+                                    key,
+                                    inclusive,
+                                    page.batch_size(),
+                                    true,
+                                )
+                                .await?;
                                 page.append(rows, |row| &row.key)?;
                             }
                             let list = page.finish();
