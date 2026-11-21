@@ -228,3 +228,20 @@ pub(crate) trait RecoveryStore: Send + Sync {
         descriptor: &crate::storage::marker::Journal,
     ) -> Result<()>;
 }
+
+#[async_trait::async_trait]
+pub(crate) trait RecoveryPreparation: Sync {
+    async fn prepare_bucket(
+        &self,
+        _job: Uuid,
+        _token: Uuid,
+        _source: Uuid,
+        _project: Uuid,
+        _target: Uuid,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+    async fn discard_prepared(&self, _job: Option<Uuid>) -> Result<()> {
+        Ok(())
+    }
+}

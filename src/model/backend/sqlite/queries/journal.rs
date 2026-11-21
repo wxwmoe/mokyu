@@ -18,15 +18,15 @@ pub(in super::super) fn lock_mode(bucket: Uuid) -> Scalar<'static, i64> {
 }
 
 pub(in super::super) fn enabled(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT g.journal_mode=1 FROM bucket_change_gates g JOIN buckets b ON b.id=g.bucket_id JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3','mokyu')").bind(bucket)
+    sqlx::query_scalar("SELECT g.journal_mode=1 FROM bucket_change_gates g JOIN published_buckets b ON b.id=g.bucket_id JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3','mokyu')").bind(bucket)
 }
 
 pub(in super::super) fn supported(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3','mokyu'))").bind(bucket)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM published_buckets b JOIN storages s ON s.id=b.storage_id WHERE b.id=? AND s.type IN ('local','s3','mokyu'))").bind(bucket)
 }
 
 pub(in super::super) fn create(bucket: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO journal_buckets(bucket_id,storage_id,bucket_name,scan_until) SELECT b.id,b.storage_id,b.name,(SELECT o.object_key FROM objects o WHERE o.bucket_id=b.id ORDER BY o.object_key DESC LIMIT 1) FROM buckets b WHERE b.id=?").bind(bucket)
+    sqlx::query("INSERT INTO journal_buckets(bucket_id,storage_id,bucket_name,scan_until) SELECT b.id,b.storage_id,b.name,(SELECT o.object_key FROM objects o WHERE o.bucket_id=b.id ORDER BY o.object_key DESC LIMIT 1) FROM published_buckets b WHERE b.id=?").bind(bucket)
 }
 
 pub(in super::super) fn set_mode(bucket: Uuid, mode: i16) -> Statement<'static> {
@@ -53,7 +53,7 @@ pub(in super::super) fn control<'a>(bucket: Uuid, operation: &'a str) -> Stateme
 }
 
 pub(in super::super) fn seed_history_mode(bucket: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq+1,j.generation,'put',CAST('~m' AS BLOB),NULL,NULL,json_object('size',0,'etag','','metadata',json_object(),'checksums',json_object(),'payload','chunks','modified_us',0,'history',json_object('mode',b.version_mode)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id JOIN buckets b ON b.id=j.bucket_id WHERE b.version_mode<>0 AND b.id=?").bind(bucket)
+    sqlx::query("INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq+1,j.generation,'put',CAST('~m' AS BLOB),NULL,NULL,json_object('size',0,'etag','','metadata',json_object(),'checksums',json_object(),'payload','chunks','modified_us',0,'history',json_object('mode',b.version_mode)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id JOIN published_buckets b ON b.id=j.bucket_id WHERE b.version_mode<>0 AND b.id=?").bind(bucket)
 }
 pub(in super::super) fn seed_history(bucket: Uuid) -> Statement<'static> {
     sqlx::query("INSERT INTO journal_entries(encrypt_frames,bucket_id,seq,generation,operation,object_key,stream_id,payload_revision,attributes,history_subject) SELECT st.block_key_id IS NOT NULL,j.bucket_id,j.last_seq+ROW_NUMBER() OVER (ORDER BY v.object_key,v.seq),j.generation,'put',CAST(('~h/' || v.version_id || '/' || v.object_key) AS BLOB),v.stream_id,s.payload_revision,json_object('size',COALESCE(s.size,0),'etag',COALESCE(s.etag,''),'metadata',json(COALESCE(s.metadata,'{}')),'checksums',json(COALESCE(s.checksums,'{}')),'payload',COALESCE(s.payload_type,'chunks'),'modified_us',v.modified_us,'history',json_object('order',v.seq,'time',v.modified_us,'marker',CASE WHEN v.stream_id IS NULL THEN 1 ELSE 0 END)),TRUE FROM journal_buckets j JOIN storages st ON st.id=j.storage_id JOIN object_versions v ON v.bucket_id=j.bucket_id LEFT JOIN streams s ON s.id=v.stream_id WHERE j.bucket_id=?").bind(bucket)

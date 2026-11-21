@@ -538,3 +538,5 @@ pub(in super::super) fn time_clock(b: Uuid) -> Statement<'static> {
 pub(in super::super) fn retained_time_points(b: Uuid) -> Statement<'static> {
     sqlx::query("INSERT INTO time_retained_streams(bucket_id,stream_id,bytes) SELECT DISTINCT t.bucket_id,t.stream_id,s.size FROM object_time_points t JOIN streams s ON s.id=t.stream_id WHERE t.bucket_id=$1 AND NOT EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=t.bucket_id AND o.stream_id=t.stream_id) AND NOT EXISTS(SELECT 1 FROM object_versions v WHERE v.bucket_id=t.bucket_id AND v.stream_id=t.stream_id)").bind(b)
 }
+
+impl crate::model::journal::restore::RecoveryPreparation for Backend {}

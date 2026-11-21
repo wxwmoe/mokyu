@@ -5,7 +5,10 @@ use crate::{
         Id,
         journal::{
             record::{BlockKey, Change, Material},
-            restore::{Job, Location, Progress, RecoveryStore, Selection, key_hash, nonce_id},
+            restore::{
+                Job, Location, Progress, RecoveryPreparation, RecoveryStore, Selection, key_hash,
+                nonce_id,
+            },
         },
     },
     storage::marker::Journal,
@@ -41,7 +44,7 @@ impl RecoveryStore for Backend {
     }
     async fn expire_recovery_previews(&self) -> Result<()> {
         q::expire().execute(q::write(self)).await?;
-        Ok(())
+        self.discard_prepared(None).await
     }
     async fn recovery_jobs(&self) -> Result<Vec<Uuid>> {
         Ok(q::pending().fetch_all(q::read(self)).await?)
@@ -76,6 +79,11 @@ impl RecoveryStore for Backend {
         retry: bool,
     ) -> Result<()> {
         let mut tx = q::admin(self, principal).await?;
+        if retry {
+            tx.commit().await?;
+            self.discard_prepared(Some(id)).await?;
+            tx = q::admin(self, principal).await?;
+        }
         let op = if retry {
             q::retry(id, revision)
         } else {
@@ -91,6 +99,9 @@ impl RecoveryStore for Backend {
             q::discard_buckets(id).execute(&mut *tx).await?;
         }
         tx.commit().await?;
+        if !retry {
+            self.discard_prepared(Some(id)).await?;
+        }
         Ok(())
     }
     async fn recovery_intent(&self, id: Uuid, token: Uuid, source: &[u8]) -> Result<()> {
@@ -125,6 +136,9 @@ impl RecoveryStore for Backend {
             q::release_scope(id).execute(&mut *tx).await?;
         }
         tx.commit().await?;
+        if state == "failed" {
+            self.discard_prepared(Some(id)).await?;
+        }
         Ok(())
     }
     async fn recovery_key_conflict(&self, key: &BlockKey) -> Result<bool> {
@@ -484,6 +498,12 @@ impl RecoveryStore for Backend {
         project: Uuid,
         target: Uuid,
     ) -> Result<()> {
+        if self
+            .prepare_bucket(job, token, source, project, target)
+            .await?
+        {
+            return Ok(());
+        }
         let mut tx = q::begin(self).await?;
         q::fence(job, token).fetch_one(&mut *tx).await?;
         let (bucket, done, _) = q::planned(job, source).fetch_one(&mut *tx).await?;

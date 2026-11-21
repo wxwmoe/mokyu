@@ -23,7 +23,7 @@ pub(in super::super) fn lock_owned_task(task: Uuid, token: Uuid) -> Scalar<'stat
 }
 
 pub(in super::super) fn lock_bucket_uploads(id: Uuid) -> Rows<'static, (String, bool)> {
-    sqlx::query_as("SELECT state,uploads_paused FROM buckets WHERE id=?").bind(id)
+    sqlx::query_as("SELECT state,uploads_paused FROM published_buckets WHERE id=?").bind(id)
 }
 
 pub(in super::super) fn completing_upload(
@@ -82,7 +82,7 @@ pub(in super::super) async fn read_snapshot<'e>(
     use crate::model::ReadRoute;
     use sqlx::{FromRow, Row};
     let mut query = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT b.*,s.id AS stream_id,s.bucket_id AS stream_bucket_id,s.object_key AS stream_object_key,s.stream_type AS stream_stream_type,s.payload_type AS stream_payload_type,s.payload_revision AS stream_payload_revision,s.state AS stream_state,s.size AS stream_size,s.etag AS stream_etag,s.metadata AS stream_metadata,s.public_read AS stream_public_read,s.checksums AS stream_checksums,s.http_compression AS stream_http_compression,s.created_at AS stream_created_at,s.touched_at AS stream_touched_at,(SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.location_id) AS tier_material,r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,c.secret_encrypted AS read_secret,EXISTS(SELECT 1 FROM s3_credential_grants g WHERE g.access_key=c.access_key_id AND g.bucket_id=b.id AND c.project_id=b.project_id AND (g.actions&2)<>0) AS read_allowed FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.object_key=",
+        "SELECT b.*,s.id AS stream_id,s.bucket_id AS stream_bucket_id,s.object_key AS stream_object_key,s.stream_type AS stream_stream_type,s.payload_type AS stream_payload_type,s.payload_revision AS stream_payload_revision,s.state AS stream_state,s.size AS stream_size,s.etag AS stream_etag,s.metadata AS stream_metadata,s.public_read AS stream_public_read,s.checksums AS stream_checksums,s.http_compression AS stream_http_compression,s.created_at AS stream_created_at,s.touched_at AS stream_touched_at,(SELECT tl.material FROM tier_locations tl WHERE tl.unit=2 AND tl.physical_id=r.location_id) AS tier_material,r.id AS raw_id,r.location_id AS raw_location,r.storage_id AS raw_storage,r.size AS raw_size,r.digest AS raw_digest,r.state AS raw_state,r.medium AS raw_medium,r.pending_upload AS raw_pending,r.revision AS raw_revision,r.quarantine_code AS raw_quarantine,e.offset_bytes,e.length,e.source_offset,c.secret_encrypted AS read_secret,EXISTS(SELECT 1 FROM s3_credential_grants g WHERE g.access_key=c.access_key_id AND g.bucket_id=b.id AND c.project_id=b.project_id AND (g.actions&2)<>0) AS read_allowed FROM published_buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.object_key=",
     );
     match route.base() {
         ReadRoute::Image { .. } => unreachable!(),
@@ -117,7 +117,7 @@ pub(in super::super) async fn read_snapshot<'e>(
             name, alias: None, ..
         } => {
             query
-                .push("SELECT id FROM buckets WHERE name=")
+                .push("SELECT id FROM published_buckets WHERE name=")
                 .push_bind(name);
         }
         ReadRoute::Bucket {
@@ -126,7 +126,7 @@ pub(in super::super) async fn read_snapshot<'e>(
             ..
         } => {
             query
-                .push("SELECT id FROM buckets WHERE name IN (")
+                .push("SELECT id FROM published_buckets WHERE name IN (")
                 .push_bind(name)
                 .push(",")
                 .push_bind(alias)
@@ -191,7 +191,7 @@ impl StreamStore for Backend {
     }
     async fn cached(&self, bucket: Uuid, key: &str) -> Result<Option<crate::model::CachedStream>> {
         use sqlx::FromRow;
-        let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN (SELECT * FROM extents WHERE stream_id=(SELECT stream_id FROM objects WHERE bucket_id=? AND object_key=?) ORDER BY offset_bytes LIMIT 65) e ON e.stream_id=s.id LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=? AND o.object_key=? AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key.as_bytes()).bind(bucket).bind(key.as_bytes()).fetch_all(&self.read).await?;
+        let rows = sqlx::query("SELECT s.*,b.settings_revision AS bucket_revision,(b.state='active') AS bucket_active,e.offset_bytes AS cache_offset,e.length AS cache_length,e.source_offset AS cache_source,e.chunk_id AS cache_chunk,c.id AS cache_ready,c.raw_size AS cache_size,c.hash AS cache_hash FROM objects o JOIN streams s ON s.id=o.stream_id JOIN published_buckets b ON b.id=o.bucket_id LEFT JOIN (SELECT * FROM extents WHERE stream_id=(SELECT stream_id FROM objects WHERE bucket_id=? AND object_key=?) ORDER BY offset_bytes LIMIT 65) e ON e.stream_id=s.id LEFT JOIN chunks c ON c.id=e.chunk_id AND c.state='ready' WHERE o.bucket_id=? AND o.object_key=? AND s.state='ready' ORDER BY e.offset_bytes LIMIT 65").bind(bucket).bind(key.as_bytes()).bind(bucket).bind(key.as_bytes()).fetch_all(&self.read).await?;
         let Some(first) = rows.first() else {
             return Ok(None);
         };

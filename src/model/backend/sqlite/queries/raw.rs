@@ -111,7 +111,7 @@ pub(in super::super) fn raw_target(
     stream: Id,
     storage: Uuid,
 ) -> Rows<'static, (String, bool, i64, bool, bool)> {
-    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled,((p.deduplication_enabled OR p.cdc_enabled) AND p.write_processing='background') FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=? AND t.id=? AND t.enabled AND s.state='writing'").bind(stream).bind(storage)
+    sqlx::query_as("SELECT t.type,(t.block_key_id IS NULL AND NOT p.compression_enabled AND NOT p.pack_enabled),p.revision,p.cdc_enabled,((p.deduplication_enabled OR p.cdc_enabled) AND p.write_processing='background') FROM streams s JOIN published_buckets b ON b.id=s.bucket_id JOIN storages t ON t.id=b.storage_id JOIN storage_profiles p ON p.storage_id=t.id WHERE s.id=? AND t.id=? AND t.enabled AND s.state='writing'").bind(stream).bind(storage)
 }
 
 pub(in super::super) fn raw_prepare(stream: Id) -> Statement<'static> {
@@ -688,7 +688,7 @@ pub(in super::super) fn insert_multipart_file(
     upload: Uuid,
     node: Option<Uuid>,
 ) -> Statement<'static> {
-    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id,node_id) SELECT ?,u.id,b.storage_id,? FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=? AND u.state='active' ").bind(id).bind(node).bind(upload)
+    sqlx::query("INSERT INTO multipart_files(id,upload_id,storage_id,node_id) SELECT ?,u.id,b.storage_id,? FROM uploads u JOIN published_buckets b ON b.id=u.bucket_id JOIN storages s ON s.id=b.storage_id WHERE u.id=? AND u.state='active' ").bind(id).bind(node).bind(upload)
 }
 
 pub(in super::super) fn insert_multipart_checkpoint(

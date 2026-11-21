@@ -1,7 +1,7 @@
 use super::*;
 
 pub(in super::super) fn lock_cache_stream(stream: Id, storage: Uuid) -> Scalar<'static, Id> {
-    sqlx::query_scalar("SELECT s.id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=? AND s.state='writing' AND b.storage_id=?").bind(stream).bind(storage)
+    sqlx::query_scalar("SELECT s.id FROM streams s JOIN published_buckets b ON b.id=s.bucket_id WHERE s.id=? AND s.state='writing' AND b.storage_id=?").bind(stream).bind(storage)
 }
 
 pub(in super::super) fn lock_cache_source(

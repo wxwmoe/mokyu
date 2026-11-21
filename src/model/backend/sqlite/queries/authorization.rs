@@ -45,7 +45,7 @@ pub(in super::super) async fn bucket_actions(
     let bits: Option<i64> = match principal {
         Principal::User { id, .. } => sqlx::query_scalar("SELECT actions FROM user_bucket_access WHERE user_id=? AND bucket_id=?").bind(id).bind(bucket).fetch_optional(connection).await?,
         Principal::Token { id, .. } => sqlx::query_scalar("SELECT actions FROM token_bucket_access WHERE token_id=? AND bucket_id=?").bind(id).bind(bucket).fetch_optional(connection).await?,
-        Principal::Service { access_key, .. } => sqlx::query_scalar("SELECT g.actions FROM s3_credential_grants g JOIN buckets b ON b.id=g.bucket_id JOIN s3_credentials c ON c.access_key_id=g.access_key AND c.project_id=b.project_id WHERE g.access_key=? AND g.bucket_id=?").bind(access_key).bind(bucket).fetch_optional(connection).await?,
+        Principal::Service { access_key, .. } => sqlx::query_scalar("SELECT g.actions FROM s3_credential_grants g JOIN published_buckets b ON b.id=g.bucket_id JOIN s3_credentials c ON c.access_key_id=g.access_key AND c.project_id=b.project_id WHERE g.access_key=? AND g.bucket_id=?").bind(access_key).bind(bucket).fetch_optional(connection).await?,
         Principal::Node { .. } => return Err(s3s::s3_error!(AccessDenied).into()),
         Principal::System | Principal::Bootstrap | Principal::Local => Some(action_bits(&Action::ALL)),
     };
@@ -53,7 +53,7 @@ pub(in super::super) async fn bucket_actions(
 }
 
 pub(in super::super) fn permission_bucket(id: Uuid) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT id FROM buckets WHERE id=?").bind(id)
+    sqlx::query_scalar("SELECT id FROM published_buckets WHERE id=?").bind(id)
 }
 
 #[async_trait::async_trait]

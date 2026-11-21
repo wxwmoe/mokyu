@@ -42,7 +42,7 @@ pub(in super::super) async fn inventory_cleanup(
     tasks: f64,
 ) -> Result<Value> {
     let rows:Vec<(String,i64,Option<i64>)>=sqlx::query_as("WITH cutoffs AS (SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)-? AS tasks) SELECT 'chunks',COUNT(*),MIN(deleted_at) FROM chunks c WHERE state='deleted' AND deleted_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.deleted_chunk_retention,1,length(sp.deleted_chunk_retention)-1) AS INTEGER)*CASE substr(sp.deleted_chunk_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=c.storage_id))*1000000 AND NOT EXISTS(SELECT 1 FROM extents WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM chunk_encodings WHERE chunk_id=c.id AND (state<>'deleted' OR recovery_pending OR owner_stream IS NOT NULL)) AND NOT EXISTS(SELECT 1 FROM pack_members WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM pack_inputs WHERE chunk_id=c.id) AND NOT EXISTS(SELECT 1 FROM cache_pins WHERE chunk_id=c.id)
-        UNION ALL SELECT 'uploads',COUNT(*),MIN(touched_at) FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.upload_retention,1,length(sp.upload_retention)-1) AS INTEGER)*CASE substr(sp.upload_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=(SELECT storage_id FROM buckets WHERE id=u.bucket_id)))*1000000 AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) AND NOT EXISTS(SELECT 1 FROM quota_reservations WHERE upload_id=u.id)
+        UNION ALL SELECT 'uploads',COUNT(*),MIN(touched_at) FROM uploads u WHERE state IN ('completed','aborted') AND touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-((SELECT (CAST(substr(sp.upload_retention,1,length(sp.upload_retention)-1) AS INTEGER)*CASE substr(sp.upload_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=(SELECT storage_id FROM published_buckets WHERE id=u.bucket_id)))*1000000 AND NOT EXISTS(SELECT 1 FROM parts WHERE upload_id=u.id) AND NOT EXISTS(SELECT 1 FROM quota_reservations WHERE upload_id=u.id)
         UNION ALL SELECT 'tasks',COUNT(*),MIN(updated_at) FROM tasks t WHERE state='completed' AND updated_at<(SELECT tasks FROM cutoffs) AND NOT EXISTS(SELECT 1 FROM integrity_issues WHERE task_id=t.id) AND NOT EXISTS(SELECT 1 FROM external_tests e WHERE e.id=t.id AND e.cleanup_required)
         UNION ALL SELECT 'integrity_issues',COUNT(*),MIN(t.updated_at) FROM integrity_issues i JOIN tasks t ON t.id=i.task_id WHERE t.state='completed' AND t.updated_at<(SELECT tasks FROM cutoffs)
         UNION ALL SELECT 'sessions',COUNT(*),MIN(expires_at) FROM sessions s WHERE expires_at<CAST(unixepoch('subsec')*1000000 AS INTEGER) AND NOT EXISTS(SELECT 1 FROM session_refresh_tokens r WHERE r.session_id=s.id AND r.revoked_at IS NULL AND r.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER))
@@ -65,7 +65,7 @@ pub(in super::super) fn inventory_database() -> Scalar<'static, Value> {
 }
 
 pub(in super::super) fn storage_inventory_buckets(storage: Uuid) -> Rows<'static, (i64, i64, i64)> {
-    sqlx::query_as("SELECT COUNT(DISTINCT b.id),COUNT(o.stream_id),CAST(COALESCE(SUM(s.size),0) AS INTEGER) FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.stream_id IS NOT NULL LEFT JOIN streams s ON s.id=o.stream_id WHERE b.storage_id=?").bind(storage)
+    sqlx::query_as("SELECT COUNT(DISTINCT b.id),COUNT(o.stream_id),CAST(COALESCE(SUM(s.size),0) AS INTEGER) FROM published_buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.stream_id IS NOT NULL LEFT JOIN streams s ON s.id=o.stream_id WHERE b.storage_id=?").bind(storage)
 }
 
 pub(in super::super) fn storage_inventory_chunks(storage: Uuid) -> Rows<'static, (i64, i64)> {
@@ -212,7 +212,7 @@ pub(in super::super) async fn save_usage(
 // Merge intervals before allocating each covered segment across projects and their buckets.
 pub(in super::super) const USAGE_SUMMARY: &str = r#"WITH chunk_ranges AS (
     SELECT DISTINCT o.bucket_id,b.project_id,e.chunk_id,e.source_offset AS lo,e.source_offset+e.length AS hi
-    FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id WHERE e.chunk_id IS NOT NULL
+    FROM objects o JOIN published_buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id WHERE e.chunk_id IS NOT NULL
 ), ordered_ranges AS (
     SELECT r.*,MAX(hi) OVER(PARTITION BY bucket_id,chunk_id ORDER BY lo,hi ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING) AS previous_hi FROM chunk_ranges r
 ), grouped_ranges AS (
@@ -242,7 +242,7 @@ pub(in super::super) const USAGE_SUMMARY: &str = r#"WITH chunk_ranges AS (
 ), attribution AS (
     SELECT a.bucket_id,a.chunk_id,a.raw_bytes,s.source_type,s.source_id,a.raw_bytes/t.raw_bytes*t.stored_size AS encoded_bytes FROM allocated a JOIN sources s USING(chunk_id) JOIN source_totals t USING(source_type,source_id)
 ), scope_buckets AS (
-    SELECT 'global' AS scope_id,id AS bucket_id FROM buckets UNION ALL SELECT scope_id,bucket_id FROM usage_buckets
+    SELECT 'global' AS scope_id,id AS bucket_id FROM published_buckets UNION ALL SELECT scope_id,bucket_id FROM usage_buckets
 ), scope_segments AS (
     SELECT DISTINCT b.scope_id,c.chunk_id,c.lo,c.hi FROM scope_buckets b JOIN coverage c ON c.bucket_id=b.bucket_id
 ), scope_unique AS (
@@ -253,13 +253,13 @@ pub(in super::super) const USAGE_SUMMARY: &str = r#"WITH chunk_ranges AS (
     SELECT b.scope_id,SUM(a.raw_bytes) AS raw_bytes,COALESCE(SUM(a.encoded_bytes),0) AS encoded_bytes,MIN(a.encoded_bytes IS NOT NULL) AS complete
     FROM scope_buckets b JOIN attribution a ON a.bucket_id=b.bucket_id GROUP BY b.scope_id
 ), logical_totals AS (
-    SELECT 'global' AS id,COUNT(b.id) AS buckets,COALESCE(SUM(q.used_bytes),0) AS bytes,COALESCE(SUM(q.object_count),0) AS objects FROM buckets b LEFT JOIN quota_scopes q ON q.scope='bucket' AND q.scope_id=b.id
-    UNION ALL SELECT m.scope_id,COUNT(b.id),COALESCE(SUM(q.used_bytes),0),COALESCE(SUM(q.object_count),0) FROM usage_buckets m JOIN buckets b ON b.id=m.bucket_id LEFT JOIN quota_scopes q ON q.scope='bucket' AND q.scope_id=b.id GROUP BY m.scope_id
+    SELECT 'global' AS id,COUNT(b.id) AS buckets,COALESCE(SUM(q.used_bytes),0) AS bytes,COALESCE(SUM(q.object_count),0) AS objects FROM published_buckets b LEFT JOIN quota_scopes q ON q.scope='bucket' AND q.scope_id=b.id
+    UNION ALL SELECT m.scope_id,COUNT(b.id),COALESCE(SUM(q.used_bytes),0),COALESCE(SUM(q.object_count),0) FROM usage_buckets m JOIN published_buckets b ON b.id=m.bucket_id LEFT JOIN quota_scopes q ON q.scope='bucket' AND q.scope_id=b.id GROUP BY m.scope_id
 ), scope_logical AS (
     SELECT s.id,COALESCE(l.buckets,0) AS buckets,COALESCE(l.bytes,0) AS bytes,COALESCE(l.objects,0) AS objects FROM usage_summary s LEFT JOIN logical_totals l ON l.id=s.id
 ), raw_references AS (
     SELECT DISTINCT o.bucket_id,b.project_id,r.id AS source_id,r.size
-    FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id
+    FROM objects o JOIN published_buckets b ON b.id=o.bucket_id JOIN raw_ranges e ON e.stream_id=o.stream_id JOIN raw_sources r ON r.id=e.source_id
 ), raw_project_counts AS (
     SELECT source_id,COUNT(DISTINCT project_id) AS n FROM raw_references GROUP BY source_id
 ), raw_allocated AS (

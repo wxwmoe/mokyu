@@ -139,7 +139,7 @@ pub(in super::super) fn clear_pages(id: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn scope(id: Uuid, storage: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO journal_snapshot_buckets(snapshot_id,bucket_id,bucket_name,generation,watermark,included,mode_revision) SELECT ?,j.bucket_id,j.bucket_name,j.generation,j.published_seq,(COALESCE(g.journal_mode,0)=1 AND j.prepared_generation=j.generation),COALESCE(b.settings_revision,0) FROM journal_buckets j LEFT JOIN bucket_change_gates g ON g.bucket_id=j.bucket_id LEFT JOIN buckets b ON b.id=j.bucket_id WHERE j.storage_id=? AND j.published_seq>0").bind(id).bind(storage)
+    sqlx::query("INSERT INTO journal_snapshot_buckets(snapshot_id,bucket_id,bucket_name,generation,watermark,included,mode_revision) SELECT ?,j.bucket_id,j.bucket_name,j.generation,j.published_seq,(COALESCE(g.journal_mode,0)=1 AND j.prepared_generation=j.generation),COALESCE(b.settings_revision,0) FROM journal_buckets j LEFT JOIN bucket_change_gates g ON g.bucket_id=j.bucket_id LEFT JOIN published_buckets b ON b.id=j.bucket_id WHERE j.storage_id=? AND j.published_seq>0").bind(id).bind(storage)
 }
 
 pub(in super::super) fn scopes(id: Uuid) -> Rows<'static, Scope> {
@@ -147,7 +147,7 @@ pub(in super::super) fn scopes(id: Uuid) -> Rows<'static, Scope> {
 }
 
 pub(in super::super) fn changed(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM journal_snapshot_buckets sc LEFT JOIN buckets b ON b.id=sc.bucket_id LEFT JOIN bucket_change_gates g ON g.bucket_id=sc.bucket_id WHERE sc.snapshot_id=? AND (sc.mode_revision<>COALESCE(b.settings_revision,0) OR sc.included<>(COALESCE(g.journal_mode,0)=1)))").bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM journal_snapshot_buckets sc LEFT JOIN published_buckets b ON b.id=sc.bucket_id LEFT JOIN bucket_change_gates g ON g.bucket_id=sc.bucket_id WHERE sc.snapshot_id=? AND (sc.mode_revision<>COALESCE(b.settings_revision,0) OR sc.included<>(COALESCE(g.journal_mode,0)=1)))").bind(id)
 }
 
 pub(in super::super) fn deltas(job: Uuid, cut: Uuid, parent: Option<Uuid>) -> Statement<'static> {

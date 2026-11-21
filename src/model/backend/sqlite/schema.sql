@@ -1,4 +1,4 @@
--- Generated from the complete sqlite migration chain through 20261114231000.
+-- Generated from the complete sqlite migration chain through 20261121095744.
 -- Do not edit directly. The initializer owns deployment metadata and migration history.
 
 PRAGMA defer_foreign_keys = ON;
@@ -100,7 +100,7 @@ CREATE TABLE buckets (
     settings_revision INTEGER NOT NULL DEFAULT 0,
     uploads_paused INTEGER CHECK (uploads_paused IN (0,1)) NOT NULL DEFAULT FALSE,
     public_base_url TEXT NOT NULL DEFAULT (''),
-    storage_id BLOB CHECK (storage_id IS NULL OR length(storage_id)=16) NOT NULL, image_revision INTEGER NOT NULL DEFAULT 0, image_families INTEGER NOT NULL DEFAULT 0, image_policy TEXT, image_import_token TEXT, version_mode INTEGER NOT NULL DEFAULT 0 CHECK (version_mode IN (0,1,2)),
+    storage_id BLOB CHECK (storage_id IS NULL OR length(storage_id)=16) NOT NULL, image_revision INTEGER NOT NULL DEFAULT 0, image_families INTEGER NOT NULL DEFAULT 0, image_policy TEXT, image_import_token TEXT, version_mode INTEGER NOT NULL DEFAULT 0 CHECK (version_mode IN (0,1,2)), restore_job BLOB REFERENCES journal_recoveries(id),
     UNIQUE (id,project_id),
     CONSTRAINT buckets_state CHECK (state IN ('active','purging')),
     CONSTRAINT buckets_project FOREIGN KEY (project_id) REFERENCES projects(id),
@@ -450,7 +450,7 @@ CREATE TABLE journal_restore_buckets (
     state TEXT NOT NULL CHECK (state IN ('planned','building','published')),
     next_key BLOB,
     restored_objects INTEGER NOT NULL DEFAULT 0,
-    restored_bytes INTEGER NOT NULL DEFAULT 0,
+    restored_bytes INTEGER NOT NULL DEFAULT 0, prepared_key BLOB, prepared_objects INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (job,source_bucket),
     FOREIGN KEY (job) REFERENCES journal_recoveries(id)
 ) STRICT, WITHOUT ROWID;
@@ -2471,6 +2471,8 @@ CREATE INDEX bucket_tiering_hot ON bucket_tiering(hot_storage,bucket_id);
 
 CREATE INDEX buckets_project ON buckets(project_id);
 
+CREATE INDEX buckets_restore_job ON buckets(restore_job) WHERE restore_job IS NOT NULL;
+
 CREATE INDEX buckets_storage ON buckets(storage_id);
 
 CREATE INDEX cache_pins_owner ON cache_pins(owner_id,chunk_id);
@@ -2931,6 +2933,8 @@ WHERE j.state NOT IN ('completed','cancelled');
 
 CREATE VIEW notice_changes(scope,resource_id,object_key) AS SELECT scope,resource_id,object_key FROM node_notices WHERE FALSE;
 
+CREATE VIEW published_buckets AS SELECT * FROM buckets WHERE restore_job IS NULL;
+
 CREATE VIEW token_bucket_access AS
 SELECT t.id AS token_id,g.bucket_id,
     g.actions & IIF(u.role='admin',2047,COALESCE(a.actions,0)) AS actions
@@ -2949,7 +2953,7 @@ CREATE VIEW user_bucket_access AS
 SELECT m.user_id,b.id AS bucket_id,
     (CASE m.role WHEN 'reader' THEN 67 WHEN 'writer' THEN 479 WHEN 'maintainer' THEN 2047 ELSE 0 END)
     & IIF(m.scope='all',2047,COALESCE(g.actions,0)) AS actions
-FROM project_members m JOIN buckets b ON b.project_id=m.project_id
+FROM project_members m JOIN published_buckets b ON b.project_id=m.project_id
 LEFT JOIN member_bucket_grants g ON g.user_id=m.user_id AND g.bucket_id=b.id;
 
 CREATE VIEW user_external_access AS
@@ -3199,13 +3203,13 @@ BEGIN
 END;
 
 CREATE TRIGGER objects_notice_delete AFTER DELETE ON objects
-WHEN OLD.stream_id IS NOT NULL
+WHEN OLD.stream_id IS NOT NULL AND EXISTS (SELECT 1 FROM published_buckets WHERE id=OLD.bucket_id)
 BEGIN
     INSERT INTO notice_changes VALUES('object',OLD.bucket_id,OLD.object_key);
 END;
 
 CREATE TRIGGER objects_notice_insert AFTER INSERT ON objects
-WHEN NEW.stream_id IS NOT NULL
+WHEN NEW.stream_id IS NOT NULL AND EXISTS (SELECT 1 FROM published_buckets WHERE id=NEW.bucket_id)
 BEGIN
     INSERT INTO notice_changes VALUES('object',NEW.bucket_id,NEW.object_key);
 END;

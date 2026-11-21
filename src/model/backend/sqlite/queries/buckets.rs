@@ -43,7 +43,7 @@ impl<'r> sqlx::FromRow<'r, SqliteRow> for ReceivedPart {
 }
 
 pub(in super::super) fn bucket_by_id(id: Uuid) -> Rows<'static, Bucket> {
-    sqlx::query_as("SELECT * FROM buckets WHERE id=?").bind(id)
+    sqlx::query_as("SELECT * FROM published_buckets WHERE id=?").bind(id)
 }
 
 pub(in super::super) fn bucket_creation_policy(project: Uuid) -> Scalar<'static, bool> {
@@ -77,7 +77,7 @@ pub(in super::super) fn insert_bucket(
 }
 
 pub(in super::super) fn duplicate_bucket(name: &str) -> Scalar<'_, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE name=?)").bind(name)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM published_buckets WHERE name=?)").bind(name)
 }
 
 pub(in super::super) fn change_project_bucket_quota(
@@ -98,7 +98,7 @@ pub(in super::super) fn delete_bucket_objects(id: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn delete_bucket(id: Uuid) -> Statement<'static> {
-    sqlx::query("DELETE FROM buckets WHERE id=?").bind(id)
+    sqlx::query("DELETE FROM buckets WHERE id=? AND restore_job IS NULL").bind(id)
 }
 
 pub(in super::super) fn bucket_member_ids(id: Uuid) -> Scalar<'static, Uuid> {
@@ -130,7 +130,7 @@ pub(in super::super) fn bucket_transfer_users(source: Uuid, target: Uuid) -> Sca
 }
 
 pub(in super::super) fn transfer_bucket(id: Uuid, project: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE buckets SET project_id=?,uploads_paused=FALSE,settings_revision=settings_revision+1 WHERE id=?").bind(project).bind(id)
+    sqlx::query("UPDATE buckets SET project_id=?,uploads_paused=FALSE,settings_revision=settings_revision+1 WHERE id=? AND restore_job IS NULL").bind(project).bind(id)
 }
 
 pub(in super::super) fn bucket_domain_owner(host: &str) -> Scalar<'_, Uuid> {
@@ -160,23 +160,23 @@ pub(in super::super) fn bucket_domains(id: Option<Uuid>) -> Rows<'static, Domain
 }
 
 pub(in super::super) fn advance_bucket_settings(id: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE buckets SET settings_revision=settings_revision+1 WHERE id=?").bind(id)
+    sqlx::query("UPDATE buckets SET settings_revision=settings_revision+1 WHERE id=? AND restore_job IS NULL").bind(id)
 }
 
 pub(in super::super) fn save_bucket_settings(id: Uuid, input: &BucketUpdate) -> Statement<'_> {
-    sqlx::query("UPDATE buckets SET cors=?,website_enabled=?,index_document=?,error_document=?,public_base_url=?,uploads_paused=?,settings_revision=settings_revision+1 WHERE id=?").bind(&input.cors).bind(input.website_enabled).bind(&input.index_document).bind(&input.error_document).bind(&input.public_base_url).bind(input.uploads_paused).bind(id)
+    sqlx::query("UPDATE buckets SET cors=?,website_enabled=?,index_document=?,error_document=?,public_base_url=?,uploads_paused=?,settings_revision=settings_revision+1 WHERE id=? AND restore_job IS NULL").bind(&input.cors).bind(input.website_enabled).bind(&input.index_document).bind(&input.error_document).bind(&input.public_base_url).bind(input.uploads_paused).bind(id)
 }
 
 pub(in super::super) fn set_bucket_cors(id: Uuid, rules: &Value) -> Statement<'_> {
-    sqlx::query("UPDATE buckets SET cors=?,settings_revision=settings_revision+1 WHERE id=? AND state='active'").bind(rules).bind(id)
+    sqlx::query("UPDATE buckets SET cors=?,settings_revision=settings_revision+1 WHERE id=? AND restore_job IS NULL AND state='active'").bind(rules).bind(id)
 }
 
 pub(in super::super) fn set_bucket_website(id: Uuid, input: &Website) -> Statement<'_> {
-    sqlx::query("UPDATE buckets SET website_enabled=?,index_document=?,error_document=?,settings_revision=settings_revision+1 WHERE id=? AND state='active'").bind(input.website_enabled).bind(&input.index_document).bind(&input.error_document).bind(id)
+    sqlx::query("UPDATE buckets SET website_enabled=?,index_document=?,error_document=?,settings_revision=settings_revision+1 WHERE id=? AND restore_job IS NULL AND state='active'").bind(input.website_enabled).bind(&input.index_document).bind(&input.error_document).bind(id)
 }
 
 pub(in super::super) fn bucket_impact(id: Uuid) -> Rows<'static, BucketImpact> {
-    sqlx::query_as("SELECT b.id AS bucket_id,b.name,b.project_id,b.state,CAST(b.settings_revision AS TEXT) revision,b.uploads_paused,CAST(q.object_count AS TEXT) objects,CAST(q.used_bytes AS TEXT) logical_bytes,CAST(q.reserved_bytes AS TEXT) reserved_bytes,CAST(q.inflight_bytes AS TEXT) inflight_bytes,(SELECT CAST(COUNT(*) AS TEXT) FROM uploads WHERE bucket_id=b.id AND state IN ('active','completing')) active_uploads,(SELECT CAST(COUNT(*) AS TEXT) FROM streams WHERE bucket_id=b.id AND state='writing') writing_streams,(SELECT CAST(COUNT(*) AS TEXT) FROM member_bucket_grants WHERE bucket_id=b.id) member_bucket_grants,(SELECT CAST(COUNT(*) AS TEXT) FROM s3_credential_grants WHERE bucket_id=b.id) service_grants,(SELECT CAST(COUNT(*) AS TEXT) FROM token_bucket_grants WHERE bucket_id=b.id) token_bucket_grants,COALESCE((SELECT json_group_array(host) FROM bucket_domains WHERE bucket_id=b.id),JSON_ARRAY()) domains FROM buckets b JOIN quota_scopes q ON q.scope='bucket' AND q.scope_id=b.id WHERE b.id=?").bind(id)
+    sqlx::query_as("SELECT b.id AS bucket_id,b.name,b.project_id,b.state,CAST(b.settings_revision AS TEXT) revision,b.uploads_paused,CAST(q.object_count AS TEXT) objects,CAST(q.used_bytes AS TEXT) logical_bytes,CAST(q.reserved_bytes AS TEXT) reserved_bytes,CAST(q.inflight_bytes AS TEXT) inflight_bytes,(SELECT CAST(COUNT(*) AS TEXT) FROM uploads WHERE bucket_id=b.id AND state IN ('active','completing')) active_uploads,(SELECT CAST(COUNT(*) AS TEXT) FROM streams WHERE bucket_id=b.id AND state='writing') writing_streams,(SELECT CAST(COUNT(*) AS TEXT) FROM member_bucket_grants WHERE bucket_id=b.id) member_bucket_grants,(SELECT CAST(COUNT(*) AS TEXT) FROM s3_credential_grants WHERE bucket_id=b.id) service_grants,(SELECT CAST(COUNT(*) AS TEXT) FROM token_bucket_grants WHERE bucket_id=b.id) token_bucket_grants,COALESCE((SELECT json_group_array(host) FROM bucket_domains WHERE bucket_id=b.id),JSON_ARRAY()) domains FROM published_buckets b JOIN quota_scopes q ON q.scope='bucket' AND q.scope_id=b.id WHERE b.id=?").bind(id)
 }
 
 pub(in super::super) fn bucket_transfer_target(id: Uuid) -> Rows<'static, TransferProject> {
@@ -189,7 +189,7 @@ pub(in super::super) fn existing_purge(id: Uuid) -> Scalar<'static, Uuid> {
 
 pub(in super::super) fn seal_purge_bucket(id: Uuid) -> Statement<'static> {
     sqlx::query(
-        "UPDATE buckets SET state='purging',settings_revision=settings_revision+1 WHERE id=?",
+        "UPDATE buckets SET state='purging',settings_revision=settings_revision+1 WHERE id=? AND restore_job IS NULL",
     )
     .bind(id)
 }
@@ -257,7 +257,7 @@ pub(in super::super) async fn purge_upload_history(
 #[async_trait::async_trait]
 impl BucketStore for Backend {
     async fn domain_names(&self) -> Result<Vec<(String, String)>> {
-        Ok(sqlx::query_as("SELECT d.host,b.name FROM bucket_domains d JOIN buckets b ON b.id=d.bucket_id ORDER BY d.host").fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT d.host,b.name FROM bucket_domains d JOIN published_buckets b ON b.id=d.bucket_id ORDER BY d.host").fetch_all(&self.read).await?)
     }
     async fn purge_counts(&self, bucket: Uuid) -> Result<(i64, i64)> {
         Ok(sqlx::query_as("SELECT (SELECT COUNT(*) FROM objects WHERE bucket_id=? AND stream_id IS NOT NULL),(SELECT COUNT(*) FROM uploads WHERE bucket_id=? AND state IN ('active','completing'))").bind(bucket).bind(bucket).fetch_one(&self.read).await?)
@@ -272,7 +272,7 @@ impl BucketStore for Backend {
         transactions::start_purge(&self.write, principal, name, id, confirmation).await
     }
     async fn purge_uploads(&self, bucket: Uuid, default_batch: i32) -> Result<(i64, Vec<Uuid>)> {
-        let batch: Option<i32>=sqlx::query_scalar("SELECT maintenance_concurrency FROM storage_profiles WHERE storage_id=(SELECT storage_id FROM buckets WHERE id=?)").bind(bucket).fetch_one(&self.read).await?;
+        let batch: Option<i32>=sqlx::query_scalar("SELECT maintenance_concurrency FROM storage_profiles WHERE storage_id=(SELECT storage_id FROM published_buckets WHERE id=?)").bind(bucket).fetch_one(&self.read).await?;
         let batch = i64::from(batch.unwrap_or(default_batch).max(1));
         Ok((batch,sqlx::query_scalar("SELECT id FROM uploads WHERE bucket_id=? AND state IN ('active','completing') ORDER BY id LIMIT ?").bind(bucket).bind(batch).fetch_all(&self.read).await?))
     }
@@ -288,26 +288,28 @@ impl BucketStore for Backend {
         transactions::purge_batch(&self.write, task, bucket, cursor, batch, active).await
     }
     async fn by_name(&self, name: &str, active: bool) -> Result<Option<Bucket>> {
-        Ok(
-            sqlx::query_as("SELECT * FROM buckets WHERE name=? AND (NOT ? OR state='active')")
-                .bind(name)
-                .bind(active)
-                .fetch_optional(&self.read)
-                .await?,
+        Ok(sqlx::query_as(
+            "SELECT * FROM published_buckets WHERE name=? AND (NOT ? OR state='active')",
         )
+        .bind(name)
+        .bind(active)
+        .fetch_optional(&self.read)
+        .await?)
     }
     async fn by_host(&self, host: &str) -> Result<Option<Bucket>> {
         Ok(sqlx::query_as(
-            "SELECT b.* FROM buckets b JOIN bucket_domains d ON d.bucket_id=b.id WHERE d.host=?",
+            "SELECT b.* FROM published_buckets b JOIN bucket_domains d ON d.bucket_id=b.id WHERE d.host=?",
         )
         .bind(host)
         .fetch_optional(&self.read)
         .await?)
     }
     async fn all(&self) -> Result<Vec<Bucket>> {
-        Ok(sqlx::query_as("SELECT * FROM buckets ORDER BY name")
-            .fetch_all(&self.read)
-            .await?)
+        Ok(
+            sqlx::query_as("SELECT * FROM published_buckets ORDER BY name")
+                .fetch_all(&self.read)
+                .await?,
+        )
     }
     async fn visible(
         &self,
@@ -315,7 +317,7 @@ impl BucketStore for Backend {
         admin: bool,
         token: Option<Uuid>,
     ) -> Result<Vec<BucketView>> {
-        Ok(sqlx::query_as("SELECT b.*,CAST(IIF(?,2047,IIF(? IS NOT NULL,COALESCE(t.actions,0),COALESCE(a.actions,0))) AS INTEGER) actions FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=? LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=? WHERE ? OR (IIF(? IS NOT NULL,t.actions,a.actions)&1)<>0 ORDER BY b.name LIMIT 1000").bind(admin).bind(token).bind(user).bind(token).bind(admin).bind(token).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT b.*,CAST(IIF(?,2047,IIF(? IS NOT NULL,COALESCE(t.actions,0),COALESCE(a.actions,0))) AS INTEGER) actions FROM published_buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=? LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=? WHERE ? OR (IIF(? IS NOT NULL,t.actions,a.actions)&1)<>0 ORDER BY b.name LIMIT 1000").bind(admin).bind(token).bind(user).bind(token).bind(admin).bind(token).fetch_all(&self.read).await?)
     }
     async fn list_s3_objects(
         &self,
@@ -413,18 +415,20 @@ impl BucketStore for Backend {
         transactions::transfer_bucket(&self.write, principal, bucket, input).await
     }
     async fn cors(&self, bucket: Uuid) -> Result<Value> {
-        Ok(sqlx::query_scalar("SELECT cors FROM buckets WHERE id=?")
-            .bind(bucket)
-            .fetch_optional(&self.read)
-            .await?
-            .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?)
+        Ok(
+            sqlx::query_scalar("SELECT cors FROM published_buckets WHERE id=?")
+                .bind(bucket)
+                .fetch_optional(&self.read)
+                .await?
+                .ok_or_else(|| s3s::s3_error!(NoSuchBucket))?,
+        )
     }
     async fn set_cors(&self, principal: &Principal, bucket: Uuid, rules: Value) -> Result<Value> {
         transactions::set_bucket_cors(&self.write, principal, bucket, rules).await
     }
     async fn website(&self, bucket: Uuid) -> Result<Website> {
         Ok(sqlx::query_as(
-            "SELECT website_enabled,index_document,error_document FROM buckets WHERE id=?",
+            "SELECT website_enabled,index_document,error_document FROM published_buckets WHERE id=?",
         )
         .bind(bucket)
         .fetch_optional(&self.read)

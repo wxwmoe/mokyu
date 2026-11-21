@@ -94,7 +94,7 @@ pub(in super::super) async fn save(
     }
     lock_permit(&mut tx, &permit).await?;
     let admin = queries::validate_identity(principal, &mut *tx).await?;
-    let project: Uuid = sqlx::query_scalar("SELECT project_id FROM buckets WHERE id=?")
+    let project: Uuid = sqlx::query_scalar("SELECT project_id FROM published_buckets WHERE id=?")
         .bind(bucket)
         .fetch_one(&mut *tx)
         .await?;

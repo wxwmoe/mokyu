@@ -6,7 +6,7 @@ use uuid::Uuid;
 pub(in super::super) fn configuration(
     bucket: Uuid,
 ) -> Rows<'static, (String, Json<UploadSettings>, i64, Uuid)> {
-    sqlx::query_as("SELECT m.deployment_mode,r.value,r.revision,b.storage_id FROM buckets b CROSS JOIN mokyu_meta m JOIN runtime_settings r ON r.section='uploads' WHERE b.id=?").bind(bucket)
+    sqlx::query_as("SELECT m.deployment_mode,r.value,r.revision,b.storage_id FROM published_buckets b CROSS JOIN mokyu_meta m JOIN runtime_settings r ON r.section='uploads' WHERE b.id=?").bind(bucket)
 }
 
 pub(in super::super) fn valid(storage: Uuid) -> Scalar<'static, bool> {

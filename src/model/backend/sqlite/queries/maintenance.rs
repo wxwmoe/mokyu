@@ -63,7 +63,7 @@ pub(in super::super) fn stale_streams(
     }
     if let Some(storage) = storage {
         query
-            .push(" AND EXISTS(SELECT 1 FROM buckets b WHERE b.id=s.bucket_id AND b.storage_id=")
+            .push(" AND EXISTS(SELECT 1 FROM published_buckets b WHERE b.id=s.bucket_id AND b.storage_id=")
             .push_bind(storage)
             .push(")");
     }
@@ -83,7 +83,7 @@ pub(in super::super) fn lock_stale_stream(
     query.push_bind(id);
     if let Some(storage) = storage {
         query
-            .push(" AND EXISTS(SELECT 1 FROM buckets b WHERE b.id=s.bucket_id AND b.storage_id=")
+            .push(" AND EXISTS(SELECT 1 FROM published_buckets b WHERE b.id=s.bucket_id AND b.storage_id=")
             .push_bind(storage)
             .push(")");
     }
@@ -158,7 +158,7 @@ pub(in super::super) fn stale_fragments(
         "SELECT f.id FROM fragments f WHERE NOT EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id)",
     );
     if let Some(storage) = storage {
-        query.push(" AND EXISTS(SELECT 1 FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=f.owner_stream AND b.storage_id=").push_bind(storage).push(")");
+        query.push(" AND EXISTS(SELECT 1 FROM streams s JOIN published_buckets b ON b.id=s.bucket_id WHERE s.id=f.owner_stream AND b.storage_id=").push_bind(storage).push(")");
     }
     query.push(" AND (f.sealed OR f.owner_stream IS NULL OR (");
     if !active.is_empty() {
@@ -195,7 +195,7 @@ pub(in super::super) async fn remove_tombstones(
     storage: Option<Uuid>,
     batch: i64,
 ) -> Result<u64> {
-    Ok(sqlx::query("DELETE FROM objects WHERE (bucket_id,object_key) IN (SELECT o.bucket_id,o.object_key FROM objects o WHERE (? IS NULL OR EXISTS(SELECT 1 FROM buckets b WHERE b.id=o.bucket_id AND b.storage_id=?)) AND o.stream_id IS NULL AND NOT EXISTS(SELECT 1 FROM streams s WHERE s.bucket_id=o.bucket_id AND s.object_key=o.object_key AND s.state='writing') ORDER BY o.bucket_id,o.object_key LIMIT ?)").bind(storage).bind(storage).bind(batch).execute(connection).await?.rows_affected())
+    Ok(sqlx::query("DELETE FROM objects WHERE (bucket_id,object_key) IN (SELECT o.bucket_id,o.object_key FROM objects o WHERE (? IS NULL OR EXISTS(SELECT 1 FROM published_buckets b WHERE b.id=o.bucket_id AND b.storage_id=?)) AND o.stream_id IS NULL AND NOT EXISTS(SELECT 1 FROM streams s WHERE s.bucket_id=o.bucket_id AND s.object_key=o.object_key AND s.state='writing') ORDER BY o.bucket_id,o.object_key LIMIT ?)").bind(storage).bind(storage).bind(batch).execute(connection).await?.rows_affected())
 }
 
 pub(in super::super) fn lock_reclaim_chunk(
@@ -299,7 +299,7 @@ pub(in super::super) async fn cleanup_history(
             "(SELECT (CAST(substr(sp.deleted_chunk_retention,1,length(sp.deleted_chunk_retention)-1) AS INTEGER)*CASE substr(sp.deleted_chunk_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM storage_profiles sp WHERE sp.storage_id=h.storage_id)",
         ),
         "uploads" => Some(
-            "(SELECT (CAST(substr(sp.upload_retention,1,length(sp.upload_retention)-1) AS INTEGER)*CASE substr(sp.upload_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM buckets b JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE b.id=h.bucket_id)",
+            "(SELECT (CAST(substr(sp.upload_retention,1,length(sp.upload_retention)-1) AS INTEGER)*CASE substr(sp.upload_retention,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END) FROM published_buckets b JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE b.id=h.bucket_id)",
         ),
         _ => None,
     };
@@ -708,7 +708,7 @@ pub(in super::super) async fn gc_status(
 pub(in super::super) async fn inventory_buckets(
     connection: &mut sqlx::SqliteConnection,
 ) -> Result<Vec<Value>> {
-    let rows:Vec<(Option<Uuid>,Option<String>,i64,i64)>=sqlx::query_as("WITH totals AS (SELECT b.id,b.name,COUNT(o.stream_id) AS objects,CAST(COALESCE(SUM(s.size),0) AS INTEGER) AS logical_bytes FROM buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.stream_id IS NOT NULL LEFT JOIN streams s ON s.id=o.stream_id GROUP BY b.id,b.name) SELECT NULL AS id,NULL AS name,CAST(COALESCE(SUM(objects),0) AS INTEGER),CAST(COALESCE(SUM(logical_bytes),0) AS INTEGER) FROM totals UNION ALL SELECT id,name,objects,logical_bytes FROM totals ORDER BY id LIMIT 1002").fetch_all(connection).await?;
+    let rows:Vec<(Option<Uuid>,Option<String>,i64,i64)>=sqlx::query_as("WITH totals AS (SELECT b.id,b.name,COUNT(o.stream_id) AS objects,CAST(COALESCE(SUM(s.size),0) AS INTEGER) AS logical_bytes FROM published_buckets b LEFT JOIN objects o ON o.bucket_id=b.id AND o.stream_id IS NOT NULL LEFT JOIN streams s ON s.id=o.stream_id GROUP BY b.id,b.name) SELECT NULL AS id,NULL AS name,CAST(COALESCE(SUM(objects),0) AS INTEGER),CAST(COALESCE(SUM(logical_bytes),0) AS INTEGER) FROM totals UNION ALL SELECT id,name,objects,logical_bytes FROM totals ORDER BY id LIMIT 1002").fetch_all(connection).await?;
     Ok(rows.into_iter().map(|(id,name,objects,logical_bytes)|serde_json::json!({"id":id,"name":name,"objects":objects,"logical_bytes":logical_bytes})).collect())
 }
 
@@ -723,7 +723,7 @@ pub(in super::super) async fn collect_uploads(
     batch: i64,
     storage: Option<Uuid>,
 ) -> Result<Vec<Uuid>> {
-    Ok(sqlx::query_scalar("SELECT u.id FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE (? IS NULL OR b.storage_id=?) AND u.state='active' AND u.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-(CAST(substr(p.multipart_idle_timeout,1,length(p.multipart_idle_timeout)-1) AS INTEGER)*CASE substr(p.multipart_idle_timeout,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 ORDER BY u.touched_at,u.id LIMIT ?").bind(storage).bind(storage).bind(batch).fetch_all(&mut *db).await?)
+    Ok(sqlx::query_scalar("SELECT u.id FROM uploads u JOIN published_buckets b ON b.id=u.bucket_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE (? IS NULL OR b.storage_id=?) AND u.state='active' AND u.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-(CAST(substr(p.multipart_idle_timeout,1,length(p.multipart_idle_timeout)-1) AS INTEGER)*CASE substr(p.multipart_idle_timeout,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 ORDER BY u.touched_at,u.id LIMIT ?").bind(storage).bind(storage).bind(batch).fetch_all(&mut *db).await?)
 }
 
 pub(in super::super) async fn collect_chunks(

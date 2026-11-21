@@ -38,12 +38,12 @@ pub(in super::super) fn node_read_bucket(route: &ReadRoute) -> Rows<'_, Bucket> 
     match route.base() {
         ReadRoute::Image { .. } => unreachable!(),
         ReadRoute::Host { host, .. } => sqlx::query_as(
-            "SELECT b.* FROM buckets b JOIN bucket_domains d ON b.id=d.bucket_id WHERE d.host=?",
+            "SELECT b.* FROM published_buckets b JOIN bucket_domains d ON b.id=d.bucket_id WHERE d.host=?",
         )
         .bind(host),
         ReadRoute::Bucket { name, alias, .. } => {
             let alias = alias.as_ref().map(|(name, _)| name);
-            sqlx::query_as("SELECT * FROM buckets WHERE name IN (?,?) ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END LIMIT 1").bind(name).bind(alias).bind(alias)
+            sqlx::query_as("SELECT * FROM published_buckets WHERE name IN (?,?) ORDER BY CASE WHEN name=? THEN 0 ELSE 1 END LIMIT 1").bind(name).bind(alias).bind(alias)
         }
     }
 }
@@ -75,7 +75,7 @@ pub(in super::super) fn node_catalog_buckets<'a>(
     expected: &'a str,
     limit: i64,
 ) -> Rows<'a, node_request::Bucket> {
-    sqlx::query_as("SELECT b.name,strftime('%Y-%m-%dT%H:%M:%fZ',b.created_at/1000000.0,'unixepoch') AS created_at FROM buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=? AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND c.project_id=b.project_id AND (g.actions&1)<>0 AND substr(b.name,1,length(?))=? AND b.name>? AND (? IS NULL OR ?=?) ORDER BY b.name LIMIT ?").bind(access).bind(prefix).bind(prefix).bind(after).bind(region).bind(region).bind(expected).bind(limit)
+    sqlx::query_as("SELECT b.name,strftime('%Y-%m-%dT%H:%M:%fZ',b.created_at/1000000.0,'unixepoch') AS created_at FROM published_buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=? AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND c.project_id=b.project_id AND (g.actions&1)<>0 AND substr(b.name,1,length(?))=? AND b.name>? AND (? IS NULL OR ?=?) ORDER BY b.name LIMIT ?").bind(access).bind(prefix).bind(prefix).bind(after).bind(region).bind(region).bind(expected).bind(limit)
 }
 pub(in super::super) async fn node_catalog_objects(
     connection: &mut sqlx::SqliteConnection,

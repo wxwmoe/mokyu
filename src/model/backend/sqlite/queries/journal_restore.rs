@@ -383,18 +383,60 @@ pub(in super::super) fn bucket_quota(bucket: Uuid, bytes: i64, items: i64) -> St
     .bind(items)
 }
 
+macro_rules! staged_rows {
+    ($all:ident, $batch:ident, $sql:literal, $alias:literal) => {
+        const $all: &str = $sql;
+        const $batch: &str = concat!(
+            $sql,
+            " AND ",
+            $alias,
+            ".object_key>? AND ",
+            $alias,
+            ".object_key<=?"
+        );
+    };
+}
+
+staged_rows!(
+    STREAMS,
+    STREAMS_BATCH,
+    "INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag,metadata,checksums,payload_type,created_at,touched_at,write_authorization) SELECT ?,i.object_key,'object',CASE WHEN i.history_id IS NULL THEN 'ready' ELSE 'retired' END,i.size,i.etag,i.metadata,i.checksums,i.payload,i.modified_us,i.modified_us,'{}' FROM journal_restore_items i WHERE NOT i.history_marker AND i.job=? AND i.source_bucket=?",
+    "i"
+);
+
 pub(in super::super) fn streams(bucket: Uuid, job: Uuid, source: Uuid) -> Statement<'static> {
     // Journal slots are unique within the source bucket, including versions and time points.
-    sqlx::query("INSERT INTO streams(bucket_id,object_key,stream_type,state,size,etag,metadata,checksums,payload_type,created_at,touched_at,write_authorization) SELECT ?,i.object_key,'object',CASE WHEN i.history_id IS NULL THEN 'ready' ELSE 'retired' END,i.size,i.etag,i.metadata,i.checksums,i.payload,i.modified_us,i.modified_us,'{}' FROM journal_restore_items i WHERE NOT i.history_marker AND i.job=? AND i.source_bucket=?").bind(bucket).bind(job).bind(source)
+    sqlx::query(STREAMS).bind(bucket).bind(job).bind(source)
 }
+
+staged_rows!(
+    EXTENTS,
+    EXTENTS_BATCH,
+    "INSERT INTO extents(stream_id,offset_bytes,length,source_offset,chunk_id,fragment_id) SELECT s.id,r.offset_bytes,r.length,r.source_offset,CASE WHEN r.kind='chunk' THEN r.native_id END,CASE WHEN r.kind='fragment' THEN r.native_id END FROM journal_restore_ranges r JOIN journal_restore_items i ON i.job=r.job AND i.source_bucket=r.source_bucket AND i.object_key=r.object_key CROSS JOIN streams s ON s.bucket_id=? AND s.object_key=i.object_key WHERE r.job=? AND r.source_bucket=? AND r.kind<>'raw'",
+    "r"
+);
 
 pub(in super::super) fn extents(bucket: Uuid, job: Uuid, source: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO extents(stream_id,offset_bytes,length,source_offset,chunk_id,fragment_id) SELECT s.id,r.offset_bytes,r.length,r.source_offset,CASE WHEN r.kind='chunk' THEN r.native_id END,CASE WHEN r.kind='fragment' THEN r.native_id END FROM journal_restore_ranges r JOIN journal_restore_items i ON i.job=r.job AND i.source_bucket=r.source_bucket AND i.object_key=r.object_key JOIN streams s ON s.bucket_id=? AND s.object_key=i.object_key WHERE r.job=? AND r.source_bucket=? AND r.kind<>'raw'").bind(bucket).bind(job).bind(source)
+    sqlx::query(EXTENTS).bind(bucket).bind(job).bind(source)
 }
 
+staged_rows!(
+    RAW_RANGES,
+    RAW_RANGES_BATCH,
+    "INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_offset,source_id) SELECT s.id,r.offset_bytes,r.length,r.source_offset,r.native_id FROM journal_restore_ranges r JOIN journal_restore_items i ON i.job=r.job AND i.source_bucket=r.source_bucket AND i.object_key=r.object_key CROSS JOIN streams s ON s.bucket_id=? AND s.object_key=i.object_key WHERE r.job=? AND r.source_bucket=? AND r.kind='raw'",
+    "r"
+);
+
 pub(in super::super) fn raw_ranges(bucket: Uuid, job: Uuid, source: Uuid) -> Statement<'static> {
-    sqlx::query("INSERT INTO raw_ranges(stream_id,offset_bytes,length,source_offset,source_id) SELECT s.id,r.offset_bytes,r.length,r.source_offset,r.native_id FROM journal_restore_ranges r JOIN journal_restore_items i ON i.job=r.job AND i.source_bucket=r.source_bucket AND i.object_key=r.object_key JOIN streams s ON s.bucket_id=? AND s.object_key=i.object_key WHERE r.job=? AND r.source_bucket=? AND r.kind='raw'").bind(bucket).bind(job).bind(source)
+    sqlx::query(RAW_RANGES).bind(bucket).bind(job).bind(source)
 }
+
+staged_rows!(
+    OBJECTS,
+    OBJECTS_BATCH,
+    "INSERT INTO objects(bucket_id,object_key,stream_id,write_token,catalog_size,catalog_modified,catalog_type,catalog_category,catalog_public) SELECT ?,i.logical_key,s.id,s.id,i.size,s.created_at,i.content_type,i.category,FALSE FROM journal_restore_items i CROSS JOIN streams s ON s.bucket_id=? AND s.object_key=i.object_key WHERE i.history_id IS NULL AND NOT i.history_marker AND i.job=? AND i.source_bucket=?",
+    "i"
+);
 
 pub(in super::super) fn objects(
     bucket: Uuid,
@@ -402,7 +444,11 @@ pub(in super::super) fn objects(
     job: Uuid,
     source: Uuid,
 ) -> Statement<'static> {
-    sqlx::query("INSERT INTO objects(bucket_id,object_key,stream_id,write_token,catalog_size,catalog_modified,catalog_type,catalog_category,catalog_public) SELECT ?,i.logical_key,s.id,s.id,i.size,s.created_at,i.content_type,i.category,FALSE FROM journal_restore_items i JOIN streams s ON s.bucket_id=? AND s.object_key=i.object_key WHERE i.history_id IS NULL AND NOT i.history_marker AND i.job=? AND i.source_bucket=?").bind(bucket).bind(owner).bind(job).bind(source)
+    sqlx::query(OBJECTS)
+        .bind(bucket)
+        .bind(owner)
+        .bind(job)
+        .bind(source)
 }
 
 pub(in super::super) fn restore_mode(job: Uuid, source: Uuid) -> Scalar<'static, i64> {
@@ -540,7 +586,7 @@ pub(in super::super) fn native_pending(storage: Uuid) -> Scalar<'static, Uuid> {
 }
 
 pub(in super::super) fn native_read_only(bucket: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets b JOIN storages s ON s.id=b.storage_id JOIN journal_restore_scopes p ON p.storage_id=s.id JOIN journal_recoveries j ON j.id=p.job WHERE b.id=? AND s.type='mokyu' AND j.source_storage=j.target_storage AND j.state<>'completed')").bind(bucket)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM published_buckets b JOIN storages s ON s.id=b.storage_id JOIN journal_restore_scopes p ON p.storage_id=s.id JOIN journal_recoveries j ON j.id=p.job WHERE b.id=? AND s.type='mokyu' AND j.source_storage=j.target_storage AND j.state<>'completed')").bind(bucket)
 }
 
 pub(in super::super) fn time_window_record(
@@ -563,4 +609,118 @@ pub(in super::super) fn time_clock(b: Uuid) -> Statement<'static> {
 
 pub(in super::super) fn retained_time_points(b: Uuid) -> Statement<'static> {
     sqlx::query("INSERT INTO time_retained_streams(bucket_id,stream_id,bytes) SELECT DISTINCT t.bucket_id,t.stream_id,s.size FROM object_time_points t JOIN streams s ON s.id=t.stream_id WHERE t.bucket_id=? AND NOT EXISTS(SELECT 1 FROM objects o WHERE o.bucket_id=t.bucket_id AND o.stream_id=t.stream_id) AND NOT EXISTS(SELECT 1 FROM object_versions v WHERE v.bucket_id=t.bucket_id AND v.stream_id=t.stream_id)").bind(b)
+}
+
+#[async_trait::async_trait]
+impl crate::model::journal::restore::RecoveryPreparation for Backend {
+    async fn prepare_bucket(
+        &self,
+        job: Uuid,
+        token: Uuid,
+        source: Uuid,
+        project: Uuid,
+        target: Uuid,
+    ) -> Result<bool> {
+        const BATCH: i64 = 1024;
+        let mut tx = begin(self).await?;
+        fence(job, token).fetch_one(&mut *tx).await?;
+        let (bucket, done, _) = planned(job, source).fetch_one(&mut *tx).await?;
+        if done {
+            return Ok(true);
+        }
+        let (name, bytes, count) = totals(job, source).fetch_one(&mut *tx).await?;
+        // Takeover, version history and time points retain their atomic publication path.
+        if bucket == source || count <= BATCH || sqlx::query_scalar::<_,bool>(
+            "SELECT EXISTS(SELECT 1 FROM journal_restore_items WHERE job=? AND source_bucket=? AND (history_id IS NOT NULL OR object_key<>logical_key OR history_marker))"
+        ).bind(job).bind(source).fetch_one(&mut *tx).await? {return Ok(false);}
+        sqlx::query("INSERT INTO buckets(id,name,project_id,storage_id,restore_job) VALUES(?,?,?,?,?) ON CONFLICT(id) DO NOTHING")
+            .bind(bucket).bind(format!("/restore/{bucket}")).bind(project).bind(target).bind(job).execute(&mut *tx).await?;
+        let owner: Option<Uuid> = sqlx::query_scalar("SELECT restore_job FROM buckets WHERE id=?")
+            .bind(bucket)
+            .fetch_one(&mut *tx)
+            .await?;
+        ensure!(owner == Some(job), "recovery bucket ownership changed");
+        tx.commit().await?;
+        loop {
+            let mut tx = begin(self).await?;
+            fence(job, token).fetch_one(&mut *tx).await?;
+            let (after,prepared):(Vec<u8>,i64)=sqlx::query_as("SELECT COALESCE(prepared_key,X''),prepared_objects FROM journal_restore_buckets WHERE job=? AND source_bucket=?").bind(job).bind(source).fetch_one(&mut *tx).await?;
+            let end:Option<Vec<u8>>=sqlx::query_scalar("SELECT MAX(object_key) FROM (SELECT object_key FROM journal_restore_items WHERE job=? AND source_bucket=? AND object_key>? ORDER BY object_key LIMIT ?)").bind(job).bind(source).bind(&after).bind(BATCH).fetch_one(&mut *tx).await?;
+            let Some(end) = end else {
+                ensure!(prepared == count, "recovered object count mismatch");
+                ensure!(
+                    quota(bytes, count, project, bytes)
+                        .execute(&mut *tx)
+                        .await?
+                        .rows_affected()
+                        == 1,
+                    crate::model::Error::QuotaExceeded
+                );
+                bucket_quota(bucket, bytes, count).execute(&mut *tx).await?;
+                ensure!(
+                    sqlx::query(
+                        "UPDATE buckets SET name=?,restore_job=NULL WHERE id=? AND restore_job=?"
+                    )
+                    .bind(&name)
+                    .bind(bucket)
+                    .bind(job)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                        == 1,
+                    "recovery bucket ownership changed"
+                );
+                complete_bucket(job, source).execute(&mut *tx).await?;
+                tx.commit().await?;
+                return Ok(true);
+            };
+            for sql in [STREAMS_BATCH, EXTENTS_BATCH, RAW_RANGES_BATCH] {
+                sqlx::query(sql)
+                    .bind(bucket)
+                    .bind(job)
+                    .bind(source)
+                    .bind(&after)
+                    .bind(&end)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            let inserted = sqlx::query(OBJECTS_BATCH)
+                .bind(bucket)
+                .bind(bucket)
+                .bind(job)
+                .bind(source)
+                .bind(&after)
+                .bind(&end)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            sqlx::query("UPDATE journal_restore_buckets SET prepared_key=?,prepared_objects=prepared_objects+? WHERE job=? AND source_bucket=?").bind(&end).bind(i64::try_from(inserted)?).bind(job).bind(source).execute(&mut *tx).await?;
+            ensure!(
+                claim(token, job, token)
+                    .execute(&mut *tx)
+                    .await?
+                    .rows_affected()
+                    == 1,
+                "recovery lease lost during preparation"
+            );
+            tx.commit().await?;
+        }
+    }
+    async fn discard_prepared(&self, job: Option<Uuid>) -> Result<()> {
+        loop {
+            let mut tx = begin(self).await?;
+            let bucket: Option<Uuid>=sqlx::query_scalar("SELECT b.id FROM buckets b JOIN journal_recoveries j ON j.id=b.restore_job WHERE j.state IN ('cancelled','failed') AND (?1 IS NULL OR j.id=?1) LIMIT 1").bind(job).fetch_optional(&mut *tx).await?;
+            let Some(bucket) = bucket else { return Ok(()) };
+            sqlx::query("DELETE FROM objects WHERE bucket_id=?1 AND object_key IN (SELECT object_key FROM streams WHERE bucket_id=?1 ORDER BY object_key,id LIMIT 1024)").bind(bucket).execute(&mut *tx).await?;
+            let removed=sqlx::query("DELETE FROM streams WHERE id IN (SELECT id FROM streams WHERE bucket_id=? ORDER BY object_key,id LIMIT 1024)").bind(bucket).execute(&mut *tx).await?.rows_affected();
+            if removed < 1024 {
+                sqlx::query("UPDATE journal_restore_buckets SET prepared_key=NULL,prepared_objects=0 WHERE target_bucket=? AND state<>'published'").bind(bucket).execute(&mut *tx).await?;
+                sqlx::query("DELETE FROM buckets WHERE id=? AND restore_job IS NOT NULL")
+                    .bind(bucket)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
+        }
+    }
 }

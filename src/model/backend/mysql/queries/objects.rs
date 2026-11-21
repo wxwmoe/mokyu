@@ -273,8 +273,7 @@ impl ObjectStore for Backend {
     }
     async fn storage(&self, bucket: Uuid) -> Result<Option<Uuid>> {
         Ok(
-            sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=?")
-                .bind(bucket)
+            object_bucket_storage(bucket)
                 .fetch_optional(&self.pool)
                 .await?,
         )
@@ -344,4 +343,8 @@ impl<'r> sqlx::FromRow<'r, sqlx::mysql::MySqlRow> for MediaItem {
             modified_at: row.try_get("modified_at")?,
         })
     }
+}
+
+pub(in super::super) fn object_bucket_storage(bucket: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=?").bind(bucket)
 }

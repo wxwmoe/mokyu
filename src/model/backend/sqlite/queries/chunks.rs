@@ -175,7 +175,7 @@ impl ChunkStore for Backend {
 
     async fn storage_for_stream(&self, stream: Id) -> Result<Option<Uuid>> {
         Ok(sqlx::query_scalar(
-            "SELECT b.storage_id FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=?",
+            "SELECT b.storage_id FROM streams s JOIN published_buckets b ON b.id=s.bucket_id WHERE s.id=?",
         )
         .bind(stream)
         .fetch_one(&self.read)

@@ -20,7 +20,7 @@ pub(in super::super) async fn begin(b: &Backend, write: bool) -> Result<Tx<'_>> 
     Ok(tx)
 }
 pub(in super::super) fn mode(b: Uuid, _lock: bool) -> Scalar<'static, i64> {
-    let query = "SELECT CAST(version_mode AS BIGINT) FROM buckets WHERE id=?";
+    let query = "SELECT CAST(version_mode AS BIGINT) FROM published_buckets WHERE id=?";
     sqlx::query_scalar(query).bind(b)
 }
 pub(in super::super) fn clock(b: Uuid) -> Statement<'static> {
@@ -31,7 +31,7 @@ pub(in super::super) fn baseline(b: Uuid) -> Statement<'static> {
 }
 pub(in super::super) fn set_mode(b: Uuid, mode: i16) -> Statement<'static> {
     sqlx::query(
-        "UPDATE buckets SET settings_revision=settings_revision+1,version_mode=? WHERE id=?",
+        "UPDATE buckets SET settings_revision=settings_revision+1,version_mode=? WHERE id=? AND restore_job IS NULL",
     )
     .bind(mode)
     .bind(b)

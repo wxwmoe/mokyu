@@ -1,6 +1,6 @@
 use super::*;
 
-const JOB_SQL: &str = "SELECT t.*,b.name AS bucket_name,CASE WHEN c.paused OR (c.policy='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration','rewrite','usage') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND json_extract(t.detail,'$.policy') IN ('pack','repack') THEN 'PackCreationStopped' END AS blocked FROM tasks t LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.policy=CASE WHEN t.task_type='pack' THEN json_extract(t.detail,'$.policy') ELSE t.task_type END";
+const JOB_SQL: &str = "SELECT t.*,b.name AS bucket_name,CASE WHEN c.paused OR (c.policy='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration','rewrite','usage') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND json_extract(t.detail,'$.policy') IN ('pack','repack') THEN 'PackCreationStopped' END AS blocked FROM tasks t LEFT JOIN published_buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.policy=CASE WHEN t.task_type='pack' THEN json_extract(t.detail,'$.policy') ELSE t.task_type END";
 
 pub(in super::super) fn task_page(
     q: &JobQuery,
@@ -203,7 +203,7 @@ pub(in super::super) fn defer_pack_changes(id: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn defer_pack_maintenance(id: Uuid) -> Statement<'static> {
-    sqlx::query("UPDATE pack_maintenance SET next_check_at=(SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)+(CAST(substr(sp.pack_interval,1,length(sp.pack_interval)-1) AS INTEGER)*CASE substr(sp.pack_interval,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 FROM streams s JOIN buckets b ON b.id=s.bucket_id JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE s.id=pack_maintenance.stream_id) WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=?)").bind(id)
+    sqlx::query("UPDATE pack_maintenance SET next_check_at=(SELECT CAST(unixepoch('subsec')*1000000 AS INTEGER)+(CAST(substr(sp.pack_interval,1,length(sp.pack_interval)-1) AS INTEGER)*CASE substr(sp.pack_interval,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000 FROM streams s JOIN published_buckets b ON b.id=s.bucket_id JOIN storage_profiles sp ON sp.storage_id=b.storage_id WHERE s.id=pack_maintenance.stream_id) WHERE stream_id IN (SELECT e.stream_id FROM extents e JOIN pack_inputs i ON i.chunk_id=e.chunk_id WHERE i.task_id=?)").bind(id)
 }
 
 pub(in super::super) fn backoff_pending_uploads(

@@ -76,7 +76,8 @@ pub(in super::super) async fn lock_project_buckets(
     if buckets.is_empty() {
         return Ok(Vec::new());
     }
-    let mut query = sqlx::QueryBuilder::<Sqlite>::new("SELECT id FROM buckets WHERE project_id=");
+    let mut query =
+        sqlx::QueryBuilder::<Sqlite>::new("SELECT id FROM published_buckets WHERE project_id=");
     query.push_bind(project).push(" AND id IN (");
     let mut ids = query.separated(",");
     for id in buckets {
@@ -182,7 +183,7 @@ pub(in super::super) fn lock_project(id: Uuid) -> Scalar<'static, Uuid> {
 }
 
 pub(in super::super) fn project_dependents(id: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM buckets WHERE project_id=?) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=?) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=?) OR EXISTS(SELECT 1 FROM external_buckets WHERE project_id=?)").bind(id).bind(id).bind(id).bind(id)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM published_buckets WHERE project_id=?) OR EXISTS(SELECT 1 FROM s3_credentials WHERE project_id=?) OR EXISTS(SELECT 1 FROM project_members WHERE project_id=?) OR EXISTS(SELECT 1 FROM external_buckets WHERE project_id=?)").bind(id).bind(id).bind(id).bind(id)
 }
 
 pub(in super::super) fn delete_project(id: Uuid) -> Statement<'static> {
@@ -204,7 +205,7 @@ pub(in super::super) fn visible_projects(
     admin: bool,
     token: Option<Uuid>,
 ) -> Rows<'static, Project> {
-    sqlx::query_as("SELECT p.* FROM projects p WHERE ? OR CASE WHEN ? IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) OR EXISTS(SELECT 1 FROM token_external_access t JOIN external_buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=?) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(admin).bind(token).bind(token).bind(token).bind(user)
+    sqlx::query_as("SELECT p.* FROM projects p WHERE ? OR CASE WHEN ? IS NOT NULL THEN EXISTS(SELECT 1 FROM token_bucket_access t JOIN published_buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) OR EXISTS(SELECT 1 FROM token_external_access t JOIN external_buckets b ON b.id=t.bucket_id WHERE t.token_id=? AND b.project_id=p.id AND (t.actions & 1)<>0) ELSE EXISTS(SELECT 1 FROM project_members m WHERE m.project_id=p.id AND m.user_id=?) END ORDER BY p.builtin DESC,p.name LIMIT 1000").bind(admin).bind(token).bind(token).bind(token).bind(user)
 }
 
 pub(in super::super) fn project_mode() -> Scalar<'static, bool> {

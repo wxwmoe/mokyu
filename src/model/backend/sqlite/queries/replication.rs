@@ -177,7 +177,7 @@ pub(in super::super) fn resume<'q>(id: Uuid) -> Statement<'q> {
 }
 
 pub(in super::super) fn profile<'q>(bucket: Uuid) -> Rows<'q, (Uuid, i64)> {
-    sqlx::query_as("SELECT b.storage_id,p.revision FROM buckets b JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=$1 AND b.state='active' AND s.enabled")
+    sqlx::query_as("SELECT b.storage_id,p.revision FROM published_buckets b JOIN storages s ON s.id=b.storage_id JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=$1 AND b.state='active' AND s.enabled")
         .bind(bucket)
 }
 

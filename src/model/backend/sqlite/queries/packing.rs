@@ -417,7 +417,7 @@ pub(in super::super) fn usage_scope_buckets(
     bucket: Option<Uuid>,
     project: Option<Uuid>,
 ) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT b.id FROM buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=? LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=? WHERE (? OR (IIF(? IS NULL,a.actions,t.actions)&64)<>0) AND (? IS NULL OR b.id=?) AND (? IS NULL OR b.project_id=?) ORDER BY b.id").bind(user).bind(token).bind(admin).bind(token).bind(bucket).bind(bucket).bind(project).bind(project)
+    sqlx::query_scalar("SELECT b.id FROM published_buckets b LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=? LEFT JOIN token_bucket_access t ON t.bucket_id=b.id AND t.token_id=? WHERE (? OR (IIF(? IS NULL,a.actions,t.actions)&64)<>0) AND (? IS NULL OR b.id=?) AND (? IS NULL OR b.project_id=?) ORDER BY b.id").bind(user).bind(token).bind(admin).bind(token).bind(bucket).bind(bucket).bind(project).bind(project)
 }
 
 pub(super) fn uuid_ids(query: &mut sqlx::QueryBuilder<Sqlite>, ids: &[Uuid]) {
@@ -516,7 +516,7 @@ pub(in super::super) fn scoped_pack_objects(
     cursor: Option<(Uuid, String)>,
 ) -> sqlx::QueryBuilder<Sqlite> {
     let mut query = sqlx::QueryBuilder::new(
-        "SELECT DISTINCT o.bucket_id,b.name AS bucket_name,o.object_key AS object_key,s.id AS version,CAST(s.size AS TEXT) AS size,COALESCE(s.metadata->>'$.content_type','application/octet-stream') AS content_type,s.public_read FROM pack_members m JOIN chunks c ON c.id=m.chunk_id JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id JOIN objects o ON o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.stream_id=s.id JOIN buckets b ON b.id=o.bucket_id LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=",
+        "SELECT DISTINCT o.bucket_id,b.name AS bucket_name,o.object_key AS object_key,s.id AS version,CAST(s.size AS TEXT) AS size,COALESCE(s.metadata->>'$.content_type','application/octet-stream') AS content_type,s.public_read FROM pack_members m JOIN chunks c ON c.id=m.chunk_id JOIN extents e ON e.chunk_id=c.id JOIN streams s ON s.id=e.stream_id JOIN objects o ON o.bucket_id=s.bucket_id AND o.object_key=s.object_key AND o.stream_id=s.id JOIN published_buckets b ON b.id=o.bucket_id LEFT JOIN user_bucket_access a ON a.bucket_id=b.id AND a.user_id=",
     );
     query
         .push_bind(principal.user_id())

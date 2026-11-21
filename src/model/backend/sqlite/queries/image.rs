@@ -64,14 +64,14 @@ pub(in super::super) async fn collision(
 }
 
 pub(in super::super) const IMPORTED: &str =
-    "SELECT image_revision FROM buckets WHERE id=? AND image_import_token=?";
+    "SELECT image_revision FROM published_buckets WHERE id=? AND image_import_token=?";
 
 pub(in super::super) const DELETE: &str = "DELETE FROM image_styles WHERE bucket_id=? AND name=?";
 
 pub(in super::super) const INSERT: &str =
     "INSERT INTO image_styles(bucket_id,name,enabled,body) VALUES(?,?,?,?)";
 
-pub(in super::super) const UPDATE: &str = "UPDATE buckets SET image_revision=?,image_families=?,image_policy=?,image_import_token=? WHERE id=? AND image_revision=?";
+pub(in super::super) const UPDATE: &str = "UPDATE buckets SET image_revision=?,image_families=?,image_policy=?,image_import_token=? WHERE id=? AND restore_job IS NULL AND image_revision=?";
 
 type Tx<'a> = sqlx::Transaction<'a, Db>;
 type StyleRow = (String, bool, String);
@@ -81,7 +81,8 @@ pub(in super::super) async fn settings(
     bucket: uuid::Uuid,
     _lock: bool,
 ) -> sqlx::Result<Option<(i64, Option<String>, i64)>> {
-    let statement = "SELECT image_revision,image_policy,image_families FROM buckets WHERE id=?";
+    let statement =
+        "SELECT image_revision,image_policy,image_families FROM published_buckets WHERE id=?";
     sqlx::query_as(statement)
         .bind(bucket)
         .fetch_optional(&mut **db)

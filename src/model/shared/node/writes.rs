@@ -1541,8 +1541,7 @@ impl NodeWrites for Backend {
             } else {
                 authority.add(source.bucket_id, Action::Read);
             }
-            let src: Uuid = sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=?")
-                .bind(source.bucket_id)
+            let src: Uuid = queries::object_bucket_storage(source.bucket_id)
                 .fetch_one(&mut *tx)
                 .await?;
             let references = src == storage

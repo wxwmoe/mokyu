@@ -9,7 +9,7 @@ pub(in super::super) fn integrity_upper_chunk(storage: Option<Uuid>) -> Scalar<'
 pub(in super::super) fn integrity_scope(query: &mut sqlx::QueryBuilder<Sqlite>, detail: &Detail) {
     if let Some(storage) = detail.storage_id {
         query
-            .push(" AND EXISTS(SELECT 1 FROM buckets b WHERE b.id=o.bucket_id AND b.storage_id=")
+            .push(" AND EXISTS(SELECT 1 FROM published_buckets b WHERE b.id=o.bucket_id AND b.storage_id=")
             .push_bind(storage)
             .push(")");
     }
@@ -238,7 +238,7 @@ pub(in super::super) async fn integrity_objects(
             .await?
             .ok_or_else(|| s3s::s3_error!(NoSuchKey))?;
     let mut query = sqlx::QueryBuilder::<Sqlite>::new(
-        "SELECT o.bucket_id,b.name AS bucket_name,o.object_key,o.stream_id FROM objects o JOIN buckets b ON b.id=o.bucket_id WHERE ",
+        "SELECT o.bucket_id,b.name AS bucket_name,o.object_key,o.stream_id FROM objects o JOIN published_buckets b ON b.id=o.bucket_id WHERE ",
     );
     if let Some(chunk) = chunk {
         query

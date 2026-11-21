@@ -165,7 +165,7 @@ pub(in super::super) fn target<'a>(b: Uuid, k: &'a str) -> Scalar<'a, Option<Id>
 }
 
 pub(in super::super) fn quota_ok(b: Uuid, b2: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar(r#"SELECT NOT EXISTS(SELECT 1 FROM quota_scopes WHERE ((scope='bucket' AND scope_id=?) OR (scope='project' AND scope_id=(SELECT project_id FROM buckets WHERE id=?))) AND logical_bytes_limit IS NOT NULL AND used_bytes+reserved_bytes>logical_bytes_limit)"#).bind(b).bind(b2)
+    sqlx::query_scalar(r#"SELECT NOT EXISTS(SELECT 1 FROM quota_scopes WHERE ((scope='bucket' AND scope_id=?) OR (scope='project' AND scope_id=(SELECT project_id FROM published_buckets WHERE id=?))) AND logical_bytes_limit IS NOT NULL AND used_bytes+reserved_bytes>logical_bytes_limit)"#).bind(b).bind(b2)
 }
 
 pub(in super::super) fn scan<'a>(

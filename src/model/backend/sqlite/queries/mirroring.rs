@@ -34,7 +34,7 @@ pub(in super::super) fn enqueue(input: &crate::model::mirroring::Start) -> State
 }
 
 pub(in super::super) fn record(bucket: Uuid) -> Rows<'static, (i64, Option<Vec<u8>>)> {
-    sqlx::query_as("SELECT COALESCE(m.revision,0),m.config_encrypted FROM buckets b LEFT JOIN bucket_mirroring m ON m.bucket_id=b.id WHERE b.id=?").bind(bucket)
+    sqlx::query_as("SELECT COALESCE(m.revision,0),m.config_encrypted FROM published_buckets b LEFT JOIN bucket_mirroring m ON m.bucket_id=b.id WHERE b.id=?").bind(bucket)
 }
 
 pub(in super::super) fn save(
@@ -144,7 +144,7 @@ pub(in super::super) fn source(task: Uuid, source: Option<(Uuid, i64)>) -> State
 }
 
 pub(in super::super) fn external(id: Uuid, revision: i64, bucket: Uuid) -> Scalar<'static, Uuid> {
-    sqlx::query_scalar("SELECT e.id FROM external_buckets e JOIN buckets b ON b.project_id=e.project_id WHERE e.id=? AND e.revision=? AND e.enabled AND b.id=?").bind(id).bind(revision).bind(bucket)
+    sqlx::query_scalar("SELECT e.id FROM external_buckets e JOIN published_buckets b ON b.project_id=e.project_id WHERE e.id=? AND e.revision=? AND e.enabled AND b.id=?").bind(id).bind(revision).bind(bucket)
 }
 
 pub(in super::super) fn negative(task: Uuid, until: i64, retry: i64) -> Statement<'static> {
@@ -206,7 +206,7 @@ pub(in super::super) fn invalidate(bucket: Uuid) -> Statement<'static> {
 }
 
 pub(in super::super) fn target(bucket: Uuid) -> Scalar<'static, Option<Uuid>> {
-    sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=?").bind(bucket)
+    sqlx::query_scalar("SELECT storage_id FROM published_buckets WHERE id=?").bind(bucket)
 }
 
 pub(in super::super) fn reader(bucket: Uuid, object: &str) -> Rows<'_, (Uuid, Uuid)> {

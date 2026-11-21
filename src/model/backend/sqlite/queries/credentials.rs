@@ -175,7 +175,7 @@ impl CredentialStore for Backend {
         expected_region: &str,
         limit: i64,
     ) -> Result<Vec<crate::app::Bucket>> {
-        Ok(sqlx::query_as("SELECT b.* FROM buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=? AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND c.project_id=b.project_id AND (g.actions & 1)<>0 AND substr(b.name,1,length(?))=? AND b.name>? AND (? IS NULL OR ?=?) ORDER BY b.name LIMIT ?").bind(access).bind(prefix).bind(prefix).bind(after).bind(region).bind(region).bind(expected_region).bind(limit).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT b.* FROM published_buckets b JOIN s3_credential_grants g ON g.bucket_id=b.id JOIN s3_credentials c ON c.access_key_id=g.access_key WHERE g.access_key=? AND c.enabled AND (c.expires_at IS NULL OR c.expires_at>CAST(unixepoch('subsec')*1000000 AS INTEGER)) AND c.project_id=b.project_id AND (g.actions & 1)<>0 AND substr(b.name,1,length(?))=? AND b.name>? AND (? IS NULL OR ?=?) ORDER BY b.name LIMIT ?").bind(access).bind(prefix).bind(prefix).bind(after).bind(region).bind(region).bind(expected_region).bind(limit).fetch_all(&self.read).await?)
     }
 
     async fn credential(&self, access: &str) -> Result<Credential> {

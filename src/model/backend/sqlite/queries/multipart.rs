@@ -80,7 +80,7 @@ pub(in super::super) fn begin_upload_completion<'a>(
 }
 
 pub(in super::super) fn abort_multipart(id: Uuid, expired: bool) -> Statement<'static> {
-    sqlx::query("UPDATE uploads SET state='aborted',touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state IN ('active','completing') AND output_stream IS NULL AND (NOT ? OR (state='active' AND EXISTS(SELECT 1 FROM buckets b JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=uploads.bucket_id AND uploads.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-(CAST(substr(p.multipart_idle_timeout,1,length(p.multipart_idle_timeout)-1) AS INTEGER)*CASE substr(p.multipart_idle_timeout,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000)))").bind(id).bind(expired)
+    sqlx::query("UPDATE uploads SET state='aborted',touched_at=CAST(unixepoch('subsec')*1000000 AS INTEGER) WHERE id=? AND state IN ('active','completing') AND output_stream IS NULL AND (NOT ? OR (state='active' AND EXISTS(SELECT 1 FROM published_buckets b JOIN storage_profiles p ON p.storage_id=b.storage_id WHERE b.id=uploads.bucket_id AND uploads.touched_at<CAST(unixepoch('subsec')*1000000 AS INTEGER)-(CAST(substr(p.multipart_idle_timeout,1,length(p.multipart_idle_timeout)-1) AS INTEGER)*CASE substr(p.multipart_idle_timeout,-1) WHEN 'm' THEN 60 WHEN 'h' THEN 3600 WHEN 'd' THEN 86400 ELSE 1 END)*1000000)))").bind(id).bind(expired)
 }
 
 pub(in super::super) fn lock_upload_active(upload: Uuid) -> Scalar<'static, bool> {
@@ -165,7 +165,7 @@ pub(in super::super) async fn durable_uploads(
     Ok(())
 }
 
-const TRANSFER_VIEW: &str = "SELECT u.id,u.bucket_id,b.name bucket_name,u.object_key,u.state,IIF(w.upload_id IS NULL,'s3','web') source,w.user_id,COALESCE(NULLIF(a.display_name,''),NULLIF(a.username,''),c.label,'S3 application') owner,w.file_name,CAST(w.expected_size AS TEXT) expected_size,CAST(w.part_size AS TEXT) part_size,w.modified_at,CAST(IIF(u.state='completed',COALESCE(s.size,w.expected_size,0),COALESCE((SELECT SUM(quota_size) FROM parts WHERE upload_id=u.id),0)) AS TEXT) received_bytes,(SELECT COUNT(*) FROM parts WHERE upload_id=u.id) parts,CASE WHEN u.state<>'completed' THEN 'pending' WHEN u.durable_at IS NOT NULL THEN 'stored' WHEN u.output_stream IS NULL THEN 'unavailable' WHEN EXISTS(SELECT 1 FROM extents e JOIN chunks ch ON ch.id=e.chunk_id WHERE e.stream_id=u.output_stream AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=ch.id AND l.state='ready') AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=ch.pack_id AND p.state='ready')) THEN 'pending' ELSE 'stored' END remote_state,u.created_at,u.touched_at,p.multipart_idle_timeout,u.durable_at FROM uploads u JOIN buckets b ON b.id=u.bucket_id JOIN storage_profiles p ON p.storage_id=b.storage_id LEFT JOIN web_uploads w ON w.upload_id=u.id LEFT JOIN web_users a ON a.id=w.user_id LEFT JOIN s3_credentials c ON c.access_key_id=u.access_key LEFT JOIN streams s ON s.id=u.output_stream WHERE ";
+const TRANSFER_VIEW: &str = "SELECT u.id,u.bucket_id,b.name bucket_name,u.object_key,u.state,IIF(w.upload_id IS NULL,'s3','web') source,w.user_id,COALESCE(NULLIF(a.display_name,''),NULLIF(a.username,''),c.label,'S3 application') owner,w.file_name,CAST(w.expected_size AS TEXT) expected_size,CAST(w.part_size AS TEXT) part_size,w.modified_at,CAST(IIF(u.state='completed',COALESCE(s.size,w.expected_size,0),COALESCE((SELECT SUM(quota_size) FROM parts WHERE upload_id=u.id),0)) AS TEXT) received_bytes,(SELECT COUNT(*) FROM parts WHERE upload_id=u.id) parts,CASE WHEN u.state<>'completed' THEN 'pending' WHEN u.durable_at IS NOT NULL THEN 'stored' WHEN u.output_stream IS NULL THEN 'unavailable' WHEN EXISTS(SELECT 1 FROM extents e JOIN chunks ch ON ch.id=e.chunk_id WHERE e.stream_id=u.output_stream AND NOT EXISTS(SELECT 1 FROM chunk_encodings l WHERE l.chunk_id=ch.id AND l.state='ready') AND NOT EXISTS(SELECT 1 FROM packs p WHERE p.id=ch.pack_id AND p.state='ready')) THEN 'pending' ELSE 'stored' END remote_state,u.created_at,u.touched_at,p.multipart_idle_timeout,u.durable_at FROM uploads u JOIN published_buckets b ON b.id=u.bucket_id JOIN storage_profiles p ON p.storage_id=b.storage_id LEFT JOIN web_uploads w ON w.upload_id=u.id LEFT JOIN web_users a ON a.id=w.user_id LEFT JOIN s3_credentials c ON c.access_key_id=u.access_key LEFT JOIN streams s ON s.id=u.output_stream WHERE ";
 
 pub(in super::super) fn upload_transfers(
     admin: bool,
@@ -490,10 +490,12 @@ impl MultipartStore for Backend {
         transactions::upload_transfers(self, principal, user, filter, after, id, limit).await
     }
     async fn bucket_name(&self, bucket: Uuid) -> Result<String> {
-        Ok(sqlx::query_scalar("SELECT name FROM buckets WHERE id=?")
-            .bind(bucket)
-            .fetch_one(&self.read)
-            .await?)
+        Ok(
+            sqlx::query_scalar("SELECT name FROM published_buckets WHERE id=?")
+                .bind(bucket)
+                .fetch_one(&self.read)
+                .await?,
+        )
     }
     async fn web_parts(&self, upload: Uuid, after: i32) -> Result<Vec<ReceivedPart>> {
         Ok(sqlx::query_as("SELECT p.part_number AS number,CAST(s.size AS TEXT) AS size,s.etag,json_extract(s.checksums,'$.sha256') AS sha256 FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=? AND p.part_number>? ORDER BY p.part_number LIMIT 1001").bind(upload).bind(after).fetch_all(&self.read).await?)

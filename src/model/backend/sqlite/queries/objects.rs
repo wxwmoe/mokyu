@@ -297,8 +297,7 @@ impl ObjectStore for Backend {
     }
     async fn storage(&self, bucket: Uuid) -> Result<Option<Uuid>> {
         Ok(
-            sqlx::query_scalar("SELECT storage_id FROM buckets WHERE id=?")
-                .bind(bucket)
+            object_bucket_storage(bucket)
                 .fetch_optional(&self.read)
                 .await?,
         )
@@ -381,4 +380,8 @@ pub(in super::super) fn required_keys() -> Scalar<'static, Uuid> {
     sqlx::query_scalar(
         "SELECT DISTINCT block_key_id FROM (SELECT block_key_id FROM chunk_encodings WHERE encryption_algorithm<>'none' AND state<>'deleted' UNION SELECT block_key_id FROM packs WHERE encryption_algorithm<>'none' AND state<>'deleted' UNION SELECT block_key_id FROM chunks WHERE encryption_algorithm<>'none' AND EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=chunks.id)) sources WHERE block_key_id IS NOT NULL",
     )
+}
+
+pub(in super::super) fn object_bucket_storage(bucket: Uuid) -> Scalar<'static, Uuid> {
+    sqlx::query_scalar("SELECT storage_id FROM published_buckets WHERE id=?").bind(bucket)
 }

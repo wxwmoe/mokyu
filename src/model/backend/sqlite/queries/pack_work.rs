@@ -198,9 +198,9 @@ pub(in super::super) async fn next_repack_stream(
     storage: Uuid,
 ) -> Result<Option<Id>> {
     if after == Id::default() {
-        sqlx::query("INSERT INTO pack_repack_queue(task_id,stream_id,saved_gets) SELECT ?,r.stream_id,SUM(r.saved_gets) FROM pack_read_shapes r JOIN streams s ON s.id=r.stream_id JOIN buckets b ON b.id=s.bucket_id WHERE b.storage_id=? AND s.state='ready' AND r.observed_hour<=? AND EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id) GROUP BY r.stream_id HAVING SUM(r.saved_gets)>0 ON CONFLICT(task_id,stream_id) DO NOTHING").bind(task).bind(storage).bind(upper.timestamp()).execute(&mut *db).await?;
+        sqlx::query("INSERT INTO pack_repack_queue(task_id,stream_id,saved_gets) SELECT ?,r.stream_id,SUM(r.saved_gets) FROM pack_read_shapes r JOIN streams s ON s.id=r.stream_id JOIN published_buckets b ON b.id=s.bucket_id WHERE b.storage_id=? AND s.state='ready' AND r.observed_hour<=? AND EXISTS(SELECT 1 FROM objects o WHERE o.stream_id=s.id) GROUP BY r.stream_id HAVING SUM(r.saved_gets)>0 ON CONFLICT(task_id,stream_id) DO NOTHING").bind(task).bind(storage).bind(upper.timestamp()).execute(&mut *db).await?;
     }
-    Ok(sqlx::query_scalar("SELECT q.stream_id FROM pack_repack_queue q LEFT JOIN pack_repack_queue previous ON previous.task_id=q.task_id AND previous.stream_id=? WHERE q.task_id=? AND (previous.stream_id IS NULL OR q.saved_gets<previous.saved_gets OR (q.saved_gets=previous.saved_gets AND (q.stream_id>previous.stream_id OR (q.stream_id=previous.stream_id AND ?>=0)))) AND EXISTS(SELECT 1 FROM streams s JOIN buckets b ON b.id=s.bucket_id WHERE s.id=q.stream_id AND b.storage_id=?) ORDER BY q.saved_gets DESC,q.stream_id LIMIT 1").bind(after).bind(task).bind(offset).bind(storage).fetch_optional(db).await?)
+    Ok(sqlx::query_scalar("SELECT q.stream_id FROM pack_repack_queue q LEFT JOIN pack_repack_queue previous ON previous.task_id=q.task_id AND previous.stream_id=? WHERE q.task_id=? AND (previous.stream_id IS NULL OR q.saved_gets<previous.saved_gets OR (q.saved_gets=previous.saved_gets AND (q.stream_id>previous.stream_id OR (q.stream_id=previous.stream_id AND ?>=0)))) AND EXISTS(SELECT 1 FROM streams s JOIN published_buckets b ON b.id=s.bucket_id WHERE s.id=q.stream_id AND b.storage_id=?) ORDER BY q.saved_gets DESC,q.stream_id LIMIT 1").bind(after).bind(task).bind(offset).bind(storage).fetch_optional(db).await?)
 }
 
 pub(in super::super) async fn next_pack_stream(
@@ -210,7 +210,7 @@ pub(in super::super) async fn next_pack_stream(
     upper: DateTime<Utc>,
     storage: Option<Uuid>,
 ) -> Result<Option<Id>> {
-    Ok(sqlx::query_scalar("SELECT s.id FROM streams s JOIN objects o ON o.stream_id=s.id JOIN buckets b ON b.id=o.bucket_id WHERE s.state='ready' AND (s.id>? OR(s.id=? AND ?>=0)) AND (? IS NULL OR b.storage_id=?) AND s.created_at<=? ORDER BY s.id LIMIT 1").bind(after).bind(after).bind(offset).bind(storage).bind(storage).bind(upper.timestamp_micros()).fetch_optional(db).await?)
+    Ok(sqlx::query_scalar("SELECT s.id FROM streams s JOIN objects o ON o.stream_id=s.id JOIN published_buckets b ON b.id=o.bucket_id WHERE s.state='ready' AND (s.id>? OR(s.id=? AND ?>=0)) AND (? IS NULL OR b.storage_id=?) AND s.created_at<=? ORDER BY s.id LIMIT 1").bind(after).bind(after).bind(offset).bind(storage).bind(storage).bind(upper.timestamp_micros()).fetch_optional(db).await?)
 }
 pub(in super::super) async fn next_pack_change(
     db: impl sqlx::SqliteExecutor<'_>,
@@ -238,7 +238,7 @@ pub(in super::super) async fn next_pack_queue(
     policy: &str,
     storage: Option<Uuid>,
 ) -> Result<Option<(Id, i64, i64)>> {
-    Ok(sqlx::query_as("SELECT pm.stream_id,pm.progress_cursor,pm.generation FROM pack_maintenance pm JOIN streams s ON s.id=pm.stream_id JOIN objects o ON o.stream_id=s.id JOIN buckets b ON b.id=o.bucket_id WHERE pm.next_check_at<=? AND pm.reason=? AND (? IS NULL OR b.storage_id=?) ORDER BY pm.next_check_at,pm.stream_id LIMIT 1").bind(cutoff.timestamp_micros()).bind(policy).bind(storage).bind(storage).fetch_optional(db).await?)
+    Ok(sqlx::query_as("SELECT pm.stream_id,pm.progress_cursor,pm.generation FROM pack_maintenance pm JOIN streams s ON s.id=pm.stream_id JOIN objects o ON o.stream_id=s.id JOIN published_buckets b ON b.id=o.bucket_id WHERE pm.next_check_at<=? AND pm.reason=? AND (? IS NULL OR b.storage_id=?) ORDER BY pm.next_check_at,pm.stream_id LIMIT 1").bind(cutoff.timestamp_micros()).bind(policy).bind(storage).bind(storage).fetch_optional(db).await?)
 }
 pub(in super::super) async fn stream_repack_after(
     db: impl sqlx::SqliteExecutor<'_>,
