@@ -160,6 +160,18 @@ macro_rules! checksums {
 }
 pub(crate) use checksums;
 
+pub(super) fn object_checksum_type(sums: &serde_json::Value) -> Option<ChecksumType> {
+    let values = sums.as_object()?;
+    if let Some(kind) = values.get("type").and_then(serde_json::Value::as_str) {
+        return Some(ChecksumType::from(kind.to_owned()));
+    }
+    // Multipart composite digests carry an explicit type. Untyped stored digests cover the full body.
+    values
+        .values()
+        .any(serde_json::Value::is_string)
+        .then(|| ChecksumType::from("FULL_OBJECT".to_owned()))
+}
+
 pub(super) fn get_read(
     read: super::object::Read,
     checksum_mode: bool,
@@ -181,7 +193,7 @@ pub(super) fn get_read(
     };
     if checksum_mode && !read.partial {
         checksums!(out, &read.checksums);
-        out.checksum_type = checksum(&read.checksums, "type").map(ChecksumType::from);
+        out.checksum_type = object_checksum_type(&read.checksums);
     }
     let mut response = S3Response::new(out);
     response.headers = read.headers;
@@ -203,7 +215,7 @@ pub(super) fn head_read(
     };
     if checksum_mode && !read.partial {
         checksums!(out, &read.checksums);
-        out.checksum_type = checksum(&read.checksums, "type").map(ChecksumType::from);
+        out.checksum_type = object_checksum_type(&read.checksums);
     }
     let mut response = S3Response::new(out);
     response.headers = read.headers;
@@ -518,6 +530,7 @@ impl S3 for Gateway {
             self.0
                 .cache_received(id, b.id, req.input.key.clone(), etag.clone(), received);
             let mut out = PutObjectOutput {
+                checksum_type: object_checksum_type(&sums),
                 version_id: self.0.objects.published_version(id).await?,
                 e_tag: Some(ETag::Strong(etag)),
                 ..Default::default()
@@ -700,7 +713,7 @@ impl S3 for Gateway {
             };
             if i.checksum_mode.is_some() && requested.is_none() {
                 checksums!(out, &s.checksums);
-                out.checksum_type = checksum(&s.checksums, "type").map(ChecksumType::from);
+                out.checksum_type = object_checksum_type(&s.checksums);
             }
             out.body = Some(
                 super::object::identity_body(
@@ -808,7 +821,7 @@ impl S3 for Gateway {
             };
             if i.checksum_mode.is_some() && i.range.is_none() {
                 checksums!(out, &s.checksums);
-                out.checksum_type = checksum(&s.checksums, "type").map(ChecksumType::from);
+                out.checksum_type = object_checksum_type(&s.checksums);
             }
             Ok(S3Response::new(out))
         }

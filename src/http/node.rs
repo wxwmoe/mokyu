@@ -1323,6 +1323,7 @@ impl S3 for Gateway {
                 )
                 .await?;
             let mut output = PutObjectOutput {
+                checksum_type: gateway::object_checksum_type(&sums),
                 version_id,
                 e_tag: Some(ETag::Strong(etag)),
                 ..Default::default()

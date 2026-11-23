@@ -17,9 +17,11 @@ for algorithm in ['CRC32', 'SHA1', 'SHA256']:
     data = os.urandom(256 * 1024)
     field = 'Checksum' + algorithm
     out = s3.put_object(Bucket=bucket, Key='checksum', Body=data, ChecksumAlgorithm=algorithm)
-    assert out[field] == encoded(algorithm, data)
+    assert out[field] == encoded(algorithm, data) and out['ChecksumType'] == 'FULL_OBJECT'
+    head = s3.head_object(Bucket=bucket, Key='checksum', ChecksumMode='ENABLED')
+    assert head[field] == out[field] and head['ChecksumType'] == 'FULL_OBJECT'
     raw, out = read('checksum', ChecksumMode='ENABLED')
-    assert raw == data and out[field] == encoded(algorithm, data)
+    assert raw == data and out[field] == encoded(algorithm, data) and out['ChecksumType'] == 'FULL_OBJECT'
     error('BadDigest', s3.put_object, Bucket=bucket, Key='checksum', Body=b'wrong',
           **{field: encoded(algorithm, data)})
     assert read('checksum')[0] == data
