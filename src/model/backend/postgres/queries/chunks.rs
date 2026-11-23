@@ -36,11 +36,6 @@ pub(in super::super) fn insert_chunk(input: &ChunkCreate) -> Rows<'_, Chunk> {
         .bind(input.stream)
 }
 
-pub(in super::super) fn can_stage_chunk_reuse(id: Id) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT pack_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=$1) FROM chunks WHERE id=$1")
-        .bind(id)
-}
-
 pub(in super::super) fn mark_chunk_uploading(stream: Id, chunk: &Chunk) -> Statement<'_> {
     sqlx::query("UPDATE chunks SET standalone_size=$2,standalone_compressed=$3,nonce=$4,state='uploading' WHERE id=$1 AND state='preparing' AND owner_stream=$5 AND current_encoding_id=$6 AND current_encoding_id=$7 AND storage_id=$8")
         .bind(chunk.id)
@@ -186,10 +181,6 @@ impl ChunkStore for Backend {
 
     async fn storage_for_stream(&self, stream: Id) -> Result<Option<Uuid>> {
         Ok(storage_for_stream(stream).fetch_one(&self.pool).await?)
-    }
-
-    async fn can_stage_reuse(&self, id: Id) -> Result<bool> {
-        Ok(can_stage_chunk_reuse(id).fetch_one(&self.pool).await?)
     }
 
     async fn start_upload(&self, stream: Id, chunk: &Chunk) -> Result<()> {

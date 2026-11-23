@@ -1,4 +1,4 @@
-"""Packed chunk reuse keeps distinct local cache identities across a restart."""
+"""Reusing packed chunks preserves their locations and reads across a restart."""
 import fcntl
 import json
 import os
@@ -48,8 +48,8 @@ def profile(value):
         path.unlink(missing_ok=True)
 
 
-def pending(ids):
-    return db.execute('SELECT count(*) FROM pending_uploads WHERE chunk_id=ANY(%s)', (ids,)).fetchone()[0]
+def mappings(key):
+    return db.execute('SELECT e.chunk_id,c.pack_id FROM objects o JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=o.stream_id JOIN chunks c ON c.id=e.chunk_id WHERE b.name=%s AND o.object_key=%s ORDER BY e.offset_bytes', (bucket, key)).fetchall()
 
 
 def read():
@@ -61,28 +61,24 @@ def read():
 
 original = cli('storage', 'profile', 'show', store)
 try:
-    profile({**original, 'upload_cache': True, 'pack_enabled': True, 'pack_max_size': '32MiB'})
-    marker.with_suffix('.hit').unlink(missing_ok=True)
-    marker.touch()
+    profile({**original, 'cdc_enabled': True, 'deduplication_enabled': True, 'upload_cache': True, 'pack_enabled': True, 'pack_max_size': '32MiB', 'pack_upload_flush_timeout': '1s'})
     s3.put_object(Bucket=bucket, Key=keys[0], Body=raw)
-    ids = [row[0] for row in db.execute('SELECT e.chunk_id FROM objects o JOIN streams s ON s.id=o.stream_id JOIN buckets b ON b.id=o.bucket_id JOIN extents e ON e.stream_id=s.id WHERE b.name=%s AND o.object_key=%s ORDER BY e.offset_bytes', (bucket, keys[0]))]
-    assert len(ids) >= 2 and pending(ids) == len(ids)
-    wait(marker.with_suffix('.hit').exists)
-    marker.unlink()
-    wait(lambda: pending(ids) == 0)
+    def ready_pack():
+        rows = mappings(keys[0])
+        return rows if len(rows) >= 2 and all(pack for _, pack in rows) else None
+    original_pack = wait(ready_pack)
+    ids = [chunk for chunk, _ in original_pack]
+    def check_reuse():
+        assert mappings(keys[0]) == mappings(keys[1]) == original_pack
+        assert db.execute('SELECT count(*) FROM pending_uploads WHERE chunk_id=ANY(%s)', (ids,)).fetchone()[0] == 0
+        assert db.execute('SELECT count(*) FROM cache_pins WHERE chunk_id=ANY(%s)', (ids,)).fetchone()[0] == 0
     assert db.execute("SELECT count(*) FROM chunks c JOIN packs p ON p.id=c.pack_id WHERE c.id=ANY(%s) AND p.state='ready'", (ids,)).fetchone()[0] == len(ids)
     assert db.execute("SELECT count(*) FROM chunk_encodings WHERE chunk_id=ANY(%s) AND state='ready'", (ids,)).fetchone()[0] == 0
 
     marker.with_suffix('.hit').unlink(missing_ok=True)
     marker.touch()
     s3.put_object(Bucket=bucket, Key=keys[1], Body=raw)
-    wait(marker.with_suffix('.hit').exists)
-    rows = db.execute('SELECT chunk_id,staging_object_key,staged_size FROM pending_uploads WHERE chunk_id=ANY(%s)', (ids,)).fetchall()
-    assert len(rows) == len(ids), (len(rows), len(ids))
-    names = [name for _, name, _ in rows]
-    assert len(set(names)) == len(ids) and all(uuid.UUID(name.rsplit('.', 1)[0]).int for name in names), names
-    reserved = sum(size for _, _, size in rows)
-    assert cli('cache', 'status')['reserved_bytes'] >= reserved
+    check_reuse()
     read()
 
     os.kill(int(Path(os.environ['MOKYU_TEST_GATEWAY_PID_FILE']).read_text()), signal.SIGKILL)
@@ -106,16 +102,9 @@ try:
         except AssertionError:
             return False
     wait(ready)
-    assert cli('cache', 'status')['reserved_bytes'] >= reserved
+    check_reuse()
     read()
-    marker.unlink()
-    job = cli('cache', 'flush')['task_id']
-    wait(lambda: cli('task', 'show', job)['state'] in ('completed', 'failed'))
-    assert cli('task', 'show', job)['state'] == 'completed'
-    assert pending(ids) == 0
-    assert db.execute('SELECT count(*) FROM cache_pins WHERE chunk_id=ANY(%s)', (ids,)).fetchone()[0] == 0
-    read()
-    print('PASS packed reuse has distinct cache identities, restart restores pins, flush preserves full and Range reads', flush=True)
+    print('PASS packed reuse preserves member locations and full and Range reads across restart', flush=True)
 finally:
     marker.unlink(missing_ok=True)
     cli('maintenance', 'disable')

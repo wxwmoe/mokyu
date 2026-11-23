@@ -214,9 +214,6 @@ impl ChunkStore for Backend {
     async fn allocate(&self, input: ChunkCreate) -> Result<(Chunk, bool)> {
         transactions::allocate_chunk(&self.write, input).await
     }
-    async fn can_stage_reuse(&self, id: Id) -> Result<bool> {
-        Ok(sqlx::query_scalar("SELECT pack_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM pending_uploads WHERE chunk_id=?) FROM chunks WHERE id=?").bind(id).bind(id).fetch_one(&self.read).await?)
-    }
     async fn start_upload(&self, stream: Id, chunk: &Chunk) -> Result<()> {
         transactions::start_chunk_upload(&self.write, stream, chunk).await
     }

@@ -258,7 +258,7 @@ async fn mysql_upload_cache_contract() -> Result<()> {
     backend.reference(copy, 0, ids[0], 32).await?;
     assert_eq!(backend.status().await?.1.len(), 4);
     assert!(
-        matches!(backend.batch(task,&detail,false).await?,CacheBatch::Encode{rows,..} if rows.len()==1)
+        matches!(backend.batch(task,&detail,false).await?,CacheBatch::Encode{rows,..} if rows.iter().map(|row| row.chunk.id).collect::<Vec<_>>() == ids[..2])
     );
     sqlx::query("DELETE FROM extents WHERE stream_id=?")
         .bind(copy)
@@ -462,7 +462,6 @@ async fn mysql_upload_cache_contract() -> Result<()> {
         .execute(db)
         .await?;
     for (offset, id) in [ids[0], late_chunk.id].into_iter().enumerate() {
-        assert!(backend.can_stage_reuse(id).await?);
         let source = backend.ready_chunk(id).await?.unwrap();
         assert!(source.location_id.is_nil());
         stage(&backend, &source, reused, offset as i64 * 32, false).await?;

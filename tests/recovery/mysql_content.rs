@@ -186,7 +186,6 @@ async fn mysql_content_contract() -> Result<()> {
     );
     lookup.rollback().await?;
     unrelated.rollback().await?;
-    assert!(!backend.can_stage_reuse(physical.id).await?);
     backend.reference(first, 32, physical.id, 32).await?;
     let all = backend.extents_for_copy(first, 0).await?;
     assert_eq!(all.len(), 2);
@@ -368,7 +367,7 @@ async fn mysql_content_contract() -> Result<()> {
     assert!(
         matches!(backend.source(physical.id, false).await?,PhysicalSource::Pack(p) if p.id==pack.into())
     );
-    assert_eq!(backend.inspection_members(pack.into()).await?[0].1, 0);
+    assert_eq!(backend.inspection_members(pack.into()).await?[0].1, 8);
     assert!(backend.inspection(task, pack.into()).await?.is_none());
     backend.record_inspection(task, pack.into(), None).await?;
     backend
@@ -381,7 +380,6 @@ async fn mysql_content_contract() -> Result<()> {
         .bind(physical.id)
         .execute(db)
         .await?;
-    assert!(backend.can_stage_reuse(physical.id).await?);
     // Packed members are charged once per extent at raw size, never as the whole pack.
     super::queries::publish_stream(first).execute(db).await?;
     assert_eq!(

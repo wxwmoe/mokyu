@@ -102,7 +102,6 @@ pub(crate) trait ChunkStore: Send + Sync {
     ) -> Result<super::recovery::RepairAllocation>;
     async fn repair_metadata(&self, repair: &super::recovery::Repair) -> Result<()>;
     async fn finish_repair(&self, repair: &super::recovery::Repair, offset: i64) -> Result<Chunk>;
-    async fn can_stage_reuse(&self, id: Id) -> Result<bool>;
     async fn start_upload(&self, stream: Id, chunk: &Chunk) -> Result<()>;
     async fn reference(&self, stream: Id, offset: i64, chunk_id: Id, raw_size: i32) -> Result<()>;
     async fn complete(&self, stream: Id, offset: i64, chunk: &Chunk) -> Result<()>;

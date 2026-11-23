@@ -46,8 +46,6 @@ impl App {
         offset: i64,
         c: &Chunk,
         data: Bytes,
-        compressed: bool,
-        new: bool,
         profile: &crate::storage::profile::StorageProfile,
     ) -> Result<bool> {
         if !profile.upload_cache {
@@ -63,23 +61,19 @@ impl App {
             self.upload_cache.disable(stream).await?;
             return Ok(false);
         }
-        let buffered = new
-            && self.role == "single"
+        let buffered = self.role == "single"
             && matches!(
                 profile.write_durability.as_deref(),
                 Some("buffered" | "volatile")
             );
-        let memory = (new
-            && self.role == "single"
+        let memory = (self.role == "single"
             && profile.write_durability.as_deref() == Some("volatile"))
         .then(|| self.storage.stage_memory(data.clone()))
         .flatten();
         let staged = if let Some(pin) = memory {
             Ok(Some(pin))
         } else {
-            self.storage
-                .stage_upload(c, data, compressed, buffered)
-                .await
+            self.storage.stage_upload(c, data, false, buffered).await
         };
         let pin = match staged {
             Ok(Some(pin)) => pin,
@@ -111,19 +105,14 @@ impl App {
         };
         let size = pin.size as i64;
         let timeout = config::seconds(&profile.pack_upload_flush_timeout)?;
-        let encoding = new
-            .then(|| {
-                serde_json::to_value(EncodingPolicy {
-                    compression: profile
-                        .compression_config(&self.config.instance.compression_idle_timeout),
-                    pack_enabled: profile.pack_enabled,
-                    pack_max_size: profile.pack_max_size.clone(),
-                    pack_flush_timeout: profile.pack_upload_flush_timeout.clone(),
-                    algorithm: c.algorithm.clone(),
-                    block_key_id: c.block_key_id,
-                })
-            })
-            .transpose()?;
+        let encoding = serde_json::to_value(EncodingPolicy {
+            compression: profile.compression_config(&self.config.instance.compression_idle_timeout),
+            pack_enabled: profile.pack_enabled,
+            pack_max_size: profile.pack_max_size.clone(),
+            pack_flush_timeout: profile.pack_upload_flush_timeout.clone(),
+            algorithm: c.algorithm.clone(),
+            block_key_id: c.block_key_id,
+        })?;
         let boot_id = pin.memory.as_ref().map(|_| self.storage.boot_id);
         let local = !pin.remote;
         let local_id = if local {
@@ -144,14 +133,14 @@ impl App {
                 chunk: c,
                 stream,
                 offset,
-                new,
+                new: true,
                 buffered,
                 boot_id,
                 size,
                 storage,
                 key: &key,
                 timeout,
-                encoding: encoding.as_ref(),
+                encoding: Some(&encoding),
                 node: self
                     .processor_node()
                     .map(|node| (node, self.role.as_str(), &self.secrets.credential_key)),

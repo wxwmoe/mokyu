@@ -128,22 +128,6 @@ impl App {
         if reused {
             #[cfg(feature = "fault-injection")]
             crate::faults::point("source-before-reference").await;
-            if accepted.is_none()
-                && profile.upload_cache
-                && !self.storage.is_native(storage_id)?
-                && self.chunks.can_stage_reuse(c.id).await?
-            {
-                let (data, compressed) = self
-                    .storage
-                    .cache_payload(&c, Bytes::copy_from_slice(&raw))
-                    .await?;
-                if self
-                    .stage_chunk(stream, offset, &c, data, compressed, false, &profile)
-                    .await?
-                {
-                    return Ok(c);
-                }
-            }
             self.reference(stream, offset, &c).await?;
             return Ok(c);
         }
@@ -153,15 +137,7 @@ impl App {
             && profile.upload_cache
             && !self.storage.is_native(storage_id)?
             && self
-                .stage_chunk(
-                    stream,
-                    offset,
-                    &c,
-                    Bytes::copy_from_slice(&raw),
-                    false,
-                    true,
-                    &profile,
-                )
+                .stage_chunk(stream, offset, &c, Bytes::copy_from_slice(&raw), &profile)
                 .await?
         {
             return Ok(c);
