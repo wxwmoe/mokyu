@@ -53,7 +53,7 @@ pub(in super::super) fn namespaces(cluster: Uuid, after: Uuid) -> Rows<'static, 
         .bind(after)
 }
 pub(in super::super) fn gaps(storage: Uuid, group: &str) -> Rows<'_, (i64, i64)> {
-    sqlx::query_as("SELECT COUNT(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(p.intent,'$.area'))='blocks' THEN 1 END),COUNT(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(p.intent,'$.area'))='recovery' THEN 1 END) FROM storage_payloads p WHERE p.namespace_id=? AND (p.state='published' OR EXISTS(SELECT 1 FROM storage_journal_sources s WHERE s.operation=p.operation)) AND NOT EXISTS(SELECT 1 FROM storage_backups b WHERE b.operation=p.operation AND b.storage_group=? AND b.verified_at IS NOT NULL)").bind(storage).bind(group)
+    sqlx::query_as("SELECT COUNT(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(p.intent,'$.area')) AS BINARY)='blocks' THEN 1 END),COUNT(CASE WHEN CAST(JSON_UNQUOTE(JSON_EXTRACT(p.intent,'$.area')) AS BINARY)='recovery' THEN 1 END) FROM storage_payloads p WHERE p.namespace_id=? AND (p.state='published' OR EXISTS(SELECT 1 FROM storage_journal_sources s WHERE s.operation=p.operation)) AND NOT EXISTS(SELECT 1 FROM storage_backups b WHERE b.operation=p.operation AND b.storage_group=? AND b.verified_at IS NOT NULL)").bind(storage).bind(group)
 }
 pub(in super::super) fn slots(operation: Uuid) -> Scalar<'static, i64> {
     sqlx::query_scalar("SELECT COUNT(*) FROM storage_backups WHERE operation=?").bind(operation)
@@ -148,7 +148,7 @@ pub(in super::super) fn finish(id: Uuid, now: i64) -> Statement<'static> {
 }
 
 pub(in super::super) fn publication(namespace: Uuid, operation: Uuid) -> Scalar<'static, i64> {
-    sqlx::query_scalar("SELECT p.revision FROM storage_journal_publications p WHERE p.namespace_id=? AND LOWER(HEX(?))=REPLACE(JSON_UNQUOTE(JSON_EXTRACT(p.proof,'$.publication.parts[0].intent.operation')),'-','') AND p.settled ORDER BY p.revision DESC LIMIT 1").bind(namespace).bind(operation)
+    sqlx::query_scalar("SELECT p.revision FROM storage_journal_publications p WHERE p.namespace_id=? AND LOWER(HEX(?))=REPLACE(CAST(JSON_UNQUOTE(JSON_EXTRACT(p.proof,'$.publication.parts[0].intent.operation')) AS BINARY),'-','') AND p.settled ORDER BY p.revision DESC LIMIT 1").bind(namespace).bind(operation)
 }
 
 pub(in super::super) fn outstanding(media: Uuid, operation: Uuid) -> Scalar<'static, bool> {

@@ -26,6 +26,28 @@ async fn mysql_dialect_and_lock_scope_contract() -> Result<()> {
     let storage = super::storage_tests::fixture(&backend).await?;
     let file = Uuid::from_u128(0x0180ff00_0000_7000_8000_000000000001);
     let missing = Uuid::from_u128(file.as_u128() + 1);
+    assert_eq!(
+        queries::storage_backup::gaps(storage, "empty")
+            .fetch_one(db)
+            .await?,
+        (0, 0)
+    );
+    assert!(
+        queries::storage_backup::publication(storage, missing)
+            .fetch_optional(db)
+            .await?
+            .is_none()
+    );
+    assert!(
+        !queries::storage_move::remains(missing)
+            .fetch_one(db)
+            .await?
+    );
+    assert!(
+        !queries::work::active_location(storage, missing)
+            .fetch_one(db)
+            .await?
+    );
     let mut inventory = db.begin().await?;
     let source = sqlx::query("INSERT INTO raw_sources(location_id,storage_id,state,size,digest,profile_revision,pending_upload) VALUES(?,?,'ready',4,?,1,TRUE)")
         .bind(file).bind(storage).bind(&[7u8; 16][..]).execute(&mut *inventory).await?.last_insert_id();

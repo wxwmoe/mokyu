@@ -178,7 +178,7 @@ pub(in super::super) fn writable() -> Scalar<'static, bool> {
 }
 
 pub(in super::super) fn active_location(storage: Uuid, location: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_permits p JOIN node_work w ON w.token=p.holder WHERE p.storage_id=? AND p.direction='control' AND w.result_hash IS NULL AND w.expires_at>UTC_TIMESTAMP(6) AND JSON_SEARCH(w.plan,'one',?) IS NOT NULL)").bind(storage).bind(location.to_string())
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_permits p JOIN node_work w ON w.token=p.holder WHERE p.storage_id=? AND p.direction='control' AND w.result_hash IS NULL AND w.expires_at>UTC_TIMESTAMP(6) AND JSON_SEARCH(w.plan,'one',CONVERT(? USING utf8mb4) COLLATE utf8mb4_bin) IS NOT NULL)").bind(storage).bind(location.to_string())
 }
 
 pub(in super::super) fn retry_collect(task: Uuid) -> Statement<'static> {

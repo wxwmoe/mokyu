@@ -46,7 +46,7 @@ pub(in super::super) fn prepared(cluster: Uuid, media: Uuid) -> Scalar<'static, 
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_payloads p WHERE p.cluster_id=? AND p.state='prepared' AND JSON_CONTAINS(JSON_EXTRACT(p.intent,'$.members'),JSON_QUOTE(?)))").bind(cluster).bind(media.to_string())
 }
 pub(in super::super) fn remains(media: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_repairs r WHERE LOWER(HEX(?))=REPLACE(JSON_UNQUOTE(JSON_EXTRACT(r.original_receipt,'$.header.media')),'-','') AND NOT r.original_removed AND r.state='installed' UNION ALL SELECT 1 FROM storage_fragments f WHERE f.media_id=? AND NOT f.deleted UNION ALL SELECT 1 FROM storage_reservations WHERE media_id=?)").bind(media).bind(media).bind(media)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_repairs r WHERE LOWER(HEX(?))=REPLACE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.original_receipt,'$.header.media')) AS BINARY),'-','') AND NOT r.original_removed AND r.state='installed' UNION ALL SELECT 1 FROM storage_fragments f WHERE f.media_id=? AND NOT f.deleted UNION ALL SELECT 1 FROM storage_reservations WHERE media_id=?)").bind(media).bind(media).bind(media)
 }
 pub(in super::super) fn retired(
     media: Uuid,
@@ -58,13 +58,13 @@ pub(in super::super) fn cleanup(
     media: Uuid,
     now: i64,
 ) -> Scalar<'static, sqlx::types::Json<crate::model::storage_payload::Intent>> {
-    sqlx::query_scalar("SELECT p.intent FROM storage_repairs r JOIN storage_payloads p ON p.operation=r.operation WHERE LOWER(HEX(?))=REPLACE(JSON_UNQUOTE(JSON_EXTRACT(r.original_receipt,'$.header.media')),'-','') AND r.state='installed' AND NOT r.original_removed AND r.protected_until<=? AND p.collect_after<=? ORDER BY p.collect_after,r.id LIMIT 1").bind(media).bind(now).bind(now)
+    sqlx::query_scalar("SELECT p.intent FROM storage_repairs r JOIN storage_payloads p ON p.operation=r.operation WHERE LOWER(HEX(?))=REPLACE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.original_receipt,'$.header.media')) AS BINARY),'-','') AND r.state='installed' AND NOT r.original_removed AND r.protected_until<=? AND p.collect_after<=? ORDER BY p.collect_after,r.id LIMIT 1").bind(media).bind(now).bind(now)
 }
 pub(in super::super) fn started(media: Uuid, target: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_repairs r WHERE LOWER(HEX(?))=REPLACE(JSON_UNQUOTE(JSON_EXTRACT(r.original_receipt,'$.header.media')),'-','') AND LOWER(HEX(?))=REPLACE(JSON_UNQUOTE(JSON_EXTRACT(r.candidate,'$.media')),'-','') AND r.state IN ('writing','installed'))").bind(media).bind(target)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_repairs r WHERE LOWER(HEX(?))=REPLACE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.original_receipt,'$.header.media')) AS BINARY),'-','') AND LOWER(HEX(?))=REPLACE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.candidate,'$.media')) AS BINARY),'-','') AND r.state IN ('writing','installed'))").bind(media).bind(target)
 }
 pub(in super::super) fn writing(media: Uuid, target: Uuid) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_repairs r WHERE LOWER(HEX(?))=REPLACE(JSON_UNQUOTE(JSON_EXTRACT(r.original_receipt,'$.header.media')),'-','') AND LOWER(HEX(?))=REPLACE(JSON_UNQUOTE(JSON_EXTRACT(r.candidate,'$.media')),'-','') AND r.state='writing')").bind(media).bind(target)
+    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM storage_repairs r WHERE LOWER(HEX(?))=REPLACE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.original_receipt,'$.header.media')) AS BINARY),'-','') AND LOWER(HEX(?))=REPLACE(CAST(JSON_UNQUOTE(JSON_EXTRACT(r.candidate,'$.media')) AS BINARY),'-','') AND r.state='writing')").bind(media).bind(target)
 }
 pub(in super::super) fn lagging(source: Uuid, target: Uuid) -> Rows<'static, (Uuid, i64, i64)> {
     sqlx::query_as("SELECT s.namespace_id,s.revision,COALESCE(t.revision,0) FROM storage_journal_receipts s LEFT JOIN storage_journal_receipts t ON t.namespace_id=s.namespace_id AND t.media_id=? WHERE s.media_id=? AND s.revision>COALESCE(t.revision,0) ORDER BY s.namespace_id LIMIT 1").bind(target).bind(source)
