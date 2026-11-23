@@ -6,7 +6,7 @@ use crate::storage::{
         objects::{self, Condition, Written},
     },
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use axum::http::Method;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
@@ -38,6 +38,34 @@ impl Transfer<'_, '_> {
             .update(id.as_bytes())
             .finalize()
             .as_bytes()
+    }
+    fn check_owner(&self, task: &[u8; 32], upload: &str, owner: [u8; 32]) -> Result<()> {
+        ensure!(
+            owner == self.owner(task, upload),
+            "cannot establish ownership of saved Upload ID"
+        );
+        Ok(())
+    }
+    pub(super) async fn discard_upload(
+        &self,
+        c: &Client,
+        key: &str,
+        task: &[u8; 32],
+    ) -> Result<()> {
+        let saved = self
+            .reader
+            .db
+            .query_row(
+                "SELECT upload,owner FROM dump_uploads WHERE task=?",
+                [task],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, [u8; 32]>(1)?)),
+            )
+            .optional()?;
+        if let Some((id, owner)) = saved {
+            self.check_owner(task, &id, owner)?;
+            self.abort_owned(c, key, task, &id).await?;
+        }
+        Ok(())
     }
     pub(super) fn forget_upload(&self, task: &[u8; 32]) -> Result<()> {
         let tx = self.reader.db.unchecked_transaction()?;
@@ -133,10 +161,7 @@ impl Transfer<'_, '_> {
             .optional()?;
         let mut saved = None;
         if let Some((id, part, size, algo, aborting, owner)) = previous {
-            ensure!(
-                owner == self.owner(&task, &id),
-                "cannot establish ownership of saved Upload ID"
-            );
+            self.check_owner(&task, &id, owner)?;
             let width = u64::try_from(part).unwrap_or(0);
             if aborting
                 || size != self.item.size
@@ -162,10 +187,13 @@ impl Transfer<'_, '_> {
         } else {
             let width = part_width(self.size(), configured)?;
             let (id, algo) = self.start(c, key, meta).await?;
-            db.execute(
+            if let Err(error) = db.execute(
                 "INSERT INTO dump_uploads(task,upload,part_size,size,checksums,owner) VALUES(?,?,?,?,?,?)",
                 params![task, id, i64::try_from(width)?, self.item.size, algo,self.owner(&task,&id)],
-            )?;
+            ) {
+                c.abort_upload(key, &id).await.with_context(|| format!("recording Multipart upload failed: {error}"))?;
+                return Err(error.into());
+            }
             (id, width, algo, BTreeMap::new())
         };
         let count = u16::try_from(self.size().div_ceil(width))?;

@@ -50,12 +50,16 @@ impl Transfer<'_, '_> {
         if let Some(out) = self.check_local(&final_path).await? {
             if let Some((token, dev, ino, ..)) = record {
                 let part = base.join(format!(".mokyu-dump-{}.part", token.simple()));
-                if let Ok(meta) = fs::symlink_metadata(&part)
-                    && meta.dev().to_be_bytes() == dev
-                    && meta.ino().to_be_bytes() == ino
-                {
-                    fs::remove_file(part)?;
-                    dir.sync_all()?;
+                match fs::symlink_metadata(&part) {
+                    Ok(meta)
+                        if meta.dev().to_be_bytes() == dev && meta.ino().to_be_bytes() == ino =>
+                    {
+                        fs::remove_file(part)?;
+                        dir.sync_all()?;
+                    }
+                    Ok(_) => (),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(e) => return Err(e.into()),
                 }
                 db.execute("DELETE FROM dump_files WHERE task=?", [task])?;
             }
@@ -112,7 +116,7 @@ impl Transfer<'_, '_> {
             dir.sync_all()?;
             let m = file.metadata()?;
             let h = blake3::Hasher::new();
-            db.execute(
+            if let Err(error) = db.execute(
                 "INSERT OR REPLACE INTO dump_files VALUES(?,?,?,?,0,?)",
                 params![
                     task,
@@ -121,7 +125,11 @@ impl Transfer<'_, '_> {
                     m.ino().to_be_bytes(),
                     h.finalize().as_bytes()
                 ],
-            )?;
+            ) {
+                fs::remove_file(&part)?;
+                dir.sync_all()?;
+                return Err(error.into());
+            }
             (file, part, 0, h)
         };
         let reused = at;
@@ -140,16 +148,21 @@ impl Transfer<'_, '_> {
         }
         self.finish_digest().await?;
         file.sync_all()?;
+        let mut outcome = if reused == 0 {
+            Outcome::Published
+        } else {
+            Outcome::Resumed(reused)
+        };
         if self.policy == Policy::Overwrite {
             fs::rename(&part, &final_path)?;
         } else {
             match fs::hard_link(&part, &final_path) {
                 Ok(()) => (),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    return self
+                    outcome = self
                         .check_local(&final_path)
                         .await?
-                        .context("concurrent target disappeared");
+                        .context("concurrent target disappeared")?;
                 }
                 Err(e) => return Err(e.into()),
             }
@@ -157,10 +170,6 @@ impl Transfer<'_, '_> {
         }
         dir.sync_all()?;
         db.execute("DELETE FROM dump_files WHERE task=?", [task])?;
-        Ok(if reused == 0 {
-            Outcome::Published
-        } else {
-            Outcome::Resumed(reused)
-        })
+        Ok(outcome)
     }
 }

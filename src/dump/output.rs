@@ -361,13 +361,16 @@ impl Transfer<'_, '_> {
             .await
             .unwrap_or(false)
             {
-                self.forget_upload(&task)?;
+                self.discard_upload(c, key, &task).await?;
                 return Ok(Outcome::Verified);
             }
         }
         let condition = match self.remote_state(c, key, dest).await? {
             Ok(v) => v,
-            Err(out) => return Ok(out),
+            Err(out) => {
+                self.discard_upload(c, key, &task).await?;
+                return Ok(out);
+            }
         };
         let metadata = verify::headers(&self.attrs)?;
         let active = self.reader.db.query_row(
@@ -395,6 +398,7 @@ impl Transfer<'_, '_> {
                 if !matches!(self.policy, Policy::Overwrite)
                     && let Err(out) = self.remote_state(c, key, dest).await?
                 {
+                    self.discard_upload(c, key, &task).await?;
                     return Ok(out);
                 }
                 return Err(e);
