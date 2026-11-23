@@ -1062,12 +1062,7 @@ impl App {
             .access_key
             .as_str();
         self.authorize(Some(access), b.id, Action::List).await?;
-        if i.encoding_type
-            .as_ref()
-            .is_some_and(|v| v.as_str() != "url")
-        {
-            return Err(s3_error!(InvalidArgument, "encoding-type must be url").into());
-        }
+        crate::app::listing::url_encoding(i.encoding_type.as_ref())?;
         let limit = i.max_uploads.unwrap_or(1000);
         if !(0..=1000).contains(&limit) {
             return Err(s3_error!(InvalidArgument).into());

@@ -244,6 +244,14 @@ pub(crate) fn bucket_token(
 ) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&(access, prefix, region, last))?))
 }
+pub(crate) fn url_encoding(kind: Option<&s3s::dto::EncodingType>) -> s3s::S3Result<bool> {
+    match kind.map(|value| value.as_str()) {
+        None => Ok(false),
+        Some("url") => Ok(true),
+        Some(_) => Err(s3s::s3_error!(InvalidArgument, "encoding-type must be url")),
+    }
+}
+
 pub fn encode_key(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {

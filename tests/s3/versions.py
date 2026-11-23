@@ -17,6 +17,12 @@ client = boto3.client(
 )
 bucket = credential["bucket"]
 key = "history/" + uuid.uuid4().hex
+try:
+    client.list_object_versions(Bucket=bucket, EncodingType="invalid")
+except ClientError as error:
+    assert error.response["Error"]["Code"] == "InvalidArgument", error.response
+else:
+    raise AssertionError("version listing accepted an unknown encoding")
 client.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
 target = {"Bucket": bucket, "Key": key}
 try:

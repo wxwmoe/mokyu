@@ -14,13 +14,8 @@ pub(crate) fn listing(
     page: Page,
 ) -> Result<S3Response<ListObjectVersionsOutput>> {
     let limit = selection(&input).limit()?;
-    let encode = |k: String| {
-        if input.encoding_type.is_some() {
-            encode_key(&k)
-        } else {
-            k
-        }
-    };
+    let encoded = url_encoding(input.encoding_type.as_ref())?;
+    let encode = |k: String| if encoded { encode_key(&k) } else { k };
     let mut versions = Vec::new();
     let mut markers = Vec::new();
     for row in page.rows {

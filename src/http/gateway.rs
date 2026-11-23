@@ -1,6 +1,6 @@
 pub(super) mod versions;
 use crate::{
-    app::listing::encode_key,
+    app::listing::{encode_key, url_encoding},
     app::{App, Metadata, StoredStream, internal},
     authorization::Action,
     content::codec,
@@ -1270,13 +1270,7 @@ pub(super) fn listed_objects(
     if !(0..=1000).contains(&n) {
         return Err(s3_error!(InvalidArgument).into());
     }
-    if i.encoding_type
-        .as_ref()
-        .is_some_and(|v| v.as_str() != "url")
-    {
-        return Err(s3_error!(InvalidArgument, "encoding-type must be url").into());
-    }
-    let encoded = i.encoding_type.is_some();
+    let encoded = url_encoding(i.encoding_type.as_ref())?;
     let encode = |s: String| if encoded { encode_key(&s) } else { s };
     let count = objects.len() + prefixes.len();
     let contents = objects

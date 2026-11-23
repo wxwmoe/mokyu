@@ -115,14 +115,9 @@ pub(crate) fn output(
     i: ListMultipartUploadsInput,
     result: UploadListing,
 ) -> Result<S3Response<ListMultipartUploadsOutput>> {
-    ensure!(
-        i.encoding_type
-            .as_ref()
-            .is_none_or(|value| value.as_str() == "url"),
-        s3s::s3_error!(InvalidArgument, "encoding-type must be url")
-    );
+    let encoded = crate::app::listing::url_encoding(i.encoding_type.as_ref())?;
     let encode = |s: String| {
-        if i.encoding_type.is_some() {
+        if encoded {
             crate::app::listing::encode_key(&s)
         } else {
             s
