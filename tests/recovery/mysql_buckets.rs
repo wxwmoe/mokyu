@@ -55,6 +55,8 @@ async fn mysql_bucket_contract() -> Result<()> {
     let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
     let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
     let backend = connection::open(&config, &secrets, &budget, "single").await?;
+    crate::model::RuntimeSettingsStore::ensure(&backend, &crate::model::runtime_defaults(&config))
+        .await?;
     let db = &backend.pool;
     let storage = super::storage_tests::fixture(&backend).await?;
     let admin = backend.initialize_admin("admin", "password", false).await?;
@@ -136,7 +138,7 @@ async fn mysql_bucket_contract() -> Result<()> {
             .is_err()
     );
     let (row, domains, journal) = backend.settings(bucket.id).await?;
-    assert!(journal.is_none());
+    assert_eq!(journal, Some(false));
     assert_eq!(domains, vec!["a.example", "b.example"]);
     assert_eq!(row.settings_revision, 2);
     assert_eq!(backend.by_host("a.example").await?.unwrap().id, bucket.id);

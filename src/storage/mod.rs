@@ -71,7 +71,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet},
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
@@ -3313,6 +3313,7 @@ impl Storage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     #[test]
     fn sweep_accepts_only_canonical_sharded_keys() {
         let id = Uuid::parse_str("084f2ff912ff4c6daef1b416fee7b800").unwrap();

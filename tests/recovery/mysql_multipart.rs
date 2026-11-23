@@ -127,6 +127,8 @@ async fn mysql_multipart_contract() -> Result<()> {
     let path = std::env::var("MOKYU_TEST_MYSQL_CONFIG")?;
     let (config, secrets, budget) = Config::load(std::path::Path::new(&path))?;
     let backend = connection::open(&config, &secrets, &budget, "single").await?;
+    crate::model::RuntimeSettingsStore::ensure(&backend, &crate::model::runtime_defaults(&config))
+        .await?;
     let db = &backend.pool;
     let storage = super::storage_tests::fixture(&backend).await?;
     let bucket = Uuid::new_v4();

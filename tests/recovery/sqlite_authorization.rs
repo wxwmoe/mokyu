@@ -89,9 +89,9 @@ async fn sqlite_authorization_contract() -> Result<()> {
     assert!(backend.admin(&node).await.is_err());
     assert!(backend.service("missing").await.is_err());
 
-    assert_eq!(queries::action_bits(&Action::ALL), 127);
+    assert_eq!(queries::action_bits(&Action::ALL), 2047);
     assert_eq!(queries::action_bits(&Action::role("reader")), 67);
-    assert_eq!(queries::action_bits(&Action::role("writer")), 95);
+    assert_eq!(queries::action_bits(&Action::role("writer")), 479);
     for action in Action::ALL {
         assert_eq!(queries::actions(queries::action_bit(action)), vec![action]);
     }
@@ -132,7 +132,7 @@ async fn sqlite_authorization_contract() -> Result<()> {
         Action::role("reader")
     );
     assert!(
-        sqlx::query("UPDATE member_bucket_grants SET actions=128 WHERE user_id=?")
+        sqlx::query("UPDATE member_bucket_grants SET actions=2048 WHERE user_id=?")
             .bind(member)
             .execute(db)
             .await
@@ -142,7 +142,7 @@ async fn sqlite_authorization_contract() -> Result<()> {
 
     let token = Uuid::new_v4();
     sqlx::query("INSERT INTO api_tokens(id,user_id,label,token_hash,prefix,system_access,auth_revision) VALUES(?,?,'test',?,'test',TRUE,0)").bind(token).bind(member).bind([8u8;32].as_slice()).execute(db).await?;
-    sqlx::query("INSERT INTO token_bucket_grants(token_id,bucket_id,actions) VALUES(?,?,127)")
+    sqlx::query("INSERT INTO token_bucket_grants(token_id,bucket_id,actions) VALUES(?,?,2047)")
         .bind(token)
         .bind(bucket)
         .execute(db)
