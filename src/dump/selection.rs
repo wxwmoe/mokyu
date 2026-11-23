@@ -1,7 +1,10 @@
 use super::{Identity, origin::physical};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::path::{Component, Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Component, Path, PathBuf},
+};
 use uuid::Uuid;
 
 pub(super) struct Selection {
@@ -100,7 +103,7 @@ impl Selection {
         );
         Ok((n, bytes))
     }
-    pub fn list(&self, db: &Connection) -> Result<()> {
+    pub fn list(&self, db: &Connection, mut out: impl Write) -> Result<()> {
         let mut previous = String::new();
         self.visit(db, |item| {
             let relative = if self.recursive {
@@ -108,14 +111,16 @@ impl Selection {
             } else {
                 &item.key
             };
-            if let Some((dir, _)) = relative.split_once('/') {
+            if self.recursive
+                && let Some((dir, _)) = relative.split_once('/')
+            {
                 let dir = format!("{dir}/");
                 if previous != dir {
-                    println!("{}", dir.escape_debug());
+                    writeln!(out, "{}", dir.escape_debug())?;
                     previous = dir;
                 }
             } else {
-                println!("{}\t{} B", relative.escape_debug(), item.size);
+                writeln!(out, "{}\t{} B", relative.escape_debug(), item.size)?;
             }
             Ok(())
         })?;
@@ -288,4 +293,32 @@ pub(super) fn preview(
     }
     println!("{count} objects, {bytes} B total");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_distinguishes_exact_keys_from_prefixes() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(crate::storage::journal::catalog::Catalog::SCHEMA)?;
+        let bucket = Uuid::new_v4();
+        db.execute("INSERT INTO buckets VALUES(?,1,'media',3,0,1)", [bucket])?;
+        for (seq, key) in (1_i64..).zip(["photos/a", "photos/sub/b", "photos/sub/c"]) {
+            db.execute(
+                "INSERT INTO objects VALUES(?,1,?,?,4,NULL)",
+                params![bucket, key, seq],
+            )?;
+        }
+        for (uri, expected) in [
+            ("mokyu://media/photos/sub/b", "photos/sub/b\t4 B\n"),
+            ("mokyu://media/photos/", "a\t4 B\nsub/\n"),
+        ] {
+            let mut output = Vec::new();
+            Selection::parse(&db, uri)?.list(&db, &mut output)?;
+            assert_eq!(output, expected.as_bytes());
+        }
+        Ok(())
+    }
 }

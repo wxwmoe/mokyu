@@ -202,7 +202,7 @@ pub(crate) async fn run(args: Args) -> Result<()> {
     };
     let selection = Selection::parse(&db, uri)?;
     let Some(dest) = dest else {
-        return selection.list(&db);
+        return selection.list(&db, std::io::stdout().lock());
     };
     let target = Target::parse(dest, &selection)?;
     if args.preview {
