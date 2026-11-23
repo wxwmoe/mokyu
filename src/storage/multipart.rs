@@ -7,6 +7,50 @@ use object_store::ObjectStoreExt;
 use std::{collections::HashSet, sync::atomic::Ordering};
 
 impl Storage {
+    pub(crate) async fn recovery_fragment_intact(
+        &self,
+        source: &crate::model::FragmentSource,
+    ) -> Result<bool> {
+        let error = match self.read_fragment(source.location_id, source).await {
+            Ok(bytes) => return Ok(source.matches(&bytes)),
+            Err(error) => error,
+        };
+        let wrong_length = matches!(
+            error.downcast_ref::<crate::content::codec::IntegrityError>(),
+            Some(crate::content::codec::IntegrityError::Length)
+        );
+        if let (Some(storage), Some(key)) = (source.staging_storage_id, &source.staging_object_key)
+        {
+            let not_found = |e: &anyhow::Error| {
+                matches!(
+                    e.downcast_ref::<object_store::Error>(),
+                    Some(object_store::Error::NotFound { .. })
+                )
+            };
+            if wrong_length || not_found(&error) {
+                // A shard or a partial response can fail while the staged object still exists.
+                match self
+                    .head_path_for(storage, &object_store::path::Path::from(key.as_str()))
+                    .await
+                {
+                    Ok(meta) if meta.size != source.size as u64 => return Ok(false),
+                    Err(head) if not_found(&head) => return Ok(false),
+                    _ => (),
+                }
+            }
+        } else if wrong_length
+            || error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof
+                )
+            })
+        {
+            return Ok(false);
+        }
+        Err(error)
+    }
+
     pub(crate) fn remote_charge(
         &self,
         storage: uuid::Uuid,

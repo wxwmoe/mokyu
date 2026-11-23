@@ -222,29 +222,29 @@ impl App {
             }
         }
         let mut cursor = Id::default();
+        let node = self.node.get().map(|local| local.node_id);
         loop {
-            let rows = self.maintenance_store.recovery_fragments(cursor).await?;
+            let rows = self
+                .maintenance_store
+                .recovery_fragments(cursor, node)
+                .await?;
             if rows.is_empty() {
                 break;
             }
             for row in rows {
-                let id = row.id;
-                let source = row.source;
-                let data = self
-                    .storage
-                    .read_fragment(source.location_id, &source)
-                    .await;
-                if !data.is_ok_and(|bytes| {
-                    bytes.len() == source.size as usize
-                        && blake3::hash(&bytes).as_bytes() == source.hash.as_slice()
-                }) {
-                    let uploads: Vec<Uuid> = self.maintenance_store.fragment_uploads(id).await?;
-                    for upload in uploads {
-                        self.abort_upload(upload).await?;
-                        tracing::error!(upload_id=%upload,fragment_id=%id,"multipart source missing or corrupt; upload invalidated");
+                cursor = row.id;
+                match self.storage.recovery_fragment_intact(&row.source).await {
+                    Ok(true) => continue,
+                    Err(error) => {
+                        tracing::warn!(fragment_id=%row.id, %error, "could not verify multipart source; keeping upload");
+                        continue;
                     }
+                    Ok(false) => (),
                 }
-                cursor = id;
+                for upload in self.maintenance_store.fragment_uploads(row.id).await? {
+                    self.abort_upload(upload).await?;
+                    tracing::error!(upload_id=%upload,fragment_id=%row.id,"multipart source missing or corrupt; upload invalidated");
+                }
             }
         }
         Ok(())

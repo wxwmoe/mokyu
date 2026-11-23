@@ -184,7 +184,7 @@ async fn mysql_maintenance_contract() -> Result<()> {
         .bind(location_id)
         .fetch_one(db)
         .await?;
-    let recovery = backend.recovery_fragments(Id::default()).await?;
+    let recovery = backend.recovery_fragments(Id::default(), None).await?;
     assert_eq!(recovery[0].source.location_id, location_id);
     assert_eq!(recovery.len(), 1);
     assert_eq!(
@@ -199,7 +199,7 @@ async fn mysql_maintenance_contract() -> Result<()> {
         recovery[0].source.staging_storage_id.is_none()
             && recovery[0].source.staging_object_key.is_none()
     );
-    assert!(backend.recovery_fragments(fragment).await?.is_empty());
+    assert!(backend.recovery_fragments(fragment, None).await?.is_empty());
     assert!(backend.claim_fragment(fragment).await?.is_none());
     assert!(
         backend

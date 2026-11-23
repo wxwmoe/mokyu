@@ -76,6 +76,14 @@ pub(crate) struct FragmentSource {
     pub(crate) raw_source: Option<Uuid>,
 }
 
+impl FragmentSource {
+    pub(crate) fn matches(&self, bytes: &[u8]) -> bool {
+        bytes.len() == self.size as usize
+            && bytes.len() <= crate::content::codec::MAX
+            && blake3::hash(bytes).as_bytes() == self.hash.as_slice()
+    }
+}
+
 #[async_trait]
 pub(crate) trait ChunkStore: Send + Sync {
     async fn storage_for_stream(&self, stream: Id) -> Result<Option<Uuid>>;

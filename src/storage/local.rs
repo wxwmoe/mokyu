@@ -133,10 +133,16 @@ mod tests {
 pub async fn read_bounded(path: impl AsRef<std::path::Path>, max: usize) -> Result<Vec<u8>> {
     let f = tokio::fs::File::open(path).await?;
     let size = f.metadata().await?.len();
-    ensure!(size <= max as u64, "local file exceeds bound");
+    ensure!(
+        size <= max as u64,
+        crate::content::codec::IntegrityError::Length
+    );
     let mut bytes = Vec::with_capacity(size as usize);
     f.take(max as u64 + 1).read_to_end(&mut bytes).await?;
-    ensure!(bytes.len() <= max, "local file exceeds bound");
+    ensure!(
+        bytes.len() <= max,
+        crate::content::codec::IntegrityError::Length
+    );
     Ok(bytes)
 }
 

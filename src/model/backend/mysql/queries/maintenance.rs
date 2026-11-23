@@ -553,8 +553,12 @@ impl MaintenanceStore for Backend {
                 .await?,
         )
     }
-    async fn recovery_fragments(&self, after: Id) -> Result<Vec<RecoveryFragment>> {
-        Ok(sqlx::query_as("SELECT f.id,f.location_id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>? AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) AND NOT EXISTS(SELECT 1 FROM multipart_tails t WHERE t.fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after).fetch_all(&self.pool).await?)
+    async fn recovery_fragments(
+        &self,
+        after: Id,
+        node: Option<Uuid>,
+    ) -> Result<Vec<RecoveryFragment>> {
+        Ok(sqlx::query_as("SELECT f.id,f.location_id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>? AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) AND (m.node_id IS NULL OR m.node_id=? OR f.staging_storage_id IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM multipart_tails t WHERE t.fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after).bind(node).fetch_all(&self.pool).await?)
     }
     async fn fragment_uploads(&self, id: Id) -> Result<Vec<Uuid>> {
         Ok(sqlx::query_scalar("SELECT DISTINCT p.upload_id FROM parts p JOIN extents e ON e.stream_id=p.stream_id WHERE e.fragment_id=?").bind(id).fetch_all(&self.pool).await?)

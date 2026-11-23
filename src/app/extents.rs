@@ -434,12 +434,7 @@ impl App {
                 .read_fragment(source.location_id, &source)
                 .await
                 .context("multipart fragment missing")?;
-            ensure!(
-                data.len() == source.size as usize
-                    && data.len() <= MAX
-                    && blake3::hash(&data).as_bytes() == source.hash.as_slice(),
-                "local fragment integrity mismatch"
-            );
+            ensure!(source.matches(&data), "local fragment integrity mismatch");
             Bytes::from(data)
         };
         e.slice(data)

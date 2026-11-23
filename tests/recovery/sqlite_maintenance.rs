@@ -119,7 +119,7 @@ async fn sqlite_maintenance_contract() -> Result<()> {
         .bind(location_id)
         .fetch_one(db)
         .await?;
-    let recovery = backend.recovery_fragments(Id::default()).await?;
+    let recovery = backend.recovery_fragments(Id::default(), None).await?;
     assert_eq!(recovery[0].source.location_id, location_id);
     assert_eq!(recovery.len(), 1);
     assert_eq!(
@@ -134,7 +134,34 @@ async fn sqlite_maintenance_contract() -> Result<()> {
         recovery[0].source.staging_storage_id.is_none()
             && recovery[0].source.staging_object_key.is_none()
     );
-    assert!(backend.recovery_fragments(fragment).await?.is_empty());
+    assert!(backend.recovery_fragments(fragment, None).await?.is_empty());
+    let file = Uuid::new_v4();
+    let owner = Uuid::new_v4();
+    sqlx::query("INSERT INTO multipart_files(id,storage_id,node_id) VALUES(?,?,?)")
+        .bind(file)
+        .bind(storage)
+        .bind(owner)
+        .execute(db)
+        .await?;
+    sqlx::query("UPDATE fragments SET file_id=?,file_offset=0 WHERE id=?")
+        .bind(file)
+        .bind(fragment)
+        .execute(db)
+        .await?;
+    for (node, count) in [(None, 0), (Some(Uuid::new_v4()), 0), (Some(owner), 1)] {
+        assert_eq!(
+            backend.recovery_fragments(Id::default(), node).await?.len(),
+            count
+        );
+    }
+    sqlx::query("UPDATE fragments SET file_id=NULL,file_offset=NULL WHERE id=?")
+        .bind(fragment)
+        .execute(db)
+        .await?;
+    sqlx::query("DELETE FROM multipart_files WHERE id=?")
+        .bind(file)
+        .execute(db)
+        .await?;
     assert!(backend.claim_fragment(fragment).await?.is_none());
     assert!(
         backend

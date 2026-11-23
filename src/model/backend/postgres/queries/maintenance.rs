@@ -128,8 +128,11 @@ pub(in super::super) fn fragment_indexed(id: Uuid) -> Scalar<'static, bool> {
     sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM fragments f WHERE f.id=$1 AND (f.staging_storage_id IS NULL OR EXISTS(SELECT 1 FROM node_read_sources nr JOIN node_read_windows v ON v.id=nr.window_id JOIN stream_leases l ON l.id=v.read_id WHERE nr.kind='fragment' AND nr.location_id=f.id AND l.expires_at>clock_timestamp()))) OR EXISTS(SELECT 1 FROM multipart_files WHERE id=$1)").bind(id)
 }
 
-pub(in super::super) fn recovery_fragments(after: Id) -> Rows<'static, RecoveryFragment> {
-    sqlx::query_as("SELECT f.id,f.id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>$1 AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) AND NOT EXISTS(SELECT 1 FROM multipart_tails t WHERE t.fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after)
+pub(in super::super) fn recovery_fragments(
+    after: Id,
+    node: Option<Uuid>,
+) -> Rows<'static, RecoveryFragment> {
+    sqlx::query_as("SELECT f.id,f.id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM fragments f LEFT JOIN multipart_files m ON m.id=f.file_id WHERE f.id>$1 AND EXISTS(SELECT 1 FROM extents WHERE fragment_id=f.id) AND (m.node_id IS NULL OR m.node_id=$2 OR f.staging_storage_id IS NOT NULL) AND NOT EXISTS(SELECT 1 FROM multipart_tails t WHERE t.fragment_id=f.id) ORDER BY f.id LIMIT 128").bind(after).bind(node)
 }
 
 pub(in super::super) fn fragment_uploads(id: Id) -> Scalar<'static, Uuid> {
@@ -595,8 +598,14 @@ impl MaintenanceStore for Backend {
     async fn fragment_exists(&self, id: Uuid) -> Result<bool> {
         Ok(fragment_indexed(id).fetch_one(&self.pool).await?)
     }
-    async fn recovery_fragments(&self, after: Id) -> Result<Vec<RecoveryFragment>> {
-        Ok(recovery_fragments(after).fetch_all(&self.pool).await?)
+    async fn recovery_fragments(
+        &self,
+        after: Id,
+        node: Option<Uuid>,
+    ) -> Result<Vec<RecoveryFragment>> {
+        Ok(recovery_fragments(after, node)
+            .fetch_all(&self.pool)
+            .await?)
     }
     async fn fragment_uploads(&self, id: Id) -> Result<Vec<Uuid>> {
         Ok(fragment_uploads(id).fetch_all(&self.pool).await?)

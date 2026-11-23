@@ -1442,7 +1442,7 @@ impl Storage {
                 (offset as u64)
                     .checked_add(source.size as u64)
                     .is_some_and(|end| end <= length),
-                "multipart range exceeds file"
+                codec::IntegrityError::Length
             );
             file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
             let mut bytes = vec![0; source.size as usize];
