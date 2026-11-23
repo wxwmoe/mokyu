@@ -281,10 +281,11 @@ impl MultipartStore for Backend {
     async fn pending_files(
         &self,
         storage: Option<Uuid>,
-        _node: Option<Uuid>,
+        node: Option<Uuid>,
+        include_unowned: bool,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
-        Ok(sqlx::query_as("SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE reclaim_pending AND state='sealed' AND (? IS NULL OR storage_id=?) ORDER BY id LIMIT ?").bind(storage).bind(storage).bind(limit).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE (node_id=? OR (node_id IS NULL AND ?)) AND part_stream IS NULL AND reclaim_pending AND state='sealed' AND (? IS NULL OR storage_id=?) ORDER BY id LIMIT ?").bind(node).bind(include_unowned).bind(storage).bind(storage).bind(limit).fetch_all(&self.read).await?)
     }
     async fn clear_reclaim(&self, id: Uuid) -> Result<()> {
         sqlx::query(
@@ -332,15 +333,16 @@ impl MultipartStore for Backend {
         stream: Id,
         after: i64,
     ) -> Result<Vec<crate::model::multipart::LocalPartRange>> {
-        Ok(sqlx::query_as("SELECT e.offset_bytes,e.length,e.source_offset,e.fragment_id,f.location_id AS fragment_location,f.size,f.hash,f.staging_storage_id,f.staging_object_key,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM extents e LEFT JOIN fragments f ON f.id=e.fragment_id LEFT JOIN multipart_files m ON m.id=f.file_id WHERE e.stream_id=? AND e.offset_bytes>=? ORDER BY e.offset_bytes LIMIT 64").bind(stream).bind(after).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT e.offset_bytes,e.length,e.source_offset,CASE WHEN f.staging_storage_id IS NULL THEN e.fragment_id END AS fragment_id,f.location_id AS fragment_location,f.size,f.hash,f.file_id,f.file_offset,m.storage_id AS file_storage,CASE WHEN m.source_id IS NOT NULL THEN m.id END AS raw_source FROM extents e LEFT JOIN fragments f ON f.id=e.fragment_id LEFT JOIN multipart_files m ON m.id=f.file_id WHERE e.stream_id=? AND e.offset_bytes>=? ORDER BY e.offset_bytes LIMIT 64").bind(stream).bind(after).fetch_all(&self.read).await?)
     }
     async fn unused_files(
         &self,
         storage: Option<Uuid>,
-        _node: Option<Uuid>,
+        node: Option<Uuid>,
+        include_unowned: bool,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
-        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE f.part_stream IS NULL AND (? IS NULL OR storage_id=?) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT ?").bind(storage).bind(storage).bind(limit).fetch_all(&self.read).await?)
+        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE (f.node_id=? OR (f.node_id IS NULL AND ?)) AND f.part_stream IS NULL AND (? IS NULL OR storage_id=?) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT ?").bind(node).bind(include_unowned).bind(storage).bind(storage).bind(limit).fetch_all(&self.read).await?)
     }
     async fn claim_file(&self, id: Uuid) -> Result<bool> {
         Ok(sqlx::query("UPDATE multipart_files AS f SET state='deleting' WHERE id=? AND f.part_stream IS NULL AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing')))").bind(id).execute(&self.write).await?.rows_affected()>0)

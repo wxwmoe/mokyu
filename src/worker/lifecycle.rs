@@ -407,10 +407,11 @@ impl App {
         let mut removed = 0;
         let mut compacted = 0;
         {
-            let owner = self.processor_node().map(|node| node.node_id);
+            let owner = self.node.get().map(|node| node.node_id);
+            let include_unowned = self.role == "single";
             for file in self
                 .multipart
-                .unused_files(storage_id, owner, batch)
+                .unused_files(storage_id, owner, include_unowned, batch)
                 .await?
             {
                 if Instant::now() >= deadline {
@@ -435,7 +436,7 @@ impl App {
             }
             for file in self
                 .multipart
-                .pending_files(storage_id, owner, batch)
+                .pending_files(storage_id, owner, include_unowned, batch)
                 .await?
             {
                 if Instant::now() >= deadline {

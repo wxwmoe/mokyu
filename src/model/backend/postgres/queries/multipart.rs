@@ -354,9 +354,10 @@ impl MultipartStore for Backend {
         &self,
         storage: Option<Uuid>,
         node: Option<Uuid>,
+        include_unowned: bool,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
-        Ok(sqlx::query_as("SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE node_id IS NOT DISTINCT FROM $3 AND reclaim_pending AND state='sealed' AND ($1::uuid IS NULL OR storage_id=$1) ORDER BY id LIMIT $2").bind(storage).bind(limit).bind(node).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT id,upload_id,storage_id,source_id,state FROM multipart_files WHERE (node_id=$3 OR (node_id IS NULL AND $4)) AND reclaim_pending AND state='sealed' AND ($1::uuid IS NULL OR storage_id=$1) ORDER BY id LIMIT $2").bind(storage).bind(limit).bind(node).bind(include_unowned).fetch_all(&self.pool).await?)
     }
     async fn clear_reclaim(&self, id: Uuid) -> Result<()> {
         sqlx::query(
@@ -412,9 +413,10 @@ impl MultipartStore for Backend {
         &self,
         storage: Option<Uuid>,
         node: Option<Uuid>,
+        include_unowned: bool,
         limit: i64,
     ) -> Result<Vec<crate::model::multipart::MultipartFile>> {
-        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE f.node_id IS NOT DISTINCT FROM $3 AND ($1::uuid IS NULL OR storage_id=$1) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT $2").bind(storage).bind(limit).bind(node).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT f.id,f.upload_id,f.storage_id,f.source_id,f.state FROM multipart_files f WHERE (f.node_id=$3 OR (f.node_id IS NULL AND $4)) AND ($1::uuid IS NULL OR storage_id=$1) AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing'))) ORDER BY f.id LIMIT $2").bind(storage).bind(limit).bind(node).bind(include_unowned).fetch_all(&self.pool).await?)
     }
     async fn claim_file(&self, id: Uuid) -> Result<bool> {
         Ok(sqlx::query("UPDATE multipart_files AS f SET state='deleting' WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM fragments WHERE file_id=f.id) AND (f.state<>'open' OR NOT EXISTS(SELECT 1 FROM uploads WHERE id=f.upload_id AND state IN ('active','completing')))").bind(id).execute(&self.pool).await?.rows_affected()>0)

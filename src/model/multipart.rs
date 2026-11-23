@@ -218,6 +218,7 @@ pub(crate) trait MultipartStore: Send + Sync {
         &self,
         storage: Option<Uuid>,
         node: Option<Uuid>,
+        include_unowned: bool,
         limit: i64,
     ) -> Result<Vec<MultipartFile>>;
     async fn clear_reclaim(&self, id: Uuid) -> Result<()>;
@@ -225,6 +226,7 @@ pub(crate) trait MultipartStore: Send + Sync {
         &self,
         storage: Option<Uuid>,
         node: Option<Uuid>,
+        include_unowned: bool,
         limit: i64,
     ) -> Result<Vec<MultipartFile>>;
     async fn claim_file(&self, id: Uuid) -> Result<bool>;

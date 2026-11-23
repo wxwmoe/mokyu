@@ -4,6 +4,7 @@ use crate::config::Config;
 use crate::model::Id;
 use crate::model::bucket::CreateBucket;
 use crate::model::maintenance::MaintenanceStore;
+use crate::model::multipart::MultipartStore;
 use crate::model::{
     AccountStore, BucketStore, ChunkStore, PhysicalStore, QuotaStore, StreamStore, StreamTail,
     TaskControlStore,
@@ -154,7 +155,64 @@ async fn sqlite_maintenance_contract() -> Result<()> {
             count
         );
     }
-    sqlx::query("UPDATE fragments SET file_id=NULL,file_offset=NULL WHERE id=?")
+    sqlx::query("UPDATE multipart_files SET state='sealed',reclaim_pending=true WHERE id=?")
+        .bind(file)
+        .execute(db)
+        .await?;
+    let other = Some(Uuid::new_v4());
+    for (node, count) in [(None, 0), (other, 0), (Some(owner), 1)] {
+        assert_eq!(
+            backend
+                .pending_files(Some(storage), node, true, 10)
+                .await?
+                .len(),
+            count
+        );
+    }
+    assert_eq!(
+        backend.local_ranges(stream, 64).await?[0].fragment_id,
+        Some(fragment)
+    );
+    sqlx::query("UPDATE fragments SET file_id=NULL,file_offset=NULL,staging_storage_id=?,staging_object_key='shared' WHERE id=?")
+        .bind(storage)
+        .bind(fragment)
+        .execute(db)
+        .await?;
+    assert!(
+        backend.local_ranges(stream, 64).await?[0]
+            .fragment_id
+            .is_none()
+    );
+    for (node, count) in [(None, 0), (other, 0), (Some(owner), 1)] {
+        assert_eq!(
+            backend
+                .unused_files(Some(storage), node, true, 10)
+                .await?
+                .len(),
+            count
+        );
+    }
+    sqlx::query("UPDATE multipart_files SET node_id=NULL WHERE id=?")
+        .bind(file)
+        .execute(db)
+        .await?;
+    for include_unowned in [false, true] {
+        assert_eq!(
+            backend
+                .unused_files(Some(storage), other, include_unowned, 10)
+                .await?
+                .len(),
+            usize::from(include_unowned)
+        );
+        assert_eq!(
+            backend
+                .pending_files(Some(storage), other, include_unowned, 10)
+                .await?
+                .len(),
+            usize::from(include_unowned)
+        );
+    }
+    sqlx::query("UPDATE fragments SET staging_storage_id=NULL,staging_object_key=NULL WHERE id=?")
         .bind(fragment)
         .execute(db)
         .await?;
