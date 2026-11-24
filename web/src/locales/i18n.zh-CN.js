@@ -1089,7 +1089,7 @@ export default {
   journalUnlimited: '不限',
   metadataJournalInitial: '正在建立初始恢复点', metadataJournalPending: '{count} 条变更待同步', metadataJournalStopped: '已停止记录', metadataJournalSynced: '已追平',
   metadataJournal: '元数据日志', metadataJournalHint: '将桶和对象的变更异步写入存储后端，供恢复元数据时使用',
-  bucketConnection: '连接与入口', bucketConnectionHint: '将这个桶名与部署时配置的 S3 端点、区域搭配使用',
+  bucketConnection: '连接与入口', bucketConnectionHint: "应用上传时使用 S3 端点、区域和桶名。公开媒体地址使用下方绑定的域名。",
   publicBaseUrl: '公共链接前缀', publicBaseUrlHint: '可选的公共或 CDN 地址，需指向此桶并用于生成公开链接，不会自动配置 DNS 或 TLS',
   bucketDomains: '公共访问域名', bucketDomainsHint: '每行一个域名，可带端口并指向公共读端口，每个域名只能属于一个桶',
   corsTitle: '欢迎受信任的地方来访', corsPreset: '填入预设', loadPreset: '载入预设', corsHint: '规则同时作用于 S3 和公共读，不会公开私有文件，也不会跳过身份验证',

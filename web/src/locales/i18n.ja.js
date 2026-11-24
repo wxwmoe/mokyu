@@ -1089,7 +1089,7 @@ export default {
   journalUnlimited: '無制限',
   metadataJournalInitial: '初期復元ポイントを準備中', metadataJournalPending: '未同期の変更 {count} 件', metadataJournalStopped: '記録を停止中', metadataJournalSynced: '同期済み',
   metadataJournal: 'メタデータジャーナル', metadataJournalHint: 'メタデータを復元できるよう、バケットとオブジェクトの変更をストレージに非同期で保存します',
-  bucketConnection: '接続と入口', bucketConnectionHint: 'このバケット名を設定済みの S3 エンドポイントとリージョンで使用します',
+  bucketConnection: '接続と入口', bucketConnectionHint: "アップロードには S3 エンドポイント、リージョン、バケット名を使います。公開メディアの配信には下で設定したホストを使います。",
   publicBaseUrl: '公開 URL のベース', publicBaseUrlHint: 'このバケットを指す公開または CDN の URL で公開リンクに使い、DNS や TLS は別途設定します',
   bucketDomains: '公開ホスト名', bucketDomainsHint: '1 行に 1 ホスト名を入力し、必要ならポートを付けて公開読み取りポートへ接続します。各ホストは 1 バケット専用です',
   corsTitle: '信頼できる場所からの訪問', corsPreset: 'プリセットを読み込む', loadPreset: 'プリセットを読み込む', corsHint: 'S3 と公開読み取りに適用し、非公開ファイルの公開や認証の省略は行いません',

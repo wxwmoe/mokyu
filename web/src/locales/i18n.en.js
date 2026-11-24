@@ -1089,7 +1089,7 @@ export default {
   journalUnlimited: 'Unlimited',
   metadataJournalInitial: 'Preparing initial recovery point', metadataJournalPending: '{count} changes pending', metadataJournalStopped: 'Recording stopped', metadataJournalSynced: 'Up to date',
   metadataJournal: 'Metadata journal', metadataJournalHint: 'Save bucket and object changes to storage for metadata recovery.',
-  bucketConnection: 'Connection', bucketConnectionHint: 'Use this bucket name with your configured S3 endpoint and region.',
+  bucketConnection: 'Connection', bucketConnectionHint: "Use the S3 endpoint, region and bucket name for uploads. Serve public media from a host bound below.",
   publicBaseUrl: 'Public URL base', publicBaseUrlHint: 'An optional public or CDN URL ending at this bucket. Used for public links. It does not configure DNS or TLS.',
   bucketDomains: 'Public hosts', bucketDomainsHint: 'One hostname per line, with an optional port. Point these hosts at the public listener through your reverse proxy. A host belongs to one bucket.',
   corsTitle: 'Let trusted places visit', corsPreset: 'Load preset', loadPreset: 'Load preset', corsHint: 'These rules apply to S3 and public reads. They do not make private files public or bypass authentication.',

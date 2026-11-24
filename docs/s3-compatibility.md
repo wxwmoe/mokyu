@@ -39,6 +39,24 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | 浏览器 POST 表单上传、SSE、read partNumber、write offset、按大小／修改时间条件删除、批量条件删除 | 拒绝相关请求字段 |
 | expected-owner、request-payer、SSE-C/SSE-KMS／复制源 SSE、标签、重定向、任意 grant、MFA、保留策略 | 拒绝扩展字段。CopyObject 沿用源校验算法 |
 
+## Mastodon 媒体接入
+
+在 Mokyu 创建桶和读写凭据。将公共媒体域名绑定到该桶，反向代理将这个域名转到公共读端口。Mastodon 使用两组地址，签名上传走 S3 入口，帖子中的图片链接走公共媒体域名。
+
+```ini
+S3_ENABLED=true
+S3_ENDPOINT=https://s3.example.com
+S3_REGION=us-east-1
+S3_BUCKET=media
+AWS_ACCESS_KEY_ID=<access_key>
+AWS_SECRET_ACCESS_KEY=<secret_key>
+S3_ALIAS_HOST=media.example.com
+S3_PROTOCOL=https
+S3_PERMISSION=public-read
+```
+
+用实际配置的签名区域替换示例值。更新并重启 Mastodon 的 Web 与后台进程后，发布一张图片，从未登录的浏览器打开原图和缩略图。应用若同时存放私有文件，应为这些对象保留私有 ACL。
+
 ## 寻址与权限
 
 | 入口 | 寻址及权限 |

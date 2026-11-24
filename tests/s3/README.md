@@ -4,6 +4,7 @@
 
 ## HTTP and recovery fixtures
 
+- `s3/release_media.py` checks first use on a fresh database. Set `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`, `MOKYU_TEST_CONFIG`, `MOKYU_TEST_PASSWORD`, `MOKYU_TEST_MEDIA_STORAGE` (an empty local backend), `MOKYU_TEST_CREDENTIALS` (a new file in a private fixture directory), `MOKYU_TEST_ENDPOINT`, `MOKYU_TEST_WEB` (management) and `MOKYU_TEST_PUBLIC`. Start the service with its Web origin set to `MOKYU_TEST_WEB`. For a disposable HTTP fixture, disable secure cookies. Run `python tests/s3/release_media.py` with the CLI available, restart Mokyu on the same data, then run `python tests/s3/release_media.py --after-restart`. The second phase reuses the credential, verifies private and public access, deletes the test objects and removes the credential file. Repeat both phases per database engine.
 - `python tests/s3/part_copy.py` uses the publication fixture variables and a disposable version-enabled source bucket. Set `MOKYU_TEST_COPY_BUCKET` for a cross-bucket copy and grant the credential access to both buckets.
 
 - `integration.py`: S3 PUT, conditions, checksums, ranges and multipart.
