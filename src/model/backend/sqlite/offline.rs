@@ -52,6 +52,24 @@ impl OfflineCatalog {
         Ok(Arc::new(Self { pool, readonly }))
     }
 
+    pub async fn copy_evidence(&self, source: uuid::Uuid, target: uuid::Uuid) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO storage_recovery_catalogs(id,namespace_id,anchor) SELECT ?,namespace_id,anchor FROM storage_recovery_catalogs WHERE id=?")
+            .bind(target).bind(source).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO storage_recovery_entries SELECT ?,category,owner_id,id,position,content_hash,encoded_bytes,content FROM storage_recovery_entries WHERE catalog=? AND category<=2")
+            .bind(target).bind(source).execute(&mut *tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn forget(&self, id: uuid::Uuid) -> Result<()> {
+        sqlx::query("DELETE FROM storage_recovery_catalogs WHERE id=?")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn layout(&self, manifest: &Manifest, current: bool) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("INSERT INTO storage_cluster_history VALUES(?,?,?) ON CONFLICT DO NOTHING")

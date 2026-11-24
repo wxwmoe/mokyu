@@ -323,7 +323,12 @@ impl Scanner {
         } else {
             verify::rooted_chain(self.clusters.as_ref(), id, &self.anchor, &heads).await?
         };
-        self.clusters.catalog_bind(id, &head).await?;
+        self.index_proof(id, &head).await?;
+        Ok(head)
+    }
+
+    pub async fn index_proof(&self, id: Uuid, head: &Proof) -> Result<()> {
+        self.clusters.catalog_bind(id, head).await?;
         let mut after = 0;
         let mut previous = None;
         loop {
@@ -346,9 +351,9 @@ impl Scanner {
             }
         }
         ensure!(
-            previous.as_ref() == Some(&head),
+            previous.as_ref() == Some(head),
             "recovery file index did not reach its head"
         );
-        Ok(head)
+        Ok(())
     }
 }

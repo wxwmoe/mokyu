@@ -6,7 +6,7 @@ use crate::{
     model::{
         OfflineCatalog,
         storage_cluster::Manifest,
-        storage_recovery::{Proof, verify},
+        storage_recovery::{CatalogEntry, Proof, RecoveryCatalog, verify},
     },
     storage::{
         Disk,
@@ -179,6 +179,51 @@ fn backend(location: Location, fixed: &Fixed, scan: Arc<Scanner>) -> Result<Back
     Ok(backend)
 }
 
+async fn earlier(
+    scan: &Arc<Scanner>,
+    sql: &OfflineCatalog,
+    location: &Location,
+    fixed: &Fixed,
+    disk: &Arc<Disk>,
+) -> Result<Option<(String, u64)>> {
+    let mut proof = fixed.proof.clone();
+    while let Some(link) = proof.publication.previous.clone() {
+        let revision = proof.publication.revision - 1;
+        let Some(CatalogEntry::Proof(previous)) = sql
+            .catalog_entry(fixed.catalog, 1, link.id, revision)
+            .await?
+        else {
+            break;
+        };
+        proof.follows(Some(&previous))?;
+        let candidate = Uuid::now_v7();
+        sql.copy_evidence(fixed.catalog, candidate).await?;
+        let trial = async {
+            let head = verify::rooted_chain(sql, candidate, &fixed.anchor, &[link]).await?;
+            scan.index_proof(candidate, &head).await?;
+            let trial = Fixed {
+                anchor: fixed.anchor.clone(),
+                group: fixed.group.clone(),
+                proof: head,
+                catalog: candidate,
+            };
+            let backend = backend(location.clone(), &trial, scan.clone())?;
+            let mut rows = Catalog::temporary(None)?;
+            let cut = scan
+                .dump(candidate, &backend.source, &trial.proof, disk, &mut rows)
+                .await?;
+            Ok::<_, anyhow::Error>((hex::encode(trial.proof.link()?.digest), cut.point.sequence))
+        }
+        .await;
+        sql.forget(candidate).await?;
+        if let Ok(point) = trial {
+            return Ok(Some(point));
+        }
+        proof = previous;
+    }
+    Ok(None)
+}
+
 pub(super) async fn build(
     uri: &str,
     path: &Path,
@@ -244,11 +289,29 @@ pub(super) async fn build(
         endpoint: None,
         region: None,
     };
-    let backend = backend(location, &fixed, scan.clone())?;
+    let backend = backend(location.clone(), &fixed, scan.clone())?;
     let disk = Disk::workspace(dir.to_owned(), None, 0, 4);
-    let cut = scan
+    let cut = match scan
         .dump(id, &backend.source, &fixed.proof, &disk, catalog)
-        .await?;
+        .await
+    {
+        Ok(cut) => cut,
+        Err(err) => {
+            let message = format!(
+                "publication {} at sequence {} is incomplete: {err:#}",
+                hex::encode(fixed.proof.link()?.digest),
+                fixed.proof.publication.through
+            );
+            if list.publication_digest.is_none()
+                && let Some((digest, seq)) = earlier(&scan, &sql, &location, &fixed, &disk).await?
+            {
+                anyhow::bail!(
+                    "{message}. Earlier verified recovery point at sequence {seq}: explicitly set publication_digest=\"{digest}\" to select it"
+                );
+            }
+            anyhow::bail!("{message}");
+        }
+    };
     ensure!(
         cut.point.sequence == fixed.proof.publication.through,
         "dump watermark differs from publication"
@@ -288,3 +351,7 @@ pub(super) async fn reopen(
     let scan = Scanner::frozen(sql, anchor, media, list.backup_group.clone());
     Ok((backend(location.clone(), fixed, scan)?, roots(&list)?))
 }
+
+#[cfg(test)]
+#[path = "../../tests/storage/offline_epochs.rs"]
+mod tests;
