@@ -36,23 +36,15 @@ impl Scanner {
             start < end && end <= intent.total && intent.layout.supported(),
             "invalid recovery read range"
         );
+        if let Some(media) = &self.offline {
+            return media.window(intent, candidates, start, end).await;
+        }
         let (wanted, offset, contiguous) =
             crate::content::erasure::locate(&intent.layout, start % intent.span());
         let length = contiguous
             .min(end - start)
             .min(reader::part_length(&intent.layout))
             .min(intent.span() - start % intent.span());
-        if let Some(media) = &self.offline {
-            let length = length.min(crate::node::storage::frozen::MAX_RANGE);
-            let sequence = (start / intent.span()) as u32;
-            let bytes = media
-                .read(candidates, sequence, wanted, offset, length)
-                .await?;
-            return Ok((
-                length,
-                futures_util::stream::once(async move { Ok(bytes) }).boxed(),
-            ));
-        }
         let mut copies = Vec::new();
         let mut recovery = Vec::new();
         for (receipt, media, backup) in candidates {

@@ -179,7 +179,91 @@ pub(crate) struct Media {
 }
 
 impl Media {
-    pub(super) async fn read(
+    pub(super) async fn window(
+        &self,
+        intent: &crate::model::storage_payload::Intent,
+        candidates: &[super::part::Candidate],
+        start: u64,
+        end: u64,
+    ) -> Result<(u64, BoxStream<'static, Result<Bytes>>)> {
+        use crate::content::erasure;
+        use futures_util::stream;
+        let layout = &intent.layout;
+        let sequence = u32::try_from(start / intent.span())?;
+        let relative = start % intent.span();
+        let (wanted, offset, contiguous) = erasure::locate(layout, relative);
+        let stripe = u64::from(layout.stripe_bytes);
+        let k = usize::from(layout.data_shards);
+        let width = k + usize::from(layout.parity_shards);
+        let total = stripe * k as u64;
+        let available = (end - start).min(intent.span() - relative);
+        let full = k > 1
+            && relative % total == 0
+            && available >= total
+            && stripe <= frozen::MAX_RANGE
+            && total <= 4 * 1024 * 1024;
+        let length = if full {
+            stripe
+        } else {
+            contiguous.min(available).min(frozen::MAX_RANGE)
+        };
+        for (receipt, _, _) in candidates {
+            intent.accepts(&receipt.header)?;
+        }
+        let requested = if full {
+            0..k
+        } else {
+            usize::from(wanted)..usize::from(wanted) + 1
+        };
+        let mut slots: Vec<Option<Vec<u8>>> = vec![None; width];
+        let mut failures = Vec::new();
+        let fetch = |slot: usize| async move {
+            (
+                slot,
+                self.read(candidates, sequence, slot as u16, offset, length)
+                    .await,
+            )
+        };
+        let mut reads = stream::iter(requested.clone())
+            .map(fetch)
+            .buffer_unordered(k);
+        while let Some((slot, result)) = reads.next().await {
+            match result {
+                Ok(bytes) => slots[slot] = Some(bytes.to_vec()),
+                Err(e) => failures.push(e.to_string()),
+            }
+        }
+        if requested.clone().any(|s| slots[s].is_none()) {
+            let mut have = slots.iter().flatten().count();
+            let others = (0..width).filter(|s| !requested.contains(s));
+            let mut reads = stream::iter(others)
+                .map(fetch)
+                .buffer_unordered((k - have).max(1));
+            while have < k
+                && let Some((slot, result)) = reads.next().await
+            {
+                if let Ok(bytes) = result {
+                    slots[slot] = Some(bytes.to_vec());
+                    have += 1;
+                }
+            }
+            ensure!(
+                have >= k && layout.parity_shards > 0,
+                "stripe {sequence} has {have} usable independent shards, needs {k}: {}",
+                failures.join(", ")
+            );
+            erasure::codec(layout)?.reconstruct_data(&mut slots)?;
+        }
+        let body = requested
+            .map(|slot| Bytes::from(slots[slot].take().expect("verified data slot")))
+            .collect::<Vec<_>>();
+        Ok((
+            length * body.len() as u64,
+            stream::iter(body.into_iter().map(Ok)).boxed(),
+        ))
+    }
+
+    async fn read(
         &self,
         candidates: &[super::part::Candidate],
         sequence: u32,

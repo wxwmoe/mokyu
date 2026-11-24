@@ -91,6 +91,8 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
         "MOKYU_DUMP_DB changed"
     );
     let (backend, mut roots) = if let Some(fixed) = &id.native {
+        // Concurrent shard lookups must not block the exporter's durable progress writes.
+        db.pragma_update(None, "journal_mode", "WAL")?;
         super::native::reopen(path, &id.location, fixed).await?
     } else {
         (
