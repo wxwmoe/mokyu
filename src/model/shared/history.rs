@@ -157,6 +157,27 @@ impl History for Backend {
         tx.commit().await?;
         Ok(result)
     }
+    async fn retention_preview(
+        &self,
+        principal: &Principal,
+        bucket: Uuid,
+        filter: RetentionFilter,
+    ) -> Result<RetentionPreview> {
+        let now = chrono::Utc::now().timestamp_micros();
+        let age = i64::from(filter.days)
+            .checked_mul(86_400_000_000)
+            .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
+        let cutoff = now
+            .checked_sub(age)
+            .ok_or_else(|| s3s::s3_error!(InvalidArgument))?;
+        let mut p = Permit::for_action(principal.clone(), bucket, Action::Settings);
+        p.add(bucket, Action::ListVersions);
+        let mut tx = q::begin(self, false).await?;
+        transactions::lock_permit(&mut tx, &p).await?;
+        let result = q::retention_preview(&mut tx, bucket, cutoff, i64::from(filter.keep)).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
     async fn published_version(&self, stream: Id) -> Result<Option<String>> {
         q::published(self, stream).await
     }

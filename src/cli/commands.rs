@@ -215,6 +215,13 @@ pub enum Buckets {
         #[arg(long, default_value_t = 50)]
         limit: i32,
     },
+    PreviewRetention {
+        name: String,
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+        #[arg(long, default_value_t = 3)]
+        keep: u32,
+    },
     RestoreVersion {
         name: String,
         key: String,
@@ -813,6 +820,7 @@ impl Command {
                 Buckets::List
                 | Buckets::Versioning { mode: None, .. }
                 | Buckets::Versions { .. }
+                | Buckets::PreviewRetention { .. }
                 | Buckets::Journal { enabled: None, .. },
             )
             | Self::Bucket(Buckets::Mirroring {

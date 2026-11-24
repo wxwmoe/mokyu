@@ -207,3 +207,46 @@ pub(in super::super) async fn deleted(
     }
     Ok(())
 }
+
+pub(in super::super) async fn retention_preview(
+    tx: &mut Tx<'_>,
+    bucket: Uuid,
+    cutoff: i64,
+    keep: i64,
+) -> Result<crate::model::history::RetentionPreview> {
+    Ok(sqlx::query_as(r#"WITH successors AS (
+    SELECT v.bucket_id,v.object_key,v.seq,v.stream_id,
+           LEAD(v.modified_us) OVER (PARTITION BY v.object_key ORDER BY v.seq) AS superseded
+    FROM object_versions v WHERE v.bucket_id=?
+), historical AS (
+    SELECT successors.*,ROW_NUMBER() OVER (PARTITION BY object_key ORDER BY seq DESC) AS newer_rank
+    FROM successors WHERE superseded IS NOT NULL AND stream_id IS NOT NULL
+), candidates AS (
+    SELECT * FROM historical WHERE superseded<=? AND newer_rank>?
+), sizes AS (
+    SELECT c.stream_id,s.size,EXISTS (SELECT 1 FROM object_time_points t WHERE t.stream_id=c.stream_id) AS timed
+    FROM candidates c JOIN streams s ON s.id=c.stream_id
+), measured AS (
+    SELECT s.size,s.timed,CASE WHEN s.timed THEN 0
+        WHEN (EXISTS (SELECT 1 FROM objects o WHERE o.stream_id=s.stream_id)
+                OR EXISTS (SELECT 1 FROM object_time_points t WHERE t.stream_id=s.stream_id)
+                OR EXISTS (SELECT 1 FROM object_versions v WHERE v.stream_id=s.stream_id AND NOT EXISTS (
+                    SELECT 1 FROM candidates x WHERE x.bucket_id=v.bucket_id AND x.object_key=v.object_key AND x.seq=v.seq))) THEN s.size ELSE
+            COALESCE((SELECT SUM(e.length) FROM extents e WHERE e.stream_id=s.stream_id AND EXISTS (
+                SELECT 1 FROM (SELECT stream_id FROM extents WHERE chunk_id=e.chunk_id
+                               UNION ALL SELECT stream_id FROM extents WHERE fragment_id=e.fragment_id) other
+                WHERE other.stream_id<>s.stream_id AND (EXISTS (SELECT 1 FROM objects o WHERE o.stream_id=other.stream_id)
+                OR EXISTS (SELECT 1 FROM object_time_points t WHERE t.stream_id=other.stream_id)
+                OR EXISTS (SELECT 1 FROM object_versions v WHERE v.stream_id=other.stream_id AND NOT EXISTS (
+                    SELECT 1 FROM candidates x WHERE x.bucket_id=v.bucket_id AND x.object_key=v.object_key AND x.seq=v.seq))))),0)
+          + COALESCE((SELECT SUM(r.length) FROM raw_ranges r WHERE r.stream_id=s.stream_id AND EXISTS (
+                SELECT 1 FROM raw_ranges other WHERE other.source_id=r.source_id AND other.stream_id<>s.stream_id AND (EXISTS (SELECT 1 FROM objects o WHERE o.stream_id=other.stream_id)
+                OR EXISTS (SELECT 1 FROM object_time_points t WHERE t.stream_id=other.stream_id)
+                OR EXISTS (SELECT 1 FROM object_versions v WHERE v.stream_id=other.stream_id AND NOT EXISTS (
+                    SELECT 1 FROM candidates x WHERE x.bucket_id=v.bucket_id AND x.object_key=v.object_key AND x.seq=v.seq))))),0)
+        END AS shared_size FROM sizes s
+)
+SELECT CAST(COUNT(*) AS BIGINT) AS versions,CAST(COALESCE(SUM(size),0) AS BIGINT) AS logical_bytes,
+       CAST(COALESCE(SUM(CASE WHEN timed THEN size ELSE 0 END),0) AS BIGINT) AS time_protected_bytes,
+       CAST(COALESCE(SUM(shared_size),0) AS BIGINT) AS shared_bytes FROM measured"#).bind(bucket).bind(cutoff).bind(keep).fetch_one(&mut **tx).await?)
+}

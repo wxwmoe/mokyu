@@ -1232,6 +1232,18 @@ async fn execute_inner(app: &Arc<App>, principal: &Principal, command: Command) 
                     .await?,
             )?)
         }
+        Command::Bucket(Buckets::PreviewRetention { name, days, keep }) => {
+            let bucket = app.bucket(&name, false).await?;
+            Ok(serde_json::to_value(
+                app.objects
+                    .retention_preview(
+                        principal,
+                        bucket.id,
+                        crate::model::history::RetentionFilter { days, keep },
+                    )
+                    .await?,
+            )?)
+        }
         Command::Bucket(Buckets::RestoreVersion {
             name,
             key,

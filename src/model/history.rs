@@ -99,6 +99,26 @@ pub(crate) fn valid_id(id: &str) -> bool {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+#[derive(Clone, Copy, Deserialize, utoipa::IntoParams)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct RetentionFilter {
+    pub days: u32,
+    pub keep: u32,
+}
+impl Default for RetentionFilter {
+    fn default() -> Self {
+        Self { days: 30, keep: 3 }
+    }
+}
+
+#[derive(Serialize, sqlx::FromRow, utoipa::ToSchema)]
+pub(crate) struct RetentionPreview {
+    pub versions: i64,
+    pub logical_bytes: i64,
+    pub time_protected_bytes: i64,
+    pub shared_bytes: i64,
+}
+
 #[async_trait::async_trait]
 pub(crate) trait History: Send + Sync {
     async fn versioning(
@@ -121,6 +141,12 @@ pub(crate) trait History: Send + Sync {
         version: Option<&str>,
         ttl: Option<i64>,
     ) -> Result<Option<(Version, Option<StoredStream>, Option<Uuid>)>>;
+    async fn retention_preview(
+        &self,
+        principal: &crate::authorization::Principal,
+        bucket: Uuid,
+        filter: RetentionFilter,
+    ) -> Result<RetentionPreview>;
     async fn published_version(&self, stream: Id) -> Result<Option<String>>;
     async fn delete_version(
         &self,

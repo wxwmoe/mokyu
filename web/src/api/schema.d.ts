@@ -928,6 +928,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/buckets/{bucket}/versions/retention-preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["preview_version_retention"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/buckets/{bucket}/website": {
         parameters: {
             query?: never;
@@ -4446,6 +4462,16 @@ export interface components {
         Restored: {
             version_id?: string | null;
         };
+        RetentionPreview: {
+            /** Format: int64 */
+            logical_bytes: number;
+            /** Format: int64 */
+            shared_bytes: number;
+            /** Format: int64 */
+            time_protected_bytes: number;
+            /** Format: int64 */
+            versions: number;
+        };
         RewriteRequest: {
             action: string;
             confirmation?: string | null;
@@ -7324,6 +7350,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Restored"];
+                };
+            };
+        };
+    };
+    preview_version_retention: {
+        parameters: {
+            query?: {
+                days?: number;
+                keep?: number;
+            };
+            header?: never;
+            path: {
+                bucket: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RetentionPreview"];
                 };
             };
         };

@@ -3,7 +3,7 @@ use crate::{
     app::App,
     authorization::{Action, Permit},
     http::{HttpError, ReadOptions},
-    model::history::{Page, Selection, Versioning},
+    model::history::{Page, RetentionFilter, RetentionPreview, Selection, Versioning},
 };
 use axum::{
     Json,
@@ -64,6 +64,19 @@ pub(super) async fn list(
 ) -> Result<Json<Page>, HttpError> {
     let permit = Permit::for_action(actor.principal, bucket, Action::ListVersions);
     Ok(Json(app.objects.versions(&permit, bucket, &filter).await?))
+}
+#[utoipa::path(get,operation_id="preview_version_retention",path="/api/v1/buckets/{bucket}/versions/retention-preview",params(("bucket"=Uuid,Path),RetentionFilter),responses((status=200,body=RetentionPreview)))]
+pub(super) async fn retention_preview(
+    State(app): State<Arc<App>>,
+    Extension(actor): Extension<Identity>,
+    Path(bucket): Path<Uuid>,
+    Query(filter): Query<RetentionFilter>,
+) -> Result<Json<RetentionPreview>, HttpError> {
+    Ok(Json(
+        app.objects
+            .retention_preview(&actor.principal, bucket, filter)
+            .await?,
+    ))
 }
 #[utoipa::path(get,operation_id="version_content",path="/api/v1/buckets/{bucket}/versions/content",params(("bucket"=Uuid,Path),Entry),responses((status=200,content_type="application/octet-stream"),(status=206)))]
 pub(super) async fn content(

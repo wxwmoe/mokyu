@@ -29,6 +29,7 @@
 | `bucket cors NAME FILE` | 用 JSON 文件替换 CORS，返回实际规则；`[]` 关闭 |
 | `bucket versioning NAME [enabled\|suspended]` | 查看、启用或暂停对象版本；默认关闭 |
 | `bucket versions NAME [--prefix PREFIX] [--key-marker KEY] [--version-marker ID] [--limit N]` | 按键及提交顺序列出历史和删除标记 |
+| `bucket preview-retention NAME [--days 30] [--keep 3]` | 只读统计已过期且超出每键保留份数的历史正文，返回逻辑大小、时间恢复保留量和其他引用保留量 |
 | `bucket restore-version NAME KEY VERSION_ID` | 将指定正文发布为新的当前版本 |
 | `bucket delete-version NAME KEY VERSION_ID` | 永久删除指定版本或删除标记 |
 | `bucket journal NAME [--enabled true\|false --revision N]` | 查看或修改桶的元数据日志开关，修改使用桶设置修订号。首次开启会扫描已存在的对象 |

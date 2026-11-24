@@ -4,6 +4,8 @@
 
 ## API and browser fixtures
 
+- `python tests/control/retention_preview.py` tests repeated previews, delete markers and shared content on an empty disposable bucket. Use the integration fixture's endpoint, credentials, Web origin and password with `MOKYU_TEST_ALLOW_STATE_CHANGES=isolated-only`. It leaves test objects and versioning state in that bucket.
+
 - `control/database_capabilities.py`: management API/CLI, configuration and cluster capability boundaries.
 
 - `web/web_assets.py`: embedded assets and public schema, three encodings, negotiation, ETags, HEAD and exclusion of sensitive responses. Install Python `brotli` and `zstandard` and run both direct and proxied.

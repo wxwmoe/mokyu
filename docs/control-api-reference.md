@@ -119,6 +119,8 @@ S3 的 `mode` 可选 `put` 或 `multipart`。大小以字节表示，等待以�
 
 ## 存储桶
 
+`GET /api/v1/buckets/{bucket}/versions/retention-preview?days=30&keep=3` 需要桶设置和历史列表权限。只读统计至少已成为历史指定天数、且有足够多较新历史正文的版本。删除标记可确定旧正文成为历史的时间，但不会占用保留份数。若较新版本已永久删除，按仍可证明的下一版本时间计算。返回 `versions`、`logical_bytes`、`time_protected_bytes` 和 `shared_bytes`。时间恢复优先计入，后两项互不重复。按映射的逻辑长度统计共享载体，实际释放的磁盘空间受编码、包内其他区块和 GC 影响。
+
 | 方法与路径 | 用途 |
 | --- | --- |
 | `GET/POST /api/v1/buckets` | 可见桶目录 / 创建桶；请求可含 `name`、`project_id`、`storage_id`，目录最多 1000 项 |

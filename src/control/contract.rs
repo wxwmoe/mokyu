@@ -253,6 +253,7 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
         .routes(routes!(super::catalog::list))
         .routes(routes!(super::history::get, super::history::set))
         .routes(routes!(super::history::list, super::history::remove))
+        .routes(routes!(super::history::retention_preview))
         .routes(routes!(super::history::content))
         .routes(routes!(super::history::restore))
         .routes(routes!(
