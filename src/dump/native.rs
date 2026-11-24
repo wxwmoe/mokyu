@@ -35,6 +35,7 @@ use uuid::Uuid;
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 pub(super) struct Fixed {
     anchor: Manifest,
+    layouts: Vec<String>,
     proof: Proof,
     catalog: Uuid,
     group: Option<String>,
@@ -81,7 +82,137 @@ pub(super) fn guard(list: &Sources, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn discover(list: &Sources, fixed: Option<&Fixed>) -> Result<(Manifest, Arc<Media>)> {
+async fn returning_source(
+    source: &Source,
+    media: Uuid,
+    layout: &Manifest,
+    fixed: &Fixed,
+    db: &OfflineCatalog,
+) -> Result<()> {
+    use crate::node::storage::frozen::Page;
+    use futures_util::TryStreamExt;
+    let namespace = fixed.proof.publication.namespace;
+    let mut layouts = std::collections::BTreeMap::new();
+    let mut observed_history = None;
+    if layout.revision > fixed.anchor.revision {
+        let history = source.layout_history(media, namespace).await?;
+        let mut current = layout;
+        while current.revision > fixed.anchor.revision {
+            layouts.insert(current.digest()?, current.clone());
+            let parent = current
+                .previous
+                .as_ref()
+                .and_then(|d| history.get(d))
+                .context("missing layout history on reconnected medium")?;
+            current.follows(parent)?;
+            current = parent;
+        }
+        ensure!(
+            current == &fixed.anchor,
+            "medium {media} belongs to a conflicting layout"
+        );
+        observed_history = Some(history);
+    } else {
+        ensure!(
+            fixed.layouts.get(usize::try_from(layout.revision - 1)?) == Some(&layout.digest()?),
+            "medium {media} reports a conflicting historical layout"
+        );
+    }
+    let mut stream = source.pages(media, namespace, "history", 0).await?;
+    let Some(Page::Evidence(first)) = stream.try_next().await? else {
+        anyhow::bail!("missing publication inventory on medium {media}");
+    };
+    let Some(head) = first.head.clone() else {
+        return Ok(());
+    };
+    if db.known_link(&head).await? {
+        return Ok(());
+    }
+    let history = match observed_history {
+        Some(history) => history,
+        None => source.layout_history(media, namespace).await?,
+    };
+    for (digest, candidate) in history {
+        if fixed.layouts.get(usize::try_from(candidate.revision - 1)?) == Some(&digest) {
+            layouts.insert(digest, candidate);
+        }
+    }
+    layouts.insert(fixed.anchor.digest()?, fixed.anchor.clone());
+    // A later snapshot may contain unrelated candidates. Walk only its committed head back to the pinned point.
+    let staged = rusqlite::Connection::open("")?;
+    staged.execute_batch(
+        "CREATE TABLE proofs(digest BLOB PRIMARY KEY,body BLOB NOT NULL) WITHOUT ROWID; BEGIN",
+    )?;
+    let mut page = first;
+    loop {
+        ensure!(
+            page.head.as_ref() == Some(&head),
+            "publication changed while reconnecting medium {media}"
+        );
+        for entry in page.entries {
+            if let Some(p) = entry.proof
+                && !entry.pending
+                && entry.error.is_none()
+                && p.publication.revision > fixed.proof.publication.revision
+            {
+                staged.execute(
+                    "INSERT OR IGNORE INTO proofs VALUES(?,?)",
+                    rusqlite::params![p.link()?.digest.as_slice(), serde_json::to_vec(&p)?],
+                )?;
+            }
+        }
+        if page.complete {
+            break;
+        }
+        let Some(Page::Evidence(next)) = stream.try_next().await? else {
+            anyhow::bail!("publication history interrupted on medium {media}");
+        };
+        page = next;
+    }
+    let mut link = head;
+    let mut child: Option<Proof> = None;
+    let pinned = fixed.proof.link()?;
+    while link != pinned {
+        let body: Vec<u8> = staged
+            .query_row(
+                "SELECT body FROM proofs WHERE digest=?",
+                [link.digest.as_slice()],
+                |r| r.get(0),
+            )
+            .with_context(|| {
+                format!("medium {media} has a conflicting or incomplete publication history")
+            })?;
+        let p: Proof = serde_json::from_slice(&body)?;
+        ensure!(
+            p.link()? == link && p.publication.namespace == namespace,
+            "reconnected publication identity differs"
+        );
+        p.verify(
+            layouts
+                .get(&p.publication.manifest)
+                .context("untrusted publication layout")?,
+        )?;
+        if let Some(child) = child {
+            child.follows(Some(&p))?;
+        }
+        link = p
+            .publication
+            .previous
+            .clone()
+            .context("publication does not descend from the pinned recovery point")?;
+        child = Some(p);
+    }
+    if let Some(child) = child {
+        child.follows(Some(&fixed.proof))?;
+    }
+    Ok(())
+}
+
+async fn discover(
+    list: &Sources,
+    saved: Option<(&Fixed, &OfflineCatalog)>,
+) -> Result<(Manifest, Arc<Media>)> {
+    let fixed = saved.map(|(f, _)| f);
     let mut media = Media::default();
     let mut anchor = fixed.map(|f| f.anchor.clone());
     let mut cluster = list.cluster.or(anchor.as_ref().map(|a| a.cluster_id));
@@ -121,14 +252,41 @@ async fn discover(list: &Sources, fixed: Option<&Fixed>) -> Result<(Manifest, Ar
         if !selected {
             continue;
         }
-        if fixed.is_none()
-            && list
-                .manifest_digest
-                .as_ref()
-                .is_none_or(|d| m.digest().as_ref().ok() == Some(d))
-            && anchor.as_ref().is_none_or(|a| m.revision > a.revision)
-        {
-            anchor = Some(m.clone());
+        if fixed.is_none() {
+            match &list.manifest_digest {
+                Some(digest) if anchor.is_none() => {
+                    anchor = if m.digest()? == *digest {
+                        Some(m.clone())
+                    } else {
+                        source
+                            .layout_history(id, list.namespace)
+                            .await?
+                            .remove(digest)
+                    };
+                }
+                None if anchor.as_ref().is_none_or(|a| m.revision > a.revision) => {
+                    anchor = Some(m.clone())
+                }
+                _ => (),
+            }
+        }
+        if let Some((fixed, db)) = saved {
+            if let Err(e) = returning_source(&source, id, &m, fixed, db).await {
+                if e.is::<std::io::Error>()
+                    || e.downcast_ref::<tonic::Status>().is_some_and(|s| {
+                        matches!(
+                            s.code(),
+                            tonic::Code::Unavailable
+                                | tonic::Code::DeadlineExceeded
+                                | tonic::Code::Cancelled
+                        )
+                    })
+                {
+                    eprintln!("Recovery medium {id}, source {name} unavailable: {e:#}");
+                    continue;
+                }
+                return Err(e);
+            }
         }
         media.sources.entry(id).or_default().push((m, source));
     }
@@ -137,10 +295,23 @@ async fn discover(list: &Sources, fixed: Option<&Fixed>) -> Result<(Manifest, Ar
         "no readable media in the selected recovery group"
     );
     let anchor = anchor.context("trusted cluster manifest is unavailable")?;
+    ensure!(
+        Some(anchor.cluster_id) == cluster,
+        "trusted manifest belongs to another storage cluster"
+    );
     for (id, sources) in &media.sources {
+        let member = anchor
+            .members
+            .iter()
+            .find(|m| m.media_id == *id)
+            .with_context(|| format!("medium {id} is outside the trusted manifest"))?;
         ensure!(
-            anchor.members.iter().any(|m| m.media_id == *id),
-            "medium {id} is outside the trusted manifest"
+            match list.backup_group.as_deref() {
+                Some(group) =>
+                    member.topology.purpose == "backup" && member.topology.storage_group == group,
+                None => member.topology.purpose != "backup",
+            },
+            "medium {id} is outside the trusted recovery group"
         );
         for (manifest, _) in sources {
             ensure!(
@@ -203,6 +374,7 @@ async fn earlier(
             scan.index_proof(candidate, &head).await?;
             let trial = Fixed {
                 anchor: fixed.anchor.clone(),
+                layouts: fixed.layouts.clone(),
                 group: fixed.group.clone(),
                 proof: head,
                 catalog: candidate,
@@ -224,9 +396,23 @@ async fn earlier(
     Ok(None)
 }
 
+pub(super) fn lock_scan(staging: &Path) -> Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let lock = options.open(staging)?;
+    lock.try_lock()
+        .context("another process is scanning this dump database")?;
+    Ok(lock)
+}
+
 pub(super) async fn build(
     uri: &str,
-    path: &Path,
+    staging: &Path,
     dir: &Path,
     catalog: &mut Catalog,
 ) -> Result<(Backend, Cut, Option<Fixed>)> {
@@ -239,18 +425,7 @@ pub(super) async fn build(
         anchor.cluster_id,
         ids.len()
     );
-    let staging = path.with_added_extension("scan");
-    let mut options = fs::OpenOptions::new();
-    options.create(true).read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let lock = options.open(&staging)?;
-    lock.try_lock()
-        .context("another process is scanning this dump database")?;
-    let sql = OfflineCatalog::open(&staging, false).await?;
+    let sql = OfflineCatalog::open(staging, false).await?;
     let hash = blake3::hash(&serde_json::to_vec(&(
         &digest,
         list.namespace,
@@ -267,6 +442,7 @@ pub(super) async fn build(
     let proof = scan
         .collect_at(id, list.namespace, &ids, list.publication_digest.as_deref())
         .await?;
+    let mut layouts = Vec::new();
     for rev in 1..=anchor.revision {
         let m = verify::layout(sql.as_ref(), id, &anchor, rev.try_into()?).await?;
         for aliases in media.sources.values() {
@@ -275,10 +451,12 @@ pub(super) async fn build(
                 "media report conflicting historical layouts at revision {rev}"
             );
         }
+        layouts.push(m.digest()?);
         sql.layout(&m, rev == anchor.revision).await?;
     }
     let fixed = Fixed {
         anchor,
+        layouts,
         proof,
         catalog: id,
         group: list.backup_group.clone(),
@@ -316,6 +494,22 @@ pub(super) async fn build(
         cut.point.sequence == fixed.proof.publication.through,
         "dump watermark differs from publication"
     );
+    catalog.db.execute_batch("CREATE TABLE dump_native_publications(id BLOB PRIMARY KEY, digest BLOB NOT NULL) WITHOUT ROWID")?;
+    let mut after = 0;
+    while after < fixed.proof.publication.revision {
+        let proofs = sql
+            .catalog_proofs(id, after, fixed.proof.publication.revision)
+            .await?;
+        ensure!(!proofs.is_empty(), "missing verified publication");
+        for proof in proofs {
+            let link = proof.link()?;
+            catalog.db.execute(
+                "INSERT INTO dump_native_publications VALUES(?,?)",
+                rusqlite::params![link.id, link.digest.as_slice()],
+            )?;
+            after = proof.publication.revision;
+        }
+    }
     catalog.db.execute(
         "ATTACH DATABASE ? AS scan",
         [staging.to_str().context("invalid work path")?],
@@ -335,6 +529,7 @@ pub(super) async fn build(
         hex::encode(fixed.proof.link()?.digest),
         cut.point.sequence
     );
+    sql.close().await;
     Ok((backend, cut, Some(fixed)))
 }
 
@@ -346,8 +541,8 @@ pub(super) async fn reopen(
     let uri = setting("MOKYU_DUMP_SOURCE")?.unwrap_or_else(|| location.uri.clone());
     let list = Sources::read(Path::new(&uri))?;
     fixed.check(&list)?;
-    let (anchor, media) = discover(&list, Some(fixed)).await?;
     let sql = OfflineCatalog::open(path, true).await?;
+    let (anchor, media) = discover(&list, Some((fixed, &sql))).await?;
     let scan = Scanner::frozen(sql, anchor, media, list.backup_group.clone());
     Ok((backend(location.clone(), fixed, scan)?, roots(&list)?))
 }

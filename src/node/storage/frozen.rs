@@ -20,6 +20,7 @@ use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Identity {
+    pub view: Uuid,
     pub media: Media,
     pub manifest: Manifest,
 }
@@ -30,6 +31,8 @@ pub(crate) struct Medium {
     root: PathBuf,
     pub identity: Identity,
     backup: bool,
+    #[cfg(unix)]
+    markers: [std::fs::Metadata; 2],
 }
 
 fn record<T: DeserializeOwned>(root: &Path, path: &Path) -> Result<T> {
@@ -41,6 +44,11 @@ fn record<T: DeserializeOwned>(root: &Path, path: &Path) -> Result<T> {
 impl Medium {
     pub fn open(root: PathBuf) -> Result<Arc<Self>> {
         let root = root.canonicalize()?;
+        #[cfg(unix)]
+        let markers = [
+            std::fs::symlink_metadata(root.join("media.json"))?,
+            std::fs::symlink_metadata(root.join("cluster.json"))?,
+        ];
         let media: Media = record(&root, &root.join("media.json"))?;
         media.validate()?;
         let manifest: Manifest = record(&root, &root.join("cluster.json"))?;
@@ -60,11 +68,19 @@ impl Medium {
             .find(|m| m.media_id == media.media_id)
             .context("media does not belong to its committed cluster")?;
         let backup = member.topology.purpose == "backup";
-        Ok(Arc::new(Self {
+        let medium = Arc::new(Self {
+            #[cfg(unix)]
+            markers,
             root,
-            identity: Identity { media, manifest },
+            identity: Identity {
+                media,
+                manifest,
+                view: Uuid::new_v4(),
+            },
             backup,
-        }))
+        });
+        medium.check()?;
+        Ok(medium)
     }
 
     pub fn range(
@@ -111,8 +127,42 @@ impl Medium {
     }
 
     pub(super) fn check(&self) -> Result<()> {
-        let media: Media = record(&self.root, &self.root.join("media.json"))?;
-        ensure!(media == self.identity.media, "source media changed");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            for (name, before) in ["media.json", "cluster.json"]
+                .into_iter()
+                .zip(&self.markers)
+            {
+                let now = std::fs::symlink_metadata(self.root.join(name))?;
+                ensure!(
+                    now.is_file()
+                        && (
+                            now.dev(),
+                            now.ino(),
+                            now.ctime(),
+                            now.ctime_nsec(),
+                            now.size()
+                        ) == (
+                            before.dev(),
+                            before.ino(),
+                            before.ctime(),
+                            before.ctime_nsec(),
+                            before.size()
+                        ),
+                    "frozen source view changed"
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let media: Media = record(&self.root, &self.root.join("media.json"))?;
+            let manifest: Manifest = record(&self.root, &self.root.join("cluster.json"))?;
+            ensure!(
+                media == self.identity.media && manifest == self.identity.manifest,
+                "frozen source view changed"
+            );
+        }
         Ok(())
     }
 

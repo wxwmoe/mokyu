@@ -32,6 +32,19 @@ fn offline_takeover_fork_and_retirement() -> Result<()> {
     let work = tempfile::tempdir()?;
     let disk = work.path().join("disk");
     copy_dir(&medium, &disk)?;
+    let opened = crate::node::storage::frozen::Medium::open(disk.clone())?;
+    let marker = disk.join("cluster.json");
+    let replacement = disk.join("replacement");
+    fs::copy(&marker, &replacement)?;
+    fs::rename(replacement, &marker)?;
+    #[cfg(unix)]
+    assert!(
+        opened
+            .scan(namespace, crate::node::storage::frozen::Scope::History, 0)
+            .is_err()
+    );
+    let reopened = crate::node::storage::frozen::Medium::open(disk.clone())?;
+    assert_ne!(opened.identity.view, reopened.identity.view);
     let old: Manifest = serde_json::from_slice(&fs::read(disk.join("cluster.json"))?)?;
     let head = disk.join(format!("recovery/heads/{}.json", namespace.simple()));
     let link: Link = serde_json::from_slice(&fs::read(&head)?)?;
@@ -65,6 +78,19 @@ fn offline_takeover_fork_and_retirement() -> Result<()> {
         fs::write(&head, serde_json::to_vec(&proof.link()?)?)?;
         Ok(())
     };
+    let export = |db: &str, output: &str| -> Result<Output> {
+        Ok(Command::new(std::env::var("MOKYU_TEST_DUMP_BIN")?)
+            .args(["dump", "mokyu://media/packed.bin"])
+            .arg(work.path().join(output))
+            .env("MOKYU_DUMP_SOURCE", work.path().join("sources.toml"))
+            .env("MOKYU_DUMP_DB", work.path().join(db))
+            .env("MOKYU_DUMP_DEPLOYMENT_KEY_FILE", &key_file)
+            .output()?)
+    };
+    ensure!(
+        run(&[&medium], "prior.db")?.status.success(),
+        "could not pin original source"
+    );
     let mut takeover = old.clone();
     takeover.previous = Some(old.digest()?);
     takeover.record_id = Uuid::now_v7();
@@ -98,17 +124,61 @@ fn offline_takeover_fork_and_retirement() -> Result<()> {
         String::from_utf8_lossy(&result.stderr)
     );
 
-    let fork = work.path().join("fork");
-    copy_dir(&disk, &fork)?;
+    run(&[&disk], "prior.db")?;
+    let later = export("prior.db", "later.bin")?;
+    ensure!(
+        later.status.success(),
+        "returning source with a verified successor was refused: {}",
+        String::from_utf8_lossy(&later.stderr)
+    );
+    let list = work.path().join("sources.toml");
+    let original = fs::read_to_string(&list)?;
+    let anchored = format!("manifest_digest={:?}\n{}", old.digest()?, original);
+    let build = |name: &str| -> Result<Output> {
+        Ok(Command::new(std::env::var("MOKYU_TEST_DUMP_BIN")?)
+            .args(["dump", "ls"])
+            .env("MOKYU_DUMP_SOURCE", &list)
+            .env("MOKYU_DUMP_DB", work.path().join(name))
+            .env("MOKYU_DUMP_DEPLOYMENT_KEY_FILE", &key_file)
+            .output()?)
+    };
+    fs::write(&list, &anchored)?;
+    assert!(!build("outside.db")?.status.success());
+    fs::write(
+        &list,
+        format!(
+            "publication_digest={:?}\n{}",
+            hex::encode(previous.link()?.digest),
+            anchored
+        ),
+    )?;
+    let pinned = build("historical.db")?;
+    ensure!(
+        pinned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pinned.stderr)
+    );
+    let preserved = work.path().join("preserved");
+    copy_dir(&disk, &preserved)?;
     update.id = Uuid::now_v7();
     let competing = Proof::sign(update.clone(), &key, &takeover)?;
     publish(&competing)?;
-    let result = run(&[&disk, &fork], "fork.db")?;
+    let result = run(&[&disk, &preserved], "fork.db")?;
     ensure!(
         !result.status.success() && !work.path().join("fork.db").exists(),
         "signed competing heads were merged"
     );
 
+    assert_eq!(
+        serde_json::from_slice::<Link>(&fs::read(&head)?)?,
+        competing.link()?
+    );
+    run(&[&disk], "incremental.db")?;
+    let returned = export("incremental.db", "fork.bin")?;
+    ensure!(
+        !returned.status.success() && !work.path().join("fork.bin").exists(),
+        "pinned export accepted a competing publication"
+    );
     let required = previous
         .publication
         .parts

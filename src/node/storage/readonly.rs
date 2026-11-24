@@ -89,6 +89,9 @@ impl StorageRecovery for Service {
         let permit = self.permit(&request)?;
         let request = request.into_inner();
         let medium = self.medium(&request.medium)?;
+        if Uuid::parse_str(&request.view).ok() != Some(medium.identity.view) {
+            return Err(Status::failed_precondition("frozen inventory view changed"));
+        }
         let namespace = Uuid::parse_str(&request.namespace)
             .map_err(|_| Status::invalid_argument("invalid namespace"))?;
         let scope = match request.scope.as_str() {

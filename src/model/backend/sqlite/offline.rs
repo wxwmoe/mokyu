@@ -52,6 +52,19 @@ impl OfflineCatalog {
         Ok(Arc::new(Self { pool, readonly }))
     }
 
+    pub async fn known_link(&self, link: &crate::model::storage_recovery::Link) -> Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM dump_native_publications WHERE id=? AND digest=?)",
+        )
+        .bind(link.id)
+        .bind(link.digest.as_slice())
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
     pub async fn copy_evidence(&self, source: uuid::Uuid, target: uuid::Uuid) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("INSERT INTO storage_recovery_catalogs(id,namespace_id,anchor) SELECT ?,namespace_id,anchor FROM storage_recovery_catalogs WHERE id=?")

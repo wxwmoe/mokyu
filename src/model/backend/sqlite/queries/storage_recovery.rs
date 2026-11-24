@@ -201,8 +201,12 @@ pub(in super::super) fn page(
     owner: Option<Uuid>,
     after: (Uuid, i64),
 ) -> Rows<'static, (Uuid, i64, i32)> {
-    sqlx::query_as("SELECT id,position,encoded_bytes FROM storage_recovery_entries WHERE catalog=? AND category=? AND (owner_id=? OR ? IS NULL) AND (id>? OR (id=? AND position>?)) ORDER BY id,position LIMIT 128")
-        .bind(id).bind(category).bind(owner).bind(owner).bind(after.0).bind(after.0).bind(after.1)
+    match owner {
+        Some(owner) => sqlx::query_as("SELECT id,position,encoded_bytes FROM storage_recovery_entries INDEXED BY storage_recovery_entry_owner WHERE catalog=? AND category=? AND owner_id=? AND (id,position)>(?,?) ORDER BY id,position LIMIT 128")
+            .bind(id).bind(category).bind(owner).bind(after.0).bind(after.1),
+        None => sqlx::query_as("SELECT id,position,encoded_bytes FROM storage_recovery_entries WHERE catalog=? AND category=? AND (id,position)>(?,?) ORDER BY id,position LIMIT 128")
+            .bind(id).bind(category).bind(after.0).bind(after.1),
+    }
 }
 pub(in super::super) fn covered(operation: Uuid, data: u16) -> Rows<'static, (i64,)> {
     sqlx::query_as("SELECT COUNT(*) FROM (SELECT sequence FROM storage_fragments WHERE operation=? AND root IS NOT NULL AND NOT deleted GROUP BY sequence HAVING COUNT(DISTINCT shard_index)>=?) covered").bind(operation).bind(i32::from(data))

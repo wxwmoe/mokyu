@@ -98,6 +98,7 @@ message RecoveryScan {
   string namespace = 2;
   string scope = 3;
   uint32 prefix = 4;
+  string view = 5;
 }
 message RecoveryRead {
   string medium = 1;

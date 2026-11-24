@@ -13,7 +13,10 @@ use futures_util::{StreamExt, TryStreamExt, stream::BoxStream};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tonic::{
@@ -26,6 +29,7 @@ use uuid::Uuid;
 pub(crate) enum Source {
     Directory(Arc<Medium>),
     Remote {
+        view: Uuid,
         client: StorageRecoveryClient<Channel>,
         token: MetadataValue<tonic::metadata::Ascii>,
     },
@@ -64,7 +68,47 @@ impl Source {
                 .any(|m| m.media_id == identity.media.media_id),
             "remote medium is outside its manifest"
         );
-        Ok((identity, Self::Remote { client, token }))
+        let view = identity.view;
+        Ok((
+            identity,
+            Self::Remote {
+                view,
+                client,
+                token,
+            },
+        ))
+    }
+
+    pub fn view(&self) -> Uuid {
+        match self {
+            Self::Directory(m) => m.identity.view,
+            Self::Remote { view, .. } => *view,
+        }
+    }
+
+    pub async fn layout_history(
+        &self,
+        media: Uuid,
+        namespace: Uuid,
+    ) -> Result<BTreeMap<String, Manifest>> {
+        let mut history = BTreeMap::new();
+        let mut pages = self.pages(media, namespace, "layouts", 0).await?;
+        while let Some(page) = pages.try_next().await? {
+            let Page::Evidence(page) = page else {
+                anyhow::bail!("expected layout history");
+            };
+            for entry in page.entries {
+                if let Some(m) = entry.manifest
+                    && !entry.pending
+                    && entry.error.is_none()
+                {
+                    m.validate()?;
+                    let digest = m.digest()?;
+                    history.insert(digest, m);
+                }
+            }
+        }
+        Ok(history)
     }
 
     pub async fn pages(
@@ -85,7 +129,11 @@ impl Source {
                 },
                 prefix,
             )),
-            Self::Remote { client, token } => {
+            Self::Remote {
+                view,
+                client,
+                token,
+            } => {
                 let mut stream = client
                     .clone()
                     .inventory(request(
@@ -94,6 +142,7 @@ impl Source {
                             namespace: namespace.to_string(),
                             scope: scope.to_owned(),
                             prefix: prefix.into(),
+                            view: view.to_string(),
                         },
                         token,
                     ))
@@ -119,7 +168,7 @@ impl Source {
                 let r = receipt.clone();
                 tokio::task::spawn_blocking(move || m.range(&r, offset, length)).await??
             }
-            Self::Remote { client, token } => client
+            Self::Remote { client, token, .. } => client
                 .clone()
                 .read(request(
                     wire::RecoveryRead {
@@ -176,7 +225,29 @@ fn request<T>(message: T, token: &MetadataValue<tonic::metadata::Ascii>) -> Requ
 #[derive(Default)]
 pub(crate) struct Media {
     pub sources: BTreeMap<Uuid, Vec<(Manifest, Source)>>,
+    directory_blocks: AtomicU64,
+    remote_blocks: AtomicU64,
+    directory_recovery: AtomicU64,
+    remote_recovery: AtomicU64,
+    failed_reads: AtomicU64,
+    reconstructed_windows: AtomicU64,
 }
+
+impl Drop for Media {
+    fn drop(&mut self) {
+        tracing::debug!(target: "mokyu::dump::reads",
+            directory_blocks = self.directory_blocks.load(Ordering::Relaxed),
+            remote_blocks = self.remote_blocks.load(Ordering::Relaxed),
+            directory_recovery = self.directory_recovery.load(Ordering::Relaxed),
+            remote_recovery = self.remote_recovery.load(Ordering::Relaxed),
+            failed_reads = self.failed_reads.load(Ordering::Relaxed),
+            reconstructed_windows = self.reconstructed_windows.load(Ordering::Relaxed), "Verified recovery reads");
+    }
+}
+
+#[cfg(test)]
+#[path = "../../../../tests/storage/offline_stripes.rs"]
+mod tests;
 
 impl Media {
     pub(super) async fn window(
@@ -253,6 +324,7 @@ impl Media {
                 failures.join(", ")
             );
             erasure::codec(layout)?.reconstruct_data(&mut slots)?;
+            self.reconstructed_windows.fetch_add(1, Ordering::Relaxed);
         }
         let body = requested
             .map(|slot| Bytes::from(slots[slot].take().expect("verified data slot")))
@@ -283,8 +355,27 @@ impl Media {
             if let Some(sources) = self.sources.get(id) {
                 for (_, source) in sources {
                     match source.bytes(*id, receipt, offset, length).await {
-                        Ok(bytes) => return Ok(bytes),
-                        Err(error) => failures.push(format!("{id}: {error}")),
+                        Ok(bytes) => {
+                            use fragment::Area;
+                            let count = match (source, receipt.header.area) {
+                                (Source::Directory(_), Area::Blocks) => &self.directory_blocks,
+                                (Source::Directory(_), Area::Recovery) => &self.directory_recovery,
+                                (Source::Remote { .. }, Area::Blocks) => &self.remote_blocks,
+                                (Source::Remote { .. }, Area::Recovery) => &self.remote_recovery,
+                            };
+                            let unit = UNIT as u64;
+                            let verified = (offset + length)
+                                .div_ceil(unit)
+                                .saturating_mul(unit)
+                                .min(receipt.header.shard_bytes)
+                                - offset / unit * unit;
+                            count.fetch_add(verified, Ordering::Relaxed);
+                            return Ok(bytes);
+                        }
+                        Err(error) => {
+                            self.failed_reads.fetch_add(1, Ordering::Relaxed);
+                            failures.push(format!("{id}: {error}"));
+                        }
                     }
                 }
             }

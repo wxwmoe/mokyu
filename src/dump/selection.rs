@@ -23,7 +23,7 @@ pub(super) struct Item {
     pub size: i64,
     pub seq: i64,
 }
-const QUERY: &str = "SELECT key,size,seq FROM objects WHERE bucket=?1 AND generation=?2 AND key>=?3 AND (?4 IS NULL OR key<?4) AND (?5 OR key=?3) AND (?6 IS NULL OR key>?6) ORDER BY key LIMIT ?7";
+const QUERY: &str = "SELECT key,size,seq FROM objects WHERE bucket=?1 AND generation=?2 AND key>=coalesce(?6,?3) AND (?4 IS NULL OR key<?4) AND (?5 OR key=?3) AND (?6 IS NULL OR key>?6) ORDER BY key LIMIT ?7";
 
 impl Selection {
     pub fn parse(db: &Connection, uri: &str) -> Result<Self> {
@@ -251,7 +251,16 @@ impl Target {
                 );
             }
             let db = absolute(db_path)?;
-            for suffix in ["", "-wal", "-shm", "-journal"] {
+            for suffix in [
+                "",
+                "-wal",
+                "-shm",
+                "-journal",
+                ".scan",
+                ".scan-wal",
+                ".scan-shm",
+                ".scan-journal",
+            ] {
                 let mut reserved = db.as_os_str().to_owned();
                 reserved.push(suffix);
                 ensure!(

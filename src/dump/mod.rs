@@ -132,6 +132,8 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
             "MOKYU_DUMP_DB must be outside the read-only source"
         );
     }
+    let staging = path.with_added_extension("scan");
+    let scan_lock = manifest.then(|| native::lock_scan(&staging)).transpose()?;
     let file = tempfile::Builder::new()
         .prefix(".mokyu-catalog-")
         .tempfile_in(&dir)?;
@@ -139,7 +141,7 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
     catalog.db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE; PRAGMA cache_size=-2048; PRAGMA temp.cache_size=-2048; BEGIN IMMEDIATE;")?;
     catalog.db.execute_batch(Catalog::SCHEMA)?;
     let (backend, cut, native) = if manifest {
-        native::build(&uri, path, &dir, &mut catalog).await?
+        native::build(&uri, &staging, &dir, &mut catalog).await?
     } else {
         let backend = Backend::open(&uri, None).await?;
         if let Some(root) = &backend.source.connection.path {
@@ -194,6 +196,11 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
             && actual.native == identity.native,
         "concurrent catalog build used a different source"
     );
+    if let Some(_lock) = scan_lock {
+        if let Err(e) = fs::remove_file(&staging) {
+            eprintln!("Could not remove completed scan {}: {e}", staging.display());
+        }
+    }
     eprintln!(
         "Metadata catalog ready at sequence {}",
         actual.cut.point.sequence

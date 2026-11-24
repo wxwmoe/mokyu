@@ -14,6 +14,15 @@ use crate::{
 use futures_util::StreamExt;
 use std::sync::Arc;
 
+#[derive(Debug)]
+struct InterruptedInventory;
+impl std::fmt::Display for InterruptedInventory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("frozen source inventory interrupted")
+    }
+}
+impl std::error::Error for InterruptedInventory {}
+
 pub(crate) struct Scanner {
     pub(super) clusters: Arc<dyn RecoveryCatalog>,
     control: Option<Arc<Control>>,
@@ -111,16 +120,20 @@ impl Scanner {
         }))
     }
 
-    async fn cursor(&self, id: Uuid, media: Uuid, scope: &str) -> Result<(i64, u16)> {
+    async fn cursor(&self, id: Uuid, media: Uuid, scope: &str) -> Result<(i64, u16, Option<Uuid>)> {
         let mut after = None;
         loop {
             let page = self.clusters.catalog_cursors(id, after).await?;
             if page.is_empty() {
-                return Ok((0, 0));
+                return Ok((0, 0, None));
             }
             for (revision, cursor) in &page {
                 if cursor.media == media && cursor.scope == scope {
-                    return Ok((*revision, if cursor.complete { 0 } else { cursor.prefix }));
+                    return Ok((
+                        *revision,
+                        if cursor.complete { 0 } else { cursor.prefix },
+                        Some(cursor.boot),
+                    ));
                 }
             }
             let last = &page.last().unwrap().1;
@@ -135,8 +148,9 @@ impl Scanner {
         media: Uuid,
         scope: &str,
         alias: usize,
-    ) -> Result<Option<Link>> {
-        let (mut revision, prefix) = self.cursor(id, media, scope).await?;
+        heads: &mut Vec<Link>,
+    ) -> Result<()> {
+        let (mut revision, prefix, previous_view) = self.cursor(id, media, scope).await?;
         let action = match scope {
             "layouts" => Action::Layouts,
             "history" => Action::History { namespace },
@@ -152,19 +166,28 @@ impl Scanner {
                 .get(&media)
                 .context("unknown recovery medium")?[alias]
                 .1;
-            // A mount or URL may now refer to a different snapshot of the same disk.
-            let pages = source.pages(media, namespace, scope, 0).await?;
+            let view = source.view();
+            let prefix = if previous_view == Some(view) {
+                prefix
+            } else {
+                0
+            };
+            let pages = source
+                .pages(media, namespace, scope, prefix)
+                .await
+                .context(InterruptedInventory)?;
             use crate::node::storage::frozen::Page;
             (
-                self.anchor.record_id,
+                view,
                 self.anchor.record_id,
                 pages
+                    .map_err(|e| e.context(InterruptedInventory))
                     .map_ok(|p| match p {
                         Page::Evidence(p) => Inventory::Evidence(p),
                         Page::Fragments(p) => Inventory::Fragments(p),
                     })
                     .boxed(),
-                0,
+                prefix,
             )
         } else {
             let target = self.target(media, action).await?;
@@ -197,6 +220,12 @@ impl Scanner {
                         ensure!(page.head == head, "recovery head changed during scan");
                     }
                     head = page.head;
+                    if scope == "history"
+                        && let Some(link) = &head
+                        && !heads.contains(link)
+                    {
+                        heads.push(link.clone());
+                    }
                     for entry in page.entries {
                         if entry.pending || entry.error.is_some() {
                             continue;
@@ -211,7 +240,11 @@ impl Scanner {
                 }
                 Inventory::Fragments(page) => {
                     cursor.page = page.number;
-                    cursor.prefix = page.restart_prefix;
+                    cursor.prefix = if page.number == 0 {
+                        prefix
+                    } else {
+                        page.restart_prefix
+                    };
                     cursor.complete = page.complete;
                     for entry in page.entries {
                         if entry.pending || entry.error.is_some() {
@@ -249,11 +282,15 @@ impl Scanner {
                 .catalog_checkpoint(id, revision, &cursor, &entries)
                 .await?;
         }
-        ensure!(
-            cursor.complete,
-            "source inventory ended before its final page"
-        );
-        Ok(head)
+        if !cursor.complete {
+            let err = anyhow::anyhow!("source inventory ended before its final page");
+            return Err(if self.offline.is_some() {
+                err.context(InterruptedInventory)
+            } else {
+                err
+            });
+        }
+        Ok(())
     }
 
     pub async fn collect(
@@ -288,13 +325,21 @@ impl Scanner {
                 .and_then(|m| m.sources.get(member))
                 .map_or(1, Vec::len);
             for alias in 0..count {
-                self.scan(id, namespace, *member, "layouts", alias).await?;
-                if let Some(head) = self.scan(id, namespace, *member, "history", alias).await? {
-                    if !heads.contains(&head) {
-                        heads.push(head);
+                for scope in ["layouts", "history", "recovery"] {
+                    if let Err(e) = self
+                        .scan(id, namespace, *member, scope, alias, &mut heads)
+                        .await
+                    {
+                        if !e.is::<InterruptedInventory>() {
+                            return Err(e);
+                        }
+                        eprintln!(
+                            "Recovery medium {member}, source {}, {scope}: {e:#}",
+                            alias + 1
+                        );
+                        break;
                     }
                 }
-                self.scan(id, namespace, *member, "recovery", alias).await?;
             }
         }
         let head = if let Some(digest) = digest {
