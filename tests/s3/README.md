@@ -4,6 +4,8 @@
 
 ## HTTP and recovery fixtures
 
+- `python tests/s3/part_copy.py` uses the publication fixture variables and a disposable version-enabled source bucket. Set `MOKYU_TEST_COPY_BUCKET` for a cross-bucket copy and grant the credential access to both buckets.
+
 - `integration.py`: S3 PUT, conditions, checksums, ranges and multipart.
 - `s3/publication.py`: keep boto3's default checksum handling; exercise file streams, transfer-manager multipart and concurrent PUT/If-None-Match on one key. Body, ETag, length, media type and writer metadata must belong to one generation. Default: 20 rounds with eight writers. Set `MOKYU_TEST_ENDPOINTS` to a JSON array of data endpoints or use `MOKYU_TEST_ENDPOINT`. Count SlowDown separately from successful requests.
 - `s3/connections.py`: with Expect, check connection handling on early rejection with no body, partial body and complete body. The first two close; the last may close safely or be reused. Bodyless requests allow reuse with an intact next response. Run 20 of each over a direct isolated HTTP/1.1 port.

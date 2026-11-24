@@ -1097,6 +1097,12 @@ impl S3 for Gateway {
     ) -> S3Result<S3Response<ListPartsOutput>> {
         multipart::parts(request).map_err(delivery::error)
     }
+    async fn upload_part_copy(
+        &self,
+        request: S3Request<UploadPartCopyInput>,
+    ) -> S3Result<S3Response<UploadPartCopyOutput>> {
+        self.copy_part(request).await.map_err(delivery::error)
+    }
     async fn copy_object(
         &self,
         request: S3Request<CopyObjectInput>,

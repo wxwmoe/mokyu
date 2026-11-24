@@ -641,7 +641,7 @@ impl Writes {
                     batch_id += 1;
                 }
             } else {
-                let body = self.reads.copy_body(source).await?;
+                let body = self.reads.copy_body(source, 0..object.size as u64).await?;
                 let body = crate::http::object::blob(body.map_err(std::io::Error::other).boxed());
                 let check = Integrity::new(&hyper::HeaderMap::new(), None)?;
                 let (size, _, _) = self

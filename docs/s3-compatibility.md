@@ -16,6 +16,7 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | ListObjectsV2 | prefix/delimiter/start-after/continuation-token/encoding-type=url；max-keys 为 0～1000，C 排序，游标绑定桶和前缀 |
 | CreateMultipartUpload | 保存初始元数据、ACL 和校验模式，无需预知总大小 |
 | UploadPart | 编号 1～10000，可并行、乱序、替换；校验并持久保存每个字节的来源后返回 |
+| UploadPartCopy | 同部署内从整对象或闭区间复制分片，支持源版本、ETag 和修改时间条件。单片最多 5 GiB，指定区间时源对象须超过 5 MiB。完成 Multipart 后目标才可见。 |
 | CompleteMultipartUpload | 按冻结清单组装，保存幂等结果；除末片外每片至少 5 MiB，ETag 和顺序须正确 |
 | AbortMultipartUpload | 释放临时引用，与 Complete 互斥 |
 | ListParts | 支持分页，每页的分片元数据一致；跨页不固定快照，不刷新过期时间 |
@@ -33,10 +34,10 @@ S3 入口默认 9000，公共读入口默认 9001。网关实现下列 S3 子集
 | CreateBucket / DeleteBucket | 使用 CLI |
 | GetBucketCors / PutBucketCors / DeleteBucketCors | 使用 CLI/Web |
 | GetBucketWebsite / PutBucketWebsite / DeleteBucketWebsite | 使用管理 Web/API |
-| ListObjects V1 / UploadPartCopy | 使用 ListObjectsV2、普通上传或 CopyObject |
+| ListObjects V1 | 使用 ListObjectsV2 |
 | lifecycle、tagging、object lock、replication、IAM、STS | 不提供对应能力 |
 | 浏览器 POST 表单上传、SSE、read partNumber、write offset、按大小／修改时间条件删除、批量条件删除 | 拒绝相关请求字段 |
-| expected-owner、request-payer、SSE-C/SSE-KMS／复制源 SSE、标签、重定向、任意 grant、MFA、保留策略 | 拒绝扩展字段；CopyObject 也不接受更换 checksum 算法，版本 ID 请求不提供历史版本读写 |
+| expected-owner、request-payer、SSE-C/SSE-KMS／复制源 SSE、标签、重定向、任意 grant、MFA、保留策略 | 拒绝扩展字段。CopyObject 沿用源校验算法 |
 
 ## 寻址与权限
 

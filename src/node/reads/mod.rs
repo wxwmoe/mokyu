@@ -829,9 +829,10 @@ impl Reads {
         super::body::stream(self.clone(), prepared, None)
     }
 
-    pub(super) async fn copy_body(
+    pub(crate) async fn copy_body(
         self: &Arc<Self>,
         mut source: Prepared,
+        range: std::ops::Range<u64>,
     ) -> Result<futures_util::stream::BoxStream<'static, Result<bytes::Bytes>>> {
         let object: read::Object = source.material(
             source
@@ -840,8 +841,11 @@ impl Reads {
                 .as_ref()
                 .context("copy object missing")?,
         )?;
-        ensure!(object.size >= 0, "invalid copy size");
-        if object.size == 0 {
+        ensure!(
+            object.size >= 0 && range.start <= range.end && range.end <= object.size as u64,
+            "invalid copy range"
+        );
+        if range.is_empty() {
             return Ok(Box::pin(futures_util::stream::empty()));
         }
         let lease = source
@@ -860,13 +864,13 @@ impl Reads {
                     lease_id: lease,
                     stream_id: object.id.to_string(),
                     payload_revision: object.revision as u64,
-                    offset: 0,
-                    end: object.size as u64,
+                    offset: range.start,
+                    end: range.end,
                 },
                 None,
             )
             .await?;
-        window.reply.length = object.size as u64;
+        window.reply.length = range.end - range.start;
         Ok(self.body(window))
     }
 

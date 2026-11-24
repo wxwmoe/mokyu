@@ -1,3 +1,4 @@
+pub(super) mod part_copy;
 pub(super) mod versions;
 use crate::{
     app::listing::{encode_key, url_encoding},
@@ -1120,6 +1121,12 @@ impl S3 for Gateway {
         .await
         .map_err(internal)
     }
+    async fn upload_part_copy(
+        &self,
+        req: S3Request<UploadPartCopyInput>,
+    ) -> S3Result<S3Response<UploadPartCopyOutput>> {
+        self.copy_part(req).await.map_err(internal)
+    }
     async fn copy_object(
         &self,
         req: S3Request<CopyObjectInput>,
@@ -1233,11 +1240,15 @@ pub(super) fn copy_source(input: &CopyObjectInput) -> Result<(&str, &str, Option
     {
         return Err(s3_error!(NotImplemented, "unsupported copy directive").into());
     }
+    copy_location(&input.copy_source)
+}
+
+pub(super) fn copy_location(input: &CopySource) -> Result<(&str, &str, Option<&str>)> {
     let CopySource::Bucket {
         bucket,
         key,
         version_id,
-    } = &input.copy_source
+    } = input
     else {
         return Err(s3_error!(NotImplemented).into());
     };
