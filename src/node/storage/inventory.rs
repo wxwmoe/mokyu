@@ -2,11 +2,15 @@ use super::{files::Files, fragments};
 use crate::{
     content::fragment::{Area, HEADER_SIZE, Header},
     model::storage_recovery::{EvidenceEntry, EvidencePage, Link},
-    storage::Disk,
 };
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{fs::ReadDir, io::Read, sync::Arc};
+use std::{
+    fs::ReadDir,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::sync::OwnedRwLockWriteGuard;
 use uuid::Uuid;
 
@@ -30,8 +34,7 @@ pub(super) struct EvidenceScan {
     head: Option<Link>,
     last: Option<EvidencePage>,
     check: fragments::Check,
-    _freeze: OwnedRwLockWriteGuard<()>,
-    _lock: Arc<std::fs::File>,
+    _guard: Option<(OwnedRwLockWriteGuard<()>, Arc<std::fs::File>)>,
 }
 
 impl EvidenceScan {
@@ -41,14 +44,25 @@ impl EvidenceScan {
         owner: Uuid,
         check: fragments::Check,
     ) -> Result<Self> {
-        ensure!(!owner.is_nil(), "invalid evidence owner");
-        check()?;
         let freeze = files
             .mutations
             .clone()
             .try_write_owned()
             .context("storage still has active mutations")?;
-        let mut path = files.disk.root.join(match kind {
+        let mut scan = Self::frozen(&files.disk.root, kind, owner, check)?;
+        scan._guard = Some((freeze, files.lock.clone()));
+        Ok(scan)
+    }
+
+    pub fn frozen(
+        root: &Path,
+        kind: EvidenceKind,
+        owner: Uuid,
+        check: fragments::Check,
+    ) -> Result<Self> {
+        ensure!(!owner.is_nil(), "invalid evidence owner");
+        check()?;
+        let mut path = root.join(match kind {
             EvidenceKind::History | EvidenceKind::Namespaces => "recovery/history",
             EvidenceKind::Layouts => "cluster/history",
         });
@@ -56,19 +70,17 @@ impl EvidenceScan {
             path = path.join(owner.simple().to_string());
         }
         let head = if matches!(kind, EvidenceKind::History) {
-            let path = files
-                .disk
-                .root
+            let path = root
                 .join("recovery/heads")
                 .join(format!("{}.json", owner.simple()));
-            fragments::check_directories(&files.disk.root, &path)?;
+            fragments::check_directories(root, &path)?;
             super::recovery::read(&path)?
                 .map(|bytes| serde_json::from_slice(&bytes))
                 .transpose()?
         } else {
             None
         };
-        fragments::check_directories(&files.disk.root, &path.join("entry"))?;
+        fragments::check_directories(root, &path.join("entry"))?;
         let directory = match std::fs::read_dir(path) {
             Ok(value) => Some(value),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -78,12 +90,11 @@ impl EvidenceScan {
             directory,
             owner,
             kind,
-            root: files.disk.root.clone(),
+            root: root.to_path_buf(),
             head,
             last: None,
             check,
-            _freeze: freeze,
-            _lock: files.lock.clone(),
+            _guard: None,
         })
     }
 
@@ -204,7 +215,7 @@ impl EvidenceScan {
 }
 
 pub(super) struct Scan {
-    disk: Arc<Disk>,
+    root: PathBuf,
     media: Uuid,
     backup: bool,
     area: Area,
@@ -212,30 +223,48 @@ pub(super) struct Scan {
     directory: Option<ReadDir>,
     last: Option<Page>,
     check: fragments::Check,
-    _freeze: OwnedRwLockWriteGuard<()>,
-    _lock: Arc<std::fs::File>,
+    _guard: Option<(OwnedRwLockWriteGuard<()>, Arc<std::fs::File>)>,
 }
 
 impl Scan {
     pub fn open(files: &Files, area: Area, prefix: u16, check: fragments::Check) -> Result<Self> {
-        ensure!(prefix < 4096, "invalid inventory restart prefix");
-        check()?;
         let freeze = files
             .mutations
             .clone()
             .try_write_owned()
             .context("storage still has active mutations")?;
+        let mut scan = Self::frozen(
+            &files.disk.root,
+            files.media.media_id,
+            files.backup,
+            area,
+            prefix,
+            check,
+        )?;
+        scan._guard = Some((freeze, files.lock.clone()));
+        Ok(scan)
+    }
+
+    pub fn frozen(
+        root: &Path,
+        media: Uuid,
+        backup: bool,
+        area: Area,
+        prefix: u16,
+        check: fragments::Check,
+    ) -> Result<Self> {
+        ensure!(prefix < 4096, "invalid inventory restart prefix");
+        check()?;
         Ok(Self {
-            disk: files.disk.clone(),
-            media: files.media.media_id,
-            backup: files.backup,
+            root: root.to_path_buf(),
+            media,
+            backup,
             area,
             prefix,
             directory: None,
             last: None,
             check,
-            _freeze: freeze,
-            _lock: files.lock.clone(),
+            _guard: None,
         })
     }
 
@@ -262,13 +291,12 @@ impl Scan {
         while self.prefix < 4096 && page.entries.len() < PAGE_LIMIT && opened < 256 {
             (self.check)()?;
             let path = self
-                .disk
                 .root
                 .join(self.area.directory())
                 .join(format!("{:03x}", self.prefix));
             if self.directory.is_none() {
                 opened += 1;
-                fragments::check_directories(&self.disk.root, &path.join("entry"))?;
+                fragments::check_directories(&self.root, &path.join("entry"))?;
                 match std::fs::read_dir(&path) {
                     Ok(directory) => self.directory = Some(directory),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -308,7 +336,7 @@ impl Scan {
                     id.simple().to_string() == text && !id.is_nil(),
                     "invalid fragment filename"
                 );
-                let expected = self.disk.root.join(self.area.path(id));
+                let expected = self.root.join(self.area.path(id));
                 ensure!(
                     expected.parent() == Some(path.as_path()),
                     "fragment is in another directory"

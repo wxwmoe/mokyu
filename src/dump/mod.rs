@@ -6,6 +6,7 @@ mod output;
 mod progress;
 mod resume;
 mod selection;
+mod sources;
 mod verify;
 
 use self::origin::{Backend, Location, setting};

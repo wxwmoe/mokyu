@@ -1,6 +1,7 @@
 mod files;
 mod forward;
 mod fragments;
+pub(crate) mod frozen;
 mod inventory;
 mod recovery;
 mod server;
