@@ -13,6 +13,18 @@ const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ select: [row: Preset] }>()
 const columns: Column[] = ['data','parity','copies','members','factor','tolerance']
 const choice = ref(''), group = useId(), viewport = ref<HTMLDivElement>()
+const moreColumns = ref(false)
+function measureColumns() {
+  const el = viewport.value
+  moreColumns.value = !!el && el.scrollWidth - el.clientWidth - el.scrollLeft > 1
+}
+watch(viewport, (el, _, cleanup) => {
+  if (!el) return
+  const observer = new ResizeObserver(measureColumns)
+  observer.observe(el)
+  if (el.firstElementChild) observer.observe(el.firstElementChild)
+  cleanup(() => observer.disconnect())
+})
 const keyOf = (row: Preset) => [row.data, row.parity, row.copies].join('-')
 const selected = computed(() => props.rows.find(row => keyOf(row) === choice.value))
 const order = ref<Column>(), direction = ref(1), page = ref(1)
@@ -42,7 +54,7 @@ function apply() { if (selected.value) { emit('select', selected.value); open.va
 </script>
 <template>
   <UiDialog v-model:open="open" :title="t('scPickLayout')" :description="t('scLayoutGuide')" wide>
-    <div ref="viewport" class="layout-scroll">
+    <div ref="viewport" class="layout-scroll" :class="{ 'more-columns': moreColumns }" @scroll.passive="measureColumns">
       <table class="layout-presets" :aria-label="t('scPickLayout')">
         <thead><tr>
           <th scope="col" class="choice-column"><span class="sr-only">{{ t('scPickLayout') }}</span></th>
@@ -62,7 +74,7 @@ function apply() { if (selected.value) { emit('select', selected.value); open.va
     </div>
     <UiListFooter :previous="page > 1" :next="page < pages" :first="page > 2" :summary="t('scLayoutPage', { page, pages, count: rows.length, first: rows.length ? (page-1)*pageSize+1 : 0, last: Math.min(page*pageSize, rows.length) })" @previous="page--" @next="page++" @first="page=1" />
     <template #footer>
-      <span v-if="selected" class="layout-selection"><Layers :size="16" aria-hidden="true" />{{ t('scLayoutValue', { data: selected.data, parity: selected.parity, copies: selected.copies }) }}</span>
+      <span v-if="selected" class="layout-selection" aria-live="polite"><Layers :size="16" aria-hidden="true" /><span class="layout-shards">{{ t('scLayoutValue', { data: selected.data, parity: selected.parity, copies: selected.copies }) }}</span><span class="layout-protection">{{ t('scLayoutSummary', { disks: selected.members, factor: Number(selected.factor.toFixed(3)), tolerance: selected.tolerance }) }}</span></span>
       <button @click="open=false">{{ t('cancel') }}</button><button class="primary" :disabled="!selected" @click="apply"><Check :size="16" />{{ t('scApplyLayout') }}</button>
     </template>
   </UiDialog>
@@ -94,7 +106,11 @@ function apply() { if (selected.value) { emit('select', selected.value); open.va
 .layout-presets th button:focus-visible { outline-offset: -4px; }
 .layout-selection { display: inline-flex; align-items: center; gap: 8px; margin-inline-end: auto; font-size: var(--small-size, 12px); color: var(--muted); }
 .layout-selection svg { flex-shrink: 0; color: var(--lilac); }
+.layout-protection { display: none; }
 @media (max-width: 560px) {
+  .layout-shards { display: none; }
+  .layout-protection { display: inline; }
+  .layout-scroll.more-columns { mask-image: linear-gradient(to right, black calc(100% - 16px), transparent); }
   .layout-presets th button { white-space: normal; word-break: keep-all; min-width: 5.2rem; line-height: 1.4; gap: 4px; padding: 10px 8px; }
   .layout-presets .choice-column { width: 2.75rem; min-width: 2.75rem; }
   .layout-selection { width: 100%; }

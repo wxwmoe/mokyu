@@ -236,7 +236,6 @@ async function toggle(row: Storage) {
       <div class="section-heading"><h2><Cloud v-if="row.type === 's3'" :size="19" /><Network v-else-if="row.type === 'mokyu'" :size="19" /><HardDrive v-else :size="19" />{{ row.name }}</h2><span class="badge" :class="{ muted: !row.enabled }">{{ t(row.enabled ? 'storeEnabled' : 'storeDisabled') }}</span></div>
       <div class="store-type"><Database :size="16" />{{ t('storeType_' + row.type) }}</div>
       <dl class="facts"><template v-if="row.type === 'local'"><dt>{{ t('storePath') }}</dt><dd><code>{{ row.path }}</code></dd></template><template v-else-if="row.type === 'mokyu'"><dt>{{ t('storageClusters') }}</dt><dd><RouterLink v-if="row.cluster_id" :to="{ path: '/storage-clusters', query: { cluster: row.cluster_id } }"><code>{{ row.cluster_id }}</code></RouterLink><span v-else>—</span></dd></template><template v-else><dt>{{ t('storeEndpoint') }}</dt><dd><code>{{ row.endpoint }}</code></dd><dt>{{ t('storeBucket') }}</dt><dd>{{ row.bucket }}</dd><dt>{{ t('storeRegion') }}</dt><dd>{{ row.region }}</dd><dt>{{ t('storePrefix') }}</dt><dd>{{ row.prefix || '—' }}</dd></template><dt>{{ t('storeCurrentKey') }}</dt><dd><code>{{ row.block_key_id || t('storeNoEncryption') }}</code></dd><dt>{{ t('updatedAt') }}</dt><dd>{{ date(row.updated_at) }}</dd></dl>
-      <p v-if="row.type !== 'mokyu'" class="store-secret-note"><ShieldCheck :size="15" /><span>{{ t('storeSecretsHint') }}</span></p>
       <div class="actions"><RouterLink class="button" :to="'/storages/' + encodeURIComponent(row.name)"><ArrowUpRight :size="15" />{{ t('storeDetails') }}</RouterLink><button @click="edit(row)"><Pencil :size="15" />{{ t('editStore') }}</button><button :disabled="checking === row.name || (!row.enabled && !row.capabilities.write)" @click="toggle(row)">{{ t(row.enabled ? 'disableStore' : 'enableStore') }}</button></div>
     </article>
   </div>
@@ -260,6 +259,7 @@ async function toggle(row: Storage) {
           <label>{{ t('storeRegion') }}<input v-model="draft.region" required placeholder="us-east-1" autocomplete="off" :disabled="busy"></label>
           <label>{{ t('storeAccessKey') }}<input v-model="draft.access_key" autocomplete="off" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label>
           <label>{{ t('storeSecretKey') }}<input v-model="draft.secret_key" type="password" autocomplete="new-password" :placeholder="editing ? t('keepCurrentSecret') : ''" :disabled="busy"></label>
+          <p class="store-form-wide field-help">{{ t('storeSecretsHint') }}</p>
         </template>
         <div v-if="draft.type === 'mokyu'" class="store-form-wide store-cluster-binding">
           <span>{{ t('storageClusters') }}</span>

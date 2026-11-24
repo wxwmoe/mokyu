@@ -127,13 +127,27 @@ pub(in super::super) fn task_value(row: sqlx::mysql::MySqlRow, detailed: bool) -
         "started_at": row.try_get::<Option<DateTime<Utc>>,_>("started_at")?,
     });
     if detailed {
+        if let Some(replication) = row.try_get::<Option<Value>, _>("replication")? {
+            value["detail"]["replication"] = replication;
+        }
         value["bucket_name"] = row.try_get::<Option<String>, _>("bucket_name")?.into();
         value["blocked"] = row.try_get::<Option<String>, _>("blocked")?.into();
     }
     Ok(value)
 }
 
-const JOB_SQL: &str = "/*M!100603 SET STATEMENT max_statement_time=5 FOR */ SELECT /*+ MAX_EXECUTION_TIME(5000) */ t.*,b.name AS bucket_name,CASE WHEN c.paused OR (c.policy='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration','rewrite','usage') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.policy')) AS BINARY) IN ('pack','repack') THEN 'PackCreationStopped' END AS blocked FROM tasks t LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.policy=CASE WHEN t.task_type='pack' THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.policy')) AS BINARY) ELSE CAST(t.task_type AS BINARY) END";
+const JOB_SQL: &str = "/*M!100603 SET STATEMENT max_statement_time=5 FOR */ SELECT /*+ MAX_EXECUTION_TIME(5000) */ t.*,b.name AS bucket_name,
+    CASE WHEN r.task_id IS NOT NULL THEN json_object(
+      'action', JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.operation')),
+      'source', COALESCE(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.source_external'))='true'
+        THEN (SELECT name FROM external_buckets WHERE id=unhex(replace(JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.source_bucket')),'-','')))
+        ELSE (SELECT name FROM buckets WHERE id=unhex(replace(JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.source_bucket')),'-',''))) END, JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.source_bucket'))),
+      'target', COALESCE(CASE WHEN JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.target_external'))='true'
+        THEN (SELECT name FROM external_buckets WHERE id=unhex(replace(JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.target_bucket')),'-','')))
+        ELSE (SELECT name FROM buckets WHERE id=unhex(replace(JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.target_bucket')),'-',''))) END, JSON_UNQUOTE(JSON_EXTRACT(r.options,'$.target_bucket')))) END AS replication,
+    CASE WHEN c.paused OR (c.policy='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration','rewrite','usage') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.policy')) AS BINARY) IN ('pack','repack') THEN 'PackCreationStopped' END AS blocked FROM tasks t
+    LEFT JOIN transfer_runs r ON r.task_id=t.id AND t.task_type='storage_migration'
+    LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.policy=CASE WHEN t.task_type='pack' THEN CAST(JSON_UNQUOTE(JSON_EXTRACT(t.detail,'$.policy')) AS BINARY) ELSE CAST(t.task_type AS BINARY) END";
 
 pub(in super::super) fn task_page(
     q: JobQuery,

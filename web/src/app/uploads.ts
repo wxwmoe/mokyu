@@ -7,7 +7,7 @@ type Part = components['schemas']['PartReceipt']
 type Parts = components['schemas']['PartsPage']
 type Input = components['schemas']['UploadInput']
 export interface UploadJob {
-  client: string; owner: string; bucket: string; input: Input; file?: File; transfer?: Transfer
+  client: string; created: string; owner: string; bucket: string; input: Input; file?: File; transfer?: Transfer
   state: 'queued' | 'checking' | 'uploading' | 'paused' | 'completing' | 'completed' | 'failed' | 'aborted'
   accepted: number; sending: number; speed: number; remaining?: number; verified: number; error?: unknown
   controller: AbortController; running: boolean; paused: boolean
@@ -172,7 +172,7 @@ export function enqueue(files: File[], bucket: string, prefix: string, publicRea
   if (!session.value) return
   for (const file of files) {
     const client = uuid()
-    uploads.push({ client, owner: session.value.id, bucket, file: markRaw(file),
+    uploads.push({ client, created: new Date().toISOString(), owner: session.value.id, bucket, file: markRaw(file),
       input: { client_id: client, key: prefix + file.name, file_name: file.name, size: String(file.size), modified_at: file.lastModified, content_type: file.type, public_read: publicRead, overwrite },
       state: 'queued', accepted: 0, sending: 0, speed: 0, verified: 0, controller: markRaw(new AbortController()), running: false, paused: false })
   }
@@ -191,7 +191,7 @@ export function reselect(transfer: Transfer, file: File) {
   resume(job)
 }
 function enqueuePaused(transfer: Transfer, file: File) {
-  uploads.push({ client: uuid(), owner: session.value!.id, bucket: transfer.bucket_id, transfer, file: markRaw(file),
+  uploads.push({ client: uuid(), created: transfer.created_at, owner: session.value!.id, bucket: transfer.bucket_id, transfer, file: markRaw(file),
     input: { client_id: uuid(), key: transfer.object_key, file_name: file.name, size: String(file.size), content_type: file.type, public_read: false, overwrite: false },
     state: 'paused', accepted: Number(transfer.received_bytes), sending: 0, speed: 0, verified: 0, controller: markRaw(new AbortController()), running: false, paused: true })
 }

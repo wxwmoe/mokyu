@@ -3,6 +3,32 @@ import { randomUUID } from 'node:crypto'
 import { test, expect } from '@playwright/test'
 import en from '../src/locales/i18n.en.js'
 
+test('transfer pages preserve server order down to the timestamp and ID', async ({ page }) => {
+  const origin = process.env.MOKYU_TEST_WEB!
+  const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()
+  const login = await page.request.post('/api/v1/auth/login', { headers: { Origin: origin }, data: { username: 'tester', password } })
+  expect(login.ok()).toBe(true)
+  const bucket = (await (await page.request.get('/api/v1/buckets')).json()).find((b: { name: string }) => b.name === 'media')
+  function item(id: number, fraction: string) {
+    return { id: '00000000-0000-4000-8000-' + String(id).padStart(12, '0'), created_at: '2026-01-01T00:00:00.' + fraction + 'Z',
+      bucket_id: bucket.id, bucket_name: bucket.name, source: 's3', owner: 'tester', status: 'active', object_key: id + '.bin', received_bytes: '0' }
+  }
+  const first = [item(1, '123001'), item(9, '123'), item(2, '123000')]
+  await page.route('**/api/v1/uploads?*', route => {
+    const second = new URL(route.request().url()).searchParams.has('after')
+    return route.fulfill({ json: { items: second ? [item(8, '122999')] : first, next_cursor: second ? null : 'next' } })
+  })
+  await page.goto('/transfers')
+  const names = page.locator('.transfer-heading strong'), footer = page.locator('.list-footer')
+  await expect(names).toHaveText(['1.bin', '9.bin', '2.bin'])
+  await expect(footer.locator('.list-footer-summary')).toHaveText(/1\D+3/)
+  await footer.getByRole('button').click()
+  await expect(names).toHaveText(['8.bin'])
+  await expect(footer.locator('.list-footer-summary')).toHaveText(/2\D+1/)
+  await footer.getByRole('button').click()
+  await expect(names).toHaveText(['1.bin', '9.bin', '2.bin'])
+})
+
 test('bounded browser multipart, pause, reload, full accepted-part validation, completion and cancellation', async ({ page, request }) => {
   test.setTimeout(150000)
   const password = (process.env.MOKYU_TEST_PASSWORD || readFileSync(process.env.MOKYU_TEST_PASSWORD_FILE!, 'utf8')).trim()

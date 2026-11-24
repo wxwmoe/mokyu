@@ -195,6 +195,9 @@ pub(in super::super) fn task_value(row: SqliteRow, detailed: bool) -> Result<Val
         "started_at": optional_date(&row,"started_at")?,
     });
     if detailed {
+        if let Some(replication) = row.try_get::<Option<Value>, _>("replication")? {
+            value["detail"]["replication"] = replication;
+        }
         value["bucket_name"] = row.try_get::<Option<String>, _>("bucket_name")?.into();
         value["blocked"] = row.try_get::<Option<String>, _>("blocked")?.into();
     }

@@ -37,6 +37,11 @@ const pageSize = computed({ get: () => ['25', '50', '100'].includes(String(route
   set: value => { router.replace({ query: { ...route.query, limit: value, cursor: undefined } }) } })
 const buckets = useQuery({ queryKey: ['buckets'], queryFn: ({ signal }) => api<Bucket[]>('/api/v1/buckets', { signal }) })
 const current = computed(() => buckets.data.value?.find(item => item.id === bucket.value))
+const filtered = computed(() => ['q', 'category', 'public', 'min_size', 'max_size', 'from', 'to'].some(key => !!route.query[key]) || route.query.recursive === 'true')
+function clearFilters() {
+  const { prefix, limit, sort, order } = route.query
+  router.push({ query: { prefix, limit, sort, order } })
+}
 const query = computed(() => {
   const values: Record<string, string | undefined> = { prefix: prefix.value, after: cursor.value || undefined, limit: pageSize.value }
   for (const key of ['q', 'mode', 'search_in', 'category', 'public', 'min_size', 'max_size', 'recursive', 'sort', 'order']) if (route.query[key]) values[key] = String(route.query[key])
@@ -98,7 +103,7 @@ async function refresh() {
     <div class="media-toolbar"><nav class="breadcrumbs" :aria-label="t('folderPath')"><RouterLink to="/media"><Home :size="15" />{{ t('media') }}</RouterLink><ChevronRight :size="13" /><button @click="folder('')">{{ current?.name }}</button><span v-if="prefix" class="path-text">/ {{ prefix }}</span></nav>
       <div class="media-view-options"><div class="view-switch" :aria-label="t('mediaLayout')"><button :aria-label="t('listView')" :aria-pressed="layout === 'list'" @click="layout = 'list'"><List :size="17" /></button><button :aria-label="t('galleryView')" :aria-pressed="layout === 'gallery'" @click="layout = 'gallery'"><LayoutGrid :size="17" /></button></div><UiSelect v-model="pageSize" :label="t('pageSize')" :options="sizes" /></div>
     </div>
-    <MediaFilters /><div v-if="objects.data.value?.items.length" class="selection-heading"><UiCheckbox v-model="all" :label="t('selectPage')" /><span>{{ t('selectionHint') }}</span></div>
+    <MediaFilters :filtered="filtered" @clear="clearFilters" /><div v-if="objects.data.value?.items.length" class="selection-heading"><UiCheckbox v-model="all" :label="t('selectPage')" /><span>{{ t('selectionHint') }}</span></div>
     <p v-if="objects.data.value?.search_mode === 'prefix' && route.query.q && (!route.query.mode || route.query.mode === 'contains')" class="field-help catalog-note">{{ t('shortSearchHint') }}</p>
     <p v-else-if="objects.data.value?.layout === 'flat'" class="field-help catalog-note">{{ t('flatResults') }}</p>
     <div v-if="objects.isPending.value" role="status"><span class="sr-only">{{ t('opening') }}</span><div v-for="i in 4" :key="i" class="skeleton-row" /></div>
@@ -113,7 +118,7 @@ async function refresh() {
         <div class="gallery-meta"><span>{{ bytes(Number(item.size)) }}</span><UiCheckbox class="item-check gallery-check" :model-value="checked.has(item.id)" :label="t('selectObject', { name: item.object_key })" @click.capture="selectionShift = $event.shiftKey" @keydown.capture="selectionShift = $event.shiftKey" @update:model-value="pick(item, $event)" /></div>
       </div>
     </div>
-    <EmptyState v-if="objects.data.value && !objects.data.value.items.length && !objects.data.value.prefixes.length" compact :title="t('emptyFolder')" :description="t('folderReady')" />
+    <EmptyState v-if="objects.isSuccess.value && objects.data.value && !objects.data.value.items.length && !objects.data.value.prefixes.length" compact :title="t(filtered ? 'mediaNoMatches' : 'emptyFolder')" :description="filtered ? undefined : t('folderReady')"><template v-if="filtered" #default><button @click="clearFilters">{{ t('clearFilters') }}</button></template></EmptyState>
     <UiListFooter v-if="objects.data.value" :first="!!cursor" :next="!!objects.data.value.next_cursor" :summary="t('pageItems', { count: objects.data.value.items.length + objects.data.value.prefixes.length })" @first="router.push({ query: { ...route.query, cursor: undefined } })" @next="router.push({ query: { ...route.query, cursor: objects.data.value!.next_cursor || undefined } })"><template #after><Heart v-if="!objects.data.value.next_cursor" :size="14" class="list-footer-endmark" /></template></UiListFooter>
   </section>
   <div v-if="picks.length && current" class="selection-bar"><span class="selection-count">{{ picks.length }}</span><strong>{{ t('selectedObjects', { count: picks.length }) }}</strong><MediaActionsMenu :bucket="current" :items="picks" @action="operate($event)" /><button class="icon-button" :aria-label="t('clearSelection')" @click="checked = new Set()"><X :size="17" /></button></div>

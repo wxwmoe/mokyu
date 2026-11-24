@@ -37,7 +37,11 @@ const destinations = [
   { key: 'service', icon: HeartPulse, group: 'administration', admin: true },
 ]
 const groups = computed(() => ['workspace', 'administration'].map(name => ({ name, entries: destinations.filter(item => (session.value?.role === 'admin' ? item.group === name : name === 'workspace' && !item.admin) && (!item.projects || session.value?.project_management) && (!item.cluster || cluster.value)) })).filter(group => group.entries.length))
-const current = computed(() => destinations.find(item => item.key === route.name) || { key: route.name === 'login' ? 'signIn' : route.name === 'storage-details' ? 'storages' : ['account', 'tokens'].includes(String(route.name)) ? String(route.name) : 'media', icon: route.name === 'account' ? Settings2 : route.name === 'storage-details' ? HardDrive : Images, group: route.name === 'storage-details' ? 'administration' : 'workspace' })
+const current = computed(() => destinations.find(item => item.key === (route.meta.navigation || route.name)) || {
+  key: route.name === 'login' ? 'signIn' : String(route.name),
+  icon: route.name === 'tokens' ? KeyRound : Settings2,
+  group: 'workspace',
+})
 async function logout() { try { await signOut(); await router.replace('/login') } catch (error) { report(error) } }
 function reload() { location.reload() }
 async function retryManualCopy() { const value = manualCopy.value; if (value && await copy(value)) manualCopy.value = '' }
@@ -63,7 +67,7 @@ onBeforeUnmount(() => { window.removeEventListener('storage', synchronize); stop
   <div v-if="session" class="app-shell">
     <aside class="sidebar">
       <RouterLink class="brand" to="/"><img src="/assets/mokyu-icon.svg" alt="" width="48" height="48"><span>Mokyu<small>{{ t('brandNote') }}</small></span></RouterLink>
-      <div class="sidebar-links"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><nav :aria-label="t(group.name)"><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key"><component :is="entry.icon" :size="19" /><span>{{ t(entry.label || entry.key) }}</span><i class="nav-dot" /></RouterLink></nav></template></div>
+      <div class="sidebar-links"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><nav :aria-label="t(group.name)"><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key" :class="{ 'router-link-active': current.key === entry.key }" :aria-current="current.key === entry.key ? 'page' : undefined"><component :is="entry.icon" :size="19" /><span>{{ t(entry.label || entry.key) }}</span><i class="nav-dot" /></RouterLink></nav></template></div>
       <div class="sidebar-bottom"><div class="mochi-note"><Sparkles class="note-sparkle" :size="18" /><img src="/assets/mokyu-mochi.svg" alt="" width="124" height="116"><p>{{ t('moreLove') }}</p><span>{{ t('gently') }}</span></div></div>
     </aside>
     <div class="workspace">
@@ -78,7 +82,7 @@ onBeforeUnmount(() => { window.removeEventListener('storage', synchronize); stop
     </div>
   </div>
   <main v-else id="main" tabindex="-1"><RouterView v-if="route.name === 'login'" /></main>
-  <UiDialog v-model:open="navigation" :title="t('yourWorkspace')"><nav class="mobile-menu"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key" @click="navigation = false"><component :is="entry.icon" :size="20" />{{ t(entry.label || entry.key) }}</RouterLink></template><RouterLink to="/tokens" @click="navigation = false"><KeyRound :size="20" />{{ t('tokens') }}</RouterLink></nav></UiDialog>
+  <UiDialog v-model:open="navigation" :title="t('yourWorkspace')"><nav class="mobile-menu"><template v-for="group in groups" :key="group.name"><p class="nav-label">{{ t(group.name) }}</p><RouterLink v-for="entry in group.entries" :key="entry.key" :to="'/' + entry.key" :class="{ 'router-link-active': current.key === entry.key }" :aria-current="current.key === entry.key ? 'page' : undefined" @click="navigation = false"><component :is="entry.icon" :size="20" />{{ t(entry.label || entry.key) }}</RouterLink></template><RouterLink to="/tokens" @click="navigation = false"><KeyRound :size="20" />{{ t('tokens') }}</RouterLink></nav></UiDialog>
   <Notices />
   <UiDialog :open="!!manualCopy" :title="t('copy')" :description="t('copyValue')" @update:open="!$event && (manualCopy = '')"><textarea class="manual-copy" :value="manualCopy" :aria-label="t('copy')" readonly rows="6" @focus="($event.target as HTMLTextAreaElement).select()" /><div class="manual-copy-actions"><button class="primary" @click="retryManualCopy"><Copy :size="16" />{{ t('copyAgain') }}</button><span class="field-help">{{ t('copyFallbackHint') }}</span></div><template #footer><button @click="manualCopy = ''">{{ t('done') }}</button></template></UiDialog>
   <SecurityPrompt />

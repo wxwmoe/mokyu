@@ -1,17 +1,18 @@
 <script setup lang="ts">
 import ErrorNotice from '../components/ErrorNotice.vue'
 import RuntimeCoverage from '../components/RuntimeCoverage.vue'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import { Heart, Images, HardDrive, Sparkles, ArrowUpRight, Package, CloudUpload, RefreshCw, Archive, Flower2, Activity, Clock3 } from 'lucide-vue-next'
-import { api, bytes, queries, session, type Bucket } from '../api/client'
+import { api, bytes, session, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { useInsights, taskTone, requestHistory, type Runtime } from '../app/insights'
 import { t, date } from '../app/i18n'
-import { report, errorText, notify } from '../app/feedback'
+import { notify } from '../app/feedback'
 import ScopePicker from '../components/ScopePicker.vue'
 import SpaceStory from '../components/SpaceStory.vue'
 import TrendChart from '../components/TrendChart.vue'
+import { useServiceStatus } from '../app/cluster'
 import { jobIcon } from '../app/maintenance'
 import EmptyState from '../components/EmptyState.vue'
 const admin = computed(() => session.value?.role === 'admin')
@@ -26,11 +27,23 @@ const capacity = computed(() => (statistics.data.value?.history || []).map(p => 
 const requests = computed(() => requestHistory(runtime.data.value))
 const saving = computed(() => usage.value?.encoded_bytes == null ? null : Number(usage.value.logical_bytes) - Number(usage.value.encoded_bytes))
 const packed = computed(() => usage.value && Number(usage.value.unique_bytes) ? Math.round(Number(usage.value.packed_bytes) / Number(usage.value.unique_bytes) * 100) : 0)
-async function refresh() { const result = await statistics.refetch(); if (admin.value) await Promise.all([runtime.refetch(), queries.refetchQueries({ queryKey: ['service-status'] })]); if (result.error) report(result.error); else notify(t('refreshed')) }
+const service = useServiceStatus(), refreshing = ref(false)
+async function refresh() {
+  if (refreshing.value) return
+  refreshing.value = true
+  try {
+    const results = await Promise.all(admin.value
+      ? [statistics.refetch(), runtime.refetch(), service.refetch()]
+      : [statistics.refetch(), buckets.refetch()])
+    if (results.every(result => !result.error)) notify(t('overviewRefreshed'))
+  } finally { refreshing.value = false }
+}
 </script>
 <template>
-  <div class="page-heading overview-heading"><div><p class="eyebrow">{{ t('overviewEyebrow') }}</p><h1>{{ t('welcomeHome', { name: session?.display_name || session?.username || 'Mokyu' }) }} <Heart class="heading-heart" :size="24" /></h1><p>{{ t('overviewHint') }}</p></div><div class="heading-actions"><ScopePicker /><button class="icon-button" :aria-label="t('refresh')" :disabled="statistics.isFetching.value" @click="refresh"><RefreshCw :size="17" /></button></div></div>
-  <ErrorNotice v-if="statistics.error.value || runtime.error.value" :error="statistics.error.value || runtime.error.value" />
+  <div class="page-heading overview-heading"><div><p class="eyebrow">{{ t('overviewEyebrow') }}</p><h1>{{ t('welcomeHome', { name: session?.display_name || session?.username || 'Mokyu' }) }} <Heart class="heading-heart" :size="24" /></h1><p>{{ t('overviewHint') }}</p></div><div class="heading-actions"><ScopePicker /><button class="icon-button" :aria-label="t('refresh')" :disabled="refreshing" @click="refresh"><RefreshCw :size="17" /></button></div></div>
+  <ErrorNotice :error="statistics.error.value" :retry="() => statistics.refetch()" :retrying="statistics.isFetching.value" />
+  <ErrorNotice v-if="!admin" :error="buckets.error.value" :retry="() => buckets.refetch()" :retrying="buckets.isFetching.value" />
+  <ErrorNotice v-if="admin" :error="runtime.error.value" :title="t('runtimeRefreshFailed')" :retry="() => runtime.refetch()" :retrying="runtime.isFetching.value" />
   <div v-if="statistics.data.value?.stale && usage" class="snapshot-note"><Clock3 :size="14" />{{ t('snapshotStale') }}</div>
   <div v-if="runtime.data.value && Number(runtime.data.value.failed_uploads) > 0" class="info-callout"><CloudUpload :size="20" /><p>{{ t('uploadNeedsAttention', { count: runtime.data.value.failed_uploads }) }}</p><RouterLink class="button" to="/transfers">{{ t('transfers') }}<ArrowUpRight :size="15" /></RouterLink></div>
   <div class="overview-ribbon" aria-hidden="true"><img src="/assets/mokyu-mochi.svg" alt="" width="138" height="132"><span>{{ t('overviewRibbon') }}</span><Heart :size="20" /><i /><Sparkles :size="21" /></div><div class="insight-cards">
@@ -42,7 +55,7 @@ async function refresh() { const result = await statistics.refetch(); if (admin.
   <section class="surface insight-story"><div class="section-heading"><h2><Sparkles :size="19" />{{ t('roomForMore') }}</h2><span v-if="statistics.data.value?.as_of" class="field-help">{{ t('measuredAt', { time: date(statistics.data.value.as_of) }) }}</span></div><SpaceStory v-if="usage" :usage="usage" /><EmptyState v-else compact :title="t('collectingInsights')" :description="t('insightsWait')" /></section>
   <div class="overview-grid">
     <section class="surface overview-panel mint-panel"><div class="section-heading"><h2><Archive :size="19" />{{ t(admin ? cluster ? 'clusterCacheCopies' : 'localPantry' : 'packedTogether') }}</h2><RouterLink :to="{ path: '/storage', query: scope }" class="text-button">{{ t('takeALook') }}<ArrowUpRight :size="15" /></RouterLink></div><template v-if="admin && now"><div class="pantry-reading"><strong>{{ bytes(Number(now.cache_bytes)) }}</strong><span>/ {{ bytes(Number(now.cache_limit)) }}</span></div><div class="pantry-meter" role="progressbar" :aria-label="t('chunkCache')" :aria-valuenow="Math.min(100, Math.round(Number(now.cache_bytes) / Math.max(1, Number(now.cache_limit)) * 100))" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: Math.min(100, Number(now.cache_bytes) / Math.max(1, Number(now.cache_limit)) * 100) + '%' }" /></div><div class="pantry-rows"><span>{{ t('uploadCache') }}<strong>{{ bytes(Number(now.upload_bytes)) }} / {{ bytes(Number(now.upload_limit)) }}</strong></span><span>{{ t('imageCache') }}<strong>{{ bytes(Number(now.image_bytes)) }}</strong></span></div><p class="field-help">{{ t(cluster ? 'clusterCacheCopiesHint' : 'cacheOverlapHint') }}</p></template><EmptyState v-else-if="admin" compact :title="t('collectingInsights')" :description="t('clusterHistoryCollecting')" /><template v-else-if="usage"><img class="pack-companion" src="/assets/mokyu-pack.svg" alt="" width="100" height="100"><p class="packed-reading"><strong>{{ packed }}%</strong> {{ t('packedContentHint') }}</p><p class="field-help">{{ t('packsInScope', { count: usage.packs }) }}</p></template></section>
-    <section class="surface overview-panel cream-panel"><div class="section-heading"><h2><Flower2 :size="19" />{{ t(admin ? 'tidyingNow' : 'yourLittleHomes') }}</h2><RouterLink v-if="admin" to="/maintenance" class="text-button">{{ t('maintenance') }}<ArrowUpRight :size="15" /></RouterLink></div><div v-if="admin && runtime.data.value?.work.length" class="work-glimpses"><RouterLink v-for="work in runtime.data.value.work" :key="work.id" class="work-glimpse" :to="{ path: '/tasks', query: { task: work.id } }"><span class="work-mark" :class="taskTone(work.task_type)"><component :is="jobIcon(work.task_type)" :size="18" /></span><div><strong>{{ t('task_' + work.task_type) }}</strong><small>{{ t(work.status) }} · {{ t('processedItems', { count: work.processed }) }}</small></div><span class="work-state" :class="work.status" /></RouterLink></div><div v-else-if="admin" class="tidy-rest"><img src="/assets/mokyu-mochi.svg" alt="" width="106" height="104"><div><strong>{{ t('quietWorkroom') }}</strong><p>{{ t('quietWorkroomHint') }}</p></div></div><div v-else class="home-links"><RouterLink v-for="home in homes" :key="home.id" :to="'/media/' + home.id"><Package :size="17" />{{ home.name }}<ArrowUpRight :size="14" /></RouterLink></div></section>
+    <section class="surface overview-panel cream-panel"><div class="section-heading"><h2><Flower2 :size="19" />{{ t(admin ? 'tidyingNow' : 'yourLittleHomes') }}</h2><RouterLink v-if="admin" to="/maintenance" class="text-button">{{ t('maintenance') }}<ArrowUpRight :size="15" /></RouterLink></div><div v-if="admin && runtime.data.value?.work.length" class="work-glimpses"><RouterLink v-for="work in runtime.data.value.work" :key="work.id" class="work-glimpse" :to="{ path: '/tasks', query: { task: work.id } }"><span class="work-mark" :class="taskTone(work.task_type)"><component :is="jobIcon(work.task_type)" :size="18" /></span><div><strong>{{ t('task_' + work.task_type) }}</strong><small>{{ t(work.status) }} · {{ t('processedItems', { count: work.processed }) }}</small></div><span class="work-state" :class="work.status" /></RouterLink></div><div v-else-if="admin && runtime.data.value" class="tidy-rest"><img src="/assets/mokyu-mochi.svg" alt="" width="106" height="104"><div><strong>{{ t('quietWorkroom') }}</strong><p>{{ t('quietWorkroomHint') }}</p></div></div><div v-else-if="!admin" class="home-links"><RouterLink v-for="home in homes" :key="home.id" :to="'/media/' + home.id"><Package :size="17" />{{ home.name }}<ArrowUpRight :size="14" /></RouterLink></div></section>
     <section class="surface overview-panel lilac-panel"><div class="section-heading"><h2><Heart :size="19" />{{ t('growingCollection') }}</h2></div><TrendChart :points="capacity" :label="t('logicalMedia')" unit="bytes" /></section>
     <section class="surface overview-panel sky-panel"><template v-if="admin"><div class="section-heading"><h2><Activity :size="19" />{{ t('requestsOverTime') }}</h2><span class="field-help">{{ t('deploymentOnly') }}</span></div><TrendChart :points="requests" :label="t('requestsPerSecond')" unit="rate" /></template><template v-else><div class="section-heading"><h2><Package :size="19" />{{ t('storageMadeGentle') }}</h2></div><p class="insight-note">{{ t('memberStorageHint') }}</p><RouterLink class="button" :to="{ path: '/storage', query: scope }">{{ t('exploreStorage') }}<ArrowUpRight :size="16" /></RouterLink></template></section>
   </div>

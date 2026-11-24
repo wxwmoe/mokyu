@@ -34,6 +34,7 @@ const notices = computed<StatusNotice[]>(() => {
 </script>
 
 <template>
-  <ErrorNotice v-if="status.error.value || overview.error.value" :error="status.error.value || overview.error.value" />
+  <ErrorNotice v-if="admin" :error="status.error.value" :title="t('serviceRefreshFailed')" :retry="() => status.refetch()" :retrying="status.isFetching.value" />
+  <ErrorNotice v-if="cluster" :error="overview.error.value" :title="t('clusterRefreshFailed')" :retry="() => overview.refetch()" :retrying="overview.isFetching.value" />
   <div v-if="notices.length" class="overview-status-stack" role="status" aria-live="polite"><section v-for="notice in notices" :key="notice.title" class="overview-status-banner" :class="'is-' + notice.tone"><TriangleAlert :size="21" /><div class="overview-status-copy"><strong>{{ notice.title }}</strong><p>{{ notice.description }}</p></div><RouterLink class="button" :to="notice.to">{{ notice.action }}<ArrowUpRight :size="15" /></RouterLink></section></div>
 </template>

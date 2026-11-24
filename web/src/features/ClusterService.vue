@@ -65,7 +65,7 @@ function refresh() { void overview.refetch(); void nodes.refetch(); void runtime
 
 <template>
   <div class="page-heading"><div><p class="eyebrow">{{ t('serviceEyebrow') }}</p><h1>{{ t('service') }}</h1><p>{{ t(singleControl ? 'singleControlCluster' : 'clusterDeploymentLabel') }}<template v-if="status.data.value"> · {{ t('revisionLabel', { value: status.data.value.deployment_mode_revision }) }}</template></p></div><div class="heading-actions"><button @click="diagnostic"><Copy :size="16" />{{ t('copyDiagnostics') }}</button><button class="icon-button" :aria-label="t('refresh')" @click="refresh"><RefreshCw :size="17" /></button></div></div>
-  <ErrorNotice v-if="overview.error.value || nodes.error.value" :error="overview.error.value || nodes.error.value" />
+  <ErrorNotice v-if="nodes.error.value" :error="nodes.error.value" :retry="() => nodes.refetch()" :retrying="nodes.isFetching.value" />
   <section v-if="singleControl && overview.data.value" class="surface node-detail-section" :aria-label="t('singleControlCluster')">
     <h2>{{ t(overview.data.value.remote_work ? 'singleControlData' : 'singleControlLocal') }}</h2>
     <p>{{ t(overview.data.value.remote_nodes ? 'singleControlPeers' : 'singleControlEmpty', { count: overview.data.value.remote_nodes, data: overview.data.value.ready_data, worker: overview.data.value.ready_workers }) }}</p>

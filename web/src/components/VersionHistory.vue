@@ -34,8 +34,9 @@ async function apply() {
 <template>
   <div class="version-history">
     <label v-if="objectKey === undefined" class="field"><span>{{ t('versionPrefix') }}</span><input v-model="prefix" :placeholder="t('versionAllKeys')" /></label>
-    <ErrorNotice v-if="query.error.value || (!action && error)" :error="query.error.value || error"/>
-    <p v-if="query.isPending.value">{{ t('loading') }}</p><p v-else-if="!rows.length" class="field-help">{{ t('versionEmpty') }}</p>
+    <ErrorNotice v-if="query.error.value" :error="query.error.value" :title="t(query.data.value ? 'versionRefreshFailed' : 'versionLoadFailed')" :retry="() => query.refetch()" :retrying="query.isFetching.value" />
+    <ErrorNotice v-if="!action && error" :error="error" />
+    <p v-if="query.isPending.value">{{ t('loading') }}</p><p v-else-if="query.isSuccess.value && !rows.length" class="field-help">{{ t('versionEmpty') }}</p>
     <article v-for="row in rows" :key="row.key + ':' + row.version_id" class="version-row">
       <div class="version-title"><Clock3 :size="16"/><strong>{{ objectKey ? date(new Date(row.modified_us / 1000).toISOString()) : row.key }}</strong><span v-if="row.latest" class="badge">{{ t('versionCurrent') }}</span></div>
       <small>{{ row.size == null ? t('versionMarker') : bytes(row.size) }} · <code>{{ row.version_id }}</code></small>

@@ -1,6 +1,17 @@
 use super::*;
 
-const JOB_SQL: &str = "SELECT t.*,b.name AS bucket_name,CASE WHEN c.paused OR (c.policy='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration','rewrite','usage') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND json_extract(t.detail,'$.policy') IN ('pack','repack') THEN 'PackCreationStopped' END AS blocked FROM tasks t LEFT JOIN published_buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.policy=CASE WHEN t.task_type='pack' THEN json_extract(t.detail,'$.policy') ELSE t.task_type END";
+const JOB_SQL: &str = "SELECT t.*,b.name AS bucket_name,
+    CASE WHEN r.task_id IS NOT NULL THEN json_object(
+      'action', json_extract(r.options,'$.operation'),
+      'source', COALESCE(CASE WHEN json_extract(r.options,'$.source_external')=1
+        THEN (SELECT name FROM external_buckets WHERE id=unhex(replace(json_extract(r.options,'$.source_bucket'),'-','')))
+        ELSE (SELECT name FROM published_buckets WHERE id=unhex(replace(json_extract(r.options,'$.source_bucket'),'-',''))) END, json_extract(r.options,'$.source_bucket')),
+      'target', COALESCE(CASE WHEN json_extract(r.options,'$.target_external')=1
+        THEN (SELECT name FROM external_buckets WHERE id=unhex(replace(json_extract(r.options,'$.target_bucket'),'-','')))
+        ELSE (SELECT name FROM published_buckets WHERE id=unhex(replace(json_extract(r.options,'$.target_bucket'),'-',''))) END, json_extract(r.options,'$.target_bucket'))) END AS replication,
+    CASE WHEN c.paused OR (c.policy='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration','rewrite','usage') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND json_extract(t.detail,'$.policy') IN ('pack','repack') THEN 'PackCreationStopped' END AS blocked FROM tasks t
+    LEFT JOIN transfer_runs r ON r.task_id=t.id AND t.task_type='storage_migration'
+    LEFT JOIN published_buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.policy=CASE WHEN t.task_type='pack' THEN json_extract(t.detail,'$.policy') ELSE t.task_type END";
 
 pub(in super::super) fn task_page(
     q: &JobQuery,

@@ -15,7 +15,8 @@ import FileIcon from '../components/FileIcon.vue'
 import EmptyState from '../components/EmptyState.vue'
 import UiListFooter from '../components/ui/UiListFooter.vue'
 
-const state = ref('active'), bucket = ref('all'), cursor = ref(''), add = ref(false), visible = ref(!document.hidden)
+const state = ref('active'), bucket = ref('all'), pages = ref(['']), add = ref(false), visible = ref(!document.hidden)
+const cursor = computed(() => pages.value[pages.value.length - 1])
 document.addEventListener('visibilitychange', visibility)
 function visibility() { visible.value = !document.hidden }
 import { onUnmounted } from 'vue'
@@ -26,19 +27,36 @@ const writable = computed(() => buckets.data.value?.some(b => b.status === 'acti
 const transfers = useQuery({ queryKey: ['transfers', state, bucket, cursor],
   queryFn: ({ signal }) => api<components['schemas']['TransferPage']>('/api/v1/uploads?' + params({ state: state.value === 'active' ? undefined : state.value, bucket: bucket.value === 'all' ? undefined : bucket.value, after: cursor.value || undefined }), { signal }),
   refetchInterval: computed(() => visible.value ? 5000 : false) })
-interface Row { id: string; job?: UploadJob; transfer?: Transfer }
+interface Row { id: string; time: string; job?: UploadJob; transfer?: Transfer }
+function sortTime(utc: string) {
+  // The API and browser use UTC with up to nine fractional digits.
+  return utc.slice(0, -1).replace('.', '').padEnd(28, '0')
+}
+function newestFirst(a: Row, b: Row) {
+  if (a.time !== b.time) return a.time > b.time ? -1 : 1
+  return a.id === b.id ? 0 : a.id > b.id ? -1 : 1
+}
 const rows = computed(() => {
-  const values = new Map<string, Row>()
-  for (const transfer of transfers.data.value?.items || []) values.set(transfer.id, { id: transfer.id, transfer })
+  const remote = transfers.data.value?.items || []
+  const values = new Map<string, Row>(remote.map(transfer => [transfer.id, { id: transfer.id, time: sortTime(transfer.created_at), transfer }]))
+  const last = values.get(remote.at(-1)?.id || '')
   for (const job of uploads) {
-    if (bucket.value !== 'all' && job.bucket !== bucket.value || cursor.value || state.value === 'active' && ['completed', 'aborted'].includes(job.state) || state.value === 'completed' && job.state !== 'completed') continue
+    if (bucket.value !== 'all' && job.bucket !== bucket.value ||
+        state.value === 'active' && ['completed', 'aborted'].includes(job.state) ||
+        state.value === 'completed' && job.state !== 'completed') continue
     const id = job.transfer?.id || job.client
-    const old = values.get(id)
-    values.set(id, { id, job, transfer: old?.transfer || job.transfer })
+    const existing = values.get(id)
+    if (existing) {
+      existing.job = job
+    } else if (!cursor.value) {
+      const row = { id, time: sortTime(job.transfer?.created_at || job.created), job, transfer: job.transfer }
+      if (job.transfer && transfers.data.value?.next_cursor && last && newestFirst(row, last) >= 0) continue
+      values.set(id, row)
+    }
   }
-  return [...values.values()].reverse()
+  return [...values.values()].sort(newestFirst)
 })
-watch([state, bucket], () => { cursor.value = '' })
+watch([state, bucket], () => { pages.value = [''] })
 const active = computed(() => uploads.filter(j => ['queued', 'checking', 'uploading', 'completing'].includes(j.state)).length)
 const pending = computed(() => rows.value.filter(r => r.transfer?.status === 'completed' && r.transfer.remote_state === 'pending').length)
 const picker = ref<HTMLInputElement>(), selected = ref<Transfer>(), removing = ref<Row>(), busy = ref(false)
@@ -87,7 +105,7 @@ async function remove() {
       </div>
     </article>
     <EmptyState v-if="!transfers.isPending.value && !transfers.error.value && !rows.length" :title="t('transfersEmpty')" :description="t('transfersEmptyHint')" />
-    <UiListFooter :first="!!cursor" :next="!!transfers.data.value?.next_cursor" :summary="cursor || transfers.data.value?.next_cursor ? t('transferNewest') : undefined" @first="cursor = ''" @next="cursor = transfers.data.value!.next_cursor || ''" />
+    <UiListFooter v-if="transfers.data.value && (cursor || transfers.data.value.next_cursor)" :first="!!cursor" :previous="pages.length > 2" :next="!!transfers.data.value.next_cursor" :summary="t('transferPage', { page: pages.length, count: rows.length })" @first="pages = ['']" @previous="pages.pop()" @next="pages.push(transfers.data.value!.next_cursor!)" />
   </section>
   <p class="field-help transfer-help">{{ t('resumeHint') }}</p>
   <input ref="picker" type="file" hidden :aria-label="t('reselectFile')" @change="picked">

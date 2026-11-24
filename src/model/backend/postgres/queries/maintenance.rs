@@ -792,4 +792,15 @@ pub(in super::super) fn record_maintenance_preview(id: Uuid, task: Uuid) -> Stat
         .bind(task)
 }
 
-pub(super) const JOB_SQL: &str = "SELECT to_jsonb(t)||jsonb_build_object('bucket_name',b.name,'blocked',CASE WHEN c.paused OR (coalesce(c.policy,'')='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') THEN 'PackCreationStopped' END) FROM tasks t LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END";
+pub(super) const JOB_SQL: &str = "SELECT to_jsonb(t)||jsonb_build_object('bucket_name',b.name,
+    'detail', CASE WHEN r.task_id IS NOT NULL THEN t.detail || jsonb_build_object('replication', jsonb_build_object(
+      'action', r.options->>'operation',
+      'source', COALESCE(CASE WHEN r.options->>'source_external'='true'
+        THEN (SELECT name FROM external_buckets WHERE id=(r.options->>'source_bucket')::uuid)
+        ELSE (SELECT name FROM buckets WHERE id=(r.options->>'source_bucket')::uuid) END, r.options->>'source_bucket'),
+      'target', COALESCE(CASE WHEN r.options->>'target_external'='true'
+        THEN (SELECT name FROM external_buckets WHERE id=(r.options->>'target_bucket')::uuid)
+        ELSE (SELECT name FROM buckets WHERE id=(r.options->>'target_bucket')::uuid) END, r.options->>'target_bucket'))) ELSE t.detail END,
+    'blocked',CASE WHEN c.paused OR (coalesce(c.policy,'')='gc' AND m.gc_paused) THEN 'PolicyPaused' WHEN m.maintenance AND t.task_type IN ('pack','unpack','purge','gc','upload','storage_migration') THEN 'MaintenanceMode' WHEN m.pack_creation_paused AND t.task_type='pack' AND t.detail->>'policy' IN ('pack','repack') THEN 'PackCreationStopped' END) FROM tasks t
+    LEFT JOIN transfer_runs r ON r.task_id=t.id AND t.task_type='storage_migration'
+    LEFT JOIN buckets b ON b.id=t.bucket_id CROSS JOIN mokyu_meta m LEFT JOIN maintenance_controls c ON c.policy=CASE WHEN t.task_type='pack' THEN t.detail->>'policy' ELSE t.task_type END";

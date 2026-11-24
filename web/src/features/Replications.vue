@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
-import { ArrowRight, Pause, Play, Plus, RefreshCw, X } from 'lucide-vue-next'
+import { ArrowRight, ChevronRight, Pause, Play, Plus, RefreshCw, X } from 'lucide-vue-next'
 import { api, params, queries, write, uuid, session, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
 import { t } from '../app/i18n'
 import { report } from '../app/feedback'
 import EmptyState from '../components/EmptyState.vue'
+import { replicationReason } from '../app/maintenance'
 import ErrorNotice from '../components/ErrorNotice.vue'
 import UiDialog from '../components/ui/UiDialog.vue'
 import UiListFooter from '../components/ui/UiListFooter.vue'
@@ -52,7 +53,6 @@ watch(targetOptions, options => { if (!options.some(option => option.value === t
 function bucketName(id: string, external = false) { return resources.value.find(bucket => bucket.id === id && bucket.external === external)?.label || id }
 function tone(value: Replication) { return value.phase === 'cancelled' ? 'gray' : ({ completed: 'mint', failed: 'rose', queued: 'cream', paused: 'cream', running: 'sky' } as Record<string, string>)[value.state] || 'gray' }
 function status(value: Replication) { return value.phase === 'cancelled' ? t('replicationPhase_cancelled') : t(value.state) }
-function reason(code: string) { const key = 'replicationError_' + code, message = t(key); return message === key ? code : message }
 async function refresh() { await queries.invalidateQueries({ queryKey: ['replications'] }); await queries.invalidateQueries({ queryKey: ['replication'] }); await queries.invalidateQueries({ queryKey: ['replication-items'] }) }
 async function create() {
   if (!sourceResource.value || !targetResource.value || busy.value) return
@@ -83,10 +83,17 @@ async function command(action: components['schemas']['ReplicationCommand']) {
   <section class="page">
     <header class="page-heading"><div><h1>{{ t('replications') }}</h1><p>{{ t('replicationsHint') }}</p></div><div class="actions"><button class="icon-button" :aria-label="t('refresh')" @click="refresh"><RefreshCw :size="17" /></button><button class="primary" :disabled="!sourceOptions.length" @click="creating = true; error = undefined"><Plus :size="16" />{{ t('replicationCreate') }}</button></div></header>
     <ErrorNotice :error="jobs.error.value || buckets.error.value || external.error.value" />
-    <div v-if="jobs.data.value?.replications.length" class="surface table-scroll">
-      <table><thead><tr><th>{{ t('replicationSource') }}</th><th>{{ t('replicationTarget') }}</th><th>{{ t('replicationStatus') }}</th><th>{{ t('replicationProgress') }}</th><th><span class="sr-only">{{ t('details') }}</span></th></tr></thead><tbody>
+    <div v-if="jobs.data.value?.replications.length" class="surface replication-list">
+      <div class="table-scroll"><table><thead><tr><th>{{ t('replicationSource') }}</th><th>{{ t('replicationTarget') }}</th><th>{{ t('replicationStatus') }}</th><th>{{ t('replicationProgress') }}</th><th><span class="sr-only">{{ t('details') }}</span></th></tr></thead><tbody>
         <tr v-for="row in jobs.data.value.replications" :key="row.id"><td>{{ bucketName(row.options.source_bucket, row.options.source_external) }}</td><td>{{ bucketName(row.options.target_bucket, row.options.target_external) }}</td><td><span class="badge node-state" :data-tone="tone(row)">{{ status(row) }}</span></td><td>{{ row.progress.completed }} / {{ row.progress.discovered }}<small class="muted">{{ t('replicationPhase_' + row.phase) }}</small></td><td><button @click="selected = row.id">{{ t('details') }}<ArrowRight :size="15" /></button></td></tr>
-      </tbody></table>
+      </tbody></table></div>
+      <div class="replication-rows">
+        <button v-for="row in jobs.data.value.replications" :key="row.id" class="replication-row" @click="selected = row.id">
+          <span class="replication-path"><span>{{ bucketName(row.options.source_bucket, row.options.source_external) }}</span><ArrowRight :size="14" :aria-label="t('replicationTarget')" /><span>{{ bucketName(row.options.target_bucket, row.options.target_external) }}</span></span>
+          <span class="replication-meta"><span class="badge node-state" :data-tone="tone(row)">{{ status(row) }}</span><span>{{ t('replicationProgress') }} · {{ row.progress.completed }} / {{ row.progress.discovered }}</span></span>
+          <ChevronRight class="row-chevron" :size="16" aria-hidden="true" />
+        </button>
+      </div>
     </div>
     <div v-else-if="jobs.isPending.value" class="skeleton-row" role="status" :aria-label="t('loading')" />
     <EmptyState v-else-if="jobs.isSuccess.value" :title="t('replicationEmpty')" />
@@ -117,8 +124,8 @@ async function command(action: components['schemas']['ReplicationCommand']) {
         <p>{{ t('replicationPhase_' + job.data.value.phase) }} · {{ job.data.value.progress.completed }} / {{ job.data.value.progress.discovered }}</p>
         <p class="muted">{{ t('replicationCounts', { skipped: job.data.value.progress.skipped, conflicts: job.data.value.progress.conflicts, sources: job.data.value.progress.sources }) }}</p>
         <p class="muted">{{ t(job.data.value.captured ? 'replicationCaptureHint' : 'replicationCompareHint') }}</p>
-        <p v-if="job.data.value.error" role="alert">{{ reason(job.data.value.error) }}</p>
-        <div class="table-scroll"><table><thead><tr><th>{{ t('replicationSource') }}</th><th>{{ t('replicationTarget') }}</th><th>{{ t('replicationStatus') }}</th></tr></thead><tbody><tr v-for="item in items.data.value?.items" :key="item.id"><td class="object-key">{{ item.source_key }}</td><td class="object-key">{{ item.target_key }}</td><td>{{ t('replicationItem_' + item.state) }}<small v-if="item.error">{{ reason(item.error) }}</small></td></tr></tbody></table></div>
+        <p v-if="job.data.value.error" role="alert">{{ replicationReason(job.data.value.error) }}</p>
+        <div class="table-scroll"><table><thead><tr><th>{{ t('replicationSource') }}</th><th>{{ t('replicationTarget') }}</th><th>{{ t('replicationStatus') }}</th></tr></thead><tbody><tr v-for="item in items.data.value?.items" :key="item.id"><td class="object-key">{{ item.source_key }}</td><td class="object-key">{{ item.target_key }}</td><td>{{ t('replicationItem_' + item.state) }}<small v-if="item.error">{{ replicationReason(item.error) }}</small></td></tr></tbody></table></div>
         <UiListFooter :first="!!itemCursor" :next="!!items.data.value?.next_after" @first="itemCursor = ''" @next="itemCursor = items.data.value?.next_after || ''" />
       </template>
       <template #footer><button v-if="active" :disabled="busy" class="danger-button" @click="cancelling = true"><X :size="15" />{{ t('cancel') }}</button><button v-if="active && ['queued', 'running'].includes(job.data.value?.state || '')" :disabled="busy" @click="command('pause')"><Pause :size="15" />{{ t('pauseTask') }}</button><button v-if="active && ['paused', 'failed'].includes(job.data.value?.state || '')" :disabled="busy" @click="command('resume')"><Play :size="15" />{{ t('resumeTask') }}</button><button @click="details = false">{{ t('close') }}</button></template>
@@ -145,4 +152,17 @@ th:first-child, td:first-child { min-width: 220px; }
 code, .object-key { overflow-wrap: anywhere; white-space: pre-wrap; }
 td small { display: block; margin-top: 4px; }
 @media (max-width: 600px) { .form-grid { grid-template-columns: 1fr; } }
+.replication-rows { display: none; }
+@media (max-width: 760px) {
+  .replication-list { padding: 0 14px; }
+  .replication-list .table-scroll { display: none; }
+  .replication-rows { display: block; }
+  .replication-row { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px 12px; padding: 15px 4px; text-align: start; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+  .replication-row + .replication-row { border-top: 1px solid var(--line-soft); }
+  .replication-row:hover, .replication-row:focus-visible { background: var(--surface-soft); }
+  .replication-path, .replication-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; }
+  .replication-path { overflow-wrap: anywhere; }
+  .replication-meta { grid-column: 1; color: var(--muted); font-size: var(--small-size, 12px); font-weight: normal; }
+  .row-chevron { grid-column: 2; grid-row: 1 / 3; align-self: center; color: var(--muted); }
+}
 </style>
