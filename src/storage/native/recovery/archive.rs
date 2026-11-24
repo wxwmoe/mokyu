@@ -6,7 +6,7 @@ use crate::{
         store::{failure, metadata},
     },
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use futures_util::TryStreamExt;
 use object_store::{GetOptions, GetResult, GetResultPayload, path::Path};
 use std::sync::Arc;
@@ -44,6 +44,23 @@ impl Archive {
         })
     }
 
+    pub fn frozen(scan: Arc<Scanner>, catalog: Uuid, namespace: Uuid) -> Result<Self> {
+        let media = scan
+            .offline
+            .as_ref()
+            .context("offline media required")?
+            .sources
+            .keys()
+            .copied()
+            .collect();
+        Ok(Self {
+            scan,
+            catalog,
+            namespace,
+            media,
+        })
+    }
+
     async fn targets(&self, intent: &Intent, sequence: u32) -> Result<Vec<super::part::Candidate>> {
         let receipts = self
             .scan
@@ -53,6 +70,11 @@ impl Archive {
         let mut candidates = Vec::new();
         for receipt in receipts {
             intent.accepts(&receipt.header)?;
+            if self.scan.backup_group.is_none() {
+                let media = receipt.header.media;
+                candidates.push((receipt, media, false));
+                continue;
+            }
             for media in &self.media {
                 candidates.push((receipt.clone(), *media, true));
             }

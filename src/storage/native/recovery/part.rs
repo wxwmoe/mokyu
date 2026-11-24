@@ -42,6 +42,17 @@ impl Scanner {
             .min(end - start)
             .min(reader::part_length(&intent.layout))
             .min(intent.span() - start % intent.span());
+        if let Some(media) = &self.offline {
+            let length = length.min(crate::node::storage::frozen::MAX_RANGE);
+            let sequence = (start / intent.span()) as u32;
+            let bytes = media
+                .read(candidates, sequence, wanted, offset, length)
+                .await?;
+            return Ok((
+                length,
+                futures_util::stream::once(async move { Ok(bytes) }).boxed(),
+            ));
+        }
         let mut copies = Vec::new();
         let mut recovery = Vec::new();
         for (receipt, media, backup) in candidates {

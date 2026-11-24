@@ -1,3 +1,4 @@
+use queries::storage_recovery::begin as begin_recovery;
 #[path = "../../shared/history.rs"]
 mod history;
 #[path = "../../shared/node_handoff.rs"]

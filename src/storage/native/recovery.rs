@@ -12,6 +12,7 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub(crate) mod archive;
+pub(crate) mod media;
 mod part;
 mod replay;
 pub(crate) mod scan;

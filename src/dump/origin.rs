@@ -228,9 +228,8 @@ pub(super) struct Backend {
     pub deployment: Uuid,
 }
 impl Backend {
-    pub async fn open(uri: &str, catalog: Option<&Location>) -> Result<Self> {
-        let uri = Location::normalize(uri)?;
-        let mut c = model::Connection {
+    pub(super) fn connection() -> model::Connection {
+        model::Connection {
             id: Uuid::nil(),
             r#type: "local".into(),
             cluster_id: None,
@@ -242,7 +241,11 @@ impl Backend {
             access: None,
             secret: None,
             identity_marker: serde_json::Value::Null,
-        };
+        }
+    }
+    pub async fn open(uri: &str, catalog: Option<&Location>) -> Result<Self> {
+        let uri = Location::normalize(uri)?;
+        let mut c = Self::connection();
         let store: Arc<dyn ObjectStore> = if uri.starts_with("s3://") {
             let (bucket, prefix) = physical(&uri)?;
             let s3 = S3::load("SOURCE", bucket, prefix, catalog)?;
@@ -269,8 +272,16 @@ impl Backend {
             .context(
                 "missing mokyu.json; select the backend root containing the metadata journal",
             )?;
-        let marker = marker::identity(&doc.value)?;
-        let journal = marker::journal(&doc.value)?.context("backend has no metadata journal")?;
+        Self::from_marker(location, store, c, doc.value)
+    }
+    pub(super) fn from_marker(
+        location: Location,
+        store: Arc<dyn ObjectStore>,
+        mut c: model::Connection,
+        value: serde_json::Value,
+    ) -> Result<Self> {
+        let marker = marker::identity(&value)?;
+        let journal = marker::journal(&value)?.context("backend has no metadata journal")?;
         let key = match (
             setting("MOKYU_DUMP_DEPLOYMENT_KEY")?,
             setting("MOKYU_DUMP_DEPLOYMENT_KEY_FILE")?,
@@ -289,7 +300,7 @@ impl Backend {
             config::file::deployment_key(&key).context("invalid MOKYU_DUMP_DEPLOYMENT_KEY")?,
         )?;
         c.id = marker.storage_id;
-        c.identity_marker = doc.value;
+        c.identity_marker = value;
         let material = journal
             .unlock(c.id, &cipher)
             .context("MOKYU_DUMP_DEPLOYMENT_KEY cannot unlock this backend")?

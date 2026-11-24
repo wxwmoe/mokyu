@@ -379,11 +379,25 @@ impl Disk {
                 .unwrap_or(u64::MAX),
         )?;
         data.start();
-        Ok(Arc::new(Self {
-            root: instance.data_path.clone(),
-            data: Some(data),
+        Ok(Self::workspace(
+            instance.data_path.clone(),
+            Some(data),
+            crate::config::bytes(&instance.min_free_space)?,
+            budget.cpu_jobs,
+        ))
+    }
+
+    pub(crate) fn workspace(
+        root: PathBuf,
+        data: Option<Arc<super::data_space::Budget>>,
+        floor: u64,
+        slots: usize,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            root,
+            data,
             limits: [None; 3],
-            floor: crate::config::bytes(&instance.min_free_space)?,
+            floor,
             spaces: Mutex::default(),
             upload_limit: None,
             usage: Mutex::new(Usage {
@@ -391,9 +405,9 @@ impl Disk {
                 upload: 0,
                 upload_by_storage: HashMap::new(),
             }),
-            io: Arc::new(Semaphore::new(budget.cpu_jobs)),
+            io: Arc::new(Semaphore::new(slots)),
             pending: Mutex::default(),
-        }))
+        })
     }
 
     pub(crate) fn mutation(&self) -> Result<Option<super::data_space::Reservation>> {

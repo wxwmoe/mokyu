@@ -1,3 +1,4 @@
+use queries::storage_recovery::begin as begin_recovery;
 mod connection;
 #[path = "../../shared/node/embedded_native.rs"]
 mod embedded_native;
@@ -36,6 +37,7 @@ mod node_work;
 mod node_writes;
 #[path = "../../shared/node/notices.rs"]
 mod notices;
+pub(crate) mod offline;
 mod queries;
 #[path = "../../shared/raw_pages.rs"]
 mod raw_pages;

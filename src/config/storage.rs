@@ -39,7 +39,7 @@ pub(crate) fn validate(instance: &Instance, role: &str) -> Result<()> {
     if let Some(region) = &instance.region {
         label(region, "instance.region")?;
     }
-    if role != "storage" {
+    if !matches!(role, "storage" | "storage-recovery") {
         for (key, present) in [
             ("storage_url", instance.storage_url.is_some()),
             ("storage_group", instance.storage_group.is_some()),
@@ -57,13 +57,15 @@ pub(crate) fn validate(instance: &Instance, role: &str) -> Result<()> {
         .storage_url
         .as_deref()
         .context("instance.storage_url is required")?)?;
-    label(
-        instance
-            .storage_group
-            .as_deref()
-            .context("instance.storage_group is required")?,
-        "instance.storage_group",
-    )?;
+    if role == "storage" || instance.storage_group.is_some() {
+        label(
+            instance
+                .storage_group
+                .as_deref()
+                .context("instance.storage_group is required")?,
+            "instance.storage_group",
+        )?;
+    }
     ensure!(
         matches!(
             instance.storage_purpose.as_deref().unwrap_or("primary"),

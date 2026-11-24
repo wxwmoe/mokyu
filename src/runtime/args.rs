@@ -133,7 +133,11 @@ pub(super) enum Command {
         maintenance: bool,
     },
     /// Run a storage member without a database or deployment key.
-    Storage,
+    Storage {
+        /// Serve an existing medium for offline recovery.
+        #[arg(long)]
+        recovery: bool,
+    },
     /// Run an offline tool without accessing service state.
     #[command(name = "tool")]
     Tool {

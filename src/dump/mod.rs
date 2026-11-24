@@ -1,6 +1,7 @@
 mod body;
 mod export;
 mod multipart;
+mod native;
 mod origin;
 mod output;
 mod progress;
@@ -41,6 +42,8 @@ struct Identity {
     storage: Uuid,
     journal: Uuid,
     cut: Cut,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native: Option<native::Fixed>,
 }
 
 fn parent(path: &Path) -> &Path {
@@ -75,10 +78,16 @@ fn existing(path: &Path) -> Result<Option<(Connection, Identity)>> {
     let origin: Identity =
         serde_json::from_slice(&bytes).context("invalid dump catalog identity")?;
     if let Some(uri) = setting("MOKYU_DUMP_SOURCE")? {
-        ensure!(
-            Location::normalize(&uri)? == origin.location.uri,
-            "MOKYU_DUMP_SOURCE differs from the catalog; select a new MOKYU_DUMP_DB"
-        );
+        if let Some(fixed) = &origin.native {
+            if Location::normalize(&uri)? != origin.location.uri || Path::new(&uri).is_file() {
+                fixed.check(&sources::Sources::read(Path::new(&uri))?)?;
+            }
+        } else {
+            ensure!(
+                Location::normalize(&uri)? == origin.location.uri,
+                "MOKYU_DUMP_SOURCE differs from the catalog; select a new MOKYU_DUMP_DB"
+            );
+        }
     }
     for (name, expected) in [
         ("MOKYU_DUMP_SOURCE_ENDPOINT", &origin.location.endpoint),
@@ -111,43 +120,58 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
         "MOKYU_DUMP_MEMORY_LIMIT must allow at least 64MiB for journal replay"
     );
     eprintln!("Building metadata catalog from the published journal...");
-    let backend = Backend::open(&uri, None).await?;
     let dir = parent(path)
         .canonicalize()
         .context("missing MOKYU_DUMP_DB parent directory")?;
-    if let Some(root) = &backend.source.connection.path {
+    let manifest = !uri.starts_with("s3://") && Path::new(&uri).is_file();
+    if manifest {
+        native::guard(&sources::Sources::read(Path::new(&uri))?, &dir)?;
+    } else if !uri.starts_with("s3://") {
         ensure!(
-            !dir.starts_with(fs::canonicalize(root)?),
+            !dir.starts_with(fs::canonicalize(&uri)?),
             "MOKYU_DUMP_DB must be outside the read-only source"
         );
     }
-    let local = Local::new(&backend.source.connection)?;
-    let _guard = match &local {
-        Some(l) => Some(l.lock(false).await?),
-        None => None,
-    };
-    backend.verify().await?;
     let file = tempfile::Builder::new()
         .prefix(".mokyu-catalog-")
         .tempfile_in(&dir)?;
     let mut catalog = Catalog::new(Connection::open(file.path())?);
     catalog.db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA temp_store=FILE; PRAGMA cache_size=-2048; PRAGMA temp.cache_size=-2048; BEGIN IMMEDIATE;")?;
     catalog.db.execute_batch(Catalog::SCHEMA)?;
-    let cut = backend
-        .source
-        .walk(&*backend.store, None, None, local.as_ref(), &mut catalog)
-        .await?;
+    let (backend, cut, native) = if manifest {
+        native::build(&uri, path, &dir, &mut catalog).await?
+    } else {
+        let backend = Backend::open(&uri, None).await?;
+        if let Some(root) = &backend.source.connection.path {
+            ensure!(
+                !dir.starts_with(fs::canonicalize(root)?),
+                "MOKYU_DUMP_DB must be outside the read-only source"
+            );
+        }
+        let local = Local::new(&backend.source.connection)?;
+        let _guard = match &local {
+            Some(l) => Some(l.lock(false).await?),
+            None => None,
+        };
+        backend.verify().await?;
+        let cut = backend
+            .source
+            .walk(&*backend.store, None, None, local.as_ref(), &mut catalog)
+            .await?;
+        backend.verify().await?;
+        (backend, cut, None)
+    };
     ensure!(
         cut.point.sequence != 0 || cut.checkpoint.is_some(),
         "metadata journal has no published recovery point"
     );
-    backend.verify().await?;
     let identity = Identity {
         location: backend.location,
         deployment: backend.deployment,
         storage: backend.source.connection.id,
         journal: backend.source.journal.journal_id,
         cut,
+        native,
     };
     catalog.db.execute(
         "INSERT INTO identity VALUES(?)",
@@ -166,7 +190,8 @@ async fn database(path: &Path) -> Result<(Connection, Identity)> {
         actual.location == identity.location
             && actual.deployment == identity.deployment
             && actual.storage == identity.storage
-            && actual.journal == identity.journal,
+            && actual.journal == identity.journal
+            && actual.native == identity.native,
         "concurrent catalog build used a different source"
     );
     eprintln!(

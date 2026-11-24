@@ -28,6 +28,23 @@ docker run -d --name mokyu-dump -w /data --no-healthcheck \
 docker exec -it mokyu-dump sh
 ```
 
+## 从原生存储群集读取
+
+将 `MOKYU_DUMP_SOURCE` 指向来源清单，例如 `/restore/sources.toml`。`namespace` 填原生后端的 UUID。原盘或固定快照只读挂载，目录填写容器内路径。下面的两项分别读取已挂载的盘和另一台服务器上的 storage。
+
+```toml
+type = "storage_cluster"
+namespace = "019a4cb1-7432-7000-8000-000000000001"
+sources = [
+  { path = "/mnt/storage-a" },
+  { url = "https://storage-b.example:9003", credential_file = "/run/secrets/storage-b" },
+]
+```
+
+远端在原机以 `mokyu storage --recovery` 启动，配置 `instance.data_path`、`storage_url`、`listen_storage` 和 TLS 证书。将 `MOKYU_STORAGE_RECOVERY_TOKEN_FILE` 指向本次恢复使用的凭据文件，可以用 `openssl rand -hex 32` 生成。清单里对应的 `credential_file` 指向恢复机上同一凭据的副本。部署 key 由 dump 读取，恢复监听直接从介质取得身份。使用自建 CA 时，可通过 `SSL_CERT_FILE` 指向受信任的证书文件。
+
+可用 `cluster` 固定群集 UUID，用 `manifest_digest` 固定经过独立核对的布局摘要。选择独立备份时填写 `backup_group`。首次建库会显示选定发布的摘要与水位，`publication_digest` 可指定已知恢复点。多条路径指向同一块盘只计一份。将索引、输出和临时文件放在源盘之外。索引建好后可以离线列举和预览，实际导出时再接入所需介质。
+
 ## 列举与预览
 
 ```sh

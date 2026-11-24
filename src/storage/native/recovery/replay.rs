@@ -387,9 +387,20 @@ impl Scanner {
         let (rows, cut, epochs) = self
             .replay_epochs(catalog, source, head, disk, fixed)
             .await?;
+        self.map_epochs(catalog, head, &epochs, install).await?;
+        Ok((rows, cut))
+    }
+
+    async fn map_epochs(
+        &self,
+        catalog: Uuid,
+        head: &Proof,
+        epochs: &[EpochCut],
+        install: bool,
+    ) -> Result<()> {
         if let Some(root) = &head.publication.root {
             self.clusters
-                .catalog_map(catalog, root.intent.operation, &epochs, install)
+                .catalog_map(catalog, root.intent.operation, epochs, install)
                 .await?;
         }
         let mut after_file = Uuid::nil();
@@ -402,7 +413,7 @@ impl Scanner {
                 after_file = file.part.intent.operation;
                 if !file.retired && file.decoded.is_some() {
                     self.clusters
-                        .catalog_map(catalog, after_file, &epochs, install)
+                        .catalog_map(catalog, after_file, epochs, install)
                         .await?;
                 }
             }
@@ -419,7 +430,7 @@ impl Scanner {
                     anyhow::bail!("invalid recovered payload record");
                 };
                 self.clusters
-                    .catalog_map(catalog, intent.operation, &epochs, install)
+                    .catalog_map(catalog, intent.operation, epochs, install)
                     .await?;
             }
             match page.after {
@@ -427,7 +438,20 @@ impl Scanner {
                 None => break,
             }
         }
-        Ok((rows, cut))
+        Ok(())
+    }
+
+    pub async fn dump(
+        self: &Arc<Self>,
+        catalog: Uuid,
+        source: &Source,
+        head: &Proof,
+        disk: &Arc<Disk>,
+        rows: &mut Catalog,
+    ) -> Result<Cut> {
+        let (cut, epochs) = self.walk_into(catalog, source, head, disk, rows).await?;
+        self.map_epochs(catalog, head, &epochs, false).await?;
+        Ok(cut)
     }
 
     async fn replay_epochs(
@@ -438,6 +462,25 @@ impl Scanner {
         disk: &Arc<Disk>,
         fixed: Option<&Cut>,
     ) -> Result<(View, Cut, Vec<EpochCut>)> {
+        let mut rows = Catalog::temporary(None)?;
+        let (cut, epochs) = self
+            .walk_into(catalog, source, head, disk, &mut rows)
+            .await?;
+        ensure!(
+            fixed.is_none_or(|p| *p == cut),
+            "fixed recovery point changed"
+        );
+        Ok((View::open(rows)?, cut, epochs))
+    }
+
+    async fn walk_into(
+        self: &Arc<Self>,
+        catalog: Uuid,
+        source: &Source,
+        head: &Proof,
+        disk: &Arc<Disk>,
+        rows: &mut Catalog,
+    ) -> Result<(Cut, Vec<EpochCut>)> {
         ensure!(
             head.publication.namespace == source.connection.id
                 && head.publication.identity.as_ref() == Some(&source.connection.identity_marker),
@@ -450,12 +493,6 @@ impl Scanner {
             disk,
             key: Key::new("aes-256-gcm", source.material)?,
         };
-        let mut rows = Catalog::temporary(None)?;
-        let (cut, epochs) = replay.walk(head, &mut rows).await?;
-        ensure!(
-            fixed.is_none_or(|p| *p == cut),
-            "fixed recovery point changed"
-        );
-        Ok((View::open(rows)?, cut, epochs))
+        replay.walk(head, rows).await
     }
 }

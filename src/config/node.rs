@@ -20,7 +20,7 @@ impl NodeConfig {
     }
 
     pub(crate) fn budget(&self, role: &str, runtime: &RuntimeSettings) -> Result<Budget> {
-        if role == "storage" {
+        if matches!(role, "storage" | "storage-recovery") {
             Budget::for_storage(&self.instance)
         } else {
             Budget::runtime(
@@ -35,7 +35,10 @@ impl NodeConfig {
 
     pub(crate) fn parse(text: &str, role: &str) -> Result<Self> {
         ensure!(
-            matches!(role, "data" | "worker" | "node" | "storage"),
+            matches!(
+                role,
+                "data" | "worker" | "node" | "storage" | "storage-recovery"
+            ),
             "node configuration requires data, worker, node or storage role"
         );
         let mut config: Self = toml::from_str(text).map_err(|_| {
@@ -47,13 +50,15 @@ impl NodeConfig {
                 && config.instance.database_read_connections.is_none(),
             "API nodes must not configure deployment_key or database budgets"
         );
-        crate::rpc::client::control_uri(
-            config
-                .instance
-                .control_url
-                .as_deref()
-                .context("instance.control_url is required")?,
-        )?;
+        if role != "storage-recovery" {
+            crate::rpc::client::control_uri(
+                config
+                    .instance
+                    .control_url
+                    .as_deref()
+                    .context("instance.control_url is required")?,
+            )?;
+        }
         let value: toml::Value = toml::from_str(text).expect("validated configuration");
         config.configured_fields = value["instance"]
             .as_table()

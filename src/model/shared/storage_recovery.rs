@@ -221,7 +221,7 @@ impl RecoveryCatalog for Backend {
         path: &str,
     ) -> Result<Option<crate::model::storage_payload::Intent>> {
         let hash = crate::model::storage_native::path(path)?;
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let row = super::queries::storage_backup::image(id, hash.to_vec())
             .fetch_optional(&mut *tx)
             .await?;
@@ -243,7 +243,7 @@ impl RecoveryCatalog for Backend {
         op: Uuid,
         seq: u32,
     ) -> Result<Vec<crate::model::storage_payload::Receipt>> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let rows = super::queries::storage_backup::shards(id, op, seq)
             .fetch_all(&mut *tx)
             .await?;
@@ -278,7 +278,7 @@ impl RecoveryCatalog for Backend {
             );
         }
         let last = epochs.last().context("missing recovery epochs")?;
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, anchor) = catalog(&mut tx, id).await?;
         indexed(&mut tx, id).await?;
         let (head, _) = q::root(id).fetch_one(&mut *tx).await?;
@@ -617,7 +617,7 @@ impl RecoveryCatalog for Backend {
     }
 
     async fn catalog_bind(&self, id: Uuid, head: &Proof) -> Result<()> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, _) = catalog(&mut tx, id).await?;
         head.publication.validate()?;
         ensure!(
@@ -646,7 +646,7 @@ impl RecoveryCatalog for Backend {
             after <= through && through <= i64::MAX as u64,
             "invalid recovery proof range"
         );
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, anchor) = catalog(&mut tx, id).await?;
         let mut proofs = Vec::new();
         for (hash, entry) in q::proofs(id, after, through).fetch_all(&mut *tx).await? {
@@ -665,7 +665,7 @@ impl RecoveryCatalog for Backend {
     }
 
     async fn catalog_index(&self, id: Uuid, proof: &Proof) -> Result<()> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, _) = catalog(&mut tx, id).await?;
         proof.publication.validate()?;
         let (head, indexed) = q::root(id).fetch_one(&mut *tx).await?;
@@ -750,7 +750,7 @@ impl RecoveryCatalog for Backend {
 
     async fn catalog_file(&self, id: Uuid, path: &str) -> Result<Option<RecoveryFile>> {
         let hash = crate::model::storage_native::path(path)?;
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, _) = catalog(&mut tx, id).await?;
         indexed(&mut tx, id).await?;
         let row = q::file_path(id, &hash, path)
@@ -765,7 +765,7 @@ impl RecoveryCatalog for Backend {
     }
 
     async fn catalog_files(&self, id: Uuid, after: Uuid) -> Result<Vec<RecoveryFile>> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, _) = catalog(&mut tx, id).await?;
         indexed(&mut tx, id).await?;
         let rows = q::files(id, after).fetch_all(&mut *tx).await?;
@@ -790,7 +790,7 @@ impl RecoveryCatalog for Backend {
                 && summary.last <= i64::MAX as u64,
             "invalid decoded recovery summary"
         );
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, _) = catalog(&mut tx, id).await?;
         indexed(&mut tx, id).await?;
         let file = recovery_file(q::file(id, operation).fetch_one(&mut *tx).await?, namespace)?;
@@ -805,7 +805,7 @@ impl RecoveryCatalog for Backend {
 
     async fn catalog_stage(&self, id: Uuid, entries: &[CatalogEntry]) -> Result<()> {
         let encoded = encoded(entries)?;
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, anchor) = catalog(&mut tx, id).await?;
         for entry in entries {
             ensure!(
@@ -829,7 +829,7 @@ impl RecoveryCatalog for Backend {
             (0..=6).contains(&category) && position <= i64::MAX as u64,
             "invalid recovery entry key"
         );
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, anchor) = catalog(&mut tx, id).await?;
         let entry = q::entry(id, category, key, position)
             .fetch_optional(&mut *tx)
@@ -855,7 +855,7 @@ impl RecoveryCatalog for Backend {
             "invalid recovery catalog identity"
         );
         anchor.validate()?;
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         q::create(id, namespace, anchor).execute(&mut *tx).await?;
         let current = catalog(&mut tx, id).await?;
         ensure!(
@@ -888,7 +888,7 @@ impl RecoveryCatalog for Backend {
             hash.update(digest);
         }
         let hash = hash.finalize();
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, anchor) = catalog(&mut tx, id).await?;
         ensure!(
             anchor
@@ -967,7 +967,7 @@ impl RecoveryCatalog for Backend {
         id: Uuid,
         after: Option<(Uuid, String)>,
     ) -> Result<Vec<(i64, Cursor)>> {
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         catalog(&mut tx, id).await?;
         let (media, scope) = after.unwrap_or_default();
         let rows = q::cursors(id, media, scope).fetch_all(&mut *tx).await?;
@@ -991,7 +991,7 @@ impl RecoveryCatalog for Backend {
             (0..=6).contains(&category) && after.is_none_or(|(_, value)| value <= i64::MAX as u64),
             "invalid recovery catalog page"
         );
-        let mut tx = q::begin(self).await?;
+        let mut tx = super::begin_recovery(self).await?;
         let (namespace, anchor) = catalog(&mut tx, id).await?;
         let page = page_in(
             &mut tx,

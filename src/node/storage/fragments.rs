@@ -131,12 +131,12 @@ fn inspect_partial(file: &mut File, planned: &Header) -> Result<u64> {
 }
 
 #[derive(Default)]
-struct ReadProof {
+pub(super) struct ReadProof {
     nodes: Vec<usize>,
-    hashes: Vec<fragment::Digest>,
+    pub(super) hashes: Vec<fragment::Digest>,
 }
 
-fn unit(
+pub(super) fn unit(
     file: &mut File,
     receipt: &Receipt,
     index: usize,

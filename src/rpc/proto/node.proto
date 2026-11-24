@@ -87,6 +87,27 @@ service StorageNode {
   rpc Inventory(stream StorageInput) returns (stream StorageOutput);
 }
 
+message RecoveryIdentify {}
+service StorageRecovery {
+  rpc Identify(RecoveryIdentify) returns (StorageInspection);
+  rpc Inventory(RecoveryScan) returns (stream StorageResult);
+  rpc Read(RecoveryRead) returns (RecoveryBytes);
+}
+message RecoveryScan {
+  string medium = 1;
+  string namespace = 2;
+  string scope = 3;
+  uint32 prefix = 4;
+}
+message RecoveryRead {
+  string medium = 1;
+  bytes receipt_json = 2;
+  uint64 offset = 3;
+  uint64 length = 4;
+}
+message RecoveryUnit { bytes data = 1; repeated bytes siblings = 2; }
+message RecoveryBytes { repeated RecoveryUnit units = 1; }
+
 message StorageSample {
   Run run = 1;
   bytes sample_json = 2;

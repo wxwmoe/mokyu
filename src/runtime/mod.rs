@@ -53,7 +53,7 @@ pub(crate) fn run() -> Result<()> {
         Some(Command::Worker { .. }) => Role::Worker,
         Some(Command::Data { .. }) => Role::Data,
         Some(Command::Node { .. }) => Role::Node,
-        Some(Command::Storage) => Role::Storage,
+        Some(Command::Storage { .. }) => Role::Storage,
         _ => Role::Single,
     };
     let testing = matches!(args.command, Some(Command::Testing));
@@ -76,14 +76,24 @@ pub(crate) fn run() -> Result<()> {
             !start_maintenance,
             "set deployment maintenance on control before starting nodes"
         );
-        let (config, budget) = config::node::NodeConfig::load(path, role.title())?;
+        let recovery = matches!(args.command, Some(Command::Storage { recovery: true }));
+        let (config, budget) = config::node::NodeConfig::load(
+            path,
+            if recovery {
+                "storage-recovery"
+            } else {
+                role.title()
+            },
+        )?;
         return tokio::runtime::Builder::new_multi_thread()
             .worker_threads(budget.available_cpus)
             .max_blocking_threads((budget.cpu_jobs * 2).max(8))
             .enable_all()
             .build()?
             .block_on(async {
-                if matches!(role, Role::Storage) {
+                if recovery {
+                    crate::node::storage::readonly::serve(config, budget).await
+                } else if matches!(role, Role::Storage) {
                     crate::node::storage::run(config, budget).await
                 } else {
                     node::run(config, role).await

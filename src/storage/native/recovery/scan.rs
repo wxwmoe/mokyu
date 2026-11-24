@@ -3,7 +3,7 @@ use crate::{
     content::fragment::Area,
     model::{
         storage_cluster::Manifest,
-        storage_recovery::{Link, Proof, verify},
+        storage_recovery::{Link, Proof, RecoveryCatalog, verify},
         storage_transfer::{Action, Destination, SignedGrant},
     },
     storage::native::{
@@ -11,11 +11,13 @@ use crate::{
         transport::{Inventory, Pool, Renewal},
     },
 };
+use futures_util::StreamExt;
 use std::sync::Arc;
 
 pub(crate) struct Scanner {
-    pub(super) clusters: Arc<dyn StorageClusters>,
-    control: Arc<Control>,
+    pub(super) clusters: Arc<dyn RecoveryCatalog>,
+    control: Option<Arc<Control>>,
+    pub(super) offline: Option<Arc<super::media::Media>>,
     pub(super) pool: Arc<Pool>,
     pub anchor: Manifest,
     pub(super) backup_group: Option<String>,
@@ -26,6 +28,8 @@ impl Renewal for Scanner {
     async fn renew(&self, signed: &SignedGrant) -> Result<SignedGrant> {
         Ok(self
             .control
+            .as_ref()
+            .context("control is unavailable during offline recovery")?
             .recovery_target(
                 &self.anchor,
                 signed.grant.media,
@@ -47,11 +51,28 @@ impl Scanner {
         let (value, _) = clusters.placement_snapshot(cluster).await?;
         Ok(Arc::new(Self {
             clusters,
-            control,
+            control: Some(control),
+            offline: None,
             pool: Arc::new(Pool::new(Duration::from_secs(90))),
             anchor: value.manifest,
             backup_group,
         }))
+    }
+
+    pub fn frozen(
+        clusters: Arc<dyn RecoveryCatalog>,
+        anchor: Manifest,
+        media: Arc<super::media::Media>,
+        backup_group: Option<String>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            clusters,
+            control: None,
+            pool: Arc::new(Pool::new(Duration::from_secs(60))),
+            offline: Some(media),
+            anchor,
+            backup_group,
+        })
     }
 
     pub(super) async fn target(&self, media: Uuid, action: Action) -> Result<Destination> {
@@ -64,6 +85,8 @@ impl Scanner {
             );
         }
         self.control
+            .as_ref()
+            .context("control is unavailable during offline recovery")?
             .recovery_target(&self.anchor, media, action, None)
             .await
     }
@@ -111,6 +134,7 @@ impl Scanner {
         namespace: Uuid,
         media: Uuid,
         scope: &str,
+        alias: usize,
     ) -> Result<Option<Link>> {
         let (mut revision, prefix) = self.cursor(id, media, scope).await?;
         let action = match scope {
@@ -122,11 +146,39 @@ impl Scanner {
             },
             _ => anyhow::bail!("invalid recovery scan scope"),
         };
-        let target = self.target(media, action).await?;
+        let (boot, fence, mut pages, prefix) = if let Some(disks) = &self.offline {
+            let source = &disks
+                .sources
+                .get(&media)
+                .context("unknown recovery medium")?[alias]
+                .1;
+            // A mount or URL may now refer to a different snapshot of the same disk.
+            let pages = source.pages(media, namespace, scope, 0).await?;
+            use crate::node::storage::frozen::Page;
+            (
+                self.anchor.record_id,
+                self.anchor.record_id,
+                pages
+                    .map_ok(|p| match p {
+                        Page::Evidence(p) => Inventory::Evidence(p),
+                        Page::Fragments(p) => Inventory::Fragments(p),
+                    })
+                    .boxed(),
+                0,
+            )
+        } else {
+            let target = self.target(media, action).await?;
+            (
+                target.authorization.grant.boot,
+                target.authorization.grant.fence,
+                self.pool.inventory(target, self.clone()).await?,
+                prefix,
+            )
+        };
         let mut cursor = Cursor {
             media,
-            boot: target.authorization.grant.boot,
-            fence: target.authorization.grant.fence,
+            boot,
+            fence,
             manifest: self.anchor.digest()?,
             scan: Uuid::now_v7(),
             scope: scope.into(),
@@ -134,7 +186,6 @@ impl Scanner {
             prefix,
             complete: false,
         };
-        let mut pages = self.pool.inventory(target, self.clone()).await?;
         let mut head = None;
         while let Some(page) = pages.try_next().await? {
             let mut entries = Vec::new();
@@ -198,6 +249,10 @@ impl Scanner {
                 .catalog_checkpoint(id, revision, &cursor, &entries)
                 .await?;
         }
+        ensure!(
+            cursor.complete,
+            "source inventory ended before its final page"
+        );
         Ok(head)
     }
 
@@ -206,6 +261,15 @@ impl Scanner {
         id: Uuid,
         namespace: Uuid,
         media: &[Uuid],
+    ) -> Result<Proof> {
+        self.collect_at(id, namespace, media, None).await
+    }
+    pub async fn collect_at(
+        self: &Arc<Self>,
+        id: Uuid,
+        namespace: Uuid,
+        media: &[Uuid],
+        digest: Option<&str>,
     ) -> Result<Proof> {
         ensure!(
             !media.is_empty()
@@ -218,13 +282,47 @@ impl Scanner {
             .await?;
         let mut heads = Vec::new();
         for member in media {
-            self.scan(id, namespace, *member, "layouts").await?;
-            if let Some(head) = self.scan(id, namespace, *member, "history").await? {
-                heads.push(head);
+            let count = self
+                .offline
+                .as_ref()
+                .and_then(|m| m.sources.get(member))
+                .map_or(1, Vec::len);
+            for alias in 0..count {
+                self.scan(id, namespace, *member, "layouts", alias).await?;
+                if let Some(head) = self.scan(id, namespace, *member, "history", alias).await? {
+                    if !heads.contains(&head) {
+                        heads.push(head);
+                    }
+                }
+                self.scan(id, namespace, *member, "recovery", alias).await?;
             }
-            self.scan(id, namespace, *member, "recovery").await?;
         }
-        let head = verify::rooted_chain(self.clusters.as_ref(), id, &self.anchor, &heads).await?;
+        let head = if let Some(digest) = digest {
+            let mut after = None;
+            let link = loop {
+                let page = self.clusters.catalog_page(id, 1, None, after).await?;
+                let mut found = None;
+                for entry in page.entries {
+                    if let CatalogEntry::Proof(p) = entry {
+                        let link = p.link()?;
+                        if hex::encode(link.digest) == digest {
+                            found = Some(link);
+                            break;
+                        }
+                    }
+                }
+                if let Some(link) = found {
+                    break link;
+                }
+                after = Some(
+                    page.after
+                        .context("requested recovery publication was not found")?,
+                );
+            };
+            verify::rooted_chain(self.clusters.as_ref(), id, &self.anchor, &[link]).await?
+        } else {
+            verify::rooted_chain(self.clusters.as_ref(), id, &self.anchor, &heads).await?
+        };
         self.clusters.catalog_bind(id, &head).await?;
         let mut after = 0;
         let mut previous = None;

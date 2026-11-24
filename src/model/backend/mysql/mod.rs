@@ -1,3 +1,4 @@
+use queries::storage_recovery::begin as begin_recovery;
 mod connection;
 #[path = "../../shared/node/embedded_native.rs"]
 mod embedded_native;

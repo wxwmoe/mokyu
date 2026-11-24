@@ -3,6 +3,7 @@ mod forward;
 mod fragments;
 pub(crate) mod frozen;
 mod inventory;
+pub(crate) mod readonly;
 mod recovery;
 mod server;
 mod transfer;

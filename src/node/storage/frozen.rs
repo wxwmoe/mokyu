@@ -24,6 +24,8 @@ pub(crate) struct Identity {
     pub manifest: Manifest,
 }
 
+pub(crate) const MAX_RANGE: u64 = 1024 * 1024;
+
 pub(crate) struct Medium {
     root: PathBuf,
     pub identity: Identity,
@@ -65,10 +67,80 @@ impl Medium {
         }))
     }
 
-    fn check(&self) -> Result<()> {
+    pub fn range(
+        &self,
+        receipt: &crate::model::storage_payload::Receipt,
+        offset: u64,
+        length: u64,
+    ) -> Result<crate::rpc::wire::RecoveryBytes> {
+        use crate::{
+            content::fragment::UNIT,
+            rpc::wire::{RecoveryBytes, RecoveryUnit},
+        };
+        self.check()?;
+        receipt.validate()?;
+        let header = &receipt.header;
+        ensure!(
+            header.cluster == self.identity.manifest.cluster_id
+                && (self.backup || header.media == self.identity.media.media_id),
+            "fragment belongs to a different medium"
+        );
+        let end = offset.checked_add(length).context("range overflow")?;
+        ensure!(
+            length > 0 && length <= MAX_RANGE && end <= header.shard_bytes,
+            "invalid recovery range"
+        );
+        let path = self.root.join(header.area.path(header.fragment));
+        fragments::check_directories(&self.root, &path)?;
+        let mut file = fragments::open(&path, false)?;
+        ensure!(
+            fragments::inspect_file(&mut file)? == *receipt,
+            "fragment differs from its verified receipt"
+        );
+        let mut proof = fragments::ReadProof::default();
+        let mut units = Vec::new();
+        for i in offset / UNIT as u64..=(end - 1) / UNIT as u64 {
+            let data = fragments::unit(&mut file, receipt, i as usize, &mut proof)?;
+            units.push(RecoveryUnit {
+                data,
+                siblings: proof.hashes.iter().map(|v| v.to_vec()).collect(),
+            });
+        }
+        self.check()?;
+        Ok(RecoveryBytes { units })
+    }
+
+    pub(super) fn check(&self) -> Result<()> {
         let media: Media = record(&self.root, &self.root.join("media.json"))?;
         ensure!(media == self.identity.media, "source media changed");
         Ok(())
+    }
+
+    pub fn pages(
+        self: &Arc<Self>,
+        namespace: Uuid,
+        scope: Scope,
+        prefix: u16,
+    ) -> futures_util::stream::BoxStream<'static, Result<Page>> {
+        use futures_util::StreamExt;
+        let medium = self.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let task = tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut pages = medium.scan(namespace, scope, prefix)?;
+            for index in 0.. {
+                let (page, done) = pages.next(index)?;
+                if tx.blocking_send(page).is_err() || done {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        async_stream::try_stream! {
+            let mut rx=rx;
+            while let Some(page)=rx.recv().await { yield page; }
+            task.await??;
+        }
+        .boxed()
     }
 
     pub fn scan(self: &Arc<Self>, namespace: Uuid, scope: Scope, prefix: u16) -> Result<Pages> {

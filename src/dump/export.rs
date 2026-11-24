@@ -90,7 +90,14 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
         serde_json::from_slice::<Identity>(&v)? == *id,
         "MOKYU_DUMP_DB changed"
     );
-    let backend = Backend::open(&id.location.uri, Some(&id.location)).await?;
+    let (backend, mut roots) = if let Some(fixed) = &id.native {
+        super::native::reopen(path, &id.location, fixed).await?
+    } else {
+        (
+            Backend::open(&id.location.uri, Some(&id.location)).await?,
+            Vec::new(),
+        )
+    };
     ensure!(
         backend.location == id.location
             && backend.deployment == id.deployment
@@ -106,7 +113,8 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
         .as_deref()
         .map(std::fs::canonicalize)
         .transpose()?;
-    if let Some(root) = &local_root {
+    roots.extend(local_root);
+    for root in &roots {
         ensure!(
             !db_path.starts_with(root),
             "MOKYU_DUMP_DB must be outside the read-only source"
@@ -125,11 +133,10 @@ pub(super) async fn run(path: &Path, id: &Identity, sel: Selection, target: Targ
         }
         let mapped = target.mapped(&sel, &item.key)?;
         target.protect_local(&mapped, id, &db_path)?;
-        if matches!(target, Target::Local(_))
-            && let Some(root) = &local_root
-        {
+        if matches!(target, Target::Local(_)) {
+            let resolved = super::selection::absolute(Path::new(&mapped))?;
             ensure!(
-                !super::selection::absolute(Path::new(&mapped))?.starts_with(root),
+                !roots.iter().any(|root| resolved.starts_with(root)),
                 "target overlaps the read-only source"
             );
         }

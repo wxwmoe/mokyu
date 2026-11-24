@@ -28,7 +28,7 @@ use tonic::{
 #[path = "../../../tests/storage/native_transport.rs"]
 pub(super) mod tests;
 
-struct Connection {
+pub(super) struct Connection {
     socket: TcpStream,
     _permit: OwnedSemaphorePermit,
 }
@@ -403,12 +403,17 @@ impl Service {
     }
 }
 
-pub(super) async fn serve(node: Arc<Node>, mut stopping: watch::Receiver<bool>) -> Result<()> {
-    let instance = &node.config.instance;
+pub(super) async fn listener(
+    instance: &crate::config::Instance,
+    slots: usize,
+) -> Result<(
+    Server,
+    impl futures_util::Stream<Item = std::io::Result<Connection>> + Send + 'static + use<>,
+)> {
     let listener = TcpListener::bind(instance.listen_storage.as_deref().unwrap_or("0.0.0.0:9003"))
         .await
         .context("storage listener")?;
-    let connections = Arc::new(Semaphore::new(node.budget.request_connections));
+    let connections = Arc::new(Semaphore::new(slots));
     let incoming = async_stream::stream! {
         loop {
             let socket = match listener.accept().await {
@@ -438,6 +443,12 @@ pub(super) async fn serve(node: Arc<Node>, mut stopping: watch::Receiver<bool>) 
         server =
             server.tls_config(ServerTlsConfig::new().identity(Identity::from_pem(cert, key)))?;
     }
+    Ok((server, incoming))
+}
+
+pub(super) async fn serve(node: Arc<Node>, mut stopping: watch::Receiver<bool>) -> Result<()> {
+    let (mut server, incoming) =
+        listener(&node.config.instance, node.budget.request_connections).await?;
     server
         .add_service(
             StorageNodeServer::new(Service {

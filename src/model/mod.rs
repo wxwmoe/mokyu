@@ -3,6 +3,7 @@ pub(crate) mod administration;
 pub(crate) mod audit;
 mod authorization;
 mod backend;
+pub(crate) use backend::sqlite::offline::OfflineCatalog;
 pub(crate) mod bucket;
 pub(crate) mod cache;
 mod chunk;
