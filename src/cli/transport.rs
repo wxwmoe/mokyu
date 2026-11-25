@@ -23,8 +23,11 @@ pub(super) async fn rpc(target: &CliTarget, command: &Command) -> Result<Value> 
     if let Some(key) = &target.deployment_key {
         request = request.header("x-mokyu-deployment-key", key);
     }
+    let body = serde_json::to_vec(command)?;
+    ensure!(body.len() <= super::CLI_BODY_LIMIT, "CLI request too large");
     let response = request
-        .json(command)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body)
         .send()
         .await
         .context("cannot reach local control HTTP")?;

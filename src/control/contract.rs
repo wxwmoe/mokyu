@@ -54,7 +54,9 @@ pub(super) fn routes() -> (Router<Arc<App>>, utoipa::openapi::OpenApi) {
     let (router, mut api) = OpenApiRouter::new()
         .routes(routes!(info))
         .routes(routes!(super::system::openapi))
-        .routes(routes!(super::cli::cli))
+        .merge(OpenApiRouter::new().routes(routes!(super::cli::cli)).layer(
+            axum::extract::DefaultBodyLimit::max(crate::cli::CLI_BODY_LIMIT),
+        ))
         .routes(routes!(super::objects::cors, super::objects::save_cors))
         .routes(routes!(super::tasks::packs))
         .routes(routes!(super::tasks::pack_detail))

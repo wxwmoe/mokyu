@@ -99,7 +99,9 @@ try:
     assert reader.get(url + '/api/v1/bucket-projects').json()['projects'] == []
     create('-denied', reader, status=403)
     bucket = create('-a', maintainer)
-    assert bucket['actions'] == ['bucket.list', 'object.read', 'object.write', 'object.delete', 'object.acl', 'bucket.settings', 'storage.inspect']
+    assert bucket['actions'] == ['bucket.list', 'object.read', 'object.write', 'object.delete',
+                                 'object.versions.list', 'object.versions.read', 'object.versions.delete',
+                                 'object.versions.restore', 'object.acl', 'bucket.settings', 'storage.inspect']
     assert any(b['id'] == bucket['id'] for b in maintainer.get(url + '/api/v1/buckets').json())
     create('-a', status=409)
     second = create('-b')
@@ -140,7 +142,15 @@ try:
     assert public.status_code == 200 and public.content == content and public.headers['access-control-allow-origin'] == 'https://client.test'
     before = settings(get(bucket))
     rules = Path('/config/' + name + '-cors.json')
-    rules.write_text(json.dumps([{'origins': ['*'], 'methods': ['GET'], 'headers': [], 'expose': [], 'max_age': 300}]))
+    rule = {'origins': ['*'], 'methods': ['GET'], 'headers': [], 'expose': [], 'max_age': 300}
+    origins = [f'https://assets-{n}.example.test' for n in range(750)]
+    config = [{**rule, 'origins': origins}]
+    document = json.dumps(config, separators=(',', ':'))
+    assert 16 * 1024 < len(document) < 64 * 1024
+    rules.write_text(document)
+    cli('bucket', 'cors', bucket['name'], str(rules))
+    assert settings(get(bucket))['cors'] == config
+    rules.write_text(json.dumps([rule]))
     cli('bucket', 'cors', bucket['name'], str(rules))
     rules.unlink()
     save(bucket, before, status=412)

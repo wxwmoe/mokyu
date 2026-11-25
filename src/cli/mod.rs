@@ -9,6 +9,9 @@ mod transport;
 pub use client::client;
 pub use commands::*;
 
+pub(crate) const CONFIG_JSON_LIMIT: usize = 512 * 1024;
+pub(crate) const CLI_BODY_LIMIT: usize = 2 * CONFIG_JSON_LIMIT;
+
 pub fn random_secret() -> Result<String> {
     let mut bytes = [0; 32];
     aws_lc_rs::rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("randomness unavailable"))?;

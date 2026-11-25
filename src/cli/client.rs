@@ -61,7 +61,11 @@ pub async fn client(path: Option<&Path>, mut command: Command) -> Result<()> {
                 !*key_stdin || file != Path::new("-"),
                 "source connection and deployment key cannot both use stdin"
             );
-            *document = Some(read_json(file, 512 * 1024, "storage connection")?);
+            *document = Some(read_json(
+                file,
+                super::CONFIG_JSON_LIMIT,
+                "storage connection",
+            )?);
             if *key_stdin {
                 let mut input = String::new();
                 std::io::stdin().take(256).read_to_string(&mut input)?;
@@ -100,7 +104,7 @@ pub async fn client(path: Option<&Path>, mut command: Command) -> Result<()> {
             | Credentials::Permissions { file, document, .. },
         )
         | Command::Settings(Settings::Set { file, document, .. }) => {
-            *document = Some(read_json(file, 512 * 1024, "JSON file")?)
+            *document = Some(read_json(file, super::CONFIG_JSON_LIMIT, "JSON file")?)
         }
         Command::Bucket(Buckets::Cors { file, document, .. }) => {
             *document = Some(read_json(file, 64 * 1024, "CORS file")?)
