@@ -37,7 +37,7 @@ def main():
     project = cli('project', 'create', name)['id']
     buckets = []
     clients = []
-    for suffix in ('-a', '-b'):
+    for suffix in ('-a', '-b', '-c'):
         label = name + suffix
         storage = cli('storage', 'create', label, 'local', '--init', '--path',
                       str(Path(os.environ['MOKYU_TEST_DATA']) / label))
@@ -46,7 +46,7 @@ def main():
         clients.append(boto3.client('s3', endpoint_url=endpoint, region_name='us-east-1',
                        aws_access_key_id=cred['access_key'], aws_secret_access_key=cred['secret_key'],
                        config=Config(signature_version='s3v4', s3={'addressing_style': 'path'})))
-    source, target = buckets
+    source, target, replica = buckets
     key = 'visible'
     domain = name + '.test'
     cli('domain', 'set', domain, source['name'])
@@ -122,29 +122,67 @@ def main():
     grant()
     member = login(name, member_password)
     old = put(1, 'existing', b'original')
-    marker = Path(os.environ['MOKYU_TEST_FAULT_DIR']) / 'migration-before-publish'
-    marker.with_suffix('.hit').unlink(missing_ok=True)
-    marker.touch()
-    try:
-        queued = action('move', {'key': 'private', 'version': hidden, 'target_key': 'existing', 'target_version': old},
-                        actor=member, target_bucket=target['id'], confirm_storage_migration=True)
-        assert queued['status'] == 202, queued
+
+    def conflicting_move(key, version, actor, change, waiting_link=None):
+        checkpoint = 'replication-batch' if waiting_link else 'migration-before-publish'
+        marker = Path(os.environ['MOKYU_TEST_FAULT_DIR']) / checkpoint
+        marker.with_suffix('.hit').unlink(missing_ok=True)
+        marker.touch()
+        try:
+            queued = action('move', {'key': key, 'version': version, 'target_key': 'existing', 'target_version': old},
+                            actor=actor, target_bucket=target['id'], confirm_storage_migration=True)
+            assert queued['status'] == 202, queued
+            until = time.monotonic() + 45
+            while not marker.with_suffix('.hit').exists():
+                assert time.monotonic() < until, 'migration did not reach publication'
+                time.sleep(.05)
+            if waiting_link:
+                while not admin.get(waiting_link).json()['pending']:
+                    assert time.monotonic() < until, 'migration did not reach its replica'
+                    time.sleep(.05)
+            change()
+        finally:
+            marker.unlink(missing_ok=True)
         until = time.monotonic() + 45
-        while not marker.with_suffix('.hit').exists():
-            assert time.monotonic() < until, 'migration did not reach publication'
-            time.sleep(.05)
+        while (state := cli('task', 'show', queued['task_id'])['state']) in ('running', 'queued', 'paused'):
+            assert time.monotonic() < until, state
+            time.sleep(.1)
+        assert state == 'failed', state
+        assert clients[1].get_object(Bucket=target['name'], Key='existing')['Body'].read() == b'original'
+
+    def revoke_write():
         grants[1]['actions'] = ['bucket.list']
         grant()
-    finally:
-        marker.unlink(missing_ok=True)
-    until = time.monotonic() + 45
-    while (state := cli('task', 'show', queued['task_id'])['state']) in ('running', 'queued'):
-        assert time.monotonic() < until, state
-        time.sleep(.1)
-    assert state == 'failed', state
-    for index, path, expected in [(0, 'private', b'private'), (1, 'existing', b'original')]:
-        assert clients[index].get_object(Bucket=buckets[index]['name'], Key=path)['Body'].read() == expected
+
+    conflicting_move('private', hidden, member, revoke_write)
+    assert clients[0].get_object(Bucket=source['name'], Key='private')['Body'].read() == b'private'
     print('PASS revoked media migration preserves source and existing destination', flush=True)
+
+    version = put(0, 'acl-change', b'original ACL fixture', 'public-read')
+    object_key = dict(Bucket=source['name'], Key='acl-change')
+
+    def change_acl(waiting_link=None):
+        conflicting_move('acl-change', version, admin, lambda: clients[0].put_object_acl(**object_key, ACL='private'),
+                         waiting_link=waiting_link)
+        assert clients[0].get_object(**object_key)['Body'].read() == b'original ACL fixture'
+        grants = clients[0].get_object_acl(**object_key)['Grants']
+        assert not any(g['Grantee'].get('URI', '').endswith('/AllUsers') for g in grants)
+
+    change_acl()
+    print('PASS migration preserves the current source ACL and existing destination', flush=True)
+
+    base = panel + '/api/v1/buckets/' + target['id'] + '/redundancy'
+    link = admin.post(base, json={'target_bucket': replica['id'], 'mode': 'synchronous'})
+    link.raise_for_status()
+    status_url = base + '/' + link.json()['task_id']
+    until = time.monotonic() + 90
+    while admin.get(status_url).json()['status'] != 'healthy':
+        assert time.monotonic() < until, 'initial replica did not finish'
+        time.sleep(.1)
+    clients[0].put_object_acl(**object_key, ACL='public-read')
+    change_acl(status_url)
+    assert clients[2].get_object(Bucket=replica['name'], Key='existing')['Body'].read() == b'original'
+    print('PASS migration rechecks the ACL after waiting for a synchronous replica', flush=True)
 
 
 if __name__ == '__main__':

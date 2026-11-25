@@ -45,7 +45,7 @@ pub(in super::super) fn object_storage(bucket: Uuid) -> Scalar<'static, Option<U
 }
 
 pub(in super::super) fn stream_public(stream: Id) -> Scalar<'static, bool> {
-    sqlx::query_scalar("SELECT public_read FROM streams WHERE id=$1").bind(stream)
+    sqlx::query_scalar("SELECT public_read FROM streams WHERE id=$1 FOR SHARE").bind(stream)
 }
 
 pub(in super::super) fn tombstone_object<'q>(

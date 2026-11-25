@@ -75,6 +75,18 @@ pub(in super::super) async fn lock_media_scope(
     Ok(())
 }
 
+async fn check_source_acl(
+    tx: &mut Transaction<'_, Postgres>,
+    stream: Id,
+    expected_public: Option<bool>,
+) -> Result<()> {
+    if let Some(expected) = expected_public {
+        let current = queries::stream_public(stream).fetch_one(&mut **tx).await?;
+        ensure!(current == expected, s3s::s3_error!(PreconditionFailed));
+    }
+    Ok(())
+}
+
 pub(in super::super) async fn selected_object(
     tx: &mut Transaction<'_, Postgres>,
     bucket: Uuid,
@@ -288,14 +300,7 @@ pub(in super::super) async fn publish_copy_in(
     )
     .await?;
     let old = selected_object(tx, target, key, expected).await?;
-    if let Some(expected_public) = expected_public {
-        let current: bool = queries::stream_public(input.source_version)
-            .fetch_one(&mut **tx)
-            .await?;
-        if current != expected_public {
-            return Err(s3s::s3_error!(PreconditionFailed).into());
-        }
-    }
+    check_source_acl(tx, input.source_version, expected_public).await?;
     require_writing_stream(tx, id).await?;
     let (_, _, _, size, payload, _, publication_id) = queries::lock_writing_stream(id)
         .fetch_one(&mut **tx)
@@ -444,7 +449,10 @@ pub(in super::super) async fn complete_storage_migration_in(
     .fetch_one(&mut **tx)
     .await?;
     lock_media_scope(tx, &StorageMigration::authority(detail)?).await?;
-    if let Err(error) = publish_migration_in(tx, id, lease_token, destination, job).await {
+    let expected_public = (job.action == "move").then_some(job.public_read);
+    if let Err(error) =
+        publish_migration_in(tx, id, lease_token, destination, job, expected_public).await
+    {
         if error.is::<crate::model::ReplicaPending>() {
             super::super::replica_transactions::park(
                 tx,
@@ -474,6 +482,7 @@ pub(in super::super) async fn publish_migration_in(
     lease_token: Uuid,
     destination: Id,
     job: &StorageMigration,
+    expected_public: Option<bool>,
 ) -> Result<()> {
     let owned: Option<Uuid> = queries::lock_migration_task(id, lease_token)
         .fetch_optional(&mut **tx)
@@ -510,6 +519,7 @@ pub(in super::super) async fn publish_migration_in(
         source_current == Some(job.source_version),
         "source object changed during storage migration"
     );
+    check_source_acl(tx, job.source_version, expected_public).await?;
     require_writing_stream(tx, destination).await?;
     let (_, _, _, size, payload, _, publication_id) = queries::lock_writing_stream(destination)
         .fetch_one(&mut **tx)

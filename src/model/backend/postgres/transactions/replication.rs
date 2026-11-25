@@ -1334,7 +1334,17 @@ async fn publish(db: &mut Tx<'_>, task: Execution, run: &mut q::Run) -> Result<(
         )
         .await
     } else {
-        transactions::publish_migration_in(db, task.id, task.token, candidate, &job).await
+        let expected_public =
+            (options.permissions == Permissions::Inherit).then_some(item.snapshot.0.public);
+        transactions::publish_migration_in(
+            db,
+            task.id,
+            task.token,
+            candidate,
+            &job,
+            expected_public,
+        )
+        .await
     };
     if let Err(error) = result {
         if error.is::<crate::model::ReplicaPending>() {

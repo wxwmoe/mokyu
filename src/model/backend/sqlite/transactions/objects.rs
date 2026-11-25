@@ -18,6 +18,21 @@ pub(in super::super) async fn lock_media_scope(
     Ok(())
 }
 
+async fn check_source_acl(
+    tx: &mut SqliteConnection,
+    stream: Id,
+    expected_public: Option<bool>,
+) -> Result<()> {
+    if let Some(expected) = expected_public {
+        let current = queries::quota_stream(stream)
+            .fetch_one(&mut *tx)
+            .await?
+            .public_read;
+        ensure!(current == expected, s3s::s3_error!(PreconditionFailed));
+    }
+    Ok(())
+}
+
 pub(in super::super) async fn selected_object(
     connection: &mut SqliteConnection,
     bucket: Uuid,
@@ -369,16 +384,7 @@ pub(in super::super) async fn publish_copy_in(
     )
     .await?;
     let old = selected_objects(tx, &input).await?;
-    if let Some(expected) = expected_public {
-        ensure!(
-            queries::quota_stream(input.source_version)
-                .fetch_one(&mut **tx)
-                .await?
-                .public_read
-                == expected,
-            s3s::s3_error!(PreconditionFailed)
-        );
-    }
+    check_source_acl(tx, input.source_version, expected_public).await?;
     let crate::model::PublishingStream {
         stream,
         publication_id,
@@ -527,7 +533,8 @@ pub(in super::super) async fn complete_storage_migration_in(
 ) -> Result<()> {
     let detail = queries::lock_task_detail(task).fetch_one(&mut **tx).await?;
     lock_media_scope(tx, &StorageMigration::authority(detail)?).await?;
-    if let Err(error) = publish_migration_in(tx, task, id, job).await {
+    let expected_public = (job.action == "move").then_some(job.public_read);
+    if let Err(error) = publish_migration_in(tx, task, id, job, expected_public).await {
         if error.is::<crate::model::ReplicaPending>() {
             super::super::replica_transactions::park(tx, task).await?;
             return Ok(());
@@ -550,6 +557,7 @@ pub(in super::super) async fn publish_migration_in(
     task: Execution,
     id: Id,
     job: &StorageMigration,
+    expected_public: Option<bool>,
 ) -> Result<()> {
     ensure!(
         matches!(job.action.as_str(), "copy" | "move"),
@@ -587,6 +595,7 @@ pub(in super::super) async fn publish_migration_in(
         },
     )
     .await?;
+    check_source_acl(tx, job.source_version, expected_public).await?;
     let crate::model::PublishingStream {
         stream,
         publication_id,

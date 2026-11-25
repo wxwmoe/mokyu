@@ -356,6 +356,7 @@ pub(super) async fn abort(db: &mut Tx<'_>, publication: Uuid, code: &str) -> Res
     {
         q::release_completion(stream).execute(&mut **db).await?;
     }
+    let mut candidates = Vec::new();
     for phase in ["admitted", "preparing", "prepared"] {
         while let Some(target) = q::target(publication, phase)
             .fetch_optional(&mut **db)
@@ -370,16 +371,20 @@ pub(super) async fn abort(db: &mut Tx<'_>, publication: Uuid, code: &str) -> Res
                 Error::OperationAborted
             );
             wake_link(db, target.link_id).await?;
-            if let Some(candidate) = target.candidate {
-                transactions::discard_replica(db, target.target_bucket, candidate).await?;
-            }
             if let Some(task) = target.task_id {
-                q::cancel_child(task).execute(&mut **db).await?;
                 transfer::task_state(task, "queued", None)
                     .execute(&mut **db)
                     .await?;
+                q::cancel_child(task).execute(&mut **db).await?;
+            }
+            if let Some(candidate) = target.candidate {
+                candidates.push((target.target_bucket, candidate));
             }
         }
+    }
+    // Replication workers lock their task before taking the quota locks used to discard a stream.
+    for (bucket, candidate) in candidates {
+        transactions::discard_replica(db, bucket, candidate).await?;
     }
     ensure!(
         q::abort(publication, &json!({"error":code}))
