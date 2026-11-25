@@ -147,7 +147,6 @@ pub(crate) trait History: Send + Sync {
         bucket: Uuid,
         filter: RetentionFilter,
     ) -> Result<RetentionPreview>;
-    async fn published_version(&self, stream: Id) -> Result<Option<String>>;
     async fn delete_version(
         &self,
         authority: &Permit,

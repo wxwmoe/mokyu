@@ -87,8 +87,8 @@ pub(crate) use multipart::MultipartStore;
 pub(crate) use object::{ObjectChange, ObjectStore};
 pub(crate) use packing::PackingStore;
 pub(crate) use publish::{
-    PublishStore, PublishingStream, ReplicaPending, check_write_conditions, replica_rejection,
-    write_intent,
+    PublishReceipt, PublishStore, PublishingStream, ReplicaPending, check_write_conditions,
+    replica_rejection, write_intent,
 };
 
 pub(crate) fn error(source: &anyhow::Error) -> Option<Error> {

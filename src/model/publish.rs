@@ -64,18 +64,40 @@ pub(crate) fn write_intent(
     )
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct PublishReceipt {
+    pub version_id: Option<String>,
+}
+
 /// The publish transaction is owned by the backend so authorization, object
 /// locks, upload completion and audit checkpoints keep one lock order.
 #[async_trait]
 pub(crate) trait PublishStore: Send + Sync {
-    async fn replicas_ready(&self, publication: Uuid) -> Result<bool>;
+    async fn replica_receipt(
+        &self,
+        publication: Uuid,
+        stream: Option<Id>,
+    ) -> Result<Option<PublishReceipt>>;
+    async fn publish_receipt(
+        &self,
+        stream: Id,
+        if_match: Option<ETagCondition>,
+        if_none: Option<ETagCondition>,
+        completion: Option<(Uuid, String, Value, Uuid)>,
+    ) -> Result<Option<PublishReceipt>>;
+    #[cfg(test)]
     async fn publish(
         &self,
         stream: Id,
         if_match: Option<ETagCondition>,
         if_none: Option<ETagCondition>,
         completion: Option<(Uuid, String, Value, Uuid)>,
-    ) -> Result<bool>;
+    ) -> Result<bool> {
+        Ok(self
+            .publish_receipt(stream, if_match, if_none, completion)
+            .await?
+            .is_some())
+    }
 }
 
 pub(crate) fn check_write_conditions(

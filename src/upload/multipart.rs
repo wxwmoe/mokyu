@@ -906,15 +906,19 @@ impl App {
         self.seal_uploads(id, true).await?;
         self.wake_raw_uploads.notify_one();
         self.wait_complete_sources(&[id], Some(id)).await?;
-        let result = json!({"etag":etag,"checksums":sums});
-        self.publish_complete(
-            id,
-            (u.bucket_id, &u.object_key),
-            i.if_match.as_ref(),
-            i.if_none_match.as_ref(),
-            Some((u.id, hash.to_owned(), result.clone(), token)),
-        )
-        .await?;
+        let mut result = json!({"etag":etag,"checksums":sums});
+        let version_id = self
+            .publish_complete(
+                id,
+                (u.bucket_id, &u.object_key),
+                i.if_match.as_ref(),
+                i.if_none_match.as_ref(),
+                Some((u.id, hash.to_owned(), result.clone(), token)),
+            )
+            .await?;
+        if let Some(version_id) = version_id {
+            result["version_id"] = version_id.into();
+        }
         Ok(completion_output(&i.bucket, &i.key, &result))
     }
     async fn local_part_ranges(

@@ -66,8 +66,7 @@ impl App {
         pin.with_read_lease(self.copy_extents(id, &src)).await?;
         self.finish_stream(id, src.size, &src.etag, src.checksums)
             .await?;
-        self.publish(id, (bucket, key), None, None).await?;
-        self.objects.published_version(id).await
+        self.publish(id, (bucket, key), None, None).await
     }
     pub(crate) async fn history_delete(
         &self,

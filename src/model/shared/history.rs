@@ -178,9 +178,6 @@ impl History for Backend {
         tx.commit().await?;
         Ok(result)
     }
-    async fn published_version(&self, stream: Id) -> Result<Option<String>> {
-        q::published(self, stream).await
-    }
     async fn delete_version(
         &self,
         authority: &Permit,

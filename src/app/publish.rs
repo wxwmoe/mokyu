@@ -1,5 +1,5 @@
 use crate::authorization::Principal;
-use crate::model::Id;
+use crate::model::{Id, PublishReceipt};
 use anyhow::Result;
 use s3s::{dto::ETagCondition, s3_error};
 use serde_json::Value;
@@ -37,7 +37,7 @@ impl App {
         object: (Uuid, &str),
         if_match: Option<&s3s::dto::ETagCondition>,
         if_none: Option<&s3s::dto::ETagCondition>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         self.publish_complete(id, object, if_match, if_none, None)
             .await
     }
@@ -48,7 +48,7 @@ impl App {
         if_match: Option<&s3s::dto::ETagCondition>,
         if_none: Option<&s3s::dto::ETagCondition>,
         completion: Option<(Uuid, String, Value, Uuid)>,
-    ) -> Result<()> {
+    ) -> Result<Option<String>> {
         self.renew_write_lease(id).await?;
         self.writable()?;
         #[cfg(feature = "fault-injection")]
@@ -66,7 +66,12 @@ impl App {
                     let _coord = self.coord.lock().await;
                     self.writable()?;
                     self.publish
-                        .publish(id, if_match.cloned(), if_none.cloned(), completion.clone())
+                        .publish_receipt(
+                            id,
+                            if_match.cloned(),
+                            if_none.cloned(),
+                            completion.clone(),
+                        )
                         .await
                 };
                 if result.as_ref().err().and_then(crate::model::error)
@@ -81,12 +86,13 @@ impl App {
         })
         .await
         .map_err(|_| s3s::s3_error!(RequestTimeout, "required storage copies are still pending"))?;
-        self.wait_publication(match result {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(s3_error!(OperationAborted).into()),
-            Err(error) => Err(error),
-        })
-        .await?;
+        let receipt = self
+            .wait_publication(
+                result
+                    .and_then(|receipt| receipt.ok_or_else(|| s3_error!(OperationAborted).into())),
+                Some(id),
+            )
+            .await?;
         drop(cache_change);
         self.wake_local_journal.notify_waiters();
         if self.deployment_mode() == "single_control" {
@@ -102,15 +108,25 @@ impl App {
         self.wake_gc.notify_one();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("object-before-seal").await;
-        self.seal_uploads(id, true).await?;
+        if let Err(error) = self.seal_uploads(id, true).await {
+            // Staging already set a durable retry time for each pending upload.
+            tracing::warn!(stream = %id, %error, "could not expedite published uploads");
+        }
         self.wake_raw_uploads.notify_one();
         self.work_queued();
         #[cfg(feature = "fault-injection")]
         crate::faults::point("object-published").await;
-        Ok(())
+        Ok(receipt.version_id)
     }
-    pub(crate) async fn wait_publication(&self, result: Result<()>) -> Result<()> {
-        let Err(error) = result else { return Ok(()) };
+    pub(crate) async fn wait_publication(
+        &self,
+        result: Result<PublishReceipt>,
+        stream: Option<Id>,
+    ) -> Result<PublishReceipt> {
+        let error = match result {
+            Ok(receipt) => return Ok(receipt),
+            Err(error) => error,
+        };
         let Some(pending) = error.downcast_ref::<crate::model::ReplicaPending>() else {
             return Err(error);
         };
@@ -119,8 +135,8 @@ impl App {
             let mut interval = std::time::Duration::from_millis(100);
             loop {
                 self.ensure_mode()?;
-                if self.publish.replicas_ready(pending.0).await? {
-                    return Ok(());
+                if let Some(receipt) = self.publish.replica_receipt(pending.0, stream).await? {
+                    return Ok(receipt);
                 }
                 tokio::time::sleep(interval).await;
                 interval = (interval * 2).min(std::time::Duration::from_secs(2));

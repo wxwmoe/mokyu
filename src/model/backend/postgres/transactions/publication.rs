@@ -1,13 +1,19 @@
 use super::*;
+use crate::model::PublishReceipt;
 
 #[async_trait::async_trait]
 impl PublishStore for Backend {
-    async fn replicas_ready(&self, publication: Uuid) -> Result<bool> {
-        let (phase, result) = super::super::queries::replica::state(publication)
-            .fetch_one(&self.pool)
-            .await?;
+    async fn replica_receipt(
+        &self,
+        publication: Uuid,
+        stream: Option<Id>,
+    ) -> Result<Option<PublishReceipt>> {
+        let (phase, result, version_id) =
+            super::super::queries::replica::state(publication, stream)
+                .fetch_one(&self.pool)
+                .await?;
         if phase == "published" {
-            return Ok(true);
+            return Ok(Some(PublishReceipt { version_id }));
         }
         if phase == "aborted" {
             return Err(crate::model::publish::reject_replica(
@@ -18,23 +24,27 @@ impl PublishStore for Backend {
             .fetch_one(&self.pool)
             .await?;
         anyhow::ensure!(!failed, crate::model::Error::OperationAborted);
-        Ok(false)
+        Ok(None)
     }
 
-    async fn publish(
+    async fn publish_receipt(
         &self,
         id: Id,
         if_match: Option<s3s::dto::ETagCondition>,
         if_none: Option<s3s::dto::ETagCondition>,
         completion: Option<(uuid::Uuid, String, Value, Uuid)>,
-    ) -> Result<bool> {
+    ) -> Result<Option<PublishReceipt>> {
         let mut tx = self.pool.begin().await?;
         self.fence_control(&mut tx).await?;
         let result = publish_in(&mut tx, id, if_match, if_none, completion).await;
-        if matches!(&result, Ok(true))
-            || result
-                .as_ref()
-                .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+        if matches!(&result, Ok(true)) {
+            let version_id = super::super::queries::history::receipt(&mut tx, id).await?;
+            tx.commit().await?;
+            return Ok(Some(PublishReceipt { version_id }));
+        }
+        if result
+            .as_ref()
+            .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
         {
             tx.commit().await?;
         } else if let Some(reason) = result
@@ -45,7 +55,7 @@ impl PublishStore for Backend {
             tx.rollback().await?;
             reject_admission(&self.pool, id, reason).await?;
         }
-        result
+        result.map(|_| None)
     }
 }
 

@@ -520,7 +520,8 @@ impl S3 for Gateway {
                     Some((b.id, &req.input.key)),
                 )
                 .await?;
-            self.0
+            let version_id = self
+                .0
                 .publish(
                     id,
                     (b.id, &req.input.key),
@@ -532,7 +533,7 @@ impl S3 for Gateway {
                 .cache_received(id, b.id, req.input.key.clone(), etag.clone(), received);
             let mut out = PutObjectOutput {
                 checksum_type: object_checksum_type(&sums),
-                version_id: self.0.objects.published_version(id).await?,
+                version_id,
                 e_tag: Some(ETag::Strong(etag)),
                 ..Default::default()
             };
@@ -1197,7 +1198,8 @@ impl S3 for Gateway {
             self.0
                 .finish_stream(id, source.size, &source.etag, source.checksums)
                 .await?;
-            self.0
+            let published_version = self
+                .0
                 .publish(
                     id,
                     (b.id, &i.key),
@@ -1206,7 +1208,7 @@ impl S3 for Gateway {
                 )
                 .await?;
             Ok(S3Response::new(CopyObjectOutput {
-                version_id: self.0.objects.published_version(id).await?,
+                version_id: published_version,
                 copy_source_version_id: version_id.map(str::to_owned),
                 copy_object_result: Some(CopyObjectResult {
                     e_tag: Some(ETag::Strong(source.etag)),

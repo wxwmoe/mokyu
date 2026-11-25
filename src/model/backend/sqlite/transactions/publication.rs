@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::PublishReceipt;
 
 pub(in super::super) async fn publish(
     backend: &super::super::Backend,
@@ -6,15 +7,19 @@ pub(in super::super) async fn publish(
     if_match: Option<s3s::dto::ETagCondition>,
     if_none: Option<s3s::dto::ETagCondition>,
     completion: Option<(uuid::Uuid, String, serde_json::Value, Uuid)>,
-) -> Result<bool> {
+) -> Result<Option<PublishReceipt>> {
     let pool = &backend.write;
     let mut tx = pool.begin_with(queries::BEGIN_WRITE).await?;
     backend.fence_control(&mut tx).await?;
     let result = publish_in(&mut tx, id, if_match, if_none, completion).await;
-    if matches!(&result, Ok(true))
-        || result
-            .as_ref()
-            .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
+    if matches!(&result, Ok(true)) {
+        let version_id = super::super::queries::history::receipt(&mut tx, id).await?;
+        tx.commit().await?;
+        return Ok(Some(PublishReceipt { version_id }));
+    }
+    if result
+        .as_ref()
+        .is_err_and(|e| e.is::<crate::model::ReplicaPending>())
     {
         tx.commit().await?;
     } else if let Some(reason) = result
@@ -25,7 +30,7 @@ pub(in super::super) async fn publish(
         tx.rollback().await?;
         reject_admission(pool, id, reason).await?;
     }
-    result
+    result.map(|_| None)
 }
 
 pub(in super::super) async fn publish_in(

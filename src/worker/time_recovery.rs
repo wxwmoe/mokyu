@@ -55,6 +55,7 @@ async fn perform(app: &App, w: &Work) -> Result<()> {
             .await?;
         app.publish(out, (w.target, &w.item.target), None, None)
             .await
+            .map(|_| ())
     }
     .await;
     if result.is_err() {

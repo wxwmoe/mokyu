@@ -121,8 +121,16 @@ pub(in super::super) fn intent(id: Uuid) -> Rows<'static, (sqlx::types::Json<ser
 }
 pub(in super::super) fn state(
     id: Uuid,
-) -> Rows<'static, (String, Option<sqlx::types::Json<serde_json::Value>>)> {
-    sqlx::query_as("SELECT phase,result FROM replica_publications WHERE id=?").bind(id)
+    stream: Option<Id>,
+) -> Rows<
+    'static,
+    (
+        String,
+        Option<sqlx::types::Json<serde_json::Value>>,
+        Option<String>,
+    ),
+> {
+    sqlx::query_as("SELECT p.phase,p.result,r.version_id FROM replica_publications p LEFT JOIN object_write_receipts r ON r.stream_id=? WHERE p.id=?").bind(stream).bind(id)
 }
 
 pub(in super::super) fn abort_target(publication: Uuid, link: Uuid) -> Statement<'static> {

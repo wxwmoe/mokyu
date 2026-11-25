@@ -326,7 +326,8 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
     {
         return copy_object(app, input, item, permit).await;
     }
-    app.wait_publication(result).await?;
+    app.wait_publication(result.map(|()| Default::default()), None)
+        .await?;
     if refresh {
         app.notifications.committed();
     }
@@ -442,7 +443,8 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             )
             .await;
         drop(_coord);
-        app.wait_publication(result).await?;
+        app.wait_publication(result.map(|()| Default::default()), None)
+            .await?;
         if refresh {
             app.notifications.committed();
         }

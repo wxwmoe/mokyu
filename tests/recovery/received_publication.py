@@ -2,6 +2,8 @@
 import base64
 import hashlib
 import json
+import os
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 
 from botocore.exceptions import ClientError
@@ -10,8 +12,38 @@ from tests.recovery.source_repair import Database
 from tests.storage.source_quarantine import Fixture, wait
 
 
+def check_queue_receipt(database):
+    fixture = Fixture()
+    profile = fixture.cli('storage', 'profile', 'show', fixture.name)
+    profile.update(cdc_enabled=True, upload_cache=True, pack_enabled=True, pack_upload_flush_timeout='10s')
+    fixture.cli('storage', 'profile', 'set', fixture.name, '-', value=profile)
+    fixture.cli('bucket', 'versioning', fixture.name, 'enabled')
+    previous = fixture.put('queued', b'original')['VersionId']
+    bucket = uuid.UUID(fixture.bucket_id)
+    trigger = 'delay_queue_' + bucket.hex
+    database.query(f"""CREATE TRIGGER {trigger} BEFORE UPDATE OF next_retry_at ON pending_uploads
+        WHEN NEW.next_retry_at < OLD.next_retry_at AND EXISTS (SELECT 1 FROM streams
+            WHERE id=NEW.stream_id AND state='ready' AND bucket_id=X'{bucket.hex}')
+        BEGIN SELECT RAISE(ABORT,'queue reschedule unavailable'); END""")
+    pending = """SELECT p.next_retry_at-p.created_at AS delay FROM pending_uploads p
+        JOIN objects o ON o.stream_id=p.stream_id WHERE o.bucket_id=%s AND o.object_key=%s"""
+    try:
+        receipt = fixture.put('queued', b'replacement')
+        assert receipt['VersionId'] != previous
+        assert fixture.client.head_object(Bucket=fixture.name, Key='queued')['VersionId'] == receipt['VersionId']
+        fixture.read('queued', b'replacement')
+        assert any(row['delay'] >= 9_000_000 for row in database.query(pending, bucket, b'queued'))
+    finally:
+        database.query('DROP TRIGGER ' + trigger)
+    wait(lambda: not database.query(pending, bucket, b'queued'), 'published upload did not drain')
+    fixture.read('queued', b'replacement')
+    print('PASS committed overwrite returns its version and pending data drains on its original deadline', flush=True)
+
+
 def main():
     database = Database()
+    if database.type == 'sqlite' and os.environ.get('MOKYU_TEST_BACKEND'):
+        check_queue_receipt(database)
     for chunked in (False, True):
         fixture = Fixture()
         profile = fixture.cli('storage', 'profile', 'show', fixture.name)

@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::PublishReceipt;
 
 pub(in super::super) fn publish_object(stream: &StoredStream) -> Statement<'_> {
     let mime = stream
@@ -50,12 +51,17 @@ pub(in super::super) fn delete_upload_parts(upload: Uuid) -> Statement<'static> 
 
 #[async_trait::async_trait]
 impl PublishStore for Backend {
-    async fn replicas_ready(&self, publication: Uuid) -> Result<bool> {
-        let (phase, result) = super::super::queries::replica::state(publication)
-            .fetch_one(&self.pool)
-            .await?;
+    async fn replica_receipt(
+        &self,
+        publication: Uuid,
+        stream: Option<Id>,
+    ) -> Result<Option<PublishReceipt>> {
+        let (phase, result, version_id) =
+            super::super::queries::replica::state(publication, stream)
+                .fetch_one(&self.pool)
+                .await?;
         if phase == "published" {
-            return Ok(true);
+            return Ok(Some(PublishReceipt { version_id }));
         }
         if phase == "aborted" {
             return Err(crate::model::publish::reject_replica(
@@ -66,16 +72,16 @@ impl PublishStore for Backend {
             .fetch_one(&self.pool)
             .await?;
         anyhow::ensure!(!failed, crate::model::Error::OperationAborted);
-        Ok(false)
+        Ok(None)
     }
 
-    async fn publish(
+    async fn publish_receipt(
         &self,
         stream: Id,
         if_match: Option<s3s::dto::ETagCondition>,
         if_none: Option<s3s::dto::ETagCondition>,
         completion: Option<(Uuid, String, Value, Uuid)>,
-    ) -> Result<bool> {
+    ) -> Result<Option<PublishReceipt>> {
         transactions::publish(self, stream, if_match, if_none, completion).await
     }
 }

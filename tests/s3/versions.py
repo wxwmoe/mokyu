@@ -43,6 +43,13 @@ try:
     assert restored["CopySourceVersionId"] == first and restored["VersionId"] not in (first, second)
     with client.get_object(**target)["Body"] as body:
         assert body.read() == b"first"
+    upload = client.create_multipart_upload(**target)["UploadId"]
+    part = client.upload_part(**target, UploadId=upload, PartNumber=1, Body=b"third")
+    manifest = {"Parts": [{"ETag": part["ETag"], "PartNumber": 1}]}
+    completed = client.complete_multipart_upload(**target, UploadId=upload, MultipartUpload=manifest)
+    replay = client.complete_multipart_upload(**target, UploadId=upload, MultipartUpload=manifest)
+    assert completed["VersionId"] == replay["VersionId"] == client.head_object(**target)["VersionId"]
+    assert completed["VersionId"] != restored["VersionId"]
 finally:
     rows = client.list_object_versions(Bucket=bucket, Prefix=key)
     for row in rows.get("Versions", []) + rows.get("DeleteMarkers", []):

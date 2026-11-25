@@ -42,14 +42,6 @@ pub(in super::super) fn remove<'a>(b: Uuid, key: &'a str, id: &'a str) -> Statem
         .bind(key.as_bytes())
         .bind(id)
 }
-pub(in super::super) async fn published(b: &Backend, stream: Id) -> Result<Option<String>> {
-    Ok(
-        sqlx::query_scalar("SELECT version_id FROM object_write_receipts WHERE stream_id=?")
-            .bind(stream)
-            .fetch_optional(&b.write)
-            .await?,
-    )
-}
 pub(in super::super) async fn receipt(tx: &mut Tx<'_>, stream: Id) -> Result<Option<String>> {
     Ok(
         sqlx::query_scalar("SELECT version_id FROM object_write_receipts WHERE stream_id=?")
