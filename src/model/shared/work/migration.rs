@@ -371,15 +371,10 @@ pub(super) async fn finish(
         transactions::complete_storage_migration_in(&mut nested, task, saved.candidate, &job).await
     {
         nested.rollback().await?;
-        let reason = if err
-            .downcast_ref::<s3s::S3Error>()
-            .is_some_and(|e| e.code() == &s3s::S3ErrorCode::PreconditionFailed)
-        {
-            Some("object_changed")
-        } else if crate::model::error(&err) == Some(Error::QuotaExceeded) {
-            Some("quota_exceeded")
-        } else {
-            None
+        let reason = match crate::model::replica_rejection(&err) {
+            Some("precondition_failed") => Some("object_changed"),
+            code @ Some("quota_exceeded" | "access_denied") => code,
+            _ => None,
         };
         if let Some(reason) = reason {
             queries::conversion_abandon(saved.candidate)

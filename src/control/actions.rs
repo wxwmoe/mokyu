@@ -299,6 +299,12 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
     crate::faults::point("media-before-publish").await;
     let _coord = app.coord.lock().await;
     app.writable()?;
+    let target_key = item.target_key.as_deref().unwrap();
+    let refresh = app.deployment_mode() == "single_control";
+    let _source_cache = app
+        .public_reads
+        .object_change(input.bucket, &item.key, refresh);
+    let _target_cache = app.public_reads.object_change(target, target_key, refresh);
     let result = app
         .objects
         .move_object(
@@ -308,7 +314,7 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
                 source_key: &item.key,
                 source_version: item.version,
                 target_bucket: target,
-                target_key: item.target_key.as_deref().unwrap(),
+                target_key,
                 target_version: item.target_version,
             },
         )
@@ -321,6 +327,9 @@ async fn move_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         return copy_object(app, input, item, permit).await;
     }
     app.wait_publication(result).await?;
+    if refresh {
+        app.notifications.committed();
+    }
     app.wake_gc.notify_one();
     Ok(())
 }
@@ -413,6 +422,8 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
         crate::faults::point("media-before-publish").await;
         let _coord = app.coord.lock().await;
         app.writable()?;
+        let refresh = app.deployment_mode() == "single_control";
+        let _cache = app.public_reads.object_change(target, key, refresh);
         let result = app
             .objects
             .publish_copy(
@@ -431,7 +442,11 @@ async fn copy_object(app: &Arc<App>, input: &Batch, item: &Item, permit: &Permit
             )
             .await;
         drop(_coord);
-        app.wait_publication(result).await
+        app.wait_publication(result).await?;
+        if refresh {
+            app.notifications.committed();
+        }
+        Ok(())
     }
     .await;
     if result.is_err() {

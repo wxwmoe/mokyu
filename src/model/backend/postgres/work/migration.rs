@@ -371,15 +371,10 @@ pub(super) async fn finish(
     {
         publication.rollback().await?;
         let error = normalize_error(error);
-        let code = if error
-            .downcast_ref::<s3s::S3Error>()
-            .is_some_and(|error| error.code() == &s3s::S3ErrorCode::PreconditionFailed)
-        {
-            Some("object_changed")
-        } else if crate::model::error(&error) == Some(Error::QuotaExceeded) {
-            Some("quota_exceeded")
-        } else {
-            None
+        let code = match crate::model::replica_rejection(&error) {
+            Some("precondition_failed") => Some("object_changed"),
+            code @ Some("quota_exceeded" | "access_denied") => code,
+            _ => None,
         };
         if let Some(code) = code {
             queries::conversion_abandon(saved.candidate)

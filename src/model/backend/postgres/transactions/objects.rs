@@ -437,6 +437,13 @@ pub(in super::super) async fn complete_storage_migration_in(
     destination: Id,
     job: &StorageMigration,
 ) -> Result<()> {
+    let detail = queries::lock_task_detail(Execution {
+        id,
+        token: lease_token,
+    })
+    .fetch_one(&mut **tx)
+    .await?;
+    lock_media_scope(tx, &StorageMigration::authority(detail)?).await?;
     if let Err(error) = publish_migration_in(tx, id, lease_token, destination, job).await {
         if error.is::<crate::model::ReplicaPending>() {
             super::super::replica_transactions::park(
@@ -513,15 +520,6 @@ pub(in super::super) async fn publish_migration_in(
         require_sources(tx, Some(destination), &[]).await?;
     }
     if let Some(publication) = publication_id {
-        let record = queries::lock_task_detail(Execution {
-            id,
-            token: lease_token,
-        })
-        .fetch_one(&mut **tx)
-        .await?;
-        if let Some(grant) = record.get("authority") {
-            lock_media_scope(tx, &serde_json::from_value(grant.clone())?).await?;
-        }
         let details =
             serde_json::json!({"operation":"task","task":id,"method":"migration","job":job});
         super::super::replica_transactions::publish(

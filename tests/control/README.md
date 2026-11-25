@@ -22,4 +22,6 @@ Run `npm run test:ui` from `web` in a container with Playwright browsers. Supply
 
 `python -m tests.control.media_previews` uses a running isolated service, one initialized storage, the `tester` account, and `MOKYU_TEST_BINARY`, `MOKYU_TEST_CONFIG`, `MOKYU_TEST_DATA`, `MOKYU_TEST_WEB`, `MOKYU_TEST_ENDPOINT`, `MOKYU_TEST_PASSWORD`, plus the isolated-state guard. Run the service as a non-root user so the failed cache-deletion case exercises actual filesystem permissions. Object versions may be UUIDs or native integer identities. Cache accounting is read from the CLI status contract.
 
+`python -m tests.control.media_publication` uses the same CLI, Web and S3 settings with a fault-enabled service. Set `MOKYU_TEST_PUBLIC_WEB` to the public listener and share `MOKYU_TEST_FAULT_DIR` with the service. It creates two local backends and checks anonymous reads after a Move, a private overwrite and a metadata edit, then revokes a queued migration's target permission before publication. Run against each database in a fresh test deployment.
+
 `metadata_journal.py` exercises per-bucket S3 journal capture, initial inventory, concurrent PUT, copy, deletion, Multipart completion, revision conflicts and reversible disabling. It uses the common Web/S3/CLI environment variables and requires the fixture bucket to use a managed S3 storage.

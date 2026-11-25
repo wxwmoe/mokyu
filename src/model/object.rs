@@ -69,6 +69,13 @@ pub(crate) struct StorageMigration {
 }
 
 impl StorageMigration {
+    pub(crate) fn authority(mut detail: Value) -> Result<Permit> {
+        detail
+            .get_mut("authority")
+            .and_then(|value| serde_json::from_value(value.take()).ok())
+            .ok_or_else(|| s3s::s3_error!(AccessDenied).into())
+    }
+
     pub(crate) fn transfer(&self) -> ObjectTransfer<'_> {
         ObjectTransfer {
             source_bucket: self.source_bucket,
