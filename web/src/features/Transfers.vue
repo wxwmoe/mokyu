@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { UploadCloud, CloudCheck, Pause, Play, X, RefreshCw, ArrowUpRight, CircleCheck, Clock, FileCheck2, ChevronRight } from 'lucide-vue-next'
 import { api, ApiError, params, bytes, type Bucket } from '../api/client'
 import type { components } from '../api/schema'
-import { uploads, pause, resume, reselect, cancel, type Transfer, type UploadJob } from '../app/uploads'
+import { syncTransfers, uploads, pause, resume, reselect, cancel, type Transfer, type UploadJob } from '../app/uploads'
 import { t, date } from '../app/i18n'
 import { report, errorText } from '../app/feedback'
 import UploadDialog from '../components/UploadDialog.vue'
@@ -27,6 +27,7 @@ const writable = computed(() => buckets.data.value?.some(b => b.status === 'acti
 const transfers = useQuery({ queryKey: ['transfers', state, bucket, cursor],
   queryFn: ({ signal }) => api<components['schemas']['TransferPage']>('/api/v1/uploads?' + params({ state: state.value === 'active' ? undefined : state.value, bucket: bucket.value === 'all' ? undefined : bucket.value, after: cursor.value || undefined }), { signal }),
   refetchInterval: computed(() => visible.value ? 5000 : false) })
+watch(transfers.dataUpdatedAt, () => syncTransfers(transfers.data.value?.items || []))
 interface Row { id: string; time: string; job?: UploadJob; transfer?: Transfer }
 function sortTime(utc: string) {
   // The API and browser use UTC with up to nine fractional digits.
@@ -96,7 +97,7 @@ async function remove() {
           </span>
           <span v-else-if="status(row) === 'paused' && row.transfer?.expires_at">{{ t('transferExpires', { date: date(row.transfer.expires_at) }) }}</span></div></template>
         <div v-else-if="status(row) === 'completed'" class="transfer-durability"><CloudCheck v-if="row.transfer?.remote_state === 'stored'" :size="14" /><Clock v-else :size="14" /><span>{{ t('remote_' + (row.transfer?.remote_state || 'pending')) }}</span><span>{{ bytes(Number(row.transfer?.received_bytes || row.job?.input.size || 0)) }}</span></div>
-        <p v-if="row.job?.error" class="transfer-error" role="alert">{{ errorText(row.job.error) }}</p>
+        <p v-if="row.job?.state === 'failed' && row.job.error" class="transfer-error" role="alert">{{ errorText(row.job.error) }}</p>
       </div><div class="transfer-actions">
         <button v-if="row.job && ['queued', 'checking', 'uploading'].includes(row.job.state)" class="icon-button" :disabled="row.job.paused" :aria-label="t(row.job.paused ? 'pausingUpload' : 'pauseUpload')" @click="pause(row.job)"><Pause :size="17" /></button>
         <button v-else-if="row.job?.file && ['paused', 'failed'].includes(row.job.state) && !needsFile(row.job)" class="icon-button" :disabled="row.job.running" :aria-label="t('resumeUpload')" @click="resume(row.job)"><Play :size="17" /></button>

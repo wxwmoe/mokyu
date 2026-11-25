@@ -10,7 +10,7 @@ export interface UploadJob {
   client: string; created: string; owner: string; bucket: string; input: Input; file?: File; transfer?: Transfer
   state: 'queued' | 'checking' | 'uploading' | 'paused' | 'completing' | 'completed' | 'failed' | 'aborted'
   accepted: number; sending: number; speed: number; remaining?: number; verified: number; error?: unknown
-  controller: AbortController; running: boolean; paused: boolean
+  controller: AbortController; running: boolean; paused: boolean; checkCompletion?: boolean
 }
 export const uploads = reactive<UploadJob[]>([])
 let worker: Worker | undefined, sequence = 0
@@ -95,6 +95,47 @@ async function receiptList(job: UploadJob) {
 }
 function refresh() { queries.invalidateQueries({ queryKey: ['transfers'] }); queries.invalidateQueries({ queryKey: ['objects'] }); queries.invalidateQueries({ queryKey: ['quota'] }) }
 
+function applyTerminal(job: UploadJob, transfer: Transfer) {
+  if (transfer.status !== 'completed' && transfer.status !== 'aborted') return false
+  job.transfer = transfer
+  job.state = transfer.status
+  job.accepted = Number(transfer.received_bytes)
+  job.sending = 0
+  job.error = undefined
+  job.file = undefined
+  job.checkCompletion = false
+  return true
+}
+
+async function checkCompletion(job: UploadJob) {
+  if (!job.checkCompletion || !job.transfer) return
+  const id = job.transfer.id, controller = job.controller
+  const current = () => job.checkCompletion && job.controller === controller && !controller.signal.aborted && session.value?.id === job.owner
+  try {
+    const transfer = await queries.fetchQuery({
+      queryKey: ['upload-completion', job.owner, id], staleTime: 0, retry: false,
+      queryFn: () => api<Transfer>(`/api/v1/uploads/${id}`, { signal: controller.signal }),
+    })
+    if (!current()) return
+    if (applyTerminal(job, transfer)) { refresh(); return }
+    job.transfer = transfer
+    job.state = transfer.status === 'completing' ? 'completing' : 'failed'
+  } catch (error) {
+    if (current() && error instanceof ApiError && [401, 403, 404].includes(error.status)) {
+      job.checkCompletion = false; job.state = 'failed'; job.error = error
+    }
+  }
+}
+
+export function syncTransfers(transfers: Transfer[]) {
+  const rows = new Map(transfers.map(transfer => [transfer.id, transfer]))
+  for (const job of uploads) {
+    const remote = job.transfer && rows.get(job.transfer.id)
+    if (remote && applyTerminal(job, remote)) continue
+    if (job.checkCompletion && (!remote || remote.status === 'completing' || job.state === 'completing')) void checkCompletion(job)
+  }
+}
+
 function measureUpload(job: UploadJob, size: number) {
   const samples = [{ time: performance.now(), sent: job.accepted }]
   job.speed = 0
@@ -113,13 +154,14 @@ function measureUpload(job: UploadJob, size: number) {
 
 // One file at a time, with two bounded part workers shared by the whole page.
 async function run(job: UploadJob) {
-  job.running = true; job.error = undefined; job.controller = markRaw(new AbortController())
+  job.running = true; job.checkCompletion = false; job.error = undefined; job.controller = markRaw(new AbortController())
   try {
     valid(job)
     if (!job.transfer) job.transfer = await json<Transfer>(job, `/api/v1/buckets/${job.bucket}/uploads`, job.input)
     const transfer = await api<Transfer>(`/api/v1/uploads/${job.transfer.id}`, { signal: job.controller.signal })
     job.transfer = transfer
-    if (transfer.status === 'completed') { job.state = 'completed'; job.file = undefined; return }
+    if (applyTerminal(job, transfer)) return
+    if (transfer.status === 'completing') { job.state = 'completing'; job.checkCompletion = true; return }
     if (transfer.status !== 'active') throw new ApiError(409, 'OperationAborted')
     const file = job.file!, size = Number(transfer.part_size), total = Math.max(1, Math.ceil(file.size / size))
     const received = await receiptList(job), receipts = new Map<number, Part>()
@@ -157,11 +199,16 @@ async function run(job: UploadJob) {
     if (failure) throw failure
     if (job.paused) { job.state = 'paused'; return }
     job.state = 'completing'
-    job.transfer = await json<Transfer>(job, `/api/v1/uploads/${job.transfer.id}/complete`, { parts: [...receipts.values()].sort((a, b) => a.number - b.number) })
-    job.state = 'completed'; job.file = undefined
+    const saved = await json<Transfer>(job, `/api/v1/uploads/${job.transfer.id}/complete`, { parts: [...receipts.values()].sort((a, b) => a.number - b.number) })
+    if (!applyTerminal(job, saved)) job.checkCompletion = true
   } catch (error) {
-    if (job.state !== 'aborted') { job.state = job.paused ? 'paused' : 'failed'; job.error = error }
-  } finally { job.running = false; refresh(); pump() }
+    if (job.state === 'completing') { job.checkCompletion = true; job.error = error }
+    else if (job.state !== 'aborted' && job.state !== 'completed') { job.state = job.paused ? 'paused' : 'failed'; job.error = error }
+  } finally {
+    job.running = false
+    if (job.checkCompletion) void checkCompletion(job)
+    refresh(); pump()
+  }
 }
 function pump() {
   if (uploads.some(job => job.running)) return
@@ -196,7 +243,7 @@ function enqueuePaused(transfer: Transfer, file: File) {
     state: 'paused', accepted: Number(transfer.received_bytes), sending: 0, speed: 0, verified: 0, controller: markRaw(new AbortController()), running: false, paused: true })
 }
 export async function cancel(job?: UploadJob, transfer?: Transfer) {
-  if (job) { job.paused = true; job.state = 'aborted'; job.controller.abort() }
+  if (job) { job.checkCompletion = false; job.paused = true; job.state = 'aborted'; job.controller.abort() }
   const id = transfer?.id || job?.transfer?.id
   try { if (id) await api(`/api/v1/uploads/${id}`, { method: 'DELETE' }); if (job) job.file = undefined }
   catch (error) { if (job) { job.state = 'failed'; job.error = error }; throw error }

@@ -79,11 +79,19 @@ test('bounded browser multipart, pause, reload, full accepted-part validation, c
   await row.getByRole('button', { name: en.reselectFile, exact: true }).click()
   await (await wrongChooser).setFiles({ ...payload, buffer: wrong })
   await expect(row.getByRole('alert')).toHaveText(en.error_ResumeMismatch)
+  let completed = false
+  await page.route('**/api/v1/uploads/*/complete', async route => {
+    const response = await route.fetch()
+    expect(response.ok()).toBe(true)
+    completed = true
+    await route.abort()
+  }, { times: 1 })
   const chooser = page.waitForEvent('filechooser')
   await row.getByRole('button', { name: en.reselectFile, exact: true }).click()
   await (await chooser).setFiles(payload)
   await expect(row).not.toBeVisible({ timeout: 30000 })
   const saved = await (await request.get('/api/v1/uploads/' + transfer.id)).json()
+  expect(completed).toBe(true)
   expect([saved.status, saved.remote_state]).toEqual(['completed', 'stored'])
   const objects = await request.get(`/api/v1/buckets/${bucket.id}/objects?` + new URLSearchParams({ q: filename, mode: 'exact' }))
   const [item] = (await objects.json()).items
