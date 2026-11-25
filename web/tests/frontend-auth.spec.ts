@@ -46,3 +46,33 @@ test('refreshes a session and restores the storage page after reopening', async 
     await context.close()
   }
 })
+
+test('logout renews a stale CSRF token and keeps the session on a failed retry', async ({ page }) => {
+  const origin = process.env.MOKYU_TEST_WEB!
+  const login = await page.request.post('/api/v1/auth/login', { headers: { Origin: origin }, data: { username: 'tester', password: password() } })
+  expect(login.ok()).toBe(true)
+  // This tab still has the session view from before another tab renewed it.
+  await page.route('**/api/v1/auth/session', async route => {
+    const response = await route.fetch()
+    await route.fulfill({ response, json: { ...await response.json(), csrf_token: 'previous-token' } })
+  }, { times: 1 })
+  await page.goto('/overview')
+  const menu = page.getByRole('button', { name: en.accountMenu, exact: true })
+  const logout = page.getByRole('menuitem', { name: en.signOut, exact: true })
+  let attempts = 0
+  await page.route('**/api/v1/auth/logout', route => ++attempts === 2
+    ? route.fulfill({ status: 503, json: { code: 'SlowDown' } }) : route.continue())
+  await menu.click()
+  const mismatch = page.waitForResponse(r => r.url().endsWith('/auth/logout') && r.status() === 403)
+  await logout.click()
+  expect((await (await mismatch).json()).code).toBe('CsrfTokenMismatch')
+  await expect.poll(() => attempts).toBe(2)
+  await expect(menu).toBeVisible()
+  expect((await page.request.get('/api/v1/auth/session')).ok()).toBe(true)
+  await menu.click()
+  await logout.click()
+  await expect(page).toHaveURL(/\/login$/)
+  await page.goto('/overview')
+  await expect(page).toHaveURL(/\/login(?:\?.*)?$/)
+  expect((await page.request.get('/api/v1/auth/session')).ok()).toBe(false)
+})

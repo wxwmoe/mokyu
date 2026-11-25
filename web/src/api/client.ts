@@ -245,15 +245,26 @@ export function savePreferences(changes: Partial<Preferences>) {
 }
 
 export async function signOut() {
-  try {
-    if (refreshFlight) await refreshFlight.catch(() => {})
-    await api('/api/v1/auth/logout', { method: 'POST' })
-  } catch (error) {
-    if (!denied(error)) throw error
-  } finally {
-    resetSession()
-    identityChanged()
+  const owner = session.value?.session_id
+  if (refreshFlight) await refreshFlight
+  const send = () => {
+    if (session.value?.session_id !== owner) throw new ApiError(0, 'Cancelled')
+    return api('/api/v1/auth/logout', { method: 'POST' })
   }
+  const attempted = csrfToken()
+  try { await send() }
+  catch (error) {
+    if (!(error instanceof ApiError) || (!denied(error) && error.code !== 'Network')) throw error
+    const current = await refreshSession()
+    if (current) {
+      if (current.session_id !== owner) throw new ApiError(0, 'Cancelled')
+      if (!denied(error) || error.code !== 'CsrfTokenMismatch' && current.csrf_token === attempted) throw error
+      await send()
+    }
+  }
+  if (session.value && session.value.session_id !== owner) throw new ApiError(0, 'Cancelled')
+  resetSession()
+  identityChanged()
 }
 
 export function identityChanged() { saveLocal('mokyu.identity-change', uuid()) }
