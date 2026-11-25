@@ -118,6 +118,9 @@ with ThreadPoolExecutor(max_workers=upload_slots) as pool:
         assert_foreground_free()
         excess, _ = uploads[upload_slots]
         slowed(s3.complete_multipart_upload, **excess)
+        part = excess['MultipartUpload']['Parts'][0]
+        many = {**excess, 'MultipartUpload': {'Parts': [{**part, 'PartNumber': n} for n in range(1, 10001)]}}
+        slowed(s3.complete_multipart_upload, **many)
         s3.put_object(Bucket=bucket, Key=prefix + 'available', Body=b'available')
         s3.upload_part(Bucket=bucket, Key=excess['Key'], UploadId=excess['UploadId'],
                        PartNumber=2, Body=b'available')
@@ -137,6 +140,7 @@ with ThreadPoolExecutor(max_workers=upload_slots) as pool:
     for future in pending:
         assert future.result(timeout=20)['ResponseMetadata']['HTTPStatusCode'] == 200
 released()
+error('InvalidPart', s3.complete_multipart_upload, **many)
 s3.complete_multipart_upload(**uploads[upload_slots][0])
 released()
 for args, data in uploads:

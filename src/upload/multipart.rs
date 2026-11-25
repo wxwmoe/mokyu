@@ -494,13 +494,22 @@ impl App {
         {
             return Err(s3_error!(BadDigest).into());
         }
-        let mut selected = Vec::with_capacity(manifest.len());
-        let mut parts = Vec::with_capacity(manifest.len());
-        let mut pins = Vec::with_capacity(manifest.len());
-        #[cfg(feature = "fault-injection")]
-        crate::faults::point("multipart-before-selection").await;
-        for part in manifest {
-            let Some(s) = self.multipart.part(u.id, part.number).await? else {
+        let input_bucket = i.bucket.clone();
+        let input_key = i.key.clone();
+        let upload_id = i.upload_id.clone();
+        let expected_hash = hash.clone();
+        let context = req
+            .extensions
+            .get::<crate::status::stats::RequestContext>()
+            .cloned();
+        let token = Uuid::new_v4();
+        let permit = self.completions.acquire().await;
+        let work = if let Ok(permit) = permit {
+            let numbers: Vec<_> = manifest.iter().map(|part| part.number).collect();
+            #[cfg(feature = "fault-injection")]
+            crate::faults::point("multipart-before-selection").await;
+            let parts = self.multipart.selected_streams(u.id, &numbers).await?;
+            if parts.len() != numbers.len() {
                 let current = self.get_upload(&i.upload_id, b.id, &i.key, &access).await?;
                 if current.state == "completed" && current.manifest_hash.as_deref() == Some(&hash) {
                     return Ok(S3Response::new(completion_output(
@@ -513,59 +522,49 @@ impl App {
                     )));
                 }
                 return Err(s3_error!(InvalidPart).into());
-            };
-            selected.push((part.number, s.id));
-            pins.push(self.pin(s.id));
-            parts.push(s);
-        }
-        let selected_metadata: Vec<_> = manifest
-            .iter()
-            .zip(&parts)
-            .map(|(part, stream)| crate::model::node_complete::Selected {
-                number: part.number,
-                size: stream.size,
-                etag: stream.etag.clone(),
-                checksums: stream.checksums.clone(),
-            })
-            .collect();
-        let summary = specification.select(&u, &selected_metadata)?;
-        if self.deployment_mode() != "single"
-            && self.multipart.staging(u.id).await?.tail_upload != "immediate"
-        {
-            let numbers: Vec<_> = manifest.iter().map(|p| p.number).collect();
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-            loop {
-                let owners = self
-                    .multipart
-                    .request_tails(u.id, self.node.get().map(|n| n.node_id), &numbers)
-                    .await?;
-                if owners.is_empty() {
-                    break;
-                }
-                for owner in owners {
-                    self.notifications
-                        .hint(&crate::model::notification::Signal::OwnerReady(owner));
-                }
-                if tokio::time::Instant::now() >= deadline {
-                    return Err(tail_pending().into());
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
-        }
-        let total = summary.size;
-        let etag = summary.etag;
-        self.multipart.seal_files(u.id).await?;
-        let input_bucket = i.bucket.clone();
-        let input_key = i.key.clone();
-        let upload_id = i.upload_id.clone();
-        let expected_hash = hash.clone();
-        let context = req
-            .extensions
-            .get::<crate::status::stats::RequestContext>()
-            .cloned();
-        let token = Uuid::new_v4();
-        let permit = self.completions.acquire().await;
-        let work = if let Ok(permit) = permit {
+            let selected: Vec<_> = numbers
+                .iter()
+                .zip(&parts)
+                .map(|(&number, s)| (number, s.id))
+                .collect();
+            let pins: Vec<_> = parts.iter().map(|part| self.pin(part.id)).collect();
+            let selected_metadata: Vec<_> = manifest
+                .iter()
+                .zip(&parts)
+                .map(|(part, stream)| crate::model::node_complete::Selected {
+                    number: part.number,
+                    size: stream.size,
+                    etag: stream.etag.clone(),
+                    checksums: stream.checksums.clone(),
+                })
+                .collect();
+            let summary = specification.select(&u, &selected_metadata)?;
+            if self.deployment_mode() != "single"
+                && self.multipart.staging(u.id).await?.tail_upload != "immediate"
+            {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+                loop {
+                    let owners = self
+                        .multipart
+                        .request_tails(u.id, self.node.get().map(|n| n.node_id), &numbers)
+                        .await?;
+                    if owners.is_empty() {
+                        break;
+                    }
+                    for owner in owners {
+                        self.notifications
+                            .hint(&crate::model::notification::Signal::OwnerReady(owner));
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(tail_pending().into());
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
+            }
+            let total = summary.size;
+            let etag = summary.etag;
+            self.multipart.seal_files(u.id).await?;
             let claimed = self
                 .multipart
                 .begin_complete(crate::model::multipart::Completion {

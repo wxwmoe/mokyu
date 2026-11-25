@@ -443,6 +443,14 @@ impl MultipartStore for Backend {
             .fetch_optional(&self.pool)
             .await?)
     }
+    async fn selected_streams(
+        &self,
+        upload: Uuid,
+        numbers: &[i32],
+    ) -> Result<Vec<crate::app::StoredStream>> {
+        Ok(sqlx::query_as("SELECT s.* FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=$1 AND p.part_number=ANY($2) AND s.state='ready' ORDER BY p.part_number")
+            .bind(upload).bind(numbers).fetch_all(&self.pool).await?)
+    }
     async fn tail(&self, stream: Id) -> Result<Option<Extent>> {
         Ok(upload_stream_tail(stream)
             .fetch_optional(&self.pool)

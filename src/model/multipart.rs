@@ -251,6 +251,7 @@ pub(crate) trait MultipartStore: Send + Sync {
     ) -> Result<()>;
     async fn active(&self, upload: Uuid) -> Result<bool>;
     async fn part(&self, upload: Uuid, number: i32) -> Result<Option<StoredStream>>;
+    async fn selected_streams(&self, upload: Uuid, numbers: &[i32]) -> Result<Vec<StoredStream>>;
     async fn tail(&self, stream: Id) -> Result<Option<Extent>>;
     async fn pair(&self, upload: Uuid, number: i32) -> Result<Option<(Value, Vec<StoredStream>)>>;
     async fn consume_seed(&self, input: SeedConsumption<'_>) -> Result<()>;

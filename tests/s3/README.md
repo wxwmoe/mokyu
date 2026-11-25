@@ -14,7 +14,7 @@
 
 - `s3/empty_ranges.py`: signed/anonymous S3, public Web and panel downloads of empty and one-byte objects; suffix/open/closed ranges, HEAD and conditions. A normal GET of an empty object succeeds; an unsatisfiable range returns 416 and `Content-Range: bytes */0`. Keep SDK checksum defaults and test empty copies. Supply `MOKYU_TEST_PASSWORD_FILE` for the panel and `MOKYU_TEST_PUBLIC_WEB`/`MOKYU_TEST_PUBLIC_HOST` for public Web.
 
-- `s3/multipart_admission.py`: use the isolated PostgreSQL integration fixture. Exercise separate completion admission, 503 at capacity, continued foreground reads/writes, release after validation failure and completion after disconnect.
+- `s3/multipart_admission.py` uses the isolated PostgreSQL integration fixture with a cache-enabled S3 backend. It checks admission for a 10,000-part manifest, continued foreground reads and writes at capacity, release after validation failure and completion after disconnect.
 
 - `s3/read_path.py`: paged SQL and body-free HEAD/304 even when background cache fails or read permits are exhausted. Add `MOKYU_TEST_PUBLIC_WEB` and `MOKYU_TEST_PUBLIC_HOST` to exercise public Web.
 

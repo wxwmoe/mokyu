@@ -423,6 +423,10 @@ impl MultipartStore for Backend {
     async fn part(&self, upload: Uuid, number: i32) -> Result<Option<StoredStream>> {
         Ok(sqlx::query_as("SELECT s.* FROM parts p JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=? AND p.part_number=? AND s.state='ready'").bind(upload).bind(number).fetch_optional(&self.pool).await?)
     }
+    async fn selected_streams(&self, upload: Uuid, numbers: &[i32]) -> Result<Vec<StoredStream>> {
+        Ok(sqlx::query_as("SELECT s.* FROM JSON_TABLE(?, '$[*]' COLUMNS(number INT PATH '$')) n JOIN parts p ON p.part_number=n.number JOIN streams s ON s.id=p.stream_id WHERE p.upload_id=? AND s.state='ready' ORDER BY p.part_number")
+            .bind(sqlx::types::Json(numbers)).bind(upload).fetch_all(&self.pool).await?)
+    }
     async fn tail(&self, stream: Id) -> Result<Option<Extent>> {
         Ok(sqlx::query_as(
             "SELECT * FROM extents WHERE stream_id=? ORDER BY offset_bytes DESC LIMIT 1",
