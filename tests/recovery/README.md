@@ -12,6 +12,7 @@ Run `python -m tests.recovery.single_control_status single_control --counts 2 1 
 
 ## Bootstrap and native contracts
 
+- Run `python -m tests.recovery.storage_status` alongside a read-only recovery node with its configuration and `MOKYU_STORAGE_RECOVERY_TOKEN_FILE`. Cover direct TLS on IPv4 and IPv6 wildcard addresses and a proxy listener. It checks both status commands and rejects a different credential.
 - `mysql_sources_lock_only_referenced_chunks` checks that source validation avoids unrelated chunk locks with a non-semijoin query plan
 - `mysql_notice_receipts_follow_publication_locks` checks receipt lock order, superseded events and consumer validity
 - `mysql_raw_claims_lock_only_the_selected_stream` checks queue selection, concurrent claims and eligibility changes before the claim lock

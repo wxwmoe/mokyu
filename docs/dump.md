@@ -43,6 +43,10 @@ sources = [
 
 远端在原机以 `mokyu storage --recovery` 启动，配置 `instance.data_path`、`storage_url`、`listen_storage` 和 TLS 证书。将 `MOKYU_STORAGE_RECOVERY_TOKEN_FILE` 指向本次恢复使用的凭据文件，可以用 `openssl rand -hex 32` 生成。清单里对应的 `credential_file` 指向恢复机上同一凭据的副本。部署 key 由 dump 读取，恢复监听直接从介质取得身份。使用自建 CA 时，可通过 `SSL_CERT_FILE` 指向受信任的证书文件。
 
+恢复容器沿用镜像的健康检查。运行 `mokyu cli status` 可查看当前介质和群集的 UUID。探针使用恢复凭据向本机 `listen_storage` 核对介质，直连 TLS 时核对配置的服务器证书，代理模式下直接访问本机的 HTTP/2 监听。介质变化或凭据失效时，检查返回非零退出码。
+
+使用自定义配置路径启动容器时，给 Docker 健康检查指定同一份配置，例如 `--health-cmd 'mokyu -c /config/recovery.toml cli status --ready'`。
+
 可用 `cluster` 固定群集 UUID，用 `manifest_digest` 固定经过独立核对的布局摘要。选择独立备份时填写 `backup_group`。首次建库会显示选定发布的摘要与水位，`publication_digest` 可指定已知恢复点。多条路径指向同一块盘只计一份。将索引、输出和临时文件放在源盘之外。索引建好后可以离线列举和预览，实际导出时再接入所需介质。
 
 ## 列举与预览

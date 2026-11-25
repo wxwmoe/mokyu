@@ -16,6 +16,8 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+pub(crate) const CREDENTIAL_ENV: &str = "MOKYU_STORAGE_RECOVERY_TOKEN_FILE";
+
 pub(crate) async fn credential(path: &Path) -> Result<String> {
     let bytes = crate::storage::local::read_bounded(path, 4096).await?;
     let text = std::str::from_utf8(&bytes)?.trim_end_matches(['\r', '\n']);
@@ -30,10 +32,15 @@ struct Service {
     medium: Arc<Medium>,
     token: String,
     slots: Arc<Semaphore>,
+    inspections: Arc<Semaphore>,
 }
 
 impl Service {
-    fn permit<T>(&self, request: &Request<T>) -> Result<OwnedSemaphorePermit, Status> {
+    fn permit<T>(
+        &self,
+        request: &Request<T>,
+        slots: &Arc<Semaphore>,
+    ) -> Result<OwnedSemaphorePermit, Status> {
         let token = request
             .metadata()
             .get("authorization")
@@ -50,7 +57,7 @@ impl Service {
         {
             return Err(Status::unauthenticated("invalid recovery credential"));
         }
-        self.slots
+        slots
             .clone()
             .try_acquire_owned()
             .map_err(|_| Status::resource_exhausted("recovery reader is busy"))
@@ -70,12 +77,15 @@ impl StorageRecovery for Service {
         &self,
         request: Request<wire::RecoveryIdentify>,
     ) -> Result<Response<wire::StorageInspection>, Status> {
-        let _permit = self.permit(&request)?;
+        let permit = self.permit(&request, &self.inspections)?;
         let m = self.medium.clone();
-        tokio::task::spawn_blocking(move || m.check())
-            .await
-            .map_err(error)?
-            .map_err(error)?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            m.check()
+        })
+        .await
+        .map_err(error)?
+        .map_err(error)?;
         Ok(Response::new(wire::StorageInspection {
             identity_json: serde_json::to_vec(&self.medium.identity).map_err(error)?,
         }))
@@ -86,7 +96,7 @@ impl StorageRecovery for Service {
         &self,
         request: Request<wire::RecoveryScan>,
     ) -> Result<Response<Self::InventoryStream>, Status> {
-        let permit = self.permit(&request)?;
+        let permit = self.permit(&request, &self.slots)?;
         let request = request.into_inner();
         let medium = self.medium(&request.medium)?;
         if Uuid::parse_str(&request.view).ok() != Some(medium.identity.view) {
@@ -117,7 +127,7 @@ impl StorageRecovery for Service {
         &self,
         request: Request<wire::RecoveryRead>,
     ) -> Result<Response<wire::RecoveryBytes>, Status> {
-        let permit = self.permit(&request)?;
+        let permit = self.permit(&request, &self.slots)?;
         let request = request.into_inner();
         let medium = self.medium(&request.medium)?;
         let receipt = serde_json::from_slice(&request.receipt_json)
@@ -139,8 +149,7 @@ fn error(e: impl std::fmt::Display) -> Status {
 }
 
 pub(crate) async fn serve(config: NodeConfig, budget: Budget) -> Result<()> {
-    let path = std::env::var_os("MOKYU_STORAGE_RECOVERY_TOKEN_FILE")
-        .context("set MOKYU_STORAGE_RECOVERY_TOKEN_FILE")?;
+    let path = std::env::var_os(CREDENTIAL_ENV).context("set MOKYU_STORAGE_RECOVERY_TOKEN_FILE")?;
     let token = credential(Path::new(&path)).await?;
     let medium = Medium::open(config.instance.data_path.clone())?;
     let (mut server, incoming) =
@@ -149,6 +158,7 @@ pub(crate) async fn serve(config: NodeConfig, budget: Budget) -> Result<()> {
         medium,
         token,
         slots: Arc::new(Semaphore::new(budget.storage_read_slots)),
+        inspections: Arc::new(Semaphore::new(budget.storage_control_slots)),
     };
     server
         .add_service(

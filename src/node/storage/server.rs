@@ -410,7 +410,7 @@ pub(super) async fn listener(
     Server,
     impl futures_util::Stream<Item = std::io::Result<Connection>> + Send + 'static + use<>,
 )> {
-    let listener = TcpListener::bind(instance.listen_storage.as_deref().unwrap_or("0.0.0.0:9003"))
+    let listener = TcpListener::bind(crate::config::storage::listen_address(instance)?)
         .await
         .context("storage listener")?;
     let connections = Arc::new(Semaphore::new(slots));

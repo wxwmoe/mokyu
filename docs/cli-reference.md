@@ -181,7 +181,7 @@ docker exec -i mokyu mokyu cli user create admin --stdin < /secure/password-file
 
 | 命令 | 作用与返回 |
 | --- | --- |
-| `status` | 返回[运行状态和容量快照](control-api-reference.md#运行状态)，读取不触发全表汇总 |
+| `status [--ready]` | 返回[运行状态和容量快照](control-api-reference.md#运行状态)，读取不触发全表汇总。`--ready` 要求服务就绪。只读恢复节点核对介质并返回介质和群集 UUID |
 | `gc status` | 返回 paused/maintenance/running、区块状态计数、宽限、间隔和 min_storage_duration |
 | `gc mark-unreferenced` | 在维护模式且活跃操作已排空时，为没有引用的 ready 区块补上回收时间标记 |
 | `gc run` | 执行一批清理与回收，返回计数。单主控已交接时返回共享回收任务 ID；遵守暂停、维护、宽限及最低存储期限 |

@@ -25,6 +25,12 @@ pub async fn client(path: Option<&Path>, mut command: Command) -> Result<()> {
     if let Command::Styles(styles) = command {
         return super::styles::execute(path, styles).await;
     }
+    if matches!(command, Command::Status { .. })
+        && let Some(status) = super::transport::recovery_status(path).await?
+    {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
     match &mut command {
         Command::Bucket(Buckets::Mirroring {
             command: Mirroring::Preview { file, document, .. },

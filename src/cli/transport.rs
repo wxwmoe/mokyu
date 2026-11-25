@@ -4,6 +4,8 @@ use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::path::Path;
 
+const DEFAULT_CONFIG: &str = "/config/config.toml";
+
 pub(super) struct CliTarget {
     base: String,
     state: Option<crate::cluster::NodeState>,
@@ -40,7 +42,7 @@ pub(super) async fn rpc(target: &CliTarget, command: &Command) -> Result<Value> 
 }
 
 pub(super) fn cli_target(explicit: Option<&Path>) -> Result<CliTarget> {
-    let path = explicit.unwrap_or_else(|| Path::new("/config/config.toml"));
+    let path = explicit.unwrap_or_else(|| Path::new(DEFAULT_CONFIG));
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if explicit.is_none() && error.kind() == std::io::ErrorKind::NotFound => {
@@ -80,6 +82,45 @@ pub(super) fn cli_target(explicit: Option<&Path>) -> Result<CliTarget> {
         state: auth.state,
         deployment_key: auth.deployment_key,
     })
+}
+
+pub(super) async fn recovery_status(path: Option<&Path>) -> Result<Option<Value>> {
+    let Some(credential) = std::env::var_os(crate::node::storage::readonly::CREDENTIAL_ENV) else {
+        return Ok(None);
+    };
+    let path = path.unwrap_or_else(|| Path::new(DEFAULT_CONFIG));
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    let Ok(config) = crate::config::node::NodeConfig::parse(&text, "storage-recovery") else {
+        return Ok(None);
+    };
+    let error = match crate::storage::native::recovery::probe::status(
+        &config.instance,
+        Path::new(&credential),
+    )
+    .await
+    {
+        Ok(status) => return Ok(Some(status)),
+        Err(error) => error,
+    };
+    if error
+        .downcast_ref::<tonic::Status>()
+        .is_some_and(|status| status.code() != tonic::Code::Unimplemented)
+    {
+        return Err(error);
+    }
+    // A registered storage may still have the recovery credential mounted.
+    if config.instance.control_url.is_some()
+        && let Ok(target) = cli_target(Some(path))
+        && let Some(node) = &target.state
+        && let Ok(status) = rpc(&target, &Command::Status { ready: false }).await
+        && status["role"] == "storage"
+        && status["node_id"] == node.node_id.to_string()
+    {
+        return Ok(None);
+    }
+    Err(error)
 }
 
 #[cfg(test)]

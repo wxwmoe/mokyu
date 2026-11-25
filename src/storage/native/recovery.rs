@@ -14,6 +14,7 @@ use uuid::Uuid;
 pub(crate) mod archive;
 pub(crate) mod media;
 mod part;
+pub(crate) mod probe;
 mod replay;
 pub(crate) mod scan;
 

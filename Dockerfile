@@ -57,5 +57,5 @@ RUN mkdir -p /data /config \
 USER 10001:10001
 EXPOSE 9000 9001 9002
 STOPSIGNAL SIGTERM
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD mokyu cli status >/dev/null || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD mokyu cli status --ready >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/mokyu"]

@@ -42,15 +42,19 @@ impl Source {
     }
 
     pub async fn remote(url: &str, credential: &Path) -> Result<(Identity, Self)> {
-        let mut token: MetadataValue<_> =
-            format!("Bearer {}", readonly::credential(credential).await?).parse()?;
-        token.set_sensitive(true);
         let endpoint = Endpoint::from_shared(url.to_owned())?
             .connect_timeout(Duration::from_secs(8))
             .timeout(Duration::from_secs(60))
             .initial_stream_window_size(1024 * 1024)
             .initial_connection_window_size(4 * 1024 * 1024)
             .tls_config(ClientTlsConfig::new().with_native_roots())?;
+        Self::connect(endpoint, credential).await
+    }
+
+    pub(super) async fn connect(endpoint: Endpoint, credential: &Path) -> Result<(Identity, Self)> {
+        let mut token: MetadataValue<_> =
+            format!("Bearer {}", readonly::credential(credential).await?).parse()?;
+        token.set_sensitive(true);
         let mut client = StorageRecoveryClient::new(endpoint.connect().await?)
             .max_decoding_message_size(8 * 1024 * 1024);
         let answer = client

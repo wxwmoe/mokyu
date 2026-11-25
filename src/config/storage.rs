@@ -35,6 +35,20 @@ pub(crate) fn url(value: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn listen_address(instance: &Instance) -> Result<SocketAddr> {
+    let address: SocketAddr = instance
+        .listen_storage
+        .as_deref()
+        .unwrap_or("0.0.0.0:9003")
+        .parse()
+        .context("invalid instance.listen_storage")?;
+    ensure!(
+        address.port() != 0,
+        "instance.listen_storage requires a fixed port"
+    );
+    Ok(address)
+}
+
 pub(crate) fn validate(instance: &Instance, role: &str) -> Result<()> {
     if let Some(region) = &instance.region {
         label(region, "instance.region")?;
@@ -73,16 +87,7 @@ pub(crate) fn validate(instance: &Instance, role: &str) -> Result<()> {
         ),
         "instance.storage_purpose must be primary or backup"
     );
-    let listen: SocketAddr = instance
-        .listen_storage
-        .as_deref()
-        .unwrap_or("0.0.0.0:9003")
-        .parse()
-        .context("invalid instance.listen_storage")?;
-    ensure!(
-        listen.port() != 0,
-        "instance.listen_storage requires a fixed port"
-    );
+    let listen = listen_address(instance)?;
     match instance.storage_transport.as_deref().unwrap_or("tls") {
         "tls" => {
             for (name, value) in [
