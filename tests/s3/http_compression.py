@@ -12,6 +12,7 @@ import brotli
 import requests
 import zstandard
 from botocore.config import Config
+from urllib3.util import SKIP_HEADER
 
 assert os.environ.get('MOKYU_TEST_ALLOW_STATE_CHANGES') == 'isolated-only'
 credential = json.loads(Path(os.environ['MOKYU_TEST_CREDENTIALS']).read_text())
@@ -27,6 +28,8 @@ client.put_object(Bucket=bucket, Key=prefix + 'private', Body=original, ContentT
 client.put_object(Bucket=bucket, Key=prefix + 'untouched', Body=original, ACL='public-read', ContentType='text/plain', CacheControl='public, no-transform')
 stored = gzip.compress(original)
 client.put_object(Bucket=bucket, Key=prefix + 'encoded', Body=stored, ACL='public-read', ContentType='text/plain', ContentEncoding='gzip')
+stacked = brotli.compress(stored)
+client.put_object(Bucket=bucket, Key=prefix + 'stacked', Body=stacked, ACL='public-read', ContentEncoding='gzip, br')
 client.put_object(Bucket=bucket, Key=prefix + 'small', Body=b'small', ACL='public-read', ContentType='text/plain')
 sources = [(endpoint + '/' + bucket + '/', {})]
 if os.environ.get('MOKYU_TEST_PUBLIC_WEB'):
@@ -71,6 +74,11 @@ for source in sources:
     assert response.headers['content-encoding'] == 'gzip'
     response, _ = wire(source, encoding='*;q=0')
     assert response.status_code == 406
+    proxy = {'X-Mokyu-File-Delivery': 'x_accel_redirect'}
+    response, data = wire(source, encoding='gzip', **proxy)
+    assert response.status_code == 200 and response.headers['etag'] == 'W/' + tag
+    assert response.headers['content-encoding'] == 'gzip' and gzip.decompress(data) == original
+    assert wire(source, key='encoded', encoding='gzip;q=0, identity', **proxy)[0].status_code == 406
     for headers in [{'If-Match': tag}, {'Cache-Control': 'no-transform'}]:
         response, data = wire(source, **headers)
         assert response.status_code == 200 and data == original and 'content-encoding' not in response.headers
@@ -97,6 +105,16 @@ for source in sources:
     response, data = wire(source, key='encoded', encoding='gzip, identity;q=0')
     assert response.status_code == 200 and response.headers['content-encoding'] == 'gzip' and data == stored
     assert wire(source, key='encoded', encoding='gzip;q=0, br, identity;q=0')[0].status_code == 406
+    for method, headers in [('GET', {}), ('HEAD', {}), ('GET', {'Range': 'bytes=1-7'})]:
+        assert wire(source, key='encoded', encoding='gzip;q=0, identity', method=method, **headers)[0].status_code == 406
+    assert wire(source, key='encoded', encoding='')[0].status_code == 406
+    response, data = wire(source, key='encoded', encoding=SKIP_HEADER)
+    assert response.status_code == 200 and response.headers['content-encoding'] == 'gzip' and data == stored
+    response, data = wire(source, key='encoded', encoding='gzip', Range='bytes=1-7')
+    assert response.status_code == 206 and data == stored[1:8]
+    assert wire(source, key='stacked', encoding='gzip, br;q=0, *')[0].status_code == 406
+    response, data = wire(source, key='stacked', encoding='gzip, br')
+    assert response.status_code == 200 and data == stacked
     response, data = wire(source, key='small')
     assert data == b'small' and 'content-encoding' not in response.headers
     assert wire(source, key='private')[0].status_code == 403

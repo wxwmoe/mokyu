@@ -106,10 +106,6 @@ http {
     # Mokyu already varies object responses on Accept-Encoding.
     gzip_vary off;
 
-    map $http_accept_encoding $mokyu_strict_encoding {
-        default 0;
-        "~*(^|,)\s*(identity|\*)\s*;\s*q=0(\.0{1,3})?\s*(,|$)" 1;
-    }
     map "$http_authorization:$args" $mokyu_signed {
         default 1;
         "~*^:(?:[^&]*&)*X-Amz-(Signature|Credential)=" 1;
@@ -134,17 +130,15 @@ http {
 }
 ```
 
-创建 `mokyu-file-delivery.conf`：
+创建 `mokyu-file-delivery.conf`。已有代理也需要更新内部文件位置，让 Nginx 从 `X-Mokyu-Content-Encoding` 还原对象的编码。
 
 ```nginx
 location / {
     error_page 418 = @mokyu_original;
     if ($mokyu_signed) { return 418; }
-    if ($mokyu_strict_encoding) { return 418; }
     proxy_pass $mokyu_upstream;
     proxy_http_version 2;
     proxy_set_header Host $http_host;
-    proxy_set_header Accept-Encoding "";
     proxy_set_header Connection "";
     proxy_set_header Upgrade "";
     proxy_set_header X-Mokyu-File-Delivery x_accel_redirect;
@@ -158,6 +152,7 @@ location ^~ /_mokyu_raw/ {
     alias /srv/mokyu/raw/;
     disable_symlinks on;
     gzip on;
+    if ($upstream_http_x_mokyu_content_encoding != "") { gzip off; }
     etag off;
     if_modified_since off;
     error_page 403 404 = @mokyu_fallback;
@@ -165,6 +160,7 @@ location ^~ /_mokyu_raw/ {
     add_header Last-Modified $upstream_http_last_modified always;
     add_header Cache-Control $upstream_http_x_mokyu_cache_control always;
     add_header Content-Disposition $upstream_http_x_mokyu_content_disposition always;
+    add_header Content-Encoding $upstream_http_x_mokyu_content_encoding;
     add_header Expires $upstream_http_x_mokyu_expires always;
     add_header Content-Language $upstream_http_content_language always;
     add_header Vary $upstream_http_vary always;
@@ -183,14 +179,13 @@ location @mokyu_fallback {
     proxy_pass $mokyu_upstream$request_uri;
     proxy_http_version 2;
     proxy_set_header Host $http_host;
-    proxy_set_header Accept-Encoding "";
     proxy_set_header Connection "";
     proxy_set_header Upgrade "";
     proxy_set_header X-Mokyu-File-Delivery application;
     proxy_buffering off;
 }
 location @mokyu_original {
-    # Keep the original request headers for signatures and strict negotiation.
+    # Keep the original request headers for signature verification.
     proxy_pass $mokyu_upstream;
     proxy_http_version 2;
     proxy_set_header Host $http_host;
@@ -209,7 +204,9 @@ docker compose up -d nginx
 docker compose exec nginx nginx -t
 ```
 
-Nginx 对可压缩类型启用原版动态 gzip，Mokyu 提供 Vary 和对象校验标记。已存储的 Content-Encoding、带 no-transform 的对象或请求、签名、Range、条件请求、校验和请求以及 HEAD 均由应用处理。签名请求和明确禁止 identity 的客户端保留原请求头，由应用完成签名校验或返回 406。磁盘文件打开失败时，Nginx 用原 URI 和查询串重新请求 Mokyu，重新核对当前权限与版本。内部位置及回退都应保留，直接从互联网请求内部 URI 会被拒绝。
+完整文件通过鉴权和交付检查后，Mokyu 返回内部文件地址。Nginx 对普通文件按客户端请求动态 gzip。对象已有 `Content-Encoding` 时，Nginx 原样发送存储字节，保留该编码和对象的强 ETag。本例在直送时即使客户端排除该编码也会发送原文件。需要严格协商的部署可使用 `application` 交付。
+
+签名、Range、条件请求、校验和请求、HEAD 以及带 `no-transform` 的对象或请求由应用处理。磁盘文件打开失败时，Nginx 用原 URI、查询串和请求头回到应用。Mokyu 重新核对权限与版本，并按客户端原始 `Accept-Encoding` 选择表示。
 
 官方镜像的动态响应压缩算法是 gzip。gzip_static 用于服务预先生成的 .gz 文件，gunzip 用于解压。Mokyu 的 raw 存储和缓存只发布原始文件，代理只读挂载。响应中的 ETag、缓存策略、下载文件名、语言和 CORS 均来自当次授权的对象。[gzip](https://nginx.org/en/docs/http/ngx_http_gzip_module.html)、[gzip_static](https://nginx.org/en/docs/http/ngx_http_gzip_static_module.html)、[gunzip](https://nginx.org/en/docs/http/ngx_http_gunzip_module.html)
 

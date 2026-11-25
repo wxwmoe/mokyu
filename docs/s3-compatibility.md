@@ -125,9 +125,11 @@ HEAD 和 304 只读取当前对象元数据，不读取区块、不占正文读�
 
 ## 公共响应压缩
 
-启用存储的 `http_compression_enabled` 时，公共 Web 与通过匿名认证的 S3 GetObject/HeadObject 按 Accept-Encoding 的 q 值协商，同权重时优先 zstd、br、gzip、identity；未发送或空值返回原始表示。签名与预签名请求、checksum mode、已有 Content-Encoding 和请求或对象的 no-transform 均不追加编码。无可接受表示返回 406；禁止 identity 且编码工作内存不足时返回 503。
+应用交付的公共 Web 与匿名 S3 GetObject/HeadObject 按 Accept-Encoding 协商。对象已有 Content-Encoding 时，客户端须接受其中的每层编码。未发送 Accept-Encoding 时可返回原始字节，显式空值只接受无编码表示。无可接受表示时返回 406。
 
-原始表示使用强 ETag，压缩表示使用同值弱 ETag。所有可协商响应发送 Vary: Accept-Encoding；S3 另包含 Authorization 和 X-Amz-Checksum-Mode。强 If-Match 和有效 Range 优先原始表示；206 不压缩，identity 被明确禁止时忽略 Range 并返回完整压缩表示。条件判断针对最终选择的表示，If-None-Match 使用弱比较。
+启用存储的 `http_compression_enabled` 时，无编码对象可按 q 值选择动态压缩，同权重时优先 zstd、br、gzip、identity。签名与预签名请求按原字节交付。checksum mode 和请求或对象的 no-transform 禁用动态压缩。禁止 identity 且编码工作内存不足时返回 503。
+
+原样发送存储字节时使用强 ETag，包括已有编码的对象。动态压缩使用同值弱 ETag。所有可协商响应发送 Vary: Accept-Encoding，S3 另包含 Authorization 和 X-Amz-Checksum-Mode。强 If-Match 和有效 Range 优先原始表示。客户端接受对象已有编码时，Range 按存储字节返回 206。对无编码对象，若客户端排除 identity 并选中动态编码，则返回完整的压缩表示。条件判断针对最终选择的表示，If-None-Match 使用弱比较。
 
 压缩 HEAD 不启动编码器，没有实际压缩正文时省略 Content-Length；304 保留 ETag、Vary 和缓存策略，省略 Content-Encoding 和长度，避免在重验证时错误标记浏览器已有正文。S3 的 `response-*` 覆盖需要签名，匿名请求包含这些参数时返回 403。
 
@@ -137,7 +139,7 @@ HEAD 和 304 只读取当前对象元数据，不读取区块、不占正文读�
 
 ## 代理文件交付
 
-本地 raw 可为匿名 S3 与公共 Web 的完整 GET 使用 X-Accel-Redirect 或 X-Sendfile，HEAD、Range、条件请求、checksum、签名读取、压缩表示及自定义对象元数据仍由 Mokyu 处理。代理不能替换对象 ETag、缓存策略或 CORS 结果，文件打开失败时回到原请求重新鉴权；配置见[部署示例](local-nginx-deployment.md)。
+本地 raw 可为匿名 S3 与公共 Web 的完整 GET 使用 X-Accel-Redirect 或 X-Sendfile。X-Accel-Redirect 可直接交付已有 Content-Encoding 的完整文件，由 Nginx 负责对客户端的编码处理。X-Sendfile 仅直送无内容编码的原文件。HEAD、Range、条件请求、checksum、签名读取和带自定义用户元数据的对象由 Mokyu 处理。代理保留对象校验标记、缓存策略和 CORS 结果。文件打开失败时回到应用重新鉴权并协商表示。[部署示例](local-nginx-deployment.md)
 
 ## 公共网站
 

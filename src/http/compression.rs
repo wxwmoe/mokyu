@@ -115,6 +115,9 @@ fn weighted_coding(item: &str) -> (&str, u16) {
 }
 
 pub(crate) fn accepts_stored(request: &HeaderMap, codings: &str) -> bool {
+    if !request.contains_key(header::ACCEPT_ENCODING) {
+        return true;
+    }
     codings.split(',').all(|coding| {
         let mut explicit = None;
         let mut wildcard = None;

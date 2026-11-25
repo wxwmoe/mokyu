@@ -153,10 +153,6 @@ impl Query {
             ] {
                 self.headers.remove(name);
             }
-            self.headers.insert(
-                "accept-encoding",
-                axum::http::HeaderValue::from_static("identity"),
-            );
         }
     }
     pub(crate) fn digest(&self) -> Result<[u8; 32]> {

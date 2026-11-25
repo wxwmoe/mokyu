@@ -61,6 +61,10 @@ pub(crate) async fn prepare(
         && !checksum
         && proxy_request(request, &profile.file_delivery)
         && proxy_response(metadata, headers)
+        && (profile.file_delivery == "x_accel_redirect"
+            || (metadata.content_encoding.is_none()
+                && !headers.contains_key(header::CONTENT_ENCODING)
+                && super::compression::AcceptEncoding::new(request).identity()))
         && profile.read_integrity != "inline"
         && !row.source.pending_upload
         && complete(&row, stream.size);
@@ -141,8 +145,6 @@ pub(crate) fn proxy_response(metadata: &Metadata, headers: &HeaderMap) -> bool {
             .cache_control
             .as_deref()
             .is_some_and(super::compression::no_transform_value)
-        && metadata.content_encoding.is_none()
-        && !headers.contains_key(header::CONTENT_ENCODING)
         && !super::compression::no_transform(headers)
 }
 
@@ -169,16 +171,22 @@ pub(crate) fn handoff(
     headers.insert(header::CONTENT_LENGTH, "0".parse()?);
     if name == "x-accel-redirect" {
         headers.remove(header::ACCEPT_RANGES);
-        // Nginx otherwise retains these across a failed file open and an application retry.
+        // Nginx restores these headers only when its internal location serves the file.
         for (field, internal) in [
             (header::CACHE_CONTROL, "x-mokyu-cache-control"),
             (header::CONTENT_DISPOSITION, "x-mokyu-content-disposition"),
+            (header::CONTENT_ENCODING, "x-mokyu-content-encoding"),
             (header::EXPIRES, "x-mokyu-expires"),
         ] {
             if let Some(value) = headers.remove(field) {
                 headers.insert(internal, value);
             }
         }
+    } else {
+        headers.insert(
+            header::ACCEPT_RANGES,
+            header::HeaderValue::from_static("bytes"),
+        );
     }
     Ok(())
 }

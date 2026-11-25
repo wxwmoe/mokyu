@@ -146,14 +146,11 @@ pub(crate) fn representation(
     force_identity: bool,
 ) -> Option<Encoding> {
     let accept = AcceptEncoding::new(request);
-    if !accept.identity()
-        && let Some(codings) = headers
-            .get(header::CONTENT_ENCODING)
-            .and_then(|value| value.to_str().ok())
-        && compression::accepts_stored(request, codings)
-    {
-        // Identity here preserves the object's own Content-Encoding and strong ETag.
-        return Some(Encoding::Identity);
+    if let Some(codings) = headers.get(header::CONTENT_ENCODING) {
+        // Passing through the stored bytes preserves their coding and strong ETag.
+        return codings.to_str().ok().and_then(|value| {
+            compression::accepts_stored(request, value).then_some(Encoding::Identity)
+        });
     }
     let transform = !checksum
         && !compression::no_transform(request)
@@ -162,7 +159,6 @@ pub(crate) fn representation(
             .cache_control
             .as_deref()
             .is_some_and(compression::no_transform_value)
-        && !headers.contains_key(header::CONTENT_ENCODING)
         && metadata.content_encoding.is_none();
     let prefer_identity = accept.identity()
         && (request.contains_key(header::IF_MATCH)
@@ -293,9 +289,7 @@ pub(crate) async fn read(
     if bucket_info.state != "active" {
         return Err(s3s::s3_error!(AccessDenied).into());
     }
-    let accept = AcceptEncoding::new(request);
     let light = head || conditional(request);
-    let public_snapshot = crate::app::reads::cached(bucket, key);
     let policy = bucket_info
         .storage_id
         .map(|id| app.storage.profile(id))
@@ -303,6 +297,9 @@ pub(crate) async fn read(
     let proxy_delivery = policy
         .as_ref()
         .is_some_and(|profile| profile.file_delivery != "application");
+    // A full file handoff needs either a validated mapping or a pin on the current object.
+    let public_snapshot = crate::app::reads::cached(bucket, key)
+        .filter(|(_, mapping)| !proxy_delivery || light || mapping.is_some());
     let cache_allowed =
         !proxy_delivery && super::delivery::body_cache(app, bucket, key, bucket_info.storage_id);
     let candidate = if cache_allowed
@@ -400,6 +397,37 @@ pub(crate) async fn read(
         let original_cacheable = cacheable(&headers);
         headers.extend(overrides.clone());
         compression::vary(&mut headers, "Accept-Encoding");
+        let original_tag = format!("\"{}\"", stream.etag);
+        headers.insert(
+            header::LAST_MODIFIED,
+            gateway::http_date(gateway::stamp(stream.touched_at))?.parse()?,
+        );
+        headers.insert(
+            "x-content-type-options",
+            HeaderValue::from_static("nosniff"),
+        );
+        if proxy_delivery
+            && super::delivery::prepare(
+                app,
+                &stream,
+                &metadata,
+                request,
+                head,
+                checksum,
+                &mut headers,
+            )
+            .await?
+        {
+            headers.insert(header::ETAG, original_tag.parse()?);
+            return Ok(Read {
+                status: StatusCode::OK,
+                headers,
+                body: None,
+                metadata,
+                checksums: stream.checksums,
+                partial: false,
+            });
+        }
         let range_requested =
             request.contains_key(header::RANGE) && gateway::if_range_matches(&stream, request);
         let Some(encoding) = representation(
@@ -412,7 +440,6 @@ pub(crate) async fn read(
         ) else {
             return Err(super::problem(StatusCode::NOT_ACCEPTABLE, "NotAcceptable").0);
         };
-        let original_tag = format!("\"{}\"", stream.etag);
         let not_modified = conditions(&stream, request, &encoding.etag(&original_tag))?;
         if !head && !not_modified && pin.is_none() && cached_mapping.is_none() {
             // Permissions and representation selection must refer to the protected current version.
@@ -422,14 +449,6 @@ pub(crate) async fn read(
             continue;
         }
         headers.insert(header::ETAG, encoding.etag(&original_tag).parse()?);
-        headers.insert(
-            header::LAST_MODIFIED,
-            gateway::http_date(gateway::stamp(stream.touched_at))?.parse()?,
-        );
-        headers.insert(
-            "x-content-type-options",
-            HeaderValue::from_static("nosniff"),
-        );
         if not_modified {
             headers.remove(header::CONTENT_ENCODING);
             return Ok(Read {
@@ -475,27 +494,6 @@ pub(crate) async fn read(
             encoding: encoding.name(),
             policy: POLICY,
         };
-        if proxy_delivery
-            && super::delivery::prepare(
-                app,
-                &stream,
-                &metadata,
-                request,
-                head,
-                checksum,
-                &mut headers,
-            )
-            .await?
-        {
-            return Ok(Read {
-                status: StatusCode::OK,
-                headers,
-                body: None,
-                metadata,
-                checksums: stream.checksums,
-                partial: false,
-            });
-        }
         let use_cache = cache_allowed
             && !checksum
             && original_cacheable
@@ -617,7 +615,7 @@ pub(crate) async fn read(
             .then(|| app.storage.http_work())
             .flatten();
         if encoding != Encoding::Identity && !head && memory.is_none() {
-            if !accept.identity() {
+            if !AcceptEncoding::new(request).identity() {
                 return Err(s3s::s3_error!(ServiceUnavailable).into());
             }
             force_identity = true;

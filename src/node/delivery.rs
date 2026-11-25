@@ -79,9 +79,9 @@ pub(crate) async fn response(
     reads: &Arc<Reads>,
     mut prepared: Prepared,
     head: bool,
-    proxy: bool,
+    proxy: Option<&HeaderMap>,
     overrides: &HeaderMap,
-    memory: Option<OwnedSemaphorePermit>,
+    mut memory: Option<OwnedSemaphorePermit>,
     ranges: Option<Vec<std::ops::Range<u64>>>,
 ) -> Result<object::Read> {
     prepared.check()?;
@@ -133,15 +133,16 @@ pub(crate) async fn response(
             .context("read object missing")?,
     )?;
     let metadata: Metadata = serde_json::from_value(object.metadata.clone())?;
-    let encoding = match prepared.reply.representation.as_str() {
+    let mut encoding = match prepared.reply.representation.as_str() {
         "identity" => Encoding::Identity,
         "zstd" => Encoding::Zstd,
         "br" => Encoding::Brotli,
         "gzip" => Encoding::Gzip,
         _ => anyhow::bail!("invalid read representation"),
     };
+    let original_tag = format!("\"{}\"", object.etag);
     ensure!(
-        prepared.reply.etag == encoding.etag(&format!("\"{}\"", object.etag)),
+        prepared.reply.etag == encoding.etag(&original_tag),
         "read etag mismatch"
     );
     let mut headers = object::metadata_headers(&metadata)?;
@@ -187,45 +188,24 @@ pub(crate) async fn response(
         !partial || (encoding == Encoding::Identity && prepared.reply.length > 0),
         "invalid partial representation"
     );
-    if encoding == Encoding::Identity {
-        headers.insert(
-            header::CONTENT_LENGTH,
-            prepared.reply.length.to_string().parse()?,
+    let proxy_policy = if proxy.is_some() {
+        ensure!(
+            !head && !partial && ranges.is_none() && encoding == Encoding::Identity,
+            "invalid file delivery read plan"
         );
-        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    } else {
-        headers.insert(
-            header::CONTENT_ENCODING,
-            HeaderValue::from_static(encoding.name()),
-        );
-    }
-    if partial {
-        headers.insert(
-            header::CONTENT_RANGE,
-            format!(
-                "bytes {}-{}/{}",
-                prepared.reply.offset,
-                end - 1,
-                object.size
-            )
-            .parse()?,
-        );
-    }
-    if proxy
-        && !head
-        && !partial
-        && !prepared.verify
-        && ranges.is_none()
-        && object.payload == "raw"
-        && encoding == Encoding::Identity
-        && crate::http::delivery::proxy_response(&metadata, &headers)
-        && prepared
+        prepared
             .reply
             .policy
             .as_ref()
             .map(|v| prepared.material::<read::Policy>(v))
             .transpose()?
-            .is_some_and(|p| !p.body_cache_enabled)
+    } else {
+        None
+    };
+    if proxy_policy.as_ref().is_some_and(|p| !p.body_cache_enabled)
+        && !prepared.verify
+        && object.payload == "raw"
+        && crate::http::delivery::proxy_response(&metadata, &headers)
         && let Some(version) = &prepared.reply.mapping
     {
         let mapping: read::Mapping = prepared.material(version)?;
@@ -273,6 +253,49 @@ pub(crate) async fn response(
                 }
             }
         }
+    }
+    if let Some(request) = proxy {
+        // The grant covers the full stored object. Select the application response on this node.
+        encoding = object::representation(
+            &object.stream(),
+            &metadata,
+            request,
+            &headers,
+            false,
+            !proxy_policy.is_some_and(|p| p.http_compression_enabled),
+        )
+        .ok_or_else(|| crate::http::problem(StatusCode::NOT_ACCEPTABLE, "NotAcceptable").0)?;
+        if encoding != Encoding::Identity {
+            memory = compression_work(reads);
+            if memory.is_none() && compression::AcceptEncoding::new(request).identity() {
+                encoding = Encoding::Identity;
+            }
+        }
+    }
+    if encoding == Encoding::Identity {
+        headers.insert(
+            header::CONTENT_LENGTH,
+            prepared.reply.length.to_string().parse()?,
+        );
+        headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    } else {
+        headers.insert(header::ETAG, encoding.etag(&original_tag).parse()?);
+        headers.insert(
+            header::CONTENT_ENCODING,
+            HeaderValue::from_static(encoding.name()),
+        );
+    }
+    if partial {
+        headers.insert(
+            header::CONTENT_RANGE,
+            format!(
+                "bytes {}-{}/{}",
+                prepared.reply.offset,
+                end - 1,
+                object.size
+            )
+            .parse()?,
+        );
     }
     let body = if head {
         None

@@ -3,6 +3,7 @@
 Optional MOKYU_TEST_PROXY_RUN writes isolated proxy configs and waits for the
 orchestrator to mount only the selected raw directory into Nginx and Apache.
 """
+import gzip
 import json
 import os
 import re
@@ -311,6 +312,25 @@ def main():
                     actual = requests.get(f'http://{proxy}:8080/{fixture.name}/text', headers={'Accept-Encoding': 'gzip'}, timeout=20)
                     assert actual.content == text
                     assert actual.headers.get('content-encoding') == ('gzip' if mode == 'x_accel_redirect' else None)
+                    stored = gzip.compress(os.urandom(8192), mtime=0)
+                    tag = put('encoded', body=stored, ContentType='text/plain', ContentEncoding='gzip')['ETag']
+                    for port, path_prefix, host in [(8080, '/' + fixture.name, {}), (8081, '', {'Host': domain})]:
+                        url = f'http://{proxy}:{port}{path_prefix}/encoded'
+                        gate = gates[port - 8080]
+                        for accept in ['gzip', 'gzip;q=0, identity']:
+                            before = gate.requests, gate.bytes
+                            with requests.get(url, headers={**host, 'Accept-Encoding': accept}, stream=True, timeout=20) as reply:
+                                if mode == 'x_sendfile' and accept != 'gzip':
+                                    assert reply.status_code == 406
+                                    continue
+                                assert reply.status_code == 200 and reply.raw.read(decode_content=False) == stored
+                                assert reply.headers['content-encoding'] == 'gzip' and reply.headers['etag'] == tag
+                                assert int(reply.headers['content-length']) == len(stored)
+                                if mode == 'x_accel_redirect':
+                                    assert (gate.requests, gate.bytes) == (before[0] + 1, before[1])
+                        rejected = {**host, 'Accept-Encoding': 'gzip;q=0, identity'}
+                        assert requests.head(url, headers=rejected, timeout=20).status_code == 406
+                        assert requests.get(url, headers={**rejected, 'Range': 'bytes=0-7'}, timeout=20).status_code == 406
                     fixture.client.put_object_acl(Bucket=fixture.name, Key='text', ACL='private')
                     assert requests.get(f'http://{proxy}:8080/{fixture.name}/text', timeout=20).status_code == 403
                     fixture.client.delete_object(Bucket=fixture.name, Key='text')
@@ -319,7 +339,8 @@ def main():
 
                     paths = set(fixture.keys())
                     race = 'race a+%/child'
-                    put(race, body=b'old body', CacheControl='public, max-age=1', ContentDisposition='inline; filename="old.bin"')
+                    old_body = {'body': stored, 'ContentEncoding': 'gzip'} if mode == 'x_accel_redirect' else {'body': b'old body'}
+                    put(race, **old_body, CacheControl='public, max-age=1', ContentDisposition='inline; filename="old.bin"')
                     old_file, = set(fixture.keys()) - paths
                     gate = gates[0]
                     gate.selected.clear()
@@ -341,6 +362,7 @@ def main():
                     assert result.headers['cache-control'] == 'public, max-age=300', (mode, dict(result.headers))
                     assert result.headers['content-disposition'] == 'attachment; filename="new.bin"', (mode, dict(result.headers))
                     assert result.headers['access-control-allow-origin'] == 'https://reader.test'
+                    assert 'content-encoding' not in result.headers
                     print('PASS ' + mode + ' GC before proxy open retries the original request without stale headers or a loop', flush=True)
             policy(public_cache_validation='strict', file_delivery='x_accel_redirect', file_delivery_prefix='/_mokyu_raw/')
             paths = set(fixture.keys())

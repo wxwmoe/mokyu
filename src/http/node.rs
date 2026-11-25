@@ -75,7 +75,7 @@ impl PreparedRequest {
 }
 
 struct RequestRead {
-    proxy: bool,
+    proxy: Option<HeaderMap>,
     route: ReadRoute,
     input: wire::ReadRequest,
     prepared: Prepared,
@@ -198,22 +198,26 @@ impl Gateway {
             && access.is_none()
             && matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
             && object::reuse_public(headers);
-        let accept = compression::AcceptEncoding::new(headers);
-        let wants_compression = !head
-            && access.is_none()
-            && accept
-                .select(|_| true)
-                .is_some_and(|encoding| encoding != compression::Encoding::Identity);
-        let memory = wants_compression
-            .then(|| delivery::compression_work(&self.reads))
-            .flatten();
+        let proxy =
+            anonymous && !head && super::delivery::proxy_request(headers, "x_accel_redirect");
         let mut headers = headers.clone();
         headers.remove("x-mokyu-image-source");
-        if wants_compression && memory.is_none() && accept.identity() {
-            headers.insert(
-                hyper::header::ACCEPT_ENCODING,
-                HeaderValue::from_static("identity"),
-            );
+        let mut memory = None;
+        if !proxy && !head && access.is_none() {
+            let accept = compression::AcceptEncoding::new(&headers);
+            if accept
+                .select(|_| true)
+                .is_some_and(|encoding| encoding != compression::Encoding::Identity)
+            {
+                memory = delivery::compression_work(&self.reads);
+                if memory.is_none() && accept.identity() {
+                    // Existing encodings need no compressor. Keep the client's coding preferences.
+                    headers.append(
+                        hyper::header::CACHE_CONTROL,
+                        HeaderValue::from_static("no-transform"),
+                    );
+                }
+            }
         }
         let route = match route.base() {
             ReadRoute::Image { .. } => unreachable!(),
@@ -276,6 +280,12 @@ impl Gateway {
             overrides: fields(overrides, crate::rpc::read::OVERRIDES),
             ..Default::default()
         };
+        if proxy {
+            // Request the stored bytes. Only this node can check its file cache for a handoff.
+            input
+                .headers
+                .retain(|field| field.name != "accept-encoding");
+        }
         if let Some(image) = image {
             input.include.push(wire::ReadInclude::Image as i32);
             if !input.include.contains(&(wire::ReadInclude::Mapping as i32)) {
@@ -292,9 +302,7 @@ impl Gateway {
             self.reads.open(input.clone()).await?
         };
         Ok(RequestRead {
-            proxy: anonymous
-                && !head
-                && super::delivery::proxy_request(&headers, "x_accel_redirect"),
+            proxy: proxy.then_some(headers),
             route: read_route,
             input,
             prepared,
@@ -367,7 +375,7 @@ impl Gateway {
             &self.reads,
             request.prepared,
             head,
-            request.proxy,
+            request.proxy.as_ref(),
             overrides,
             request.compression,
             None,
@@ -484,7 +492,7 @@ impl Gateway {
                     &reads,
                     request.prepared,
                     false,
-                    false,
+                    None,
                     &HeaderMap::new(),
                     None,
                     ranges,
