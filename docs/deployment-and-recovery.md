@@ -45,12 +45,12 @@ Rust 构建还需要 `protoc`，由 `src/rpc/proto/node.proto` 生成 gRPC 类�
    | --- | --- |
    | `database` | 主机、端口、数据库和用户；删除示例 `password`，启用 `password_file = "secrets/postgres-password"`，与 Compose 共用密码文件 |
    | `instance` | 将上一步输出的部署密钥填入 `deployment_key`，按需调整监听地址、数据目录和资源预算 |
-   `instance.deployment_key` 仅配置在单容器/control，同一部署保持不变；data/worker/node 使用独立节点配置，见[群集部署](cluster-deployment.md)。首次启动后用 `cli key create NAME block` 创建区块密钥，并用 `cli storage key set STORE KEY` 绑定；密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。
+   `instance.deployment_key` 仅配置在单容器/control，同一部署保持不变。data/worker/node 使用独立节点配置，见[群集部署](cluster-deployment.md)。首次启动后按[初始化与接入](#初始化与接入)创建区块密钥并绑定后端。密钥材料只在数据库中保存加密副本，CLI 和 Web 永不返回明文。完整字段和资源限制见[配置参考](configuration.md)。
 
 3. 确认容器可以读取配置和密码文件后启动。`./config` 只读挂载，宿主机上传的 `root:root` 配置文件可用 `0644`，其目录须允许运行用户进入。普通部署缺少配置或所需密钥时会报告错误并退出。
 
    ```sh
-   docker compose up -d
+   docker compose up -d --wait
    docker compose ps
    docker exec mokyu mokyu cli status
    ```
@@ -89,15 +89,15 @@ type = "sqlite"
 
 ```sh
 docker exec -it mokyu mokyu cli user create admin
-docker exec -it mokyu mokyu cli key create main block
-docker exec mokyu mokyu cli storage create primary local --init
-docker exec -it mokyu mokyu cli storage key set primary main
+docker exec mokyu mokyu cli key create main block
+docker exec mokyu mokyu cli storage create primary local --init --key main
 docker exec mokyu mokyu cli bucket create media
 docker exec mokyu mokyu cli cred create media
-docker exec mokyu mokyu cli domain set media.example.com media
 ```
 
-`storage create primary local` 使用默认路径 `/data/storage`。也可以在 Web 或 CLI 中创建 S3 存储，所需字段和核对规则见[存储](configuration.md#存储与运行参数)。创建桶前必须先创建存储；凭据的 secret 仅在创建时返回，保存到应用私有配置。不同应用可使用独立逻辑桶、凭据和域名；同一存储内跨桶去重，跨存储不去重。
+`storage create primary local` 使用默认路径 `/data/storage`，`--key main` 为后端绑定刚创建的区块密钥。创建桶前须先创建存储。也可以在 Web 或 CLI 中创建 S3 存储，所需字段和核对规则见[存储命令](cli-reference.md#存储)。
+
+`cred create` 仅在创建时返回 secret，请将凭据保存到应用的私有配置。需要给桶绑定域名时，可运行 `docker exec mokyu mokyu cli domain set media.example.com media`。不同应用可使用独立逻辑桶、凭据和域名。同一存储内跨桶去重，跨存储不去重。
 
 上述在线操作也可在管理页面完成。默认无需启用项目管理；多个应用团队需要分权时，再创建项目与普通成员，并设置桶范围、应用密钥和逻辑额度，见[管理指南](management.md)。
 
@@ -198,7 +198,7 @@ PostgreSQL 和 SQLite 的新装及各次迁移在事务中执行；失败或中�
 
 已成功的迁移不重复执行。不要修改已发布迁移或迁移历史。快照与编号迁移必须同步维护，并通过新装与完整历史链的结构、初值一致性测试；快照不能作为已有库的升级脚本直接执行。涉及索引构建时，应为大库预留启动时间和磁盘空间。
 
-程序不自动降级数据库。回退需按恢复流程还原升级前的一致备份，并确认相关存储区块仍存在。实际 SQL 见[migrations](../migrations)。
+程序不自动降级数据库。回退需按恢复流程还原升级前的一致备份，并确认相关存储区块仍存在。各后端的迁移 SQL 见 [PostgreSQL](../src/model/backend/postgres/migrations)、[MySQL / MariaDB](../src/model/backend/mysql/migrations) 和 [SQLite](../src/model/backend/sqlite/migrations)。
 
 打包功能默认开启，维护改写期间新旧载荷并存，旧载荷满足 GC 宽限和最低存储期后删除；为临时空间和 S3 请求预留预算。停用时设置 `pack.enabled=false`，历史数据仍可读。需要消除历史包时，先运行 `maintenance pack-creation stop` 并等待准备中的包收尾，再执行 `pack unpack --all` 的预览与确认操作；Web 整理工作台提供相同流程。
 

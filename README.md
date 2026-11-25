@@ -30,15 +30,7 @@
 
 `./build.sh --alpine` 构建 Alpine 镜像；`--api-only` 省略内嵌前端，两项可组合
 
-按 [部署与恢复](docs/deployment-and-recovery.md) 准备配置、密钥和目录，随后：
-
-```sh
-docker compose up -d
-docker exec mokyu mokyu cli status
-docker exec mokyu mokyu cli bucket create media
-docker exec mokyu mokyu cli credential create media
-docker exec -it mokyu mokyu cli user create admin
-```
+接下来按[首次部署](docs/deployment-and-recovery.md#准备配置并启动)准备配置和密钥并启动服务，再按[初始化与接入](docs/deployment-and-recovery.md#初始化与接入)创建管理员、配置本地后端、建立第一个存储桶并取得 S3 凭据。
 
 ## 实际接口和运维文档
 
